@@ -306,6 +306,8 @@ impl World {
 pub struct Frame {
     pub dt: f32,
     pub time: f32,
+    /// Smoothed frames per second (updated about twice a second).
+    pub fps: f32,
     pub width: u32,
     pub height: u32,
     pub aspect: f32,

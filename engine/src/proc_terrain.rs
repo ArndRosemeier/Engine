@@ -21,9 +21,9 @@ pub struct ClipmapConfig {
 impl Default for ClipmapConfig {
     fn default() -> Self {
         Self {
-            rings: 4,
-            resolution: 128,
-            cell_size: 0.5,
+            rings: 5,
+            resolution: 256,
+            cell_size: 0.25,
         }
     }
 }

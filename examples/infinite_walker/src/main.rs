@@ -3,6 +3,7 @@
 //! Controls: WASD / arrows move · Q/E turn · Shift sprint · Esc quit
 //!
 //! Landscape is a GPU clipmap (formula in the vertex shader) — no CPU mesh bake.
+//! Window title shows FPS. Override size with `ENGINE_WIDTH` / `ENGINE_HEIGHT`.
 use engine::prelude::*;
 
 fn walker_mesh() -> Mesh {
@@ -58,15 +59,7 @@ fn main() {
             world.set_clear_color(rgb(145, 195, 235));
             world.set_sun((0.45, 1.0, 0.25), 0.28);
             world.set_proc_terrain(
-                ProcTerrain::gpu_clipmap(
-                    rules.clone(),
-                    ClipmapConfig {
-                        rings: 4,
-                        resolution: 128,
-                        cell_size: 0.5,
-                    },
-                )
-                .with_focus(pos),
+                ProcTerrain::gpu_clipmap(rules.clone(), ClipmapConfig::default()).with_focus(pos),
             );
             walker = Some(world.spawn(walker_mesh()));
         }

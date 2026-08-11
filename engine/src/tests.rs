@@ -137,6 +137,7 @@ fn frame_first_flag_exists() {
     let f = Frame {
         dt: 0.016,
         time: 0.0,
+        fps: 60.0,
         width: 1,
         height: 1,
         aspect: 1.0,

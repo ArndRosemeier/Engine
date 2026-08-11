@@ -26,6 +26,9 @@ struct App {
     first_update_done: bool,
     screenshot_path: Option<PathBuf>,
     screenshot_frame: u32,
+    fps: f32,
+    fps_accum_s: f32,
+    fps_frames: u32,
 }
 
 impl App {
@@ -49,7 +52,22 @@ impl App {
             first_update_done: false,
             screenshot_path,
             screenshot_frame,
+            fps: 0.0,
+            fps_accum_s: 0.0,
+            fps_frames: 0,
         }
+    }
+
+    fn window_inner_size() -> winit::dpi::LogicalSize<u32> {
+        let w = std::env::var("ENGINE_WIDTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1920);
+        let h = std::env::var("ENGINE_HEIGHT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1080);
+        winit::dpi::LogicalSize::new(w.max(320), h.max(180))
     }
 }
 
@@ -60,7 +78,7 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes()
             .with_title(self.title.clone())
-            .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
+            .with_inner_size(Self::window_inner_size());
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -108,6 +126,17 @@ impl ApplicationHandler for App {
                 self.last = now;
                 let time = (now - self.start).as_secs_f32();
 
+                self.fps_accum_s += dt.max(0.0);
+                self.fps_frames += 1;
+                if self.fps_accum_s >= 0.5 {
+                    self.fps = self.fps_frames as f32 / self.fps_accum_s;
+                    self.fps_accum_s = 0.0;
+                    self.fps_frames = 0;
+                    if let Some(window) = &self.window {
+                        window.set_title(&format!("{} — {:.0} FPS", self.title, self.fps));
+                    }
+                }
+
                 let size = self
                     .renderer
                     .as_ref()
@@ -117,6 +146,7 @@ impl ApplicationHandler for App {
                 let frame = Frame {
                     dt,
                     time,
+                    fps: self.fps,
                     width: size.width,
                     height: size.height,
                     aspect: size.width as f32 / size.height.max(1) as f32,
