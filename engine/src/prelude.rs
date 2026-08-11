@@ -15,6 +15,8 @@ pub use crate::proc::{scatter_on_xz, Noise};
 pub use crate::proc_terrain::{
     demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain,
 };
+pub use crate::surface::{SurfaceSample, SurfaceSource, WATER_CLEARANCE};
+pub use crate::surface_terrain::{SurfaceMeshStyle, SurfaceStream, SurfaceTerrain};
 pub use crate::terrain::{HeightTerrain, TerrainRules, TerrainSample, TerrainStream};
 pub use crate::ui::{UiFrame, UiPanel};
 pub use crate::world::{EntityId, Frame, World};

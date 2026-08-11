@@ -4,6 +4,7 @@
 //! Visuals use a displaced clipmap; no CPU mesh bake required.
 
 use crate::color::{rgb, rgba, Color};
+use crate::surface::{SurfaceSample, WATER_CLEARANCE};
 use crate::terrain::TerrainRules;
 use glam::Vec3;
 
@@ -68,11 +69,19 @@ impl HeightField {
     }
 
     pub fn height_at(&self, x: f32, z: f32) -> f32 {
-        self.sample(x, z).height
+        self.surface_sample(x, z).walk_height()
     }
 
     pub fn sample(&self, x: f32, z: f32) -> FieldSample {
         sample_field(&self.rules, x, z)
+    }
+
+    pub fn surface_sample(&self, x: f32, z: f32) -> SurfaceSample {
+        let s = self.sample(x, z);
+        SurfaceSample {
+            ground: s.ground,
+            water_top: s.water_top,
+        }
     }
 
     /// Height matching the GPU clipmap *triangles* on the finest ring.
@@ -121,19 +130,18 @@ impl HeightField {
             h00 * (1.0 - tx) + h10 * (tx - tz) + h11 * tz
         };
 
-        // Stand on the drawn land surface; float when that surface is submerged.
-        if ground < self.rules.water_level {
-            self.rules.water_level
-        } else {
-            ground
-        }
+        let water_top = sample_field(&self.rules, x, z).water_top;
+        let col = SurfaceSample { ground, water_top };
+        col.walk_height()
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct FieldSample {
+    /// Walkable height ([`SurfaceSample::walk_height`]).
     pub height: f32,
     pub ground: f32,
+    pub water_top: f32,
     pub water: bool,
 }
 
@@ -247,21 +255,31 @@ pub fn sample_field(r: &TerrainRules, x: f32, z: f32) -> FieldSample {
     let floor = h_raw.max(r.water_level);
     let carved = floor - basin * 3.5;
     let near_shore = floor <= r.water_level + 1.5;
-    let water = basin > 0.25 && near_shore && carved < r.water_level;
-    let ground = if water { carved } else { floor };
+    // Candidate lake body: assign water_top, then wetness from clearance only.
+    let in_basin = basin > 0.25 && near_shore;
+    let (ground, water_top, water) = if in_basin {
+        let water_top = r.water_level;
+        let ground = carved.min(water_top - WATER_CLEARANCE - 1e-3);
+        (ground, water_top, true)
+    } else {
+        (floor, f32::NEG_INFINITY, false)
+    };
+    let col = SurfaceSample { ground, water_top };
+    // Soft apron on dry land approaching a basin (visual only; does not invent wetness).
     let height = if water {
-        r.water_level
+        col.walk_height()
     } else if basin > 0.0 && near_shore {
         let t = (basin / 0.25).clamp(0.0, 1.0);
         let t = t * t * (3.0 - 2.0 * t);
         floor * (1.0 - t) + r.water_level * t
     } else {
-        floor
+        ground
     };
 
     FieldSample {
         height,
         ground,
+        water_top,
         water,
     }
 }

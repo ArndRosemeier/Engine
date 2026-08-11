@@ -3,6 +3,7 @@
 use crate::color::{rgb, rgba, Color};
 use crate::mesh::{BuiltMesh, Mesh};
 use crate::proc::Noise;
+use crate::surface::WATER_CLEARANCE;
 use crate::world::World;
 use glam::{IVec3, Vec3};
 use rayon::prelude::*;
@@ -17,6 +18,7 @@ pub struct TerrainSample {
     pub height: f32,
     /// Solid ground under the surface (below the waterline inside lakes).
     pub ground: f32,
+    pub water_top: f32,
     pub water: bool,
 }
 
@@ -108,23 +110,31 @@ impl HeightTerrain {
         let carved = floor - basin * 3.5;
         // Lakes only on the coastal shelf (floor near waterline).
         let near_shore = floor <= r.water_level + 1.5;
-        let water = basin > 0.25 && near_shore && carved < r.water_level;
-        let ground = if water { carved } else { floor };
+        let in_basin = basin > 0.25 && near_shore;
+        let (ground, water_top, water) = if in_basin {
+            let water_top = r.water_level;
+            // Epsilon so float rounding still satisfies `is_wet` (>= CLEARANCE).
+            let ground = carved.min(water_top - WATER_CLEARANCE - 1e-3);
+            (ground, water_top, true)
+        } else {
+            (floor, f32::NEG_INFINITY, false)
+        };
         // Soft apron: land in the lake field eases down to the waterline so
         // neighboring hill verts don't spike through the water surface.
         let height = if water {
-            r.water_level
+            water_top
         } else if basin > 0.0 && near_shore {
             let t = (basin / 0.25).clamp(0.0, 1.0);
             let t = t * t * (3.0 - 2.0 * t);
             floor * (1.0 - t) + r.water_level * t
         } else {
-            floor
+            ground
         };
 
         TerrainSample {
             height,
             ground,
+            water_top,
             water,
         }
     }
@@ -141,7 +151,6 @@ impl HeightTerrain {
         let origin_x = cx as f32 * cells as f32 * cs;
         let origin_z = cz as f32 * cells as f32 * cs;
         let verts = (cells + 1) as usize;
-        let water_y = r.water_level + 0.03;
 
         // Sample the heightfield in parallel — this is the hot path for dense chunks.
         let samples: Vec<TerrainSample> = (0..verts * verts)
@@ -191,13 +200,25 @@ impl HeightTerrain {
                 mesh.add_quad(ids[i00], ids[i01], ids[i11], ids[i10])
                     .expect("terrain quad");
 
-                let wet = samples[i00].water
-                    || samples[i10].water
-                    || samples[i01].water
-                    || samples[i11].water;
-                if !wet {
+                let corners = [
+                    samples[i00],
+                    samples[i10],
+                    samples[i01],
+                    samples[i11],
+                ];
+                if !corners.iter().any(|c| c.water) {
                     continue;
                 }
+                let mut water_y = f32::NEG_INFINITY;
+                for c in corners {
+                    if c.water {
+                        water_y = water_y.max(c.water_top);
+                    }
+                }
+                if !water_y.is_finite() {
+                    continue;
+                }
+                water_y += WATER_CLEARANCE * 0.5;
                 let x0 = origin_x + ix as f32 * cs;
                 let z0 = origin_z + iz as f32 * cs;
                 let x1 = x0 + cs;

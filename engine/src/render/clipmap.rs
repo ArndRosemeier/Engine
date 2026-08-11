@@ -121,9 +121,12 @@ fn fbm2(p0: vec2<f32>, seed: u32, octaves: u32, lacunarity: f32, gain: f32) -> f
     return 0.0;
 }
 
+const WATER_CLEARANCE: f32 = 0.02;
+
 struct HeightOut {
     height: f32,
     ground: f32,
+    water_top: f32,
     water: f32,
 };
 
@@ -143,14 +146,18 @@ fn sample_field(xz: vec2<f32>) -> HeightOut {
     let floor_h = max(h_raw, terrain.water_level);
     let carved = floor_h - basin * 3.5;
     let near_shore = floor_h <= terrain.water_level + 1.5;
-    let water = basin > 0.25 && near_shore && carved < terrain.water_level;
+    let in_basin = basin > 0.25 && near_shore;
     var ground = floor_h;
-    if water {
-        ground = carved;
+    var water_top = -1e30;
+    var water = false;
+    if in_basin {
+        water_top = terrain.water_level;
+        ground = min(carved, water_top - WATER_CLEARANCE - 0.001);
+        water = true;
     }
-    var height = floor_h;
+    var height = ground;
     if water {
-        height = terrain.water_level;
+        height = water_top;
     } else if basin > 0.0 && near_shore {
         var t = clamp(basin / 0.25, 0.0, 1.0);
         t = t * t * (3.0 - 2.0 * t);
@@ -159,6 +166,7 @@ fn sample_field(xz: vec2<f32>) -> HeightOut {
     var out: HeightOut;
     out.height = height;
     out.ground = ground;
+    out.water_top = water_top;
     out.water = select(0.0, 1.0, water);
     return out;
 }
@@ -223,7 +231,8 @@ struct WaterVsOut {
 fn vs_water(v: VsIn) -> WaterVsOut {
     let xz = ring.center + v.local_xz * ring.extent;
     let h = sample_field(xz);
-    let y = terrain.water_level + 0.04;
+    // Sheet sits on water_top from the same sample that decided wetness (rim marriage).
+    let y = h.water_top + WATER_CLEARANCE * 0.5;
     let world = vec3(xz.x, y, xz.y);
     var out: WaterVsOut;
     out.clip = frame.view_proj * vec4(world, 1.0);

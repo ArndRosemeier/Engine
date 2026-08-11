@@ -16,6 +16,8 @@ pub mod place;
 pub mod prelude;
 pub mod proc;
 pub mod proc_terrain;
+pub mod surface;
+pub mod surface_terrain;
 pub mod terrain;
 pub mod ui;
 pub mod world;
@@ -39,6 +41,8 @@ pub use place::Place;
 pub use proc_terrain::{
     demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain,
 };
+pub use surface::{SurfaceSample, SurfaceSource, WATER_CLEARANCE};
+pub use surface_terrain::{SurfaceMeshStyle, SurfaceStream, SurfaceTerrain};
 pub use terrain::{HeightTerrain, TerrainRules, TerrainSample, TerrainStream};
 pub use ui::{egui, UiFrame, UiPanel};
 pub use world::{AnimatedEntity, EntityId, Frame, Light, World};
