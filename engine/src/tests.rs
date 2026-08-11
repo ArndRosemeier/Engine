@@ -143,6 +143,7 @@ fn frame_first_flag_exists() {
         aspect: 1.0,
         first: true,
         input: crate::input::Input::new(),
+        ui: crate::ui::UiFrame::default(),
     };
     assert!(f.first);
 }

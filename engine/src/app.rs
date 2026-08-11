@@ -1,6 +1,7 @@
 use crate::input::Input;
 use crate::limits::EngineLimits;
 use crate::render::Renderer;
+use crate::ui_backend::UiBackend;
 use crate::world::{Frame, World};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,7 +9,6 @@ use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 type UpdateFn = Box<dyn FnMut(&mut World, &Frame)>;
@@ -17,6 +17,7 @@ struct App {
     title: String,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    ui_backend: Option<UiBackend>,
     world: World,
     update: UpdateFn,
     input: Input,
@@ -43,6 +44,7 @@ impl App {
             title,
             window: None,
             renderer: None,
+            ui_backend: None,
             world: World::new().with_limits(limits),
             update,
             input: Input::new(),
@@ -85,8 +87,10 @@ impl ApplicationHandler for App {
                 .expect("failed to create window"),
         );
         let renderer = pollster::block_on(Renderer::new(window.clone()));
+        let ui_backend = UiBackend::new(&window, renderer.device(), renderer.surface_format());
         self.window = Some(window);
         self.renderer = Some(renderer);
+        self.ui_backend = Some(ui_backend);
         self.start = Instant::now();
         self.last = self.start;
     }
@@ -97,20 +101,25 @@ impl ApplicationHandler for App {
         _id: WindowId,
         event: WindowEvent,
     ) {
+        if let (Some(window), Some(ui)) = (self.window.as_ref(), self.ui_backend.as_mut()) {
+            let _consumed = ui.on_window_event(window, &event);
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
-                        logical_key: Key::Named(NamedKey::Escape),
+                        logical_key: winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
                         state: ElementState::Pressed,
                         ..
                     },
                 ..
-            } => event_loop.exit(),
+            } => {
+                // Quit is decided after egui runs (Escape closes modals first).
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
-                // Ignore key repeat so we don't thrash; held state is enough.
                 if !event.repeat {
                     self.input.set_key(event.physical_key, pressed);
                 }
@@ -143,23 +152,62 @@ impl ApplicationHandler for App {
                     .map(|r| r.size())
                     .unwrap_or_default();
                 let first = !self.first_update_done;
-                let frame = Frame {
-                    dt,
-                    time,
-                    fps: self.fps,
-                    width: size.width,
-                    height: size.height,
-                    aspect: size.width as f32 / size.height.max(1) as f32,
-                    first,
-                    input: self.input.clone(),
-                };
                 self.first_update_done = true;
 
-                (self.update)(&mut self.world, &frame);
+                let Some(window) = self.window.clone() else {
+                    return;
+                };
+                let Some(ui_backend) = self.ui_backend.as_mut() else {
+                    return;
+                };
+
+                let mut input = self.input.clone();
+                if ui_backend.wants_keyboard_input() || ui_backend.wants_pointer_input() {
+                    input = Input::new();
+                }
+
+                let update = &mut self.update;
+                let world = &mut self.world;
+                let fps = self.fps;
+                let (modal_was_open, full_output) = {
+                    let (ui_result, full_output) = ui_backend.run_ui(&window, |ui| {
+                        let frame = Frame {
+                            dt,
+                            time,
+                            fps,
+                            width: size.width,
+                            height: size.height,
+                            aspect: size.width as f32 / size.height.max(1) as f32,
+                            first,
+                            input: input.clone(),
+                            ui: ui.clone(),
+                        };
+                        update(world, &frame);
+                        ui.modal_was_open()
+                    });
+                    (ui_result, full_output)
+                };
+
+                if ui_backend.take_escape_pressed() && !modal_was_open {
+                    event_loop.exit();
+                    return;
+                }
 
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.sync_world(&self.world);
-                    match renderer.render(&self.world) {
+                    let ui_backend = self.ui_backend.as_mut().expect("ui backend");
+                    match renderer.render_with(&self.world, |device, queue, encoder, view| {
+                        ui_backend.paint(
+                            &window,
+                            device,
+                            queue,
+                            encoder,
+                            view,
+                            size.width,
+                            size.height,
+                            full_output,
+                        );
+                    }) {
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                             renderer.resize(renderer.size());
@@ -182,9 +230,7 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
+                window.request_redraw();
             }
             _ => {}
         }

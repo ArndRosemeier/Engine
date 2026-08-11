@@ -36,4 +36,5 @@ cargo run -p hello_mesh
 cargo run -p procedural_caves
 cargo run -p populate_world
 cargo run -p infinite_walker   # WASD move, Q/E turn, Shift sprint
+cargo run -p ui_modal          # egui modal + RGBA image overlay
 ```

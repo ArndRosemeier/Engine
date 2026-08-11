@@ -6,6 +6,7 @@ use crate::limits::EngineLimits;
 use crate::mesh::{BuiltMesh, Mesh};
 use crate::place::Place;
 use crate::proc_terrain::{HeightField, ProcTerrain};
+use crate::ui::UiFrame;
 use glam::{IVec3, Mat4, Vec3};
 use std::collections::HashMap;
 use std::fmt;
@@ -313,6 +314,8 @@ pub struct Frame {
     pub aspect: f32,
     /// True only on the first update after the window is ready.
     pub first: bool,
-    /// Keys held this frame.
+    /// Keys held this frame (cleared while UI wants keyboard/pointer).
     pub input: Input,
+    /// Immediate-mode UI (modals, buttons, images).
+    pub ui: UiFrame,
 }

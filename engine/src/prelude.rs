@@ -14,6 +14,7 @@ pub use crate::proc_terrain::{
     demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain,
 };
 pub use crate::terrain::{HeightTerrain, TerrainRules, TerrainSample, TerrainStream};
+pub use crate::ui::{UiFrame, UiPanel};
 pub use crate::world::{EntityId, Frame, World};
 pub use crate::Engine;
 pub use glam::Vec3;

@@ -16,11 +16,13 @@ pub mod prelude;
 pub mod proc;
 pub mod proc_terrain;
 pub mod terrain;
+pub mod ui;
 pub mod world;
 
 pub(crate) mod app;
 pub(crate) mod marching_cubes;
 pub(crate) mod render;
+pub(crate) mod ui_backend;
 pub(crate) mod volume;
 
 pub use camera::Camera;
@@ -36,6 +38,7 @@ pub use proc_terrain::{
     demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain,
 };
 pub use terrain::{HeightTerrain, TerrainRules, TerrainSample, TerrainStream};
+pub use ui::{egui, UiFrame, UiPanel};
 pub use world::{EntityId, Frame, Light, World};
 
 /// Entry point matching the planned `Engine::run` shape.

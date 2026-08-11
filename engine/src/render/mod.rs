@@ -183,7 +183,23 @@ impl Renderer {
         }
     }
 
+    /// 3D-only frame (no overlay pass).
+    #[allow(dead_code)]
     pub fn render(&mut self, world: &World) -> Result<(), wgpu::SurfaceError> {
+        self.render_with(world, |_, _, _, _| {})
+    }
+
+    /// Render the 3D world, then invoke `after` for overlay passes (egui).
+    pub fn render_with(
+        &mut self,
+        world: &World,
+        after: impl FnOnce(
+            &wgpu::Device,
+            &wgpu::Queue,
+            &mut wgpu::CommandEncoder,
+            &wgpu::TextureView,
+        ),
+    ) -> Result<(), wgpu::SurfaceError> {
         self.write_uniforms(world);
 
         let frame = self.surface.get_current_texture()?;
@@ -197,9 +213,23 @@ impl Renderer {
                 label: Some("frame-encoder"),
             });
         self.encode_pass(&mut encoder, &view, world);
+        after(&self.device, &self.queue, &mut encoder, &view);
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         Ok(())
+    }
+
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    #[allow(dead_code)]
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.config.format
     }
 
     /// Render the current world to a PNG (for demo QA / automation).
