@@ -28,8 +28,53 @@ impl Noise {
     }
 
     /// Smooth value roughly in [-1, 1].
+    pub fn sample2(&self, x: f32, y: f32) -> f32 {
+        self.perlin.get([x as f64, y as f64]) as f32
+    }
+
+    /// Smooth value roughly in [-1, 1].
     pub fn sample3(&self, p: Vec3) -> f32 {
         self.perlin.get([p.x as f64, p.y as f64, p.z as f64]) as f32
+    }
+
+    /// Fractal Brownian motion in 2D.
+    pub fn fbm2(&self, x: f32, y: f32, octaves: u32, lacunarity: f32, gain: f32) -> f32 {
+        let mut amp = 1.0;
+        let mut freq = 1.0;
+        let mut sum = 0.0;
+        let mut norm = 0.0;
+        for _ in 0..octaves {
+            sum += amp * self.sample2(x * freq, y * freq);
+            norm += amp;
+            amp *= gain;
+            freq *= lacunarity;
+        }
+        if norm > 0.0 {
+            sum / norm
+        } else {
+            0.0
+        }
+    }
+
+    /// Ridged multifractal in 2D: `1 - |n|`, sharpened, remapped to roughly [-1, 1].
+    pub fn ridged2(&self, x: f32, y: f32, octaves: u32, lacunarity: f32, gain: f32) -> f32 {
+        let mut amp = 1.0;
+        let mut freq = 1.0;
+        let mut sum = 0.0;
+        let mut norm = 0.0;
+        for _ in 0..octaves {
+            let ridge = 1.0 - self.sample2(x * freq, y * freq).abs();
+            let ridge = ridge * ridge;
+            sum += amp * ridge;
+            norm += amp;
+            amp *= gain;
+            freq *= lacunarity;
+        }
+        if norm > 0.0 {
+            (sum / norm) * 2.0 - 1.0
+        } else {
+            0.0
+        }
     }
 
     /// Fractal Brownian motion.
@@ -161,4 +206,22 @@ pub fn scatter_on_xz(
 /// Simple unit cube mesh factory.
 pub fn unit_box(color: Color) -> Mesh {
     Mesh::box_at(Vec3::ZERO, Vec3::ONE, color).expect("unit box")
+}
+
+#[cfg(test)]
+mod noise_tests {
+    use super::Noise;
+
+    #[test]
+    fn sample2_and_fbm_are_finite() {
+        let n = Noise::new(42);
+        let s = n.sample2(1.25, -3.5);
+        assert!(s.is_finite());
+        assert!((-1.5..=1.5).contains(&s));
+        let f = n.fbm2(0.1, 0.2, 4, 2.0, 0.5);
+        assert!(f.is_finite());
+        let r = n.ridged2(0.1, 0.2, 4, 2.0, 0.5);
+        assert!(r.is_finite());
+        assert!((-1.5..=1.5).contains(&r));
+    }
 }
