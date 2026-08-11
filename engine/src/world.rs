@@ -285,6 +285,17 @@ impl World {
             .unwrap_or(0.0)
     }
 
+    /// Walkable height matching the rendered clipmap surface (finest-ring triangles).
+    pub fn proc_walk_height(&self, x: f32, z: f32) -> f32 {
+        match (&self.height_field, &self.proc_terrain) {
+            (Some(field), Some(proc)) => {
+                field.walk_height_on_clipmap(x, z, &proc.config, proc.focus)
+            }
+            (Some(field), None) => field.height_at(x, z),
+            _ => 0.0,
+        }
+    }
+
     pub(crate) fn proc_terrain(&self) -> Option<&ProcTerrain> {
         self.proc_terrain.as_ref()
     }

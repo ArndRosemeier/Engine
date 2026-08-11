@@ -242,6 +242,53 @@ fn camera_right_xz_matches_follow_view() {
 }
 
 #[test]
+fn walk_height_matches_clipmap_triangle() {
+    use crate::proc_terrain::{demo_terrain_rules, ClipmapConfig, HeightField};
+    let field = HeightField::new(demo_terrain_rules());
+    let cfg = ClipmapConfig {
+        rings: 2,
+        resolution: 32,
+        cell_size: 1.0,
+    };
+    let focus = Vec3::new(10.0, 0.0, -4.0);
+    let x = 12.3;
+    let z = -2.7;
+    let y = field.walk_height_on_clipmap(x, z, &cfg, focus);
+    let cell = cfg.cell_size;
+    let cx = (focus.x / cell).floor() * cell;
+    let cz = (focus.z / cell).floor() * cell;
+    let extent = cell * cfg.resolution as f32;
+    let ox = cx - extent * 0.5;
+    let oz = cz - extent * 0.5;
+    let fx = (x - ox) / cell;
+    let fz = (z - oz) / cell;
+    let ix = fx.floor();
+    let iz = fz.floor();
+    let tx = fx - ix;
+    let tz = fz - iz;
+    let g = |di: f32, dj: f32| {
+        field
+            .sample(ox + (ix + di) * cell, oz + (iz + dj) * cell)
+            .ground
+    };
+    let h00 = g(0.0, 0.0);
+    let h10 = g(1.0, 0.0);
+    let h01 = g(0.0, 1.0);
+    let h11 = g(1.0, 1.0);
+    let expect = if tz >= tx {
+        h00 * (1.0 - tz) + h01 * (tz - tx) + h11 * tx
+    } else {
+        h00 * (1.0 - tx) + h10 * (tx - tz) + h11 * tz
+    };
+    if !field.sample(x, z).water {
+        assert!(
+            (y - expect).abs() < 1e-4,
+            "walk height {y} != triangle {expect}"
+        );
+    }
+}
+
+#[test]
 fn terrain_stream_budgets_main_thread_work() {
     use crate::terrain::{TerrainRules, TerrainStream};
     use crate::world::World;

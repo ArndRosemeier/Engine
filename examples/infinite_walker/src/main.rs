@@ -7,9 +7,10 @@ use engine::prelude::*;
 
 fn walker_mesh() -> Mesh {
     let mut m = Mesh::new();
-    m.add_box((0.0, 0.9, 0.0), (0.55, 1.1, 0.35), rgb(55, 90, 160))
+    // Feet at local y=0 so Place.y is the ground contact.
+    m.add_box((0.0, 0.55, 0.0), (0.55, 1.1, 0.35), rgb(55, 90, 160))
         .unwrap();
-    m.add_box((0.0, 1.7, 0.0), (0.4, 0.4, 0.4), rgb(220, 190, 160))
+    m.add_box((0.0, 1.35, 0.0), (0.4, 0.4, 0.4), rgb(220, 190, 160))
         .unwrap();
     m
 }
@@ -23,7 +24,7 @@ fn main() {
     let mut walker: Option<EntityId> = None;
 
     let screenshot = std::env::var_os("ENGINE_SCREENSHOT").is_some();
-    if screenshot {
+    if screenshot && std::env::var_os("ENGINE_SCREENSHOT_ORIGIN").is_none() {
         let mut best: Option<(f32, f32, f32)> = None;
         for z in -90..90 {
             for x in -90..90 {
@@ -83,8 +84,9 @@ fn main() {
             }
         }
 
-        pos.y = world.proc_height_at(pos.x, pos.z) + 0.05;
+        // Focus first so walk height uses the same snapped grid the GPU draws.
         world.set_proc_focus(pos);
+        pos.y = world.proc_walk_height(pos.x, pos.z) + 0.02;
 
         if let Some(id) = walker {
             world

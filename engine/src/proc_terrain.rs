@@ -74,6 +74,60 @@ impl HeightField {
     pub fn sample(&self, x: f32, z: f32) -> FieldSample {
         sample_field(&self.rules, x, z)
     }
+
+    /// Height matching the GPU clipmap *triangles* on the finest ring.
+    ///
+    /// Point-sampling the continuous formula sinks the walker through steep
+    /// facets. GPU quads are split as (00,01,11) + (00,11,10); we use the same
+    /// planar interp so feet sit on the drawn surface.
+    pub fn walk_height_on_clipmap(
+        &self,
+        x: f32,
+        z: f32,
+        config: &ClipmapConfig,
+        focus: Vec3,
+    ) -> f32 {
+        let cell = config.cell_size.max(1e-4);
+        let res = config.resolution.max(2);
+        let extent = cell * res as f32;
+        let cx = (focus.x / cell).floor() * cell;
+        let cz = (focus.z / cell).floor() * cell;
+        let origin_x = cx - extent * 0.5;
+        let origin_z = cz - extent * 0.5;
+
+        let fx = ((x - origin_x) / cell).clamp(0.0, (res - 1) as f32 - 1e-4);
+        let fz = ((z - origin_z) / cell).clamp(0.0, (res - 1) as f32 - 1e-4);
+        let ix = fx.floor();
+        let iz = fz.floor();
+        let tx = fx - ix;
+        let tz = fz - iz;
+
+        let sample_g = |i: f32, j: f32| {
+            sample_field(
+                &self.rules,
+                origin_x + i * cell,
+                origin_z + j * cell,
+            )
+            .ground
+        };
+        let h00 = sample_g(ix, iz);
+        let h10 = sample_g(ix + 1.0, iz);
+        let h01 = sample_g(ix, iz + 1.0);
+        let h11 = sample_g(ix + 1.0, iz + 1.0);
+        // Match clipmap index winding: [i00,i01,i11, i00,i11,i10].
+        let ground = if tz >= tx {
+            h00 * (1.0 - tz) + h01 * (tz - tx) + h11 * tx
+        } else {
+            h00 * (1.0 - tx) + h10 * (tx - tz) + h11 * tz
+        };
+
+        // Stand on the drawn land surface; float when that surface is submerged.
+        if ground < self.rules.water_level {
+            self.rules.water_level
+        } else {
+            ground
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -125,22 +179,29 @@ fn color4(c: Color) -> [f32; 4] {
 }
 
 // --- Portable noise (must stay in sync with WGSL in render/clipmap.rs) ---
+// Integer hash — stable across CPU/GPU (avoid sin/fract precision drift).
 
-fn hash21(p: glam::Vec2, seed: u32) -> f32 {
-    let mut x = p.x.mul_add(127.1, p.y * 311.7) + seed as f32 * 0.017;
-    x = x.sin() * 43758.5453;
-    x.fract().abs()
+fn hash21(ix: i32, iy: i32, seed: u32) -> f32 {
+    let mut n = (ix as u32)
+        .wrapping_mul(1597334677)
+        .wrapping_add((iy as u32).wrapping_mul(3812015801))
+        .wrapping_add(seed.wrapping_mul(2747636419));
+    n ^= n >> 16;
+    n = n.wrapping_mul(2246822519);
+    n ^= n >> 13;
+    (n >> 8) as f32 / 16777215.0
 }
 
 fn value_noise(p: glam::Vec2, seed: u32) -> f32 {
     let i = p.floor();
-    let f = p.fract();
+    let f = p - i;
     let u = f * f * (glam::Vec2::splat(3.0) - 2.0 * f);
-    let a = hash21(i, seed);
-    let b = hash21(i + glam::Vec2::X, seed);
-    let c = hash21(i + glam::Vec2::Y, seed);
-    let d = hash21(i + glam::Vec2::ONE, seed);
-    // Remap [0,1] → [-1,1]
+    let ix = i.x as i32;
+    let iy = i.y as i32;
+    let a = hash21(ix, iy, seed);
+    let b = hash21(ix + 1, iy, seed);
+    let c = hash21(ix, iy + 1, seed);
+    let d = hash21(ix + 1, iy + 1, seed);
     let v = a + (b - a) * u.x + (c - a) * u.y + (a - b - c + d) * u.x * u.y;
     v * 2.0 - 1.0
 }

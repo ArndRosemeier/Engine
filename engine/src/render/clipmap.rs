@@ -82,20 +82,24 @@ struct VsOut {
     @location(3) wet: f32,
 };
 
-fn hash21(p: vec2<f32>, seed: u32) -> f32 {
-    var x = p.x * 127.1 + p.y * 311.7 + f32(seed) * 0.017;
-    x = sin(x) * 43758.5453;
-    return fract(abs(x));
+fn hash21(ix: i32, iy: i32, seed: u32) -> f32 {
+    var n = u32(ix) * 1597334677u + u32(iy) * 3812015801u + seed * 2747636419u;
+    n = n ^ (n >> 16u);
+    n = n * 2246822519u;
+    n = n ^ (n >> 13u);
+    return f32(n >> 8u) / 16777215.0;
 }
 
 fn value_noise(p: vec2<f32>, seed: u32) -> f32 {
     let i = floor(p);
-    let f = fract(p);
+    let f = p - i;
     let u = f * f * (3.0 - 2.0 * f);
-    let a = hash21(i, seed);
-    let b = hash21(i + vec2(1.0, 0.0), seed);
-    let c = hash21(i + vec2(0.0, 1.0), seed);
-    let d = hash21(i + vec2(1.0, 1.0), seed);
+    let ix = i32(i.x);
+    let iy = i32(i.y);
+    let a = hash21(ix, iy, seed);
+    let b = hash21(ix + 1, iy, seed);
+    let c = hash21(ix, iy + 1, seed);
+    let d = hash21(ix + 1, iy + 1, seed);
     let v = a + (b - a) * u.x + (c - a) * u.y + (a - b - c + d) * u.x * u.y;
     return v * 2.0 - 1.0;
 }
@@ -250,7 +254,8 @@ fn fs_water(in: WaterVsOut) -> @location(0) vec4<f32> {
 struct RingGpu {
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    /// Finest cell size for this ring (for snapping).
+    /// World cell size for this ring (coarser rings double each level).
+    #[allow(dead_code)]
     cell: f32,
     extent: f32,
     /// Index range into the shared index buffer (full or annulus).
@@ -483,10 +488,13 @@ impl ClipmapRenderer {
         let params = TerrainParamsUniform::from_rules(&proc.rules);
         queue.write_buffer(&self.terrain_buf, 0, bytemuck::bytes_of(&params));
 
-        let focus = proc.focus;
+        // Snap every ring to the finest cell so nested holes stay aligned.
+        // Per-ring cell snaps drift apart and let coarser (higher) facets win
+        // depth over the fine ring — the walker then appears to sink through.
+        let fine_cell = self.config.cell_size.max(1e-4);
+        let snapped_x = (proc.focus.x / fine_cell).floor() * fine_cell;
+        let snapped_z = (proc.focus.z / fine_cell).floor() * fine_cell;
         for ring in &self.rings {
-            let snapped_x = (focus.x / ring.cell).floor() * ring.cell;
-            let snapped_z = (focus.z / ring.cell).floor() * ring.cell;
             let u = RingUniform {
                 center: [snapped_x, snapped_z],
                 extent: ring.extent,
