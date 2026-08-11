@@ -35,4 +35,5 @@ Power users: `engine::advanced` (`Volume`, `ChunkStreamer`, …).
 cargo run -p hello_mesh
 cargo run -p procedural_caves
 cargo run -p populate_world
+cargo run -p infinite_walker   # WASD move, Q/E turn, Shift sprint
 ```

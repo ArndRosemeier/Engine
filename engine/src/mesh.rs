@@ -1,7 +1,8 @@
 use crate::color::Color;
 use crate::error::{EngineError, EngineResult};
 use crate::place::ensure_finite3;
-use glam::Vec3;
+use glam::{Vec3, Vec4};
+use std::collections::HashMap;
 
 /// Opaque index into [`Mesh`] points.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -22,7 +23,7 @@ impl PointId {
 #[derive(Clone, Debug, Default)]
 pub struct Mesh {
     points: Vec<Vec3>,
-    colors: Vec<Vec3>,
+    colors: Vec<Vec4>,
     faces: Vec<Vec<PointId>>,
 }
 
@@ -59,11 +60,11 @@ impl Mesh {
         ensure_finite3(position, "point position")?;
         let id = PointId(self.points.len() as u32);
         self.points.push(position);
-        self.colors.push(Color::rgb(191, 191, 191).to_vec3());
+        self.colors.push(Color::rgb(191, 191, 191).to_vec4());
         Ok(id)
     }
 
-    /// Set the display color of an existing point.
+    /// Set the display color of an existing point (alpha < 1 draws in the transparent pass).
     pub fn set_point_color(&mut self, id: PointId, color: Color) -> EngineResult<()> {
         let idx = id.0 as usize;
         if idx >= self.colors.len() {
@@ -72,7 +73,7 @@ impl Mesh {
                 id.0
             )));
         }
-        self.colors[idx] = color.to_vec3();
+        self.colors[idx] = color.to_vec4();
         Ok(())
     }
 
@@ -159,52 +160,88 @@ impl Mesh {
     }
 
     /// Build GPU-ready geometry: triangulate faces with flat per-face normals.
+    ///
+    /// Opaque faces are packed first; [`BuiltMesh::opaque_index_count`] marks the split
+    /// so the renderer can draw transparent triangles in a second pass.
     pub fn build(&self) -> BuiltMesh {
+        let mut opaque_faces = Vec::new();
+        let mut xlucent_faces = Vec::new();
+        for face in &self.faces {
+            let transparent = face.iter().any(|p| self.colors[p.0 as usize].w < 0.999);
+            if transparent {
+                xlucent_faces.push(face.as_slice());
+            } else {
+                opaque_faces.push(face.as_slice());
+            }
+        }
+
         let mut positions = Vec::new();
         let mut normals = Vec::new();
         let mut colors = Vec::new();
         let mut indices = Vec::new();
 
-        for face in &self.faces {
-            let tris: [[PointId; 3]; 2] = match face.len() {
-                3 => [[face[0], face[1], face[2]], [face[0], face[0], face[0]]],
-                4 => [
-                    [face[0], face[1], face[2]],
-                    [face[0], face[2], face[3]],
-                ],
-                _ => unreachable!("add_face only allows 3 or 4 points"),
-            };
-            let tri_count = if face.len() == 3 { 1 } else { 2 };
-
-            for tri in tris.iter().take(tri_count) {
-                let a = self.points[tri[0].0 as usize];
-                let b = self.points[tri[1].0 as usize];
-                let c = self.points[tri[2].0 as usize];
-                let n = {
-                    let raw = (b - a).cross(c - a);
-                    if raw.length_squared() > 0.0 {
-                        raw.normalize()
-                    } else {
-                        Vec3::Y
-                    }
+        let emit = |faces: &[&[PointId]],
+                    positions: &mut Vec<Vec3>,
+                    normals: &mut Vec<Vec3>,
+                    colors: &mut Vec<Vec4>,
+                    indices: &mut Vec<u32>| {
+            for face in faces {
+                let tris: [[PointId; 3]; 2] = match face.len() {
+                    3 => [[face[0], face[1], face[2]], [face[0], face[0], face[0]]],
+                    4 => [
+                        [face[0], face[1], face[2]],
+                        [face[0], face[2], face[3]],
+                    ],
+                    _ => unreachable!("add_face only allows 3 or 4 points"),
                 };
-                let base = positions.len() as u32;
-                positions.push(a);
-                positions.push(b);
-                positions.push(c);
-                normals.extend([n, n, n]);
-                colors.push(self.colors[tri[0].0 as usize]);
-                colors.push(self.colors[tri[1].0 as usize]);
-                colors.push(self.colors[tri[2].0 as usize]);
-                indices.extend([base, base + 1, base + 2]);
+                let tri_count = if face.len() == 3 { 1 } else { 2 };
+                for tri in tris.iter().take(tri_count) {
+                    let a = self.points[tri[0].0 as usize];
+                    let b = self.points[tri[1].0 as usize];
+                    let c = self.points[tri[2].0 as usize];
+                    let n = {
+                        let raw = (b - a).cross(c - a);
+                        if raw.length_squared() > 0.0 {
+                            raw.normalize()
+                        } else {
+                            Vec3::Y
+                        }
+                    };
+                    let base = positions.len() as u32;
+                    positions.push(a);
+                    positions.push(b);
+                    positions.push(c);
+                    normals.extend([n, n, n]);
+                    colors.push(self.colors[tri[0].0 as usize]);
+                    colors.push(self.colors[tri[1].0 as usize]);
+                    colors.push(self.colors[tri[2].0 as usize]);
+                    indices.extend([base, base + 1, base + 2]);
+                }
             }
-        }
+        };
+
+        emit(
+            &opaque_faces,
+            &mut positions,
+            &mut normals,
+            &mut colors,
+            &mut indices,
+        );
+        let opaque_index_count = indices.len();
+        emit(
+            &xlucent_faces,
+            &mut positions,
+            &mut normals,
+            &mut colors,
+            &mut indices,
+        );
 
         BuiltMesh {
             positions,
             normals,
             colors,
             indices,
+            opaque_index_count,
         }
     }
 }
@@ -214,8 +251,10 @@ impl Mesh {
 pub struct BuiltMesh {
     pub positions: Vec<Vec3>,
     pub normals: Vec<Vec3>,
-    pub colors: Vec<Vec3>,
+    pub colors: Vec<Vec4>,
     pub indices: Vec<u32>,
+    /// Indices `[0..opaque_index_count)` are opaque; the rest use alpha blending.
+    pub opaque_index_count: usize,
 }
 
 impl BuiltMesh {
@@ -245,13 +284,81 @@ impl BuiltMesh {
     }
 
     pub fn append_translated(&mut self, other: &BuiltMesh, translation: Vec3) {
-        let base = self.positions.len() as u32;
-        self.positions
-            .extend(other.positions.iter().map(|p| *p + translation));
-        self.normals.extend_from_slice(&other.normals);
-        self.colors.extend_from_slice(&other.colors);
-        self.indices
-            .extend(other.indices.iter().map(|i| i + base));
+        // Preserve opaque-then-transparent ordering across both meshes.
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut colors = Vec::new();
+        let mut indices = Vec::new();
+
+        let push_range = |src: &BuiltMesh,
+                          index_start: usize,
+                          index_end: usize,
+                          translation: Vec3,
+                          positions: &mut Vec<Vec3>,
+                          normals: &mut Vec<Vec3>,
+                          colors: &mut Vec<Vec4>,
+                          indices: &mut Vec<u32>| {
+            let mut remap = HashMap::new();
+            for &old in &src.indices[index_start..index_end] {
+                let new = *remap.entry(old).or_insert_with(|| {
+                    let i = old as usize;
+                    let id = positions.len() as u32;
+                    positions.push(src.positions[i] + translation);
+                    normals.push(src.normals[i]);
+                    colors.push(src.colors[i]);
+                    id
+                });
+                indices.push(new);
+            }
+        };
+
+        push_range(
+            self,
+            0,
+            self.opaque_index_count,
+            Vec3::ZERO,
+            &mut positions,
+            &mut normals,
+            &mut colors,
+            &mut indices,
+        );
+        push_range(
+            other,
+            0,
+            other.opaque_index_count,
+            translation,
+            &mut positions,
+            &mut normals,
+            &mut colors,
+            &mut indices,
+        );
+        let opaque_index_count = indices.len();
+        push_range(
+            self,
+            self.opaque_index_count,
+            self.indices.len(),
+            Vec3::ZERO,
+            &mut positions,
+            &mut normals,
+            &mut colors,
+            &mut indices,
+        );
+        push_range(
+            other,
+            other.opaque_index_count,
+            other.indices.len(),
+            translation,
+            &mut positions,
+            &mut normals,
+            &mut colors,
+            &mut indices,
+        );
+
+        self.positions = positions;
+        self.normals = normals;
+        self.colors = colors;
+        self.indices = indices;
+        self.opaque_index_count = opaque_index_count;
     }
 }
 
@@ -260,7 +367,7 @@ impl BuiltMesh {
 pub(crate) struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
-    pub color: [f32; 3],
+    pub color: [f32; 4],
 }
 
 impl Vertex {
@@ -270,7 +377,7 @@ impl Vertex {
         attributes: &wgpu::vertex_attr_array![
             0 => Float32x3,
             1 => Float32x3,
-            2 => Float32x3,
+            2 => Float32x4,
         ],
     };
 }

@@ -141,8 +141,160 @@ fn frame_first_flag_exists() {
         height: 1,
         aspect: 1.0,
         first: true,
+        input: crate::input::Input::new(),
     };
     assert!(f.first);
+}
+
+#[test]
+fn height_terrain_has_some_water() {
+    let t = crate::terrain::HeightTerrain::new(crate::terrain::TerrainRules {
+        seed: 9,
+        lake_threshold: 0.60,
+        ..Default::default()
+    });
+    let mut water = 0;
+    let mut total = 0;
+    for z in -120..120 {
+        for x in -120..120 {
+            if t.sample(x as f32 * 2.0, z as f32 * 2.0).water {
+                water += 1;
+            }
+            total += 1;
+        }
+    }
+    assert!(water > 0, "expected some lake samples");
+    assert!(water < total / 2, "lakes should be occasional, got {water}/{total}");
+}
+
+#[test]
+fn lakes_carve_below_waterline() {
+    let water_level = 5.5;
+    let t = crate::terrain::HeightTerrain::new(crate::terrain::TerrainRules {
+        seed: 19,
+        lake_threshold: 0.60,
+        water_level,
+        ..Default::default()
+    });
+    let mut water_cells = 0;
+    let mut shore_checks = 0;
+    for z in -120..120 {
+        for x in -120..120 {
+            let px = x as f32 * 2.0;
+            let pz = z as f32 * 2.0;
+            let s = t.sample(px, pz);
+            if !s.water {
+                assert!(
+                    s.height + 1e-3 >= water_level,
+                    "dry surface must not undercut the waterline (mesa risk): {}",
+                    s.height
+                );
+                assert!(
+                    s.ground + 1e-3 >= water_level,
+                    "dry ground must not undercut the waterline: {}",
+                    s.ground
+                );
+                continue;
+            }
+            water_cells += 1;
+            assert!(
+                s.ground < water_level,
+                "lake bed must sit below waterline (got ground={})",
+                s.ground
+            );
+            assert!(
+                (s.height - water_level).abs() < 1e-3,
+                "walkable height on water must be water_level"
+            );
+            for (dx, dz) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                let n = t.sample(px + dx, pz + dz);
+                if !n.water {
+                    assert!(
+                        n.ground + 0.05 >= water_level,
+                        "shore undercuts water: shore={} water={}",
+                        n.ground,
+                        water_level
+                    );
+                    shore_checks += 1;
+                }
+            }
+        }
+    }
+    assert!(water_cells > 0, "expected some water");
+    assert!(shore_checks > 0, "expected shore samples");
+}
+
+#[test]
+fn camera_right_xz_matches_follow_view() {
+    // look_at_rh side vector is forward × up; for yaw 0 (face +Z) that is −X.
+    let right0 = crate::camera::Camera::right_xz(0.0);
+    assert!(
+        right0.dot(-Vec3::X) > 0.9,
+        "yaw 0 follow view: screen-right is −X, got {right0}"
+    );
+    let f = crate::camera::Camera::facing_xz(35.0);
+    let r = crate::camera::Camera::right_xz(35.0);
+    let expected = Vec3::new(-f.z, 0.0, f.x);
+    assert!(
+        r.dot(expected) > 0.99,
+        "strafe must match look_at_rh screen-right"
+    );
+}
+
+#[test]
+fn terrain_stream_budgets_main_thread_work() {
+    use crate::terrain::{TerrainRules, TerrainStream};
+    use crate::world::World;
+    use std::time::{Duration, Instant};
+
+    let rules = TerrainRules {
+        chunk_cells: 48,
+        cell_size: 1.0,
+        ..TerrainRules::default()
+    };
+    // Tiny upload budget so one sync cannot push the whole ring.
+    let mut stream = TerrainStream::new(rules, 2).with_budgets(8, 1);
+    let mut world = World::new();
+    let focus = Vec3::ZERO;
+
+    let t0 = Instant::now();
+    stream.sync(&mut world, focus);
+    assert!(
+        t0.elapsed() < Duration::from_millis(750),
+        "first sync should not build the whole ring on the main thread"
+    );
+    // Focus chunk is forced in; at most one extra upload same frame.
+    assert!(stream.loaded_count() <= 2);
+    assert!(stream.loaded_count() >= 1);
+
+    let start = Instant::now();
+    while stream.loaded_count() < 25 && start.elapsed() < Duration::from_secs(10) {
+        stream.sync(&mut world, focus);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        stream.loaded_count(),
+        25,
+        "ring should fill asynchronously (got {})",
+        stream.loaded_count()
+    );
+}
+
+#[test]
+fn height_chunk_builds_quads() {
+    let t = crate::terrain::HeightTerrain::new(crate::terrain::TerrainRules::default());
+    let mesh = t.build_chunk(0, 0);
+    let cells = t.rules().chunk_cells as usize;
+    let ground_verts = (cells + 1) * (cells + 1);
+    let ground_faces = cells * cells;
+    assert!(mesh.point_count() >= ground_verts);
+    assert!(mesh.face_count() >= ground_faces);
+    let built = mesh.build();
+    assert!(built.opaque_index_count > 0);
+    assert!(
+        built.opaque_index_count <= built.indices.len(),
+        "transparent water should partition after opaque land"
+    );
 }
 
 #[test]
@@ -151,4 +303,30 @@ fn color_rgb_bytes() {
     assert!((c.r - 1.0).abs() < 1e-5);
     assert!(c.g.abs() < 1e-5);
     assert!((c.b - 128.0 / 255.0).abs() < 1e-5);
+    assert!((c.a - 1.0).abs() < 1e-5);
+}
+
+#[test]
+fn transparent_faces_draw_after_opaque() {
+    use crate::color::rgba;
+    let mut m = Mesh::new();
+    let a = m.add_point((0.0, 0.0, 0.0)).unwrap();
+    let b = m.add_point((1.0, 0.0, 0.0)).unwrap();
+    let c = m.add_point((0.0, 0.0, 1.0)).unwrap();
+    m.set_point_color(a, rgba(0, 0, 255, 128)).unwrap();
+    m.set_point_color(b, rgba(0, 0, 255, 128)).unwrap();
+    m.set_point_color(c, rgba(0, 0, 255, 128)).unwrap();
+    m.add_triangle(a, b, c).unwrap();
+    let d = m.add_point((0.0, 1.0, 0.0)).unwrap();
+    let e = m.add_point((1.0, 1.0, 0.0)).unwrap();
+    let f = m.add_point((0.0, 1.0, 1.0)).unwrap();
+    m.set_point_color(d, rgb(255, 0, 0)).unwrap();
+    m.set_point_color(e, rgb(255, 0, 0)).unwrap();
+    m.set_point_color(f, rgb(255, 0, 0)).unwrap();
+    m.add_triangle(d, e, f).unwrap();
+    let built = m.build();
+    assert_eq!(built.opaque_index_count, 3);
+    assert_eq!(built.indices.len(), 6);
+    assert!(built.colors[0].w > 0.99);
+    assert!(built.colors[3].w < 0.99);
 }

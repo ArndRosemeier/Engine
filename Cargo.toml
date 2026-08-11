@@ -5,6 +5,7 @@ members = [
     "examples/hello_mesh",
     "examples/procedural_caves",
     "examples/populate_world",
+    "examples/infinite_walker",
 ]
 default-members = ["engine"]
 

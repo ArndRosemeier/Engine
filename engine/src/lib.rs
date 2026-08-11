@@ -6,6 +6,7 @@ pub mod advanced;
 pub mod camera;
 pub mod color;
 pub mod error;
+pub mod input;
 pub mod landscape;
 pub mod limits;
 pub mod mesh;
@@ -13,6 +14,8 @@ pub mod model;
 pub mod place;
 pub mod prelude;
 pub mod proc;
+pub mod proc_terrain;
+pub mod terrain;
 pub mod world;
 
 pub(crate) mod app;
@@ -21,13 +24,18 @@ pub(crate) mod render;
 pub(crate) mod volume;
 
 pub use camera::Camera;
-pub use color::{rgb, Color};
+pub use color::{rgb, rgba, Color};
 pub use error::{EngineError, EngineResult};
+pub use input::{Input, Key};
 pub use landscape::Landscape;
 pub use limits::EngineLimits;
 pub use mesh::{Mesh, PointId, Shape};
 pub use model::{scatter_places, Model};
 pub use place::Place;
+pub use proc_terrain::{
+    demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain,
+};
+pub use terrain::{HeightTerrain, TerrainRules, TerrainSample, TerrainStream};
 pub use world::{EntityId, Frame, Light, World};
 
 /// Entry point matching the planned `Engine::run` shape.

@@ -339,6 +339,7 @@ impl Volume {
             normals: Vec::new(),
             colors: Vec::new(),
             indices: Vec::new(),
+            opaque_index_count: 0,
         };
         let mut keys: Vec<IVec3> = self.chunks.keys().copied().collect();
         keys.sort_by_key(|k| (k.y, k.z, k.x));
@@ -458,7 +459,7 @@ fn built_to_editable_mesh(built: &BuiltMesh) -> Mesh {
     for (i, p) in built.positions.iter().enumerate() {
         let id = mesh.add_point(*p).expect("built point");
         let c = built.colors[i];
-        let color = Color::rgb01_unchecked(c.x, c.y, c.z);
+        let color = Color::rgba01(c.x, c.y, c.z, c.w).expect("color");
         mesh.set_point_color(id, color).expect("built color");
         ids.push(id);
     }

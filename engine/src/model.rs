@@ -83,6 +83,7 @@ fn load_gltf_document(
         normals: Vec::new(),
         colors: Vec::new(),
         indices: Vec::new(),
+        opaque_index_count: 0,
     };
 
     for mesh in document.meshes() {
@@ -111,45 +112,57 @@ fn load_gltf_document(
                 .base_color_factor();
             let base = Vec3::new(base_color[0], base_color[1], base_color[2]);
 
-            let colors: Vec<Vec3> = if let Some(iter) = reader.read_colors(0) {
+            let colors: Vec<glam::Vec4> = if let Some(iter) = reader.read_colors(0) {
                 match iter {
                     gltf::mesh::util::ReadColors::RgbU8(i) => i
                         .map(|c| {
-                            Vec3::new(c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0)
+                            glam::Vec4::new(
+                                c[0] as f32 / 255.0,
+                                c[1] as f32 / 255.0,
+                                c[2] as f32 / 255.0,
+                                1.0,
+                            )
                         })
                         .collect(),
                     gltf::mesh::util::ReadColors::RgbU16(i) => i
                         .map(|c| {
-                            Vec3::new(
+                            glam::Vec4::new(
                                 c[0] as f32 / 65535.0,
                                 c[1] as f32 / 65535.0,
                                 c[2] as f32 / 65535.0,
+                                1.0,
                             )
                         })
                         .collect(),
                     gltf::mesh::util::ReadColors::RgbF32(i) => {
-                        i.map(|c| Vec3::new(c[0], c[1], c[2])).collect()
+                        i.map(|c| glam::Vec4::new(c[0], c[1], c[2], 1.0)).collect()
                     }
                     gltf::mesh::util::ReadColors::RgbaU8(i) => i
                         .map(|c| {
-                            Vec3::new(c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0)
+                            glam::Vec4::new(
+                                c[0] as f32 / 255.0,
+                                c[1] as f32 / 255.0,
+                                c[2] as f32 / 255.0,
+                                c[3] as f32 / 255.0,
+                            )
                         })
                         .collect(),
                     gltf::mesh::util::ReadColors::RgbaU16(i) => i
                         .map(|c| {
-                            Vec3::new(
+                            glam::Vec4::new(
                                 c[0] as f32 / 65535.0,
                                 c[1] as f32 / 65535.0,
                                 c[2] as f32 / 65535.0,
+                                c[3] as f32 / 65535.0,
                             )
                         })
                         .collect(),
-                    gltf::mesh::util::ReadColors::RgbaF32(i) => {
-                        i.map(|c| Vec3::new(c[0], c[1], c[2])).collect()
-                    }
+                    gltf::mesh::util::ReadColors::RgbaF32(i) => i
+                        .map(|c| glam::Vec4::new(c[0], c[1], c[2], c[3]))
+                        .collect(),
                 }
             } else {
-                vec![base; positions.len()]
+                vec![glam::Vec4::new(base.x, base.y, base.z, 1.0); positions.len()]
             };
 
             let indices: Vec<u32> = if let Some(iter) = reader.read_indices() {
@@ -162,6 +175,7 @@ fn load_gltf_document(
                 positions: positions.into_iter().map(Vec3::from).collect(),
                 normals,
                 colors,
+                opaque_index_count: indices.len(),
                 indices,
             };
             combined.append_translated(&part, Vec3::ZERO);
@@ -218,7 +232,7 @@ fn built_to_mesh(built: &BuiltMesh) -> EngineResult<Mesh> {
     for (i, p) in built.positions.iter().enumerate() {
         let id = mesh.add_point(*p)?;
         let c = built.colors[i];
-        mesh.set_point_color(id, Color::rgb01_unchecked(c.x, c.y, c.z))?;
+        mesh.set_point_color(id, Color::rgba01(c.x, c.y, c.z, c.w).expect("color"))?;
         ids.push(id);
     }
     for tri in built.indices.chunks_exact(3) {

@@ -1,10 +1,12 @@
+mod clipmap;
 mod gpu_mesh;
 mod pipeline;
 
 use crate::mesh::InstanceRaw;
 use crate::world::{EntityId, World};
+use clipmap::ClipmapRenderer;
 use gpu_mesh::GpuMesh;
-use pipeline::{create_pipeline, Uniforms};
+use pipeline::{create_pipelines, Pipelines, Uniforms};
 use std::collections::HashMap;
 use winit::dpi::PhysicalSize;
 
@@ -13,9 +15,8 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    pipeline: wgpu::RenderPipeline,
-    uniform_buf: wgpu::Buffer,
-    uniform_bind_group: wgpu::BindGroup,
+    pipelines: Pipelines,
+    clipmap: Option<ClipmapRenderer>,
     depth_view: wgpu::TextureView,
     depth_texture: wgpu::Texture,
     gpu_meshes: HashMap<EntityId, GpuMesh>,
@@ -73,7 +74,7 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        let (pipeline, uniform_buf, uniform_bind_group) = create_pipeline(&device, format);
+        let pipelines = create_pipelines(&device, format);
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
 
         Self {
@@ -81,9 +82,8 @@ impl Renderer {
             device,
             queue,
             config,
-            pipeline,
-            uniform_buf,
-            uniform_bind_group,
+            pipelines,
+            clipmap: None,
             depth_view,
             depth_texture,
             gpu_meshes: HashMap::new(),
@@ -106,6 +106,36 @@ impl Renderer {
     }
 
     pub fn sync_world(&mut self, world: &World) {
+        if let Some(proc) = world.proc_terrain() {
+            let format = self.config.format;
+            match self.clipmap.as_mut() {
+                Some(clip) => clip.ensure_config(&self.device, format, &proc.config),
+                None => {
+                    self.clipmap = Some(ClipmapRenderer::new(
+                        &self.device,
+                        format,
+                        proc.config.clone(),
+                    ));
+                }
+            }
+            if let Some(clip) = self.clipmap.as_mut() {
+                let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+                let vp = world.camera.view_projection(aspect);
+                let light_dir = world.light.direction.normalize_or_zero();
+                clip.prepare(
+                    &self.queue,
+                    vp,
+                    light_dir,
+                    world.light.ambient,
+                    world.light.color,
+                    world.camera.eye,
+                    proc,
+                );
+            }
+        } else {
+            self.clipmap = None;
+        }
+
         let live: std::collections::HashSet<EntityId> =
             world.entities().map(|(id, _)| id).collect();
         self.gpu_meshes.retain(|id, _| live.contains(id));
@@ -271,15 +301,21 @@ impl Renderer {
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         let vp = world.camera.view_projection(aspect);
         let light_dir = world.light.direction.normalize_or_zero();
+        let eye = world.camera.eye;
         let uniforms = Uniforms {
             view_proj: vp.to_cols_array_2d(),
             light_dir: [light_dir.x, light_dir.y, light_dir.z],
             ambient: world.light.ambient,
             light_color: world.light.color.into(),
             _pad: 0.0,
+            eye: [eye.x, eye.y, eye.z],
+            _pad2: 0.0,
         };
-        self.queue
-            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+        self.queue.write_buffer(
+            &self.pipelines.uniform_buf,
+            0,
+            bytemuck::bytes_of(&uniforms),
+        );
     }
 
     fn encode_pass(
@@ -316,14 +352,47 @@ impl Renderer {
             timestamp_writes: None,
         });
 
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+        // GPU procgen terrain (depth-writing land), then entity meshes.
+        if let Some(clip) = self.clipmap.as_ref() {
+            clip.draw_land(&mut pass);
+        }
 
+        pass.set_bind_group(0, &self.pipelines.bind_group, &[]);
+
+        // Opaque first (depth write on), then alpha-blended surfaces.
+        pass.set_pipeline(&self.pipelines.opaque);
         for gpu in self.gpu_meshes.values() {
+            if gpu.opaque_index_count == 0 {
+                continue;
+            }
             pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
             pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
             pass.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..gpu.index_count as u32, 0, 0..gpu.instance_count as u32);
+            pass.draw_indexed(
+                0..gpu.opaque_index_count as u32,
+                0,
+                0..gpu.instance_count as u32,
+            );
+        }
+
+        pass.set_pipeline(&self.pipelines.transparent);
+        for gpu in self.gpu_meshes.values() {
+            if gpu.opaque_index_count >= gpu.index_count {
+                continue;
+            }
+            pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
+            pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
+            pass.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(
+                gpu.opaque_index_count as u32..gpu.index_count as u32,
+                0,
+                0..gpu.instance_count as u32,
+            );
+        }
+
+        // Translucent water after meshes so the walker can occlude shorelines.
+        if let Some(clip) = self.clipmap.as_ref() {
+            clip.draw_water(&mut pass);
         }
     }
 

@@ -1,10 +1,12 @@
 use crate::camera::Camera;
 use crate::color::Color;
 use crate::error::{EngineError, EngineResult};
+use crate::input::Input;
 use crate::limits::EngineLimits;
 use crate::mesh::{BuiltMesh, Mesh};
 use crate::place::Place;
-use glam::{Mat4, Vec3};
+use crate::proc_terrain::{HeightField, ProcTerrain};
+use glam::{IVec3, Mat4, Vec3};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -66,6 +68,10 @@ pub struct World {
     order: Vec<EntityId>,
     /// Chunk key -> entity id for streamed volume meshes (advanced).
     pub(crate) chunk_entities: HashMap<glam::IVec3, EntityId>,
+    /// Optional GPU procgen terrain (clipmap). Drawn before entity meshes.
+    pub(crate) proc_terrain: Option<ProcTerrain>,
+    /// CPU sampler matching the GPU formula (for feet / gameplay).
+    pub(crate) height_field: Option<HeightField>,
 }
 
 impl Default for World {
@@ -79,6 +85,8 @@ impl Default for World {
             entities: HashMap::new(),
             order: Vec::new(),
             chunk_entities: HashMap::new(),
+            proc_terrain: None,
+            height_field: None,
         }
     }
 }
@@ -210,32 +218,79 @@ impl World {
         self.entities.len()
     }
 
-    /// Advanced: replace/create a chunk mesh entity (streaming).
-    #[allow(dead_code)]
-    pub(crate) fn upsert_chunk_mesh(&mut self, key: glam::IVec3, mesh: BuiltMesh) -> EntityId {
-        if let Some(&id) = self.chunk_entities.get(&key) {
-            let e = self.entities.get_mut(&id).expect("chunk entity");
-            e.mesh = mesh;
-            e.transform = Mat4::IDENTITY;
-            e.instances.clear();
-            id
-        } else {
-            let id = self.spawn_built(mesh, Mat4::IDENTITY);
-            self.chunk_entities.insert(key, id);
-            id
-        }
+    /// Replace or create a streamed chunk mesh (infinite terrain / LOD).
+    pub fn set_chunk(&mut self, key: IVec3, mesh: Mesh) -> EntityId {
+        self.set_chunk_built(key, mesh.build())
     }
 
-    /// Advanced: remove a streamed chunk entity.
-    #[allow(dead_code)]
-    pub(crate) fn remove_chunk(&mut self, key: glam::IVec3) {
+    /// Like [`set_chunk`] but accepts a pre-built mesh (for background generation).
+    pub fn set_chunk_built(&mut self, key: IVec3, built: BuiltMesh) -> EntityId {
+        if let Some(&id) = self.chunk_entities.get(&key) {
+            // Remesh requires a new GPU upload — swap entity id so renderer rebuilds.
+            self.despawn(id);
+            self.chunk_entities.remove(&key);
+        }
+        let id = self.spawn_built(built, Mat4::IDENTITY);
+        self.chunk_entities.insert(key, id);
+        id
+    }
+
+    /// Remove a streamed chunk if present.
+    pub fn clear_chunk(&mut self, key: IVec3) {
         if let Some(id) = self.chunk_entities.remove(&key) {
             self.despawn(id);
         }
     }
+
+    pub fn has_chunk(&self, key: IVec3) -> bool {
+        self.chunk_entities.contains_key(&key)
+    }
+
+    /// Third-person follow camera (yaw in degrees, 0 = +Z).
+    pub fn look_follow(
+        &mut self,
+        target: impl Into<Vec3>,
+        yaw_degrees: f32,
+        distance: f32,
+        height: f32,
+    ) {
+        self.camera = Camera::follow(target, yaw_degrees, distance, height);
+    }
+
+    /// Enable GPU procedural terrain (clipmap). Replaces any previous proc terrain.
+    pub fn set_proc_terrain(&mut self, terrain: ProcTerrain) {
+        self.height_field = Some(HeightField::new(terrain.rules.clone()));
+        self.proc_terrain = Some(terrain);
+    }
+
+    /// Clear GPU procedural terrain (mesh-only mode).
+    pub fn clear_proc_terrain(&mut self) {
+        self.proc_terrain = None;
+        self.height_field = None;
+    }
+
+    /// Update clipmap focus (usually the walker position).
+    pub fn set_proc_focus(&mut self, focus: impl Into<Vec3>) {
+        let focus = focus.into();
+        if let Some(t) = self.proc_terrain.as_mut() {
+            t.focus = focus;
+        }
+    }
+
+    /// Height from the GPU terrain formula (CPU portable noise). Falls back to 0.
+    pub fn proc_height_at(&self, x: f32, z: f32) -> f32 {
+        self.height_field
+            .as_ref()
+            .map(|f| f.height_at(x, z))
+            .unwrap_or(0.0)
+    }
+
+    pub(crate) fn proc_terrain(&self) -> Option<&ProcTerrain> {
+        self.proc_terrain.as_ref()
+    }
 }
 
-/// Per-frame timing passed to the update closure.
+/// Per-frame timing and input passed to the update closure.
 #[derive(Clone, Debug)]
 pub struct Frame {
     pub dt: f32,
@@ -245,4 +300,6 @@ pub struct Frame {
     pub aspect: f32,
     /// True only on the first update after the window is ready.
     pub first: bool,
+    /// Keys held this frame.
+    pub input: Input,
 }

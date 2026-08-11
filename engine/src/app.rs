@@ -1,3 +1,4 @@
+use crate::input::Input;
 use crate::limits::EngineLimits;
 use crate::render::Renderer;
 use crate::world::{Frame, World};
@@ -5,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
-use winit::event::{KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
@@ -18,6 +19,7 @@ struct App {
     renderer: Option<Renderer>,
     world: World,
     update: UpdateFn,
+    input: Input,
     start: Instant,
     last: Instant,
     frame_index: u32,
@@ -40,6 +42,7 @@ impl App {
             renderer: None,
             world: World::new().with_limits(limits),
             update,
+            input: Input::new(),
             start: now,
             last: now,
             frame_index: 0,
@@ -82,10 +85,18 @@ impl ApplicationHandler for App {
                 event:
                     KeyEvent {
                         logical_key: Key::Named(NamedKey::Escape),
+                        state: ElementState::Pressed,
                         ..
                     },
                 ..
             } => event_loop.exit(),
+            WindowEvent::KeyboardInput { event, .. } => {
+                let pressed = event.state == ElementState::Pressed;
+                // Ignore key repeat so we don't thrash; held state is enough.
+                if !event.repeat {
+                    self.input.set_key(event.physical_key, pressed);
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.resize(size);
@@ -110,6 +121,7 @@ impl ApplicationHandler for App {
                     height: size.height,
                     aspect: size.width as f32 / size.height.max(1) as f32,
                     first,
+                    input: self.input.clone(),
                 };
                 self.first_update_done = true;
 
