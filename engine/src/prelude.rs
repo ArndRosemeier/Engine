@@ -1,5 +1,6 @@
 //! Everyday imports for the friendly API.
 
+pub use crate::anim::AnimatedModel;
 pub use crate::camera::Camera;
 pub use crate::color::{rgb, rgba, Color};
 pub use crate::error::{EngineError, EngineResult};
@@ -9,6 +10,7 @@ pub use crate::limits::EngineLimits;
 pub use crate::mesh::{Mesh, PointId, Shape};
 pub use crate::model::{scatter_places, Model};
 pub use crate::place::Place;
+pub use crate::world::AnimatedEntity;
 pub use crate::proc::{scatter_on_xz, Noise};
 pub use crate::proc_terrain::{
     demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain,

@@ -83,6 +83,7 @@ pub struct Pipelines {
     pub transparent: wgpu::RenderPipeline,
     pub uniform_buf: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
+    pub bind_layout: wgpu::BindGroupLayout,
 }
 
 pub fn create_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> Pipelines {
@@ -191,5 +192,6 @@ pub fn create_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> P
         transparent,
         uniform_buf,
         bind_group,
+        bind_layout,
     }
 }

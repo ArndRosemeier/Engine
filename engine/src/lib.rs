@@ -3,6 +3,7 @@
 //! Prefer [`prelude`] for everyday use. Power users can open [`advanced`].
 
 pub mod advanced;
+pub mod anim;
 pub mod camera;
 pub mod color;
 pub mod error;
@@ -25,6 +26,7 @@ pub(crate) mod render;
 pub(crate) mod ui_backend;
 pub(crate) mod volume;
 
+pub use anim::{AnimatedModel, Animator, AnimationClip};
 pub use camera::Camera;
 pub use color::{rgb, rgba, Color};
 pub use error::{EngineError, EngineResult};
@@ -39,7 +41,7 @@ pub use proc_terrain::{
 };
 pub use terrain::{HeightTerrain, TerrainRules, TerrainSample, TerrainStream};
 pub use ui::{egui, UiFrame, UiPanel};
-pub use world::{EntityId, Frame, Light, World};
+pub use world::{AnimatedEntity, EntityId, Frame, Light, World};
 
 /// Entry point matching the planned `Engine::run` shape.
 pub struct Engine;

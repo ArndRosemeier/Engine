@@ -9,6 +9,8 @@ pub struct EngineLimits {
     pub max_model_triangles: u64,
     /// Max GPU instances in one `spawn_many` / instanced spawn.
     pub max_instances_per_spawn: u64,
+    /// Max joints in one skinned model.
+    pub max_joints: u32,
 }
 
 impl Default for EngineLimits {
@@ -18,6 +20,7 @@ impl Default for EngineLimits {
             max_gltf_buffer_bytes: 64 * 1024 * 1024,
             max_model_triangles: 2_000_000,
             max_instances_per_spawn: 100_000,
+            max_joints: 128,
         }
     }
 }
@@ -29,6 +32,7 @@ impl EngineLimits {
             max_gltf_buffer_bytes: u64::MAX / 4,
             max_model_triangles: u64::MAX / 4,
             max_instances_per_spawn: u64::MAX / 4,
+            max_joints: 256,
         }
     }
 }

@@ -193,6 +193,8 @@ impl ApplicationHandler for App {
                     return;
                 }
 
+                self.world.tick_animations(dt);
+
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.sync_world(&self.world);
                     let ui_backend = self.ui_backend.as_mut().expect("ui backend");

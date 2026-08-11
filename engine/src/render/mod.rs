@@ -1,12 +1,14 @@
 mod clipmap;
 mod gpu_mesh;
 mod pipeline;
+mod skinned;
 
 use crate::mesh::InstanceRaw;
 use crate::world::{EntityId, World};
 use clipmap::ClipmapRenderer;
 use gpu_mesh::GpuMesh;
 use pipeline::{create_pipelines, Pipelines, Uniforms};
+use skinned::{create_skinned_pipelines, GpuSkinnedEntity, SkinnedPipelines};
 use std::collections::HashMap;
 use winit::dpi::PhysicalSize;
 
@@ -16,10 +18,12 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipelines: Pipelines,
+    skinned: SkinnedPipelines,
     clipmap: Option<ClipmapRenderer>,
     depth_view: wgpu::TextureView,
     depth_texture: wgpu::Texture,
     gpu_meshes: HashMap<EntityId, GpuMesh>,
+    gpu_skinned: HashMap<EntityId, GpuSkinnedEntity>,
     size: PhysicalSize<u32>,
 }
 
@@ -86,6 +90,7 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let pipelines = create_pipelines(&device, format);
+        let skinned = create_skinned_pipelines(&device, format, &pipelines.bind_layout);
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
 
         Self {
@@ -94,10 +99,12 @@ impl Renderer {
             queue,
             config,
             pipelines,
+            skinned,
             clipmap: None,
             depth_view,
             depth_texture,
             gpu_meshes: HashMap::new(),
+            gpu_skinned: HashMap::new(),
             size,
         }
     }
@@ -177,6 +184,29 @@ impl Renderer {
                     self.gpu_meshes.insert(
                         id,
                         GpuMesh::upload(&self.device, entity.mesh(), &instances),
+                    );
+                }
+            }
+        }
+
+        let live_anim: std::collections::HashSet<EntityId> =
+            world.animated_entities().map(|(id, _)| *id).collect();
+        self.gpu_skinned.retain(|id, _| live_anim.contains(id));
+
+        for (id, anim) in world.animated_entities() {
+            let joints = anim.animator.joint_matrices();
+            match self.gpu_skinned.get_mut(id) {
+                Some(gpu) => gpu.update(&self.queue, anim.transform, &joints),
+                None => {
+                    self.gpu_skinned.insert(
+                        *id,
+                        GpuSkinnedEntity::upload(
+                            &self.device,
+                            &self.skinned.joint_bind_layout,
+                            &anim.animator.model.meshes,
+                            anim.transform,
+                            &joints,
+                        ),
                     );
                 }
             }
@@ -415,6 +445,19 @@ impl Renderer {
                 0..gpu.instance_count as u32,
             );
         }
+
+        pass.set_pipeline(&self.skinned.opaque);
+        for gpu in self.gpu_skinned.values() {
+            pass.set_bind_group(1, &gpu.joint_bind, &[]);
+            pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
+            for mesh in &gpu.meshes {
+                pass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
+                pass.set_index_buffer(mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+        }
+        // Restore scene bind group for subsequent passes.
+        pass.set_bind_group(0, &self.pipelines.bind_group, &[]);
 
         pass.set_pipeline(&self.pipelines.transparent);
         for gpu in self.gpu_meshes.values() {

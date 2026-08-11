@@ -1,3 +1,4 @@
+use crate::anim::{AnimatedModel, Animator};
 use crate::camera::Camera;
 use crate::color::Color;
 use crate::error::{EngineError, EngineResult};
@@ -10,6 +11,7 @@ use crate::ui::UiFrame;
 use glam::{IVec3, Mat4, Vec3};
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 /// Opaque handle to a spawned entity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -57,6 +59,23 @@ impl Entity {
     }
 }
 
+/// Skinned entity with clip playback.
+#[derive(Clone, Debug)]
+pub struct AnimatedEntity {
+    pub(crate) animator: Animator,
+    pub(crate) transform: Mat4,
+}
+
+impl AnimatedEntity {
+    pub fn animator(&self) -> &Animator {
+        &self.animator
+    }
+
+    pub fn transform(&self) -> Mat4 {
+        self.transform
+    }
+}
+
 /// Scene state visible to user update callbacks.
 #[derive(Debug)]
 pub struct World {
@@ -67,6 +86,8 @@ pub struct World {
     next_id: u64,
     entities: HashMap<EntityId, Entity>,
     order: Vec<EntityId>,
+    animated: HashMap<EntityId, AnimatedEntity>,
+    animated_order: Vec<EntityId>,
     /// Chunk key -> entity id for streamed volume meshes (advanced).
     pub(crate) chunk_entities: HashMap<glam::IVec3, EntityId>,
     /// Optional GPU procgen terrain (clipmap). Drawn before entity meshes.
@@ -85,6 +106,8 @@ impl Default for World {
             next_id: 1,
             entities: HashMap::new(),
             order: Vec::new(),
+            animated: HashMap::new(),
+            animated_order: Vec::new(),
             chunk_entities: HashMap::new(),
             proc_terrain: None,
             height_field: None,
@@ -168,16 +191,76 @@ impl World {
     pub fn despawn(&mut self, id: EntityId) {
         self.entities.remove(&id);
         self.order.retain(|x| *x != id);
+        self.animated.remove(&id);
+        self.animated_order.retain(|x| *x != id);
         self.chunk_entities.retain(|_, eid| *eid != id);
     }
 
     pub fn set_place(&mut self, id: EntityId, place: Place) -> EngineResult<()> {
+        if let Some(e) = self.entities.get_mut(&id) {
+            e.transform = place.to_matrix();
+            return Ok(());
+        }
+        if let Some(e) = self.animated.get_mut(&id) {
+            e.transform = place.to_matrix();
+            return Ok(());
+        }
+        Err(EngineError::UnknownEntity)
+    }
+
+    /// Spawn a skinned model with clip playback.
+    pub fn spawn_animated(
+        &mut self,
+        model: AnimatedModel,
+        place: Place,
+    ) -> EngineResult<EntityId> {
+        let animator = Animator::new(Arc::new(model))?;
+        let id = EntityId(self.next_id);
+        self.next_id += 1;
+        self.animated.insert(
+            id,
+            AnimatedEntity {
+                animator,
+                transform: place.to_matrix(),
+            },
+        );
+        self.animated_order.push(id);
+        Ok(id)
+    }
+
+    pub fn play_animation(&mut self, id: EntityId, clip_name: &str) -> EngineResult<()> {
         let e = self
-            .entities
+            .animated
             .get_mut(&id)
             .ok_or(EngineError::UnknownEntity)?;
-        e.transform = place.to_matrix();
+        e.animator.play(clip_name)
+    }
+
+    pub fn set_animation_speed(&mut self, id: EntityId, speed: f32) -> EngineResult<()> {
+        if !speed.is_finite() {
+            return Err(EngineError::InvalidValue(format!(
+                "animation speed must be finite, got {speed}"
+            )));
+        }
+        let e = self
+            .animated
+            .get_mut(&id)
+            .ok_or(EngineError::UnknownEntity)?;
+        e.animator.speed = speed;
         Ok(())
+    }
+
+    /// Advance all skinned clip clocks (call once per frame before render sync).
+    pub fn tick_animations(&mut self, dt: f32) {
+        for e in self.animated.values_mut() {
+            e.animator.tick(dt);
+        }
+    }
+
+    pub fn animated_entities(&self) -> impl Iterator<Item = (&EntityId, &AnimatedEntity)> {
+        self.animated_order
+            .iter()
+            .filter_map(|id| self.animated.get(id).map(|e| (id, e)))
     }
 
     /// Orbit camera helper (yaw/pitch in degrees).
