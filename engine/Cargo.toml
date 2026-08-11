@@ -1,0 +1,18 @@
+[package]
+name = "engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal procedural 3D engine (wgpu)"
+
+[dependencies]
+bytemuck = { workspace = true }
+glam = { workspace = true }
+gltf = { workspace = true }
+image = { workspace = true }
+noise = { workspace = true }
+pollster = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }

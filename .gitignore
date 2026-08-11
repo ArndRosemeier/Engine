@@ -1,0 +1,4 @@
+/target/
+/demoshots/
+**/*.rs.bk
+.DS_Store
