@@ -37,7 +37,7 @@ pub use anim::{AnimatedModel, AnimationClip, Animator};
 pub use camera::Camera;
 pub use chunk_stream::{ChunkBuilder, ChunkPayload, ChunkStream};
 pub use color::{rgb, rgba, Color};
-pub use contact::ContactGrid;
+pub use contact::{ContactGrid, ContactSnapshot};
 pub use error::{EngineError, EngineResult};
 pub use input::{Input, Key, MouseButton};
 pub use landscape::Landscape;

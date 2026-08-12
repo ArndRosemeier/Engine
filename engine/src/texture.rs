@@ -151,6 +151,29 @@ pub fn load_rgba8_png(path: impl AsRef<Path>) -> EngineResult<(u32, u32, Vec<u8>
     Ok((w, h, rgba.into_raw()))
 }
 
+/// Write RGBA8 pixels out as a PNG (loud failure on a bad path or size).
+///
+/// The counterpart of [`load_rgba8_png`], for diagnostics that draw a picture of
+/// something the renderer cannot show — a plan view of generated geometry, a
+/// field plotted as an image — rather than for anything the game does at runtime.
+pub fn save_rgba8_png(path: impl AsRef<Path>, w: u32, h: u32, rgba: &[u8]) -> EngineResult<()> {
+    let path = path.as_ref();
+    let want = (w as usize) * (h as usize) * 4;
+    if w == 0 || h == 0 || rgba.len() != want {
+        return Err(EngineError::InvalidValue(format!(
+            "{}: {w}x{h} needs {want} bytes, got {}",
+            path.display(),
+            rgba.len()
+        )));
+    }
+    image::save_buffer(path, rgba, w, h, image::ColorType::Rgba8).map_err(|e| {
+        EngineError::Io(std::io::Error::other(format!(
+            "failed to write {}: {e}",
+            path.display()
+        )))
+    })
+}
+
 /// Kind of built-in tileable albedo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerrainAlbedo {

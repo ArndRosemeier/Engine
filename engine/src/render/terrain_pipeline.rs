@@ -119,12 +119,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let grass_w = max(1.0 - rock_w - sand_w, 0.0);
 
     var albedo = grass * grass_w + sand * sand_w + rock * rock_w;
-    // River / lake bed: authored as dark brown (low green). Must win over grass
-    // or translucent water shows sliding grass parallax in the channel.
-    let bed_w = (1.0 - smoothstep(0.14, 0.30, in.color.g))
-        * (1.0 - smoothstep(0.28, 0.48, in.color.r));
+    // River / lake bed. Alpha says so outright: a caller that wants a dark
+    // forest floor and a caller that wants a streambed cannot be told apart by
+    // how brown their vertex colour is, and guessing gave the darker of the two
+    // a bed it never asked for.
+    let bed_w = clamp(1.0 - in.color.a, 0.0, 1.0);
     let mud = sand * vec3<f32>(0.42, 0.34, 0.26) + rock * vec3<f32>(0.18, 0.14, 0.12);
-    albedo = mix(albedo, mud, clamp(bed_w, 0.0, 1.0));
+    albedo = mix(albedo, mud, bed_w);
     // Mild vertex-color tint (biome / slope authoring) — skip on beds.
     albedo = mix(albedo, albedo * in.color.rgb, tp.tint_strength * (1.0 - bed_w));
 

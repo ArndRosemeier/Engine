@@ -8,7 +8,7 @@
 //! Failures are propagated, not swallowed: a builder error surfaces from
 //! [`ChunkStream::sync`] on the frame it is observed.
 
-use crate::contact::ContactGrid;
+use crate::contact::{ContactGrid, ContactSnapshot};
 use crate::error::{EngineError, EngineResult};
 use crate::mesh::BuiltMesh;
 use crate::space::{
@@ -81,7 +81,9 @@ pub trait ChunkBuilder: Send + Sync + 'static {
 
 struct ResidentChunk {
     layers: Vec<ChunkLayer>,
-    contact: Option<ContactGrid>,
+    /// Shared so a snapshot can be handed to a worker thread without copying
+    /// every height in the ring.
+    contact: Option<Arc<ContactGrid>>,
 }
 
 struct JobResult {
@@ -239,6 +241,17 @@ impl ChunkStream {
             .get(&coord)
             .and_then(|c| c.contact.as_ref())
             .and_then(|g| g.height_at(p))
+    }
+
+    /// The ground bakes resident right now, for a worker thread to stand things on.
+    pub fn contact_snapshot(&self) -> ContactSnapshot {
+        ContactSnapshot::new(
+            self.span,
+            self.resident
+                .iter()
+                .filter_map(|(coord, chunk)| Some((*coord, Arc::clone(chunk.contact.as_ref()?))))
+                .collect(),
+        )
     }
 
     fn in_hole(&self, coord: ChunkCoord, center: ChunkCoord) -> bool {
@@ -410,7 +423,7 @@ impl ChunkStream {
             coord,
             ResidentChunk {
                 layers: installed,
-                contact,
+                contact: contact.map(Arc::new),
             },
         );
         Ok(())

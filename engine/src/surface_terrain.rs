@@ -9,7 +9,7 @@
 //! chunk looks like.
 
 use crate::chunk_stream::{ChunkBuilder, ChunkPayload, ChunkStream};
-use crate::color::{rgb, Color};
+use crate::color::{rgb, rgba, Color};
 use crate::contact::ContactGrid;
 use crate::error::EngineResult;
 use crate::mesh::{BuiltMesh, Mesh};
@@ -21,6 +21,12 @@ use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Visual knobs for land [`SurfaceTerrain`] meshes.
+///
+/// The alpha of a land colour is not opacity — the terrain pass is opaque. It
+/// is how much soil the vertex stands for: 1 is ordinary ground, 0 is the bed
+/// of a water body, which the terrain shader draws as mud so translucent water
+/// has something plausible under it. Anything that wants a bed has to say so
+/// there.
 #[derive(Clone, Debug)]
 pub struct SurfaceMeshStyle {
     pub chunk_cells: i32,
@@ -41,7 +47,7 @@ impl Default for SurfaceMeshStyle {
             grass: rgb(92, 140, 70),
             sand: rgb(194, 178, 128),
             rock: rgb(120, 118, 112),
-            bed: rgb(110, 125, 95),
+            bed: rgba(110, 125, 95, 0),
             rock_height: 400.0,
         }
     }

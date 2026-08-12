@@ -4,7 +4,7 @@ pub use crate::anim::AnimatedModel;
 pub use crate::camera::Camera;
 pub use crate::chunk_stream::{ChunkBuilder, ChunkPayload, ChunkStream};
 pub use crate::color::{rgb, rgba, Color};
-pub use crate::contact::ContactGrid;
+pub use crate::contact::{ContactGrid, ContactSnapshot};
 pub use crate::error::{EngineError, EngineResult};
 pub use crate::input::{Input, Key, MouseButton};
 pub use crate::landscape::Landscape;

@@ -5,8 +5,11 @@
 //! produced the land mesh, from the same samples and the same diagonal split,
 //! so feet can never sink into or float above the geometry on screen.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use crate::error::{EngineError, EngineResult};
-use crate::space::GlobalXZ;
+use crate::space::{ChunkCoord, ChunkSpan, GlobalXZ};
 
 /// Vertex heights of one chunk's land mesh, in absolute metres.
 #[derive(Clone, Debug)]
@@ -111,6 +114,45 @@ impl ContactGrid {
         } else {
             h00 * (1.0 - u) + h10 * (u - v) + h11 * v
         })
+    }
+}
+
+/// The drawn ground as it stands right now, readable from another thread.
+///
+/// Contact grids belong to the streamer, which is main-thread state: a worker
+/// that wants to place things on the ground — cover, props, anything sown on the
+/// surface the player actually walks on — cannot borrow it while the streamer
+/// keeps loading. Taking a snapshot costs one clone of a map of handles, and the
+/// grids themselves are shared, not copied. It is a snapshot in the strict
+/// sense: chunks that arrive afterwards are not in it.
+#[derive(Clone, Debug, Default)]
+pub struct ContactSnapshot {
+    span: Option<ChunkSpan>,
+    grids: HashMap<ChunkCoord, Arc<ContactGrid>>,
+}
+
+impl ContactSnapshot {
+    pub fn new(span: ChunkSpan, grids: HashMap<ChunkCoord, Arc<ContactGrid>>) -> Self {
+        Self {
+            span: Some(span),
+            grids,
+        }
+    }
+
+    /// Height of the drawn ground under `p`, or `None` where nothing is resident.
+    pub fn height_at(&self, p: GlobalXZ) -> Option<f32> {
+        let span = self.span?;
+        self.grids
+            .get(&ChunkCoord::containing(p, span))
+            .and_then(|g| g.height_at(p))
+    }
+
+    pub fn len(&self) -> usize {
+        self.grids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.grids.is_empty()
     }
 }
 
