@@ -1,5 +1,9 @@
 use glam::{Mat4, Vec3};
 
+/// How far a first-person view may tilt before the look direction would fold
+/// onto the up axis.
+pub const MAX_PITCH_DEGREES: f32 = 89.0;
+
 /// Simple perspective camera. Y-up, angles in degrees where helpers use degrees.
 #[derive(Clone, Debug)]
 pub struct Camera {
@@ -71,6 +75,31 @@ impl Camera {
             far: 800.0,
             ..Self::default()
         }
+    }
+
+    /// First-person camera: the eye *is* the viewpoint, no offset.
+    ///
+    /// `yaw_degrees` is the facing (0 = +Z), `pitch_degrees` is positive
+    /// looking up. Pitch is clamped short of straight up/down so the view
+    /// direction never becomes parallel to `up`.
+    pub fn first_person(eye: impl Into<Vec3>, yaw_degrees: f32, pitch_degrees: f32) -> Self {
+        let eye = eye.into();
+        Self {
+            eye,
+            target: eye + Self::direction(yaw_degrees, pitch_degrees),
+            far: 800.0,
+            ..Self::default()
+        }
+    }
+
+    /// Unit look direction for a yaw/pitch pair in degrees.
+    pub fn direction(yaw_degrees: f32, pitch_degrees: f32) -> Vec3 {
+        let yaw = yaw_degrees.to_radians();
+        let pitch = pitch_degrees
+            .clamp(-MAX_PITCH_DEGREES, MAX_PITCH_DEGREES)
+            .to_radians();
+        let flat = pitch.cos();
+        Vec3::new(yaw.sin() * flat, pitch.sin(), yaw.cos() * flat)
     }
 
     /// Unit facing vector on XZ for a yaw in degrees (0 = +Z).

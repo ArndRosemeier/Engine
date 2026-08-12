@@ -124,6 +124,8 @@ pub struct World {
     next_material_id: u64,
     /// Applied to fully-opaque `set_chunk_built` uploads when set.
     pub(crate) default_terrain_material: Option<MaterialId>,
+    /// Whether the game wants the pointer pinned for mouse-look.
+    pointer_lock: bool,
 }
 
 impl Default for World {
@@ -149,6 +151,7 @@ impl Default for World {
             next_texture_id: 1,
             next_material_id: 1,
             default_terrain_material: None,
+            pointer_lock: false,
         }
     }
 }
@@ -366,6 +369,31 @@ impl World {
         for id in ids {
             self.clear_anchored_chunk(id);
         }
+    }
+
+    /// Pin the pointer to the window and hide it, for mouse-look.
+    ///
+    /// While locked, look deltas arrive as [`crate::input::Input::mouse_delta`]
+    /// and the UI no longer steals input on hover. Release it before showing a
+    /// menu or map the player has to click.
+    pub fn set_pointer_lock(&mut self, locked: bool) {
+        self.pointer_lock = locked;
+    }
+
+    pub fn pointer_lock(&self) -> bool {
+        self.pointer_lock
+    }
+
+    /// First-person camera at an anchored eye position, expressed globally.
+    pub fn look_first_person_global(
+        &mut self,
+        eye: GlobalPosition,
+        yaw_degrees: f32,
+        pitch_degrees: f32,
+    ) -> EngineResult<()> {
+        let local = self.to_render(eye)?;
+        self.look_first_person(local, yaw_degrees, pitch_degrees);
+        Ok(())
     }
 
     /// Follow camera around an anchored target, expressed globally.
@@ -627,6 +655,16 @@ impl World {
 
     pub fn has_chunk(&self, key: IVec3) -> bool {
         self.chunk_entities.contains_key(&key)
+    }
+
+    /// First-person camera (yaw in degrees, 0 = +Z; pitch positive is up).
+    pub fn look_first_person(
+        &mut self,
+        eye: impl Into<Vec3>,
+        yaw_degrees: f32,
+        pitch_degrees: f32,
+    ) {
+        self.camera = Camera::first_person(eye, yaw_degrees, pitch_degrees);
     }
 
     /// Third-person follow camera (yaw in degrees, 0 = +Z).

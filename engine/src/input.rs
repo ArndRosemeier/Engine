@@ -1,7 +1,7 @@
-//! Friendly keyboard input for the frame callback.
+//! Friendly keyboard and mouse-look input for the frame callback.
 
 use crate::camera::Camera;
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use std::collections::HashSet;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -14,8 +14,10 @@ pub enum Key {
     D,
     Q,
     E,
+    F,
     Space,
     Shift,
+    Ctrl,
     Up,
     Down,
     Left,
@@ -31,8 +33,10 @@ impl Key {
             KeyCode::KeyD => Self::D,
             KeyCode::KeyQ => Self::Q,
             KeyCode::KeyE => Self::E,
+            KeyCode::KeyF => Self::F,
             KeyCode::Space => Self::Space,
             KeyCode::ShiftLeft | KeyCode::ShiftRight => Self::Shift,
+            KeyCode::ControlLeft | KeyCode::ControlRight => Self::Ctrl,
             KeyCode::ArrowUp => Self::Up,
             KeyCode::ArrowDown => Self::Down,
             KeyCode::ArrowLeft => Self::Left,
@@ -42,10 +46,12 @@ impl Key {
     }
 }
 
-/// Snapshot of held keys for one frame.
+/// Snapshot of held keys, fresh presses, and mouse motion for one frame.
 #[derive(Clone, Debug, Default)]
 pub struct Input {
     down: HashSet<Key>,
+    pressed: HashSet<Key>,
+    mouse_delta: Vec2,
 }
 
 impl Input {
@@ -62,13 +68,44 @@ impl Input {
         };
         if pressed {
             self.down.insert(key);
+            self.pressed.insert(key);
         } else {
             self.down.remove(&key);
         }
     }
 
+    /// Accumulate raw pointer motion (device counts, not window pixels).
+    pub(crate) fn add_mouse_delta(&mut self, dx: f32, dy: f32) {
+        self.mouse_delta += Vec2::new(dx, dy);
+    }
+
+    /// Forget one frame's edges and motion, keeping which keys are held.
+    pub(crate) fn end_frame(&mut self) {
+        self.pressed.clear();
+        self.mouse_delta = Vec2::ZERO;
+    }
+
     pub fn down(&self, key: Key) -> bool {
         self.down.contains(&key)
+    }
+
+    /// True on the frame a key goes down, for toggles like fly mode.
+    pub fn pressed(&self, key: Key) -> bool {
+        self.pressed.contains(&key)
+    }
+
+    /// Raw pointer motion since the last frame (x right, y down).
+    ///
+    /// Only meaningful while the pointer is locked
+    /// ([`crate::world::World::set_pointer_lock`]); otherwise it is whatever
+    /// motion the window happened to see.
+    pub fn mouse_delta(&self) -> Vec2 {
+        self.mouse_delta
+    }
+
+    /// Signed axis from two keys, for one-line bindings.
+    pub fn axis(&self, negative: Key, positive: Key) -> f32 {
+        f32::from(self.down(positive)) - f32::from(self.down(negative))
     }
 
     /// Horizontal move intent from WASD / arrows (x = strafe right, y = forward).

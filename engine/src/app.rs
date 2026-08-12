@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 type UpdateFn = Box<dyn FnMut(&mut World, &Frame)>;
 
@@ -30,6 +30,7 @@ struct App {
     fps: f32,
     fps_accum_s: f32,
     fps_frames: u32,
+    pointer_locked: bool,
 }
 
 impl App {
@@ -57,7 +58,31 @@ impl App {
             fps: 0.0,
             fps_accum_s: 0.0,
             fps_frames: 0,
+            pointer_locked: false,
         }
+    }
+
+    /// Match the window's pointer grab to what the game asked for.
+    ///
+    /// Windows only supports [`CursorGrabMode::Confined`], the other desktops
+    /// prefer `Locked`; either is enough because look deltas come from raw
+    /// device motion rather than the cursor position.
+    fn apply_pointer_lock(&mut self, window: &Window, wanted: bool) {
+        if wanted == self.pointer_locked {
+            return;
+        }
+        if wanted {
+            let grabbed = window
+                .set_cursor_grab(CursorGrabMode::Locked)
+                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
+            grabbed.expect("this platform supports neither locked nor confined pointer grab");
+        } else {
+            window
+                .set_cursor_grab(CursorGrabMode::None)
+                .expect("release pointer grab");
+        }
+        window.set_cursor_visible(!wanted);
+        self.pointer_locked = wanted;
     }
 
     fn window_inner_size() -> winit::dpi::LogicalSize<u32> {
@@ -152,8 +177,12 @@ impl ApplicationHandler for App {
                     return;
                 };
 
+                // A locked pointer means the game owns the mouse, so egui's
+                // hover state must not swallow look and movement input.
                 let mut input = self.input.clone();
-                if ui_backend.wants_keyboard_input() || ui_backend.wants_pointer_input() {
+                if !self.pointer_locked
+                    && (ui_backend.wants_keyboard_input() || ui_backend.wants_pointer_input())
+                {
                     input = Input::new();
                 }
 
@@ -178,11 +207,15 @@ impl ApplicationHandler for App {
                     });
                     (ui_result, full_output)
                 };
+                self.input.end_frame();
 
                 if ui_backend.take_escape_pressed() && !modal_was_open {
                     event_loop.exit();
                     return;
                 }
+
+                let wants_lock = self.world.pointer_lock();
+                self.apply_pointer_lock(&window, wants_lock);
 
                 self.world.tick_animations(dt);
 
@@ -226,6 +259,13 @@ impl ApplicationHandler for App {
                 window.request_redraw();
             }
             _ => {}
+        }
+    }
+
+    /// Raw pointer motion, which keeps working once the cursor is pinned.
+    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
+        if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+            self.input.add_mouse_delta(dx as f32, dy as f32);
         }
     }
 

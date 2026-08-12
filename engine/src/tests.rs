@@ -268,6 +268,30 @@ fn camera_right_xz_matches_follow_view() {
 }
 
 #[test]
+fn first_person_looks_along_yaw_and_pitch() {
+    use crate::camera::{Camera, MAX_PITCH_DEGREES};
+
+    let level = Camera::first_person(Vec3::new(3.0, 2.0, -1.0), 0.0, 0.0);
+    assert_eq!(level.eye, Vec3::new(3.0, 2.0, -1.0));
+    let forward = (level.target - level.eye).normalize();
+    assert!(
+        forward.dot(Vec3::Z) > 0.999,
+        "yaw 0 must look down +Z, got {forward}"
+    );
+
+    let up = Camera::direction(90.0, 45.0);
+    assert!(up.y > 0.7 && up.x > 0.7, "yaw 90 pitch 45 goes up and +X");
+
+    // Straight up would collapse the view matrix onto the up axis.
+    let steep = Camera::direction(0.0, 200.0);
+    assert!(
+        steep.y < MAX_PITCH_DEGREES.to_radians().sin() + 1e-6 && steep.y > 0.99,
+        "pitch is clamped just short of vertical, got {steep}"
+    );
+    assert!(steep.is_finite() && steep.length() > 0.99);
+}
+
+#[test]
 fn walk_height_matches_clipmap_triangle() {
     use crate::proc_terrain::{demo_terrain_rules, ClipmapConfig, HeightField};
     let field = HeightField::new(demo_terrain_rules());
