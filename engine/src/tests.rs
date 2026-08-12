@@ -24,6 +24,32 @@ fn mesh_quad_builds_two_triangles() {
 }
 
 #[test]
+fn mesh_build_smooth_shares_normals_across_ridge() {
+    // Two quads meeting at a ridge — flat build has discontinuous normals;
+    // smooth build averages at the shared authoring points.
+    let mut m = Mesh::new();
+    let p00 = m.add_point(Vec3::new(0.0, 0.0, 0.0)).unwrap();
+    let p10 = m.add_point(Vec3::new(1.0, 0.0, 0.0)).unwrap();
+    let p20 = m.add_point(Vec3::new(2.0, 0.0, 0.0)).unwrap();
+    let p01 = m.add_point(Vec3::new(0.0, 0.5, 1.0)).unwrap();
+    let p11 = m.add_point(Vec3::new(1.0, 1.0, 1.0)).unwrap();
+    let p21 = m.add_point(Vec3::new(2.0, 0.5, 1.0)).unwrap();
+    m.add_quad(p00, p01, p11, p10).unwrap();
+    m.add_quad(p10, p11, p21, p20).unwrap();
+    let flat = m.build();
+    let smooth = m.build_smooth();
+    let mut max_dot_gap = 0.0_f32;
+    for i in 0..flat.normals.len() {
+        let d = flat.normals[i].dot(smooth.normals[i]);
+        max_dot_gap = max_dot_gap.max(1.0 - d);
+    }
+    assert!(
+        max_dot_gap > 0.02,
+        "smooth normals should differ from flat on a bent heightfield (gap={max_dot_gap})"
+    );
+}
+
+#[test]
 fn invalid_face_returns_error() {
     let mut m = Mesh::new();
     let a = m.add_point(Vec3::ZERO).unwrap();
@@ -91,12 +117,7 @@ fn oversize_paint_hits_resource_limit() {
         ..EngineLimits::default()
     };
     let err = v
-        .paint_fn_limited(
-            Vec3::ZERO,
-            Vec3::new(50.0, 50.0, 50.0),
-            &limits,
-            |_| 1.0,
-        )
+        .paint_fn_limited(Vec3::ZERO, Vec3::new(50.0, 50.0, 50.0), &limits, |_| 1.0)
         .unwrap_err();
     assert!(matches!(err, EngineError::ResourceLimit(_)));
 }
@@ -166,7 +187,10 @@ fn height_terrain_has_some_water() {
         }
     }
     assert!(water > 0, "expected some lake samples");
-    assert!(water < total / 2, "lakes should be occasional, got {water}/{total}");
+    assert!(
+        water < total / 2,
+        "lakes should be occasional, got {water}/{total}"
+    );
 }
 
 #[test]
@@ -343,6 +367,101 @@ fn height_chunk_builds_quads() {
     assert!(
         built.opaque_index_count <= built.indices.len(),
         "transparent water should partition after opaque land"
+    );
+}
+
+#[test]
+fn rebasing_moves_anchored_entities_but_not_their_global_anchor() {
+    use crate::place::GlobalPlace;
+    use crate::space::{GlobalPosition, GlobalXZ, RenderOrigin};
+    use crate::world::World;
+
+    let mut world = World::new();
+    let anchor = GlobalPosition::at(2_500_000.0, 30.0, -1_250_000.0);
+    let id = world
+        .spawn_anchored(
+            Mesh::box_at(Vec3::ZERO, Vec3::ONE, rgb(200, 200, 200)).unwrap(),
+            GlobalPlace::at(anchor).with_yaw_deg(35.0),
+        )
+        .unwrap();
+
+    world
+        .set_render_origin(RenderOrigin::snapped(anchor.horizontal(), 1_000.0).unwrap())
+        .unwrap();
+    let near = world.entity(id).unwrap().transform.w_axis.truncate();
+    assert!(
+        near.length() < 2_000.0,
+        "anchored entity should sit near the rebased origin, got {near}"
+    );
+
+    // A second, far rebase must be derived from the anchor, not from `near`.
+    world
+        .set_render_origin(RenderOrigin::new(GlobalXZ::at(0.0, 0.0)))
+        .unwrap();
+    let far = world.entity(id).unwrap().transform.w_axis.truncate();
+    assert!((far.x as f64 - anchor.x).abs() < 1.0);
+    assert!((far.z as f64 - anchor.z).abs() < 1.0);
+    assert!((far.y - 30.0).abs() < 1e-3, "rebase is horizontal only");
+}
+
+#[test]
+fn repeated_rebases_keep_two_anchors_the_same_distance_apart() {
+    use crate::place::GlobalPlace;
+    use crate::space::{GlobalPosition, GlobalXZ, RenderOrigin};
+    use crate::world::World;
+
+    let mut world = World::new();
+    let a = GlobalPosition::at(1_000_000.0, 5.0, 1_000_000.0);
+    let b = GlobalPosition::at(1_000_037.5, 5.0, 1_000_012.25);
+    let ea = world
+        .spawn_anchored(
+            Mesh::box_at(Vec3::ZERO, Vec3::ONE, rgb(1, 1, 1)).unwrap(),
+            GlobalPlace::at(a),
+        )
+        .unwrap();
+    let eb = world
+        .spawn_anchored(
+            Mesh::box_at(Vec3::ZERO, Vec3::ONE, rgb(1, 1, 1)).unwrap(),
+            GlobalPlace::at(b),
+        )
+        .unwrap();
+
+    let expected = ((b.x - a.x).powi(2) + (b.z - a.z).powi(2)).sqrt() as f32;
+    for step in 0..6 {
+        let origin = GlobalXZ::at(1_000_000.0 + step as f64 * 250_000.0, 1_000_000.0);
+        world
+            .set_render_origin(RenderOrigin::snapped(origin, 2_000.0).unwrap())
+            .unwrap();
+        let pa = world.entity(ea).unwrap().transform.w_axis.truncate();
+        let pb = world.entity(eb).unwrap().transform.w_axis.truncate();
+        let d = (pb - pa).length();
+        assert!(
+            (d - expected).abs() < 0.01,
+            "rebase {step} drifted: {d} vs {expected}"
+        );
+    }
+}
+
+#[test]
+fn terrain_texture_phase_is_continuous_across_rebase() {
+    use crate::space::{GlobalXZ, RenderOrigin};
+
+    // Two origins one whole tile apart must produce the same sampling phase.
+    let tile = 8.0_f32;
+    let a = RenderOrigin::new(GlobalXZ::at(1_000_000.0, -3_000.0));
+    let b = RenderOrigin::new(GlobalXZ::at(1_000_000.0 + tile as f64 * 512.0, -3_000.0));
+    let pa = a.texture_phase(tile);
+    let pb = b.texture_phase(tile);
+    assert!((pa[0] - pb[0]).abs() < 1e-3);
+    assert!((pa[1] - pb[1]).abs() < 1e-3);
+
+    // A world point keeps its UV: render x shrinks by the same amount the phase grows.
+    let world_x = 1_000_050.0_f64;
+    let ua = (world_x - a.horizontal().x) as f32 + pa[0];
+    let ub = (world_x - b.horizontal().x) as f32 + pb[0];
+    assert!(
+        ((ua - ub) / tile).fract().abs() < 1e-3,
+        "uv phase jumped by a fraction of a tile: {ua} vs {ub}"
     );
 }
 

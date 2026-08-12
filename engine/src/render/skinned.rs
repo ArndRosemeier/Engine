@@ -268,7 +268,10 @@ impl GpuSkinnedEntity {
         transform: Mat4,
         joints: &[Mat4],
     ) -> Self {
-        let gpu_meshes = meshes.iter().map(|m| GpuSkinnedMesh::upload(device, m)).collect();
+        let gpu_meshes = meshes
+            .iter()
+            .map(|m| GpuSkinnedMesh::upload(device, m))
+            .collect();
         let instance = InstanceRaw::from_matrix(transform);
         let instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("skinned-instance"),
@@ -297,12 +300,7 @@ impl GpuSkinnedEntity {
         }
     }
 
-    pub fn update(
-        &self,
-        queue: &wgpu::Queue,
-        transform: Mat4,
-        joints: &[Mat4],
-    ) {
+    pub fn update(&self, queue: &wgpu::Queue, transform: Mat4, joints: &[Mat4]) {
         let instance = InstanceRaw::from_matrix(transform);
         queue.write_buffer(&self.instance_buf, 0, bytemuck::bytes_of(&instance));
         let palette = JointPalette::from_matrices(joints);

@@ -95,12 +95,7 @@ impl ApplicationHandler for App {
         self.last = self.start;
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         if let (Some(window), Some(ui)) = (self.window.as_ref(), self.ui_backend.as_mut()) {
             let _consumed = ui.on_window_event(window, &event);
         }
@@ -146,11 +141,7 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                let size = self
-                    .renderer
-                    .as_ref()
-                    .map(|r| r.size())
-                    .unwrap_or_default();
+                let size = self.renderer.as_ref().map(|r| r.size()).unwrap_or_default();
                 let first = !self.first_update_done;
                 self.first_update_done = true;
 

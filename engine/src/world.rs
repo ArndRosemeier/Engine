@@ -5,12 +5,18 @@ use crate::error::{EngineError, EngineResult};
 use crate::input::Input;
 use crate::limits::EngineLimits;
 use crate::mesh::{BuiltMesh, Mesh};
-use crate::place::Place;
+use crate::place::{GlobalPlace, Place};
 use crate::proc_terrain::{HeightField, ProcTerrain};
+use crate::space::{ChunkId, GlobalPosition, GlobalXZ, RenderOrigin};
+use crate::texture::{
+    generate_terrain_albedo, load_rgba8_png, CpuTexture, MaterialId, TerrainAlbedo,
+    TerrainMaterial, TerrainMaterialDesc, TextureId,
+};
 use crate::ui::UiFrame;
 use glam::{IVec3, Mat4, Vec3};
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
 use std::sync::Arc;
 
 /// Opaque handle to a spawned entity.
@@ -47,6 +53,8 @@ pub struct Entity {
     pub(crate) transform: Mat4,
     /// If non-empty, drawn with GPU instancing.
     pub(crate) instances: Vec<Mat4>,
+    /// Optional terrain material (world-XZ grass/sand/rock).
+    pub(crate) material: Option<MaterialId>,
 }
 
 impl Entity {
@@ -57,6 +65,16 @@ impl Entity {
     pub fn transform(&self) -> Mat4 {
         self.transform
     }
+
+    pub fn material(&self) -> Option<MaterialId> {
+        self.material
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AnchoredChunk {
+    entity: EntityId,
+    anchor: GlobalPosition,
 }
 
 /// Skinned entity with clip playback.
@@ -90,10 +108,22 @@ pub struct World {
     animated_order: Vec<EntityId>,
     /// Chunk key -> entity id for streamed volume meshes (advanced).
     pub(crate) chunk_entities: HashMap<glam::IVec3, EntityId>,
+    /// Horizontal anchor that render space is measured from.
+    render_origin: RenderOrigin,
+    /// Entities whose transform is re-derived on rebase.
+    anchored_entities: HashMap<EntityId, GlobalPlace>,
+    /// Streamed chunks with global anchors and chunk-local vertices.
+    anchored_chunks: HashMap<ChunkId, AnchoredChunk>,
     /// Optional GPU procgen terrain (clipmap). Drawn before entity meshes.
     pub(crate) proc_terrain: Option<ProcTerrain>,
     /// CPU sampler matching the GPU formula (for feet / gameplay).
     pub(crate) height_field: Option<HeightField>,
+    pub(crate) textures: HashMap<TextureId, CpuTexture>,
+    pub(crate) materials: HashMap<MaterialId, TerrainMaterial>,
+    next_texture_id: u64,
+    next_material_id: u64,
+    /// Applied to fully-opaque `set_chunk_built` uploads when set.
+    pub(crate) default_terrain_material: Option<MaterialId>,
 }
 
 impl Default for World {
@@ -109,8 +139,16 @@ impl Default for World {
             animated: HashMap::new(),
             animated_order: Vec::new(),
             chunk_entities: HashMap::new(),
+            render_origin: RenderOrigin::default(),
+            anchored_entities: HashMap::new(),
+            anchored_chunks: HashMap::new(),
             proc_terrain: None,
             height_field: None,
+            textures: HashMap::new(),
+            materials: HashMap::new(),
+            next_texture_id: 1,
+            next_material_id: 1,
+            default_terrain_material: None,
         }
     }
 }
@@ -141,7 +179,11 @@ impl World {
     }
 
     /// Spawn one mesh at many places (GPU instancing).
-    pub fn spawn_many(&mut self, mesh: Mesh, places: impl Into<Vec<Place>>) -> EngineResult<EntityId> {
+    pub fn spawn_many(
+        &mut self,
+        mesh: Mesh,
+        places: impl Into<Vec<Place>>,
+    ) -> EngineResult<EntityId> {
         let places = places.into();
         if places.len() as u64 > self.limits.max_instances_per_spawn {
             return Err(EngineError::ResourceLimit(format!(
@@ -163,6 +205,7 @@ impl World {
                 mesh,
                 transform,
                 instances: Vec::new(),
+                material: None,
             },
         );
         self.order.push(id);
@@ -182,6 +225,7 @@ impl World {
                 mesh,
                 transform: Mat4::IDENTITY,
                 instances,
+                material: None,
             },
         );
         self.order.push(id);
@@ -194,6 +238,152 @@ impl World {
         self.animated.remove(&id);
         self.animated_order.retain(|x| *x != id);
         self.chunk_entities.retain(|_, eid| *eid != id);
+        self.anchored_entities.remove(&id);
+        self.anchored_chunks.retain(|_, c| c.entity != id);
+    }
+
+    /// Horizontal anchor that render-space coordinates are measured from.
+    pub fn render_origin(&self) -> RenderOrigin {
+        self.render_origin
+    }
+
+    /// Rebase render space onto a new origin.
+    ///
+    /// Every anchored entity and chunk transform is recomputed from its
+    /// immutable global anchor, so repeated rebases never accumulate drift.
+    /// Unanchored content (plain [`Self::spawn`] / [`Self::set_chunk_built`])
+    /// is left alone: it was authored directly in render space.
+    pub fn set_render_origin(&mut self, origin: RenderOrigin) -> EngineResult<()> {
+        self.render_origin = origin;
+        let places: Vec<(EntityId, GlobalPlace)> = self
+            .anchored_entities
+            .iter()
+            .map(|(id, place)| (*id, *place))
+            .collect();
+        for (id, place) in places {
+            let local = place.to_place(origin)?;
+            let e = self
+                .entities
+                .get_mut(&id)
+                .ok_or(EngineError::UnknownEntity)?;
+            e.transform = local.to_matrix();
+        }
+        let chunks: Vec<AnchoredChunk> = self.anchored_chunks.values().copied().collect();
+        for chunk in chunks {
+            let offset = chunk.anchor.to_render(origin)?.vec3();
+            let e = self
+                .entities
+                .get_mut(&chunk.entity)
+                .ok_or(EngineError::UnknownEntity)?;
+            e.transform = Mat4::from_translation(offset);
+        }
+        Ok(())
+    }
+
+    /// Render-space position of a global point under the active origin.
+    pub fn to_render(&self, position: GlobalPosition) -> EngineResult<Vec3> {
+        Ok(position.to_render(self.render_origin)?.vec3())
+    }
+
+    /// Global position of a render-space point under the active origin.
+    pub fn to_global(&self, position: Vec3) -> EngineResult<GlobalPosition> {
+        Ok(crate::space::RenderPosition::new(position)?.to_global(self.render_origin))
+    }
+
+    /// Spawn a mesh anchored in absolute world metres (survives rebasing).
+    pub fn spawn_anchored(&mut self, mesh: Mesh, place: GlobalPlace) -> EngineResult<EntityId> {
+        let local = place.to_place(self.render_origin)?;
+        let id = self.spawn_built(mesh.build(), local.to_matrix());
+        self.anchored_entities.insert(id, place);
+        Ok(id)
+    }
+
+    /// Move an anchored entity to a new global place.
+    pub fn set_anchored_place(&mut self, id: EntityId, place: GlobalPlace) -> EngineResult<()> {
+        if !self.anchored_entities.contains_key(&id) {
+            return Err(EngineError::InvalidValue(format!(
+                "entity {id} is not anchored; use set_place for render-space entities"
+            )));
+        }
+        let local = place.to_place(self.render_origin)?;
+        let e = self
+            .entities
+            .get_mut(&id)
+            .ok_or(EngineError::UnknownEntity)?;
+        e.transform = local.to_matrix();
+        self.anchored_entities.insert(id, place);
+        Ok(())
+    }
+
+    /// Upload a streamed chunk whose vertices are relative to `anchor`.
+    ///
+    /// Chunk-local vertices keep `f32` mesh precision independent of how far the
+    /// chunk sits from the world origin.
+    pub fn set_anchored_chunk(
+        &mut self,
+        id: ChunkId,
+        anchor: GlobalPosition,
+        built: BuiltMesh,
+    ) -> EngineResult<EntityId> {
+        let offset = anchor.to_render(self.render_origin)?.vec3();
+        if let Some(existing) = self.anchored_chunks.remove(&id) {
+            // Remesh needs a new GPU upload — swap entity id so the renderer rebuilds.
+            self.despawn(existing.entity);
+        }
+        let apply_terrain = built.opaque_index_count == built.index_count()
+            && self.default_terrain_material.is_some();
+        let entity = self.spawn_built(built, Mat4::from_translation(offset));
+        if apply_terrain {
+            if let Some(mat) = self.default_terrain_material {
+                self.entities
+                    .get_mut(&entity)
+                    .expect("just spawned")
+                    .material = Some(mat);
+            }
+        }
+        self.anchored_chunks
+            .insert(id, AnchoredChunk { entity, anchor });
+        Ok(entity)
+    }
+
+    pub fn clear_anchored_chunk(&mut self, id: ChunkId) {
+        if let Some(chunk) = self.anchored_chunks.remove(&id) {
+            self.despawn(chunk.entity);
+        }
+    }
+
+    pub fn has_anchored_chunk(&self, id: ChunkId) -> bool {
+        self.anchored_chunks.contains_key(&id)
+    }
+
+    pub fn anchored_chunk_count(&self) -> usize {
+        self.anchored_chunks.len()
+    }
+
+    /// Drop every anchored chunk (leaving a world / regenerating).
+    pub fn clear_anchored_chunks(&mut self) {
+        let ids: Vec<ChunkId> = self.anchored_chunks.keys().copied().collect();
+        for id in ids {
+            self.clear_anchored_chunk(id);
+        }
+    }
+
+    /// Follow camera around an anchored target, expressed globally.
+    pub fn look_follow_global(
+        &mut self,
+        target: GlobalPosition,
+        yaw_degrees: f32,
+        distance: f32,
+        height: f32,
+    ) -> EngineResult<()> {
+        let local = self.to_render(target)?;
+        self.look_follow(local, yaw_degrees, distance, height);
+        Ok(())
+    }
+
+    /// Distance from the render origin to `p`, used to decide when to rebase.
+    pub fn render_offset_m(&self, p: GlobalXZ) -> f64 {
+        p.distance(self.render_origin.horizontal())
     }
 
     pub fn set_place(&mut self, id: EntityId, place: Place) -> EngineResult<()> {
@@ -209,11 +399,7 @@ impl World {
     }
 
     /// Spawn a skinned model with clip playback.
-    pub fn spawn_animated(
-        &mut self,
-        model: AnimatedModel,
-        place: Place,
-    ) -> EngineResult<EntityId> {
+    pub fn spawn_animated(&mut self, model: AnimatedModel, place: Place) -> EngineResult<EntityId> {
         let animator = Animator::new(Arc::new(model))?;
         let id = EntityId(self.next_id);
         self.next_id += 1;
@@ -314,9 +500,122 @@ impl World {
             self.despawn(id);
             self.chunk_entities.remove(&key);
         }
+        let apply_terrain = built.opaque_index_count == built.index_count()
+            && self.default_terrain_material.is_some();
         let id = self.spawn_built(built, Mat4::IDENTITY);
+        if apply_terrain {
+            if let Some(mat) = self.default_terrain_material {
+                self.entities.get_mut(&id).expect("just spawned").material = Some(mat);
+            }
+        }
         self.chunk_entities.insert(key, id);
         id
+    }
+
+    /// Create an RGBA8 texture from raw bytes (`width * height * 4`).
+    pub fn create_texture_rgba(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> EngineResult<TextureId> {
+        if width == 0 || height == 0 {
+            return Err(EngineError::InvalidValue(
+                "texture size must be non-zero".into(),
+            ));
+        }
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| EngineError::InvalidValue("texture dimensions overflow".into()))?;
+        if rgba.len() != expected {
+            return Err(EngineError::InvalidValue(format!(
+                "texture rgba len {} != {}x{}x4",
+                rgba.len(),
+                width,
+                height
+            )));
+        }
+        let id = TextureId(self.next_texture_id);
+        self.next_texture_id += 1;
+        self.textures.insert(
+            id,
+            CpuTexture {
+                width,
+                height,
+                rgba,
+            },
+        );
+        Ok(id)
+    }
+
+    /// Load a PNG from disk into an RGBA8 texture.
+    pub fn load_texture_png(&mut self, path: impl AsRef<Path>) -> EngineResult<TextureId> {
+        let (w, h, rgba) = load_rgba8_png(path)?;
+        self.create_texture_rgba(w, h, rgba)
+    }
+
+    /// Create a built-in tileable terrain albedo (`Grass` / `Sand` / `Rock`).
+    pub fn create_terrain_albedo(
+        &mut self,
+        kind: TerrainAlbedo,
+        size: u32,
+        seed: u32,
+    ) -> EngineResult<TextureId> {
+        let (w, h, rgba) = generate_terrain_albedo(kind, size, seed);
+        self.create_texture_rgba(w, h, rgba)
+    }
+
+    /// Create a grass/sand/rock terrain material (world-XZ sampling).
+    pub fn create_terrain_material(
+        &mut self,
+        desc: TerrainMaterialDesc,
+    ) -> EngineResult<MaterialId> {
+        for tid in [desc.grass, desc.sand, desc.rock] {
+            if !self.textures.contains_key(&tid) {
+                return Err(EngineError::UnknownTexture);
+            }
+        }
+        if desc.metres_per_tile <= 0.0 {
+            return Err(EngineError::InvalidValue(
+                "metres_per_tile must be > 0".into(),
+            ));
+        }
+        let id = MaterialId(self.next_material_id);
+        self.next_material_id += 1;
+        self.materials.insert(id, TerrainMaterial { desc });
+        Ok(id)
+    }
+
+    /// Fully-opaque chunk uploads (`set_chunk_built`) receive this material.
+    pub fn set_default_terrain_material(&mut self, material: Option<MaterialId>) {
+        self.default_terrain_material = material;
+    }
+
+    pub fn set_entity_material(
+        &mut self,
+        id: EntityId,
+        material: Option<MaterialId>,
+    ) -> EngineResult<()> {
+        if let Some(mat) = material {
+            if !self.materials.contains_key(&mat) {
+                return Err(EngineError::UnknownMaterial);
+            }
+        }
+        let e = self
+            .entities
+            .get_mut(&id)
+            .ok_or(EngineError::UnknownEntity)?;
+        e.material = material;
+        Ok(())
+    }
+
+    pub(crate) fn textures(&self) -> &HashMap<TextureId, CpuTexture> {
+        &self.textures
+    }
+
+    pub(crate) fn materials(&self) -> &HashMap<MaterialId, TerrainMaterial> {
+        &self.materials
     }
 
     /// Remove a streamed chunk if present.

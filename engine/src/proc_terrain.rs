@@ -77,11 +77,7 @@ impl HeightField {
     }
 
     pub fn surface_sample(&self, x: f32, z: f32) -> SurfaceSample {
-        let s = self.sample(x, z);
-        SurfaceSample {
-            ground: s.ground,
-            water_top: s.water_top,
-        }
+        self.sample(x, z).surface()
     }
 
     /// Height matching the GPU clipmap *triangles* on the finest ring.
@@ -112,12 +108,7 @@ impl HeightField {
         let tz = fz - iz;
 
         let sample_g = |i: f32, j: f32| {
-            sample_field(
-                &self.rules,
-                origin_x + i * cell,
-                origin_z + j * cell,
-            )
-            .ground
+            sample_field(&self.rules, origin_x + i * cell, origin_z + j * cell).ground
         };
         let h00 = sample_g(ix, iz);
         let h10 = sample_g(ix + 1.0, iz);
@@ -130,9 +121,11 @@ impl HeightField {
             h00 * (1.0 - tx) + h10 * (tx - tz) + h11 * tz
         };
 
-        let water_top = sample_field(&self.rules, x, z).water_top;
-        let col = SurfaceSample { ground, water_top };
-        col.walk_height()
+        // Wetness comes from the point sample; only the bed follows the drawn facet.
+        match sample_field(&self.rules, x, z).water_top {
+            Some(top) => SurfaceSample::wet(ground.min(top - WATER_CLEARANCE), top).walk_height(),
+            None => SurfaceSample::dry(ground).walk_height(),
+        }
     }
 }
 
@@ -141,8 +134,17 @@ pub struct FieldSample {
     /// Walkable height ([`SurfaceSample::walk_height`]).
     pub height: f32,
     pub ground: f32,
-    pub water_top: f32,
+    pub water_top: Option<f32>,
     pub water: bool,
+}
+
+impl FieldSample {
+    pub fn surface(self) -> SurfaceSample {
+        match self.water_top {
+            Some(top) => SurfaceSample::wet(self.ground, top),
+            None => SurfaceSample::dry(self.ground),
+        }
+    }
 }
 
 /// Pack rules into a GPU uniform block (must match WGSL `TerrainParams`).
@@ -257,17 +259,19 @@ pub fn sample_field(r: &TerrainRules, x: f32, z: f32) -> FieldSample {
     let near_shore = floor <= r.water_level + 1.5;
     // Candidate lake body: assign water_top, then wetness from clearance only.
     let in_basin = basin > 0.25 && near_shore;
-    let (ground, water_top, water) = if in_basin {
+    let (ground, water_top) = if in_basin {
         let water_top = r.water_level;
-        let ground = carved.min(water_top - WATER_CLEARANCE - 1e-3);
-        (ground, water_top, true)
+        // Carve the bed so the column always clears the sheet by construction.
+        (
+            carved.min(water_top - WATER_CLEARANCE - 1e-3),
+            Some(water_top),
+        )
     } else {
-        (floor, f32::NEG_INFINITY, false)
+        (floor, None)
     };
-    let col = SurfaceSample { ground, water_top };
     // Soft apron on dry land approaching a basin (visual only; does not invent wetness).
-    let height = if water {
-        col.walk_height()
+    let height = if let Some(top) = water_top {
+        SurfaceSample::wet(ground, top).walk_height()
     } else if basin > 0.0 && near_shore {
         let t = (basin / 0.25).clamp(0.0, 1.0);
         let t = t * t * (3.0 - 2.0 * t);
@@ -280,7 +284,7 @@ pub fn sample_field(r: &TerrainRules, x: f32, z: f32) -> FieldSample {
         height,
         ground,
         water_top,
-        water,
+        water: water_top.is_some(),
     }
 }
 

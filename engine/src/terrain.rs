@@ -18,7 +18,8 @@ pub struct TerrainSample {
     pub height: f32,
     /// Solid ground under the surface (below the waterline inside lakes).
     pub ground: f32,
-    pub water_top: f32,
+    /// Sheet height when this column holds water.
+    pub water_top: Option<f32>,
     pub water: bool,
 }
 
@@ -75,7 +76,11 @@ impl HeightTerrain {
     pub fn new(rules: TerrainRules) -> Self {
         let hills = Noise::new(rules.seed);
         let lakes = Noise::new(rules.seed ^ 0xC0FFEE);
-        Self { rules, hills, lakes }
+        Self {
+            rules,
+            hills,
+            lakes,
+        }
     }
 
     pub fn rules(&self) -> &TerrainRules {
@@ -111,18 +116,18 @@ impl HeightTerrain {
         // Lakes only on the coastal shelf (floor near waterline).
         let near_shore = floor <= r.water_level + 1.5;
         let in_basin = basin > 0.25 && near_shore;
-        let (ground, water_top, water) = if in_basin {
+        let (ground, water_top) = if in_basin {
             let water_top = r.water_level;
-            // Epsilon so float rounding still satisfies `is_wet` (>= CLEARANCE).
+            // Epsilon so float rounding still satisfies the clearance contract.
             let ground = carved.min(water_top - WATER_CLEARANCE - 1e-3);
-            (ground, water_top, true)
+            (ground, Some(water_top))
         } else {
-            (floor, f32::NEG_INFINITY, false)
+            (floor, None)
         };
         // Soft apron: land in the lake field eases down to the waterline so
         // neighboring hill verts don't spike through the water surface.
-        let height = if water {
-            water_top
+        let height = if let Some(top) = water_top {
+            top
         } else if basin > 0.0 && near_shore {
             let t = (basin / 0.25).clamp(0.0, 1.0);
             let t = t * t * (3.0 - 2.0 * t);
@@ -135,7 +140,7 @@ impl HeightTerrain {
             height,
             ground,
             water_top,
-            water,
+            water: water_top.is_some(),
         }
     }
 
@@ -200,41 +205,25 @@ impl HeightTerrain {
                 mesh.add_quad(ids[i00], ids[i01], ids[i11], ids[i10])
                     .expect("terrain quad");
 
-                let corners = [
-                    samples[i00],
-                    samples[i10],
-                    samples[i01],
-                    samples[i11],
-                ];
-                if !corners.iter().any(|c| c.water) {
+                let corners = [samples[i00], samples[i10], samples[i01], samples[i11]];
+                let Some(mut water_y) = corners
+                    .iter()
+                    .filter_map(|c| c.water_top)
+                    .fold(None, |acc: Option<f32>, top| {
+                        Some(acc.map_or(top, |a| a.max(top)))
+                    })
+                else {
                     continue;
-                }
-                let mut water_y = f32::NEG_INFINITY;
-                for c in corners {
-                    if c.water {
-                        water_y = water_y.max(c.water_top);
-                    }
-                }
-                if !water_y.is_finite() {
-                    continue;
-                }
+                };
                 water_y += WATER_CLEARANCE * 0.5;
                 let x0 = origin_x + ix as f32 * cs;
                 let z0 = origin_z + iz as f32 * cs;
                 let x1 = x0 + cs;
                 let z1 = z0 + cs;
-                let w00 = mesh
-                    .add_point(Vec3::new(x0, water_y, z0))
-                    .expect("water");
-                let w10 = mesh
-                    .add_point(Vec3::new(x1, water_y, z0))
-                    .expect("water");
-                let w01 = mesh
-                    .add_point(Vec3::new(x0, water_y, z1))
-                    .expect("water");
-                let w11 = mesh
-                    .add_point(Vec3::new(x1, water_y, z1))
-                    .expect("water");
+                let w00 = mesh.add_point(Vec3::new(x0, water_y, z0)).expect("water");
+                let w10 = mesh.add_point(Vec3::new(x1, water_y, z0)).expect("water");
+                let w01 = mesh.add_point(Vec3::new(x0, water_y, z1)).expect("water");
+                let w11 = mesh.add_point(Vec3::new(x1, water_y, z1)).expect("water");
                 for id in [w00, w10, w01, w11] {
                     mesh.set_point_color(id, r.water).expect("water color");
                 }
@@ -254,11 +243,7 @@ impl HeightTerrain {
         let cells = self.rules.chunk_cells as f32;
         let cs = self.rules.cell_size;
         let span = cells * cs;
-        IVec3::new(
-            (x / span).floor() as i32,
-            0,
-            (z / span).floor() as i32,
-        )
+        IVec3::new((x / span).floor() as i32, 0, (z / span).floor() as i32)
     }
 }
 

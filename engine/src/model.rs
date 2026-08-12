@@ -157,9 +157,9 @@ fn load_gltf_document(
                             )
                         })
                         .collect(),
-                    gltf::mesh::util::ReadColors::RgbaF32(i) => i
-                        .map(|c| glam::Vec4::new(c[0], c[1], c[2], c[3]))
-                        .collect(),
+                    gltf::mesh::util::ReadColors::RgbaF32(i) => {
+                        i.map(|c| glam::Vec4::new(c[0], c[1], c[2], c[3])).collect()
+                    }
                 }
             } else {
                 vec![glam::Vec4::new(base.x, base.y, base.z, 1.0); positions.len()]
@@ -254,12 +254,10 @@ pub fn scatter_places(
     positions
         .iter()
         .enumerate()
-        .map(|(i, p)| {
-            Place {
-                position: *p,
-                yaw_degrees: y_rotation_degrees(i),
-                scale,
-            }
+        .map(|(i, p)| Place {
+            position: *p,
+            yaw_degrees: y_rotation_degrees(i),
+            scale,
         })
         .collect()
 }

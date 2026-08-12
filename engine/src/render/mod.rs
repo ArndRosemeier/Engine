@@ -2,14 +2,20 @@ mod clipmap;
 mod gpu_mesh;
 mod pipeline;
 mod skinned;
+mod terrain_pipeline;
 
 use crate::mesh::InstanceRaw;
+use crate::texture::{MaterialId, TextureId};
 use crate::world::{EntityId, World};
 use clipmap::ClipmapRenderer;
 use gpu_mesh::GpuMesh;
 use pipeline::{create_pipelines, Pipelines, Uniforms};
 use skinned::{create_skinned_pipelines, GpuSkinnedEntity, SkinnedPipelines};
 use std::collections::HashMap;
+use terrain_pipeline::{
+    build_terrain_material, create_terrain_pipelines, upload_texture, GpuTerrainMaterial,
+    GpuTexture, TerrainPipelines,
+};
 use winit::dpi::PhysicalSize;
 
 pub struct Renderer {
@@ -18,12 +24,17 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipelines: Pipelines,
+    terrain: TerrainPipelines,
     skinned: SkinnedPipelines,
     clipmap: Option<ClipmapRenderer>,
     depth_view: wgpu::TextureView,
     depth_texture: wgpu::Texture,
     gpu_meshes: HashMap<EntityId, GpuMesh>,
     gpu_skinned: HashMap<EntityId, GpuSkinnedEntity>,
+    gpu_textures: HashMap<TextureId, GpuTexture>,
+    gpu_materials: HashMap<MaterialId, GpuTerrainMaterial>,
+    /// Origin the terrain material phases were last written for.
+    terrain_origin: crate::space::RenderOrigin,
     size: PhysicalSize<u32>,
 }
 
@@ -90,6 +101,7 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let pipelines = create_pipelines(&device, format);
+        let terrain = create_terrain_pipelines(&device, format, &pipelines.bind_layout);
         let skinned = create_skinned_pipelines(&device, format, &pipelines.bind_layout);
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
 
@@ -99,12 +111,16 @@ impl Renderer {
             queue,
             config,
             pipelines,
+            terrain,
             skinned,
             clipmap: None,
             depth_view,
             depth_texture,
             gpu_meshes: HashMap::new(),
             gpu_skinned: HashMap::new(),
+            gpu_textures: HashMap::new(),
+            gpu_materials: HashMap::new(),
+            terrain_origin: crate::space::RenderOrigin::default(),
             size,
         }
     }
@@ -124,6 +140,8 @@ impl Renderer {
     }
 
     pub fn sync_world(&mut self, world: &World) {
+        self.sync_textures_and_materials(world);
+
         if let Some(proc) = world.proc_terrain() {
             let format = self.config.format;
             match self.clipmap.as_mut() {
@@ -181,10 +199,8 @@ impl Renderer {
                     }
                 }
                 None => {
-                    self.gpu_meshes.insert(
-                        id,
-                        GpuMesh::upload(&self.device, entity.mesh(), &instances),
-                    );
+                    self.gpu_meshes
+                        .insert(id, GpuMesh::upload(&self.device, entity.mesh(), &instances));
                 }
             }
         }
@@ -223,12 +239,7 @@ impl Renderer {
     pub fn render_with(
         &mut self,
         world: &World,
-        after: impl FnOnce(
-            &wgpu::Device,
-            &wgpu::Queue,
-            &mut wgpu::CommandEncoder,
-            &wgpu::TextureView,
-        ),
+        after: impl FnOnce(&wgpu::Device, &wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView),
     ) -> Result<(), wgpu::SurfaceError> {
         self.write_uniforms(world);
 
@@ -358,14 +369,8 @@ impl Renderer {
         drop(data);
         output.unmap();
 
-        image::save_buffer(
-            path.as_ref(),
-            &rgba,
-            width,
-            height,
-            image::ColorType::Rgba8,
-        )
-        .unwrap_or_else(|e| panic!("failed to save screenshot: {e}"));
+        image::save_buffer(path.as_ref(), &rgba, width, height, image::ColorType::Rgba8)
+            .unwrap_or_else(|e| panic!("failed to save screenshot: {e}"));
     }
 
     fn write_uniforms(&self, world: &World) {
@@ -430,12 +435,43 @@ impl Renderer {
 
         pass.set_bind_group(0, &self.pipelines.bind_group, &[]);
 
-        // Opaque first (depth write on), then alpha-blended surfaces.
+        // Opaque untextured, then terrain-textured, then skinned / transparent.
         pass.set_pipeline(&self.pipelines.opaque);
-        for gpu in self.gpu_meshes.values() {
+        for (id, entity) in world.entities() {
+            if entity.material.is_some() {
+                continue;
+            }
+            let Some(gpu) = self.gpu_meshes.get(&id) else {
+                continue;
+            };
             if gpu.opaque_index_count == 0 {
                 continue;
             }
+            pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
+            pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
+            pass.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(
+                0..gpu.opaque_index_count as u32,
+                0,
+                0..gpu.instance_count as u32,
+            );
+        }
+
+        pass.set_pipeline(&self.terrain.opaque);
+        for (id, entity) in world.entities() {
+            let Some(mid) = entity.material else {
+                continue;
+            };
+            let Some(gpu) = self.gpu_meshes.get(&id) else {
+                continue;
+            };
+            let Some(mat) = self.gpu_materials.get(&mid) else {
+                continue;
+            };
+            if gpu.opaque_index_count == 0 {
+                continue;
+            }
+            pass.set_bind_group(1, &mat.bind_group, &[]);
             pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
             pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
             pass.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
@@ -460,7 +496,10 @@ impl Renderer {
         pass.set_bind_group(0, &self.pipelines.bind_group, &[]);
 
         pass.set_pipeline(&self.pipelines.transparent);
-        for gpu in self.gpu_meshes.values() {
+        for (id, _entity) in world.entities() {
+            let Some(gpu) = self.gpu_meshes.get(&id) else {
+                continue;
+            };
             if gpu.opaque_index_count >= gpu.index_count {
                 continue;
             }
@@ -483,9 +522,63 @@ impl Renderer {
     pub fn size(&self) -> PhysicalSize<u32> {
         self.size
     }
+
+    fn sync_textures_and_materials(&mut self, world: &World) {
+        for (id, cpu) in world.textures() {
+            if self.gpu_textures.contains_key(id) {
+                continue;
+            }
+            let gpu = upload_texture(&self.device, &self.queue, cpu.width, cpu.height, &cpu.rgba);
+            self.gpu_textures.insert(*id, gpu);
+        }
+        self.gpu_textures
+            .retain(|id, _| world.textures().contains_key(id));
+
+        for (id, mat) in world.materials() {
+            if self.gpu_materials.contains_key(id) {
+                continue;
+            }
+            let grass = self
+                .gpu_textures
+                .get(&mat.desc.grass)
+                .expect("terrain grass texture missing on GPU");
+            let sand = self
+                .gpu_textures
+                .get(&mat.desc.sand)
+                .expect("terrain sand texture missing on GPU");
+            let rock = self
+                .gpu_textures
+                .get(&mat.desc.rock)
+                .expect("terrain rock texture missing on GPU");
+            let gpu = build_terrain_material(
+                &self.device,
+                &self.terrain.mat_bind_layout,
+                &self.terrain.sampler,
+                [grass, sand, rock],
+                &mat.desc,
+                world.render_origin(),
+            );
+            self.gpu_materials.insert(*id, gpu);
+        }
+        self.gpu_materials
+            .retain(|id, _| world.materials().contains_key(id));
+
+        // Rebase moved render space under the terrain; re-phase the tiling so
+        // the ground texture stays locked to world coordinates.
+        if world.render_origin() != self.terrain_origin {
+            self.terrain_origin = world.render_origin();
+            for mat in self.gpu_materials.values() {
+                mat.write_origin(&self.queue, self.terrain_origin);
+            }
+        }
+    }
 }
 
-fn create_depth(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+fn create_depth(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth"),
         size: wgpu::Extent3d {

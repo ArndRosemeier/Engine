@@ -637,11 +637,7 @@ fn build_rings(
                 },
             ],
         });
-        let (index_start, index_count) = if i == 0 {
-            full_range
-        } else {
-            annulus_range
-        };
+        let (index_start, index_count) = if i == 0 { full_range } else { annulus_range };
         out.push(RingGpu {
             uniform_buf,
             bind_group,

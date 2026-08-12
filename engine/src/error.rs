@@ -26,6 +26,12 @@ pub enum EngineError {
 
     #[error("unknown entity")]
     UnknownEntity,
+
+    #[error("unknown texture")]
+    UnknownTexture,
+
+    #[error("unknown material")]
+    UnknownMaterial,
 }
 
 pub type EngineResult<T> = Result<T, EngineError>;

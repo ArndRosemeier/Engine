@@ -101,13 +101,7 @@ impl Mesh {
         self.add_face(&[a, b, c])
     }
 
-    pub fn add_quad(
-        &mut self,
-        a: PointId,
-        b: PointId,
-        c: PointId,
-        d: PointId,
-    ) -> EngineResult<()> {
+    pub fn add_quad(&mut self, a: PointId, b: PointId, c: PointId, d: PointId) -> EngineResult<()> {
         self.add_face(&[a, b, c, d])
     }
 
@@ -164,6 +158,16 @@ impl Mesh {
     /// Opaque faces are packed first; [`BuiltMesh::opaque_index_count`] marks the split
     /// so the renderer can draw transparent triangles in a second pass.
     pub fn build(&self) -> BuiltMesh {
+        self.build_with_normals(false)
+    }
+
+    /// Like [`Self::build`], but averages face normals at shared authoring points
+    /// so heightfields / ribbons shade as continuous surfaces instead of facets.
+    pub fn build_smooth(&self) -> BuiltMesh {
+        self.build_with_normals(true)
+    }
+
+    fn build_with_normals(&self, smooth: bool) -> BuiltMesh {
         let mut opaque_faces = Vec::new();
         let mut xlucent_faces = Vec::new();
         for face in &self.faces {
@@ -174,6 +178,12 @@ impl Mesh {
                 opaque_faces.push(face.as_slice());
             }
         }
+
+        let smooth_normals = if smooth {
+            Some(self.averaged_vertex_normals())
+        } else {
+            None
+        };
 
         let mut positions = Vec::new();
         let mut normals = Vec::new();
@@ -188,10 +198,7 @@ impl Mesh {
             for face in faces {
                 let tris: [[PointId; 3]; 2] = match face.len() {
                     3 => [[face[0], face[1], face[2]], [face[0], face[0], face[0]]],
-                    4 => [
-                        [face[0], face[1], face[2]],
-                        [face[0], face[2], face[3]],
-                    ],
+                    4 => [[face[0], face[1], face[2]], [face[0], face[2], face[3]]],
                     _ => unreachable!("add_face only allows 3 or 4 points"),
                 };
                 let tri_count = if face.len() == 3 { 1 } else { 2 };
@@ -199,7 +206,7 @@ impl Mesh {
                     let a = self.points[tri[0].0 as usize];
                     let b = self.points[tri[1].0 as usize];
                     let c = self.points[tri[2].0 as usize];
-                    let n = {
+                    let face_n = {
                         let raw = (b - a).cross(c - a);
                         if raw.length_squared() > 0.0 {
                             raw.normalize()
@@ -211,7 +218,23 @@ impl Mesh {
                     positions.push(a);
                     positions.push(b);
                     positions.push(c);
-                    normals.extend([n, n, n]);
+                    if let Some(sn) = smooth_normals.as_ref() {
+                        let mut n0 = sn[tri[0].0 as usize];
+                        let mut n1 = sn[tri[1].0 as usize];
+                        let mut n2 = sn[tri[2].0 as usize];
+                        if n0.length_squared() < 1e-10 {
+                            n0 = face_n;
+                        }
+                        if n1.length_squared() < 1e-10 {
+                            n1 = face_n;
+                        }
+                        if n2.length_squared() < 1e-10 {
+                            n2 = face_n;
+                        }
+                        normals.extend([n0, n1, n2]);
+                    } else {
+                        normals.extend([face_n, face_n, face_n]);
+                    }
                     colors.push(self.colors[tri[0].0 as usize]);
                     colors.push(self.colors[tri[1].0 as usize]);
                     colors.push(self.colors[tri[2].0 as usize]);
@@ -243,6 +266,41 @@ impl Mesh {
             indices,
             opaque_index_count,
         }
+    }
+
+    fn averaged_vertex_normals(&self) -> Vec<Vec3> {
+        let mut accum = vec![Vec3::ZERO; self.points.len()];
+        for face in &self.faces {
+            let tris: [[PointId; 3]; 2] = match face.len() {
+                3 => [[face[0], face[1], face[2]], [face[0], face[0], face[0]]],
+                4 => [[face[0], face[1], face[2]], [face[0], face[2], face[3]]],
+                _ => continue,
+            };
+            let tri_count = if face.len() == 3 { 1 } else { 2 };
+            for tri in tris.iter().take(tri_count) {
+                let a = self.points[tri[0].0 as usize];
+                let b = self.points[tri[1].0 as usize];
+                let c = self.points[tri[2].0 as usize];
+                let raw = (b - a).cross(c - a);
+                if raw.length_squared() <= 0.0 {
+                    continue;
+                }
+                // Area-weighted (unnormalized cross).
+                accum[tri[0].0 as usize] += raw;
+                accum[tri[1].0 as usize] += raw;
+                accum[tri[2].0 as usize] += raw;
+            }
+        }
+        accum
+            .into_iter()
+            .map(|n| {
+                if n.length_squared() > 0.0 {
+                    n.normalize()
+                } else {
+                    Vec3::Y
+                }
+            })
+            .collect()
     }
 }
 

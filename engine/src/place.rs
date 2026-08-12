@@ -1,4 +1,5 @@
 use crate::error::{EngineError, EngineResult};
+use crate::space::{GlobalPosition, RenderOrigin};
 use glam::{Mat4, Vec3};
 
 /// Friendly transform: position + yaw (degrees) + uniform scale.
@@ -68,6 +69,55 @@ impl Place {
         let r = Mat4::from_rotation_y(self.yaw_degrees.to_radians());
         let s = Mat4::from_scale(Vec3::splat(self.scale));
         t * r * s
+    }
+}
+
+/// A [`Place`] anchored in absolute world metres.
+///
+/// Anchored transforms survive [`crate::world::World::set_render_origin`]: the
+/// engine re-derives the render transform from this global anchor instead of
+/// shifting an already-shifted position.
+#[derive(Clone, Copy, Debug)]
+pub struct GlobalPlace {
+    pub position: GlobalPosition,
+    pub yaw_degrees: f32,
+    pub scale: f32,
+}
+
+impl GlobalPlace {
+    pub fn at(position: GlobalPosition) -> Self {
+        Self {
+            position,
+            yaw_degrees: 0.0,
+            scale: 1.0,
+        }
+    }
+
+    pub fn with_yaw_deg(mut self, degrees: f32) -> Self {
+        self.yaw_degrees = degrees;
+        self
+    }
+
+    pub fn with_scale(mut self, scale: f32) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    /// Resolve into render space against the active origin.
+    pub fn to_place(self, origin: RenderOrigin) -> EngineResult<Place> {
+        if !self.yaw_degrees.is_finite() {
+            return Err(EngineError::InvalidValue("yaw must be finite".into()));
+        }
+        if !self.scale.is_finite() || self.scale <= 0.0 {
+            return Err(EngineError::InvalidValue(
+                "scale must be finite and > 0".into(),
+            ));
+        }
+        Ok(Place {
+            position: self.position.to_render(origin)?.vec3(),
+            yaw_degrees: self.yaw_degrees,
+            scale: self.scale,
+        })
     }
 }
 

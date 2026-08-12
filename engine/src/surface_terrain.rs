@@ -1,32 +1,33 @@
-//! Chunk meshing from a [`SurfaceSource`] — land + water from one sample.
+//! Land heightfield chunks from a [`SurfaceSource`].
 //!
-//! **Land** is a heightfield mesh (its resolution is only for ground LOD).
-//! **Water** is a separate isosurface of the continuous wetness field
-//! (`water_top - ground >= CLEARANCE`), extracted at [`SurfaceMeshStyle::water_iso_cell`].
-//! Water is never “paint this land cell blue” — that always makes rectangular shores.
+//! Water is **not** meshed here — games that need water layers implement
+//! [`crate::chunk_stream::ChunkBuilder`] directly and emit a
+//! [`crate::space::ChunkLayer::Water`] layer alongside the land one.
+//!
+//! Queueing, budgets, hysteresis, and rebasing live in
+//! [`crate::chunk_stream::ChunkStream`]; this module only decides what a land
+//! chunk looks like.
 
+use crate::chunk_stream::{ChunkBuilder, ChunkPayload, ChunkStream};
 use crate::color::{rgb, Color};
-use crate::mesh::{BuiltMesh, Mesh, PointId};
-use crate::surface::{SharedSurface, SurfaceSample, SurfaceSource, WATER_CLEARANCE};
+use crate::contact::ContactGrid;
+use crate::error::EngineResult;
+use crate::mesh::{BuiltMesh, Mesh};
+use crate::space::{ChunkCoord, ChunkLayer, ChunkSpan, GlobalXZ};
+use crate::surface::{SharedSurface, SurfaceSample, SurfaceSource};
 use crate::world::World;
-use glam::{IVec3, Vec2, Vec3};
+use glam::Vec3;
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 
-/// Visual knobs for [`SurfaceTerrain`] meshes (sampling comes from [`SurfaceSource`]).
+/// Visual knobs for land [`SurfaceTerrain`] meshes.
 #[derive(Clone, Debug)]
 pub struct SurfaceMeshStyle {
     pub chunk_cells: i32,
     pub cell_size: f32,
-    /// Independent sample spacing for the water wetness isosurface (metres).
-    /// Decoupled from [`Self::cell_size`] on purpose.
-    pub water_iso_cell: f32,
     pub grass: Color,
     pub sand: Color,
     pub rock: Color,
-    pub water: Color,
     pub bed: Color,
     /// Heights above this (approx) tint as rock.
     pub rock_height: f32,
@@ -37,18 +38,16 @@ impl Default for SurfaceMeshStyle {
         Self {
             chunk_cells: 48,
             cell_size: 4.0,
-            water_iso_cell: 1.0,
             grass: rgb(92, 140, 70),
             sand: rgb(194, 178, 128),
             rock: rgb(120, 118, 112),
-            water: crate::color::rgba(40, 120, 175, 90),
             bed: rgb(110, 125, 95),
             rock_height: 400.0,
         }
     }
 }
 
-/// Builds land/water chunk meshes from a pluggable surface sample.
+/// Builds land chunk meshes from a pluggable surface sample.
 #[derive(Clone)]
 pub struct SurfaceTerrain {
     source: SharedSurface,
@@ -76,20 +75,23 @@ impl SurfaceTerrain {
         self.sample(x, z).walk_height()
     }
 
-    pub fn chunk_key_for(&self, x: f32, z: f32) -> IVec3 {
-        let cells = self.style.chunk_cells as f32;
-        let cs = self.style.cell_size;
-        let span = cells * cs;
-        IVec3::new((x / span).floor() as i32, 0, (z / span).floor() as i32)
+    pub fn chunk_span(&self) -> ChunkSpan {
+        ChunkSpan::new(self.style.chunk_cells.max(1) as f64 * self.style.cell_size as f64)
+            .expect("surface chunk span")
     }
 
-    pub fn build_chunk(&self, cx: i32, cz: i32) -> Mesh {
+    pub fn chunk_coord_for(&self, x: f32, z: f32) -> ChunkCoord {
+        ChunkCoord::containing(GlobalXZ::at(x as f64, z as f64), self.chunk_span())
+    }
+
+    /// Chunk mesh with vertices relative to the chunk's minimum corner.
+    pub fn build_chunk(&self, coord: ChunkCoord) -> (Mesh, Vec<f32>) {
         let s = &self.style;
-        let cells = s.chunk_cells;
+        let cells = s.chunk_cells.max(1);
         let cs = s.cell_size;
-        let origin_x = cx as f32 * cells as f32 * cs;
-        let origin_z = cz as f32 * cells as f32 * cs;
-        let span = cells as f32 * cs;
+        let origin = coord.origin(self.chunk_span());
+        let origin_x = origin.x as f32;
+        let origin_z = origin.z as f32;
         let verts = (cells + 1) as usize;
 
         let samples: Vec<SurfaceSample> = (0..verts * verts)
@@ -97,35 +99,31 @@ impl SurfaceTerrain {
             .map(|i| {
                 let ix = (i % verts) as i32;
                 let iz = (i / verts) as i32;
-                let x = origin_x + ix as f32 * cs;
-                let z = origin_z + iz as f32 * cs;
-                self.source.sample(x, z)
+                self.source
+                    .sample(origin_x + ix as f32 * cs, origin_z + iz as f32 * cs)
             })
             .collect();
 
         let mut mesh = Mesh::new();
         let mut ids = Vec::with_capacity(verts * verts);
+        let mut heights = Vec::with_capacity(verts * verts);
 
         for (i, sample) in samples.iter().enumerate() {
             let ix = (i % verts) as i32;
             let iz = (i / verts) as i32;
-            let x = origin_x + ix as f32 * cs;
-            let z = origin_z + iz as f32 * cs;
+            // Local coordinates keep f32 mesh precision independent of distance
+            // from the world origin.
             let id = mesh
-                .add_point(Vec3::new(x, sample.ground, z))
+                .add_point(Vec3::new(ix as f32 * cs, sample.ground(), iz as f32 * cs))
                 .expect("terrain point");
-            let color = if sample.is_wet() {
-                s.bed
-            } else if sample.water_top.is_finite() && sample.ground < sample.water_top + 1.0
-            {
-                s.sand
-            } else if sample.ground > s.rock_height {
-                s.rock
-            } else {
-                s.grass
+            let color = match sample.water_top() {
+                Some(_) => s.bed,
+                None if sample.ground() > s.rock_height => s.rock,
+                None => s.grass,
             };
             mesh.set_point_color(id, color).expect("terrain color");
             ids.push(id);
+            heights.push(sample.ground());
         }
 
         for iz in 0..cells {
@@ -139,194 +137,68 @@ impl SurfaceTerrain {
             }
         }
 
-        // Water: continuous wetness isosurface — not the land grid.
-        append_water_isosurface(
-            &mut mesh,
-            self.source.as_ref(),
-            origin_x,
-            origin_z,
-            span,
-            s.water_iso_cell.max(0.25),
-            s.water,
-        );
-
-        mesh
+        (mesh, heights)
     }
 
-    pub fn build_chunk_built(&self, cx: i32, cz: i32) -> BuiltMesh {
-        self.build_chunk(cx, cz).build()
+    pub fn build_chunk_built(&self, coord: ChunkCoord) -> BuiltMesh {
+        self.build_chunk(coord).0.build()
     }
 }
 
-/// Signed wetness: >= 0 means wet (same predicate as [`SurfaceSample::is_wet`]).
-fn wet_excess(s: SurfaceSample) -> f32 {
-    if !s.water_top.is_finite() {
-        return -1.0;
+impl ChunkBuilder for SurfaceTerrain {
+    fn span(&self) -> ChunkSpan {
+        self.chunk_span()
     }
-    (s.water_top - s.ground) - WATER_CLEARANCE
-}
 
-fn edge_crossing_xz(a: Vec2, ea: f32, b: Vec2, eb: f32) -> (Vec2, f32) {
-    let denom = ea - eb;
-    let t = if denom.abs() < 1e-8 {
-        0.5
-    } else {
-        (ea / denom).clamp(0.0, 1.0)
-    };
-    (a + (b - a) * t, t)
-}
-
-/// Extract water as the zero-contour of wetness over an independent fine lattice.
-fn append_water_isosurface(
-    mesh: &mut Mesh,
-    source: &dyn SurfaceSource,
-    origin_x: f32,
-    origin_z: f32,
-    span: f32,
-    iso_cell: f32,
-    water_color: Color,
-) {
-    let n = ((span / iso_cell).ceil() as i32).max(2);
-    let step = span / n as f32;
-    let verts = (n + 1) as usize;
-
-    // Sample continuous field on the iso lattice (parallel).
-    let field: Vec<(f32, f32)> = (0..verts * verts)
-        .into_par_iter()
-        .map(|i| {
-            let ix = (i % verts) as i32;
-            let iz = (i / verts) as i32;
-            let x = origin_x + ix as f32 * step;
-            let z = origin_z + iz as f32 * step;
-            let s = source.sample(x, z);
-            let e = wet_excess(s);
-            let sheet = if s.water_top.is_finite() {
-                s.water_top
-            } else {
-                0.0
-            };
-            (e, sheet)
-        })
-        .collect();
-
-    for iz in 0..n {
-        for ix in 0..n {
-            let i00 = (iz * (n + 1) + ix) as usize;
-            let i10 = i00 + 1;
-            let i01 = i00 + (n as usize + 1);
-            let i11 = i01 + 1;
-            let x0 = origin_x + ix as f32 * step;
-            let z0 = origin_z + iz as f32 * step;
-            let x1 = x0 + step;
-            let z1 = z0 + step;
-
-            let corners = [
-                (Vec2::new(x0, z0), field[i00].0, field[i00].1),
-                (Vec2::new(x1, z0), field[i10].0, field[i10].1),
-                (Vec2::new(x1, z1), field[i11].0, field[i11].1),
-                (Vec2::new(x0, z1), field[i01].0, field[i01].1),
-            ];
-            emit_water_iso_cell(mesh, water_color, corners);
-        }
+    fn build(&self, coord: ChunkCoord) -> EngineResult<Option<ChunkPayload>> {
+        let span = self.chunk_span();
+        let origin = coord.origin(span);
+        let (mesh, heights) = self.build_chunk(coord);
+        let contact = ContactGrid::new(
+            origin,
+            self.style.cell_size as f64,
+            (self.style.chunk_cells.max(1) + 1) as usize,
+            heights,
+        )?;
+        Ok(Some(
+            ChunkPayload::new(origin.with_height(0.0)?)
+                .with_layer(ChunkLayer::Land, mesh.build())?
+                .with_contact(contact),
+        ))
     }
 }
 
-/// Max vertical jump (metres) allowed across one water iso cell. Larger deltas
-/// are body seams (e.g. highland river vs sea) — bridging them draws sky walls.
-const MAX_WATER_SHEET_DELTA: f32 = 2.5;
-
-/// Marching-squares on wetness; vertex Y from interpolated `water_top`.
-fn emit_water_iso_cell(
-    mesh: &mut Mesh,
-    water_color: Color,
-    corners: [(Vec2, f32, f32); 4],
-) {
-    let excess = [corners[0].1, corners[1].1, corners[2].1, corners[3].1];
-    if !excess.iter().any(|e| *e >= 0.0) {
-        return;
-    }
-
-    let mut sheet_min = f32::INFINITY;
-    let mut sheet_max = f32::NEG_INFINITY;
-    for i in 0..4 {
-        if excess[i] >= 0.0 {
-            sheet_min = sheet_min.min(corners[i].2);
-            sheet_max = sheet_max.max(corners[i].2);
-        }
-    }
-    if sheet_max - sheet_min > MAX_WATER_SHEET_DELTA {
-        // Do not bridge disconnected vertical sheets.
-        return;
-    }
-
-    // Polygon of (xz, sheet_z) along the wet side of the contour.
-    let mut poly: Vec<(Vec2, f32)> = Vec::with_capacity(6);
-    for i in 0..4 {
-        let j = (i + 1) % 4;
-        let (pi, ei, si) = corners[i];
-        let (pj, ej, sj) = corners[j];
-        if ei >= 0.0 {
-            poly.push((pi, si));
-        }
-        if (ei >= 0.0) != (ej >= 0.0) {
-            let (xz, t) = edge_crossing_xz(pi, ei, pj, ej);
-            let sheet = si + (sj - si) * t;
-            poly.push((xz, sheet));
-        }
-    }
-    if poly.len() < 3 {
-        return;
-    }
-
-    let mut ids: Vec<PointId> = Vec::with_capacity(poly.len());
-    for (p, sheet) in &poly {
-        let y = *sheet + WATER_CLEARANCE * 0.5;
-        let id = mesh
-            .add_point(Vec3::new(p.x, y, p.y))
-            .expect("water point");
-        mesh.set_point_color(id, water_color).expect("water color");
-        ids.push(id);
-    }
-    for k in 1..ids.len() - 1 {
-        mesh.add_triangle(ids[0], ids[k], ids[k + 1])
-            .expect("water tri");
-    }
-}
-
-type ChunkKey = (i32, i32);
-
-/// Streams [`SurfaceTerrain`] chunks around a focus (same budgets as heightfield stream).
+/// Streams [`SurfaceTerrain`] land chunks around a focus.
+///
+/// A thin adapter over [`ChunkStream`] kept for demos that sample in render
+/// space around the world origin.
 pub struct SurfaceStream {
     terrain: Arc<SurfaceTerrain>,
-    pub radius: i32,
-    pub max_jobs_per_frame: usize,
-    pub max_uploads_per_frame: usize,
-    loaded: HashMap<ChunkKey, ()>,
-    inflight: HashSet<ChunkKey>,
-    ready_queue: VecDeque<(ChunkKey, BuiltMesh)>,
-    tx: Sender<(ChunkKey, BuiltMesh)>,
-    rx: Receiver<(ChunkKey, BuiltMesh)>,
+    stream: ChunkStream,
 }
 
 impl SurfaceStream {
     pub fn new(terrain: SurfaceTerrain, radius: i32) -> Self {
-        let (tx, rx) = mpsc::channel();
-        Self {
-            terrain: Arc::new(terrain),
-            radius: radius.max(1),
-            max_jobs_per_frame: 6,
-            max_uploads_per_frame: 2,
-            loaded: HashMap::new(),
-            inflight: HashSet::new(),
-            ready_queue: VecDeque::new(),
-            tx,
-            rx,
-        }
+        let terrain = Arc::new(terrain);
+        let stream = ChunkStream::new(Arc::clone(&terrain) as Arc<dyn ChunkBuilder>, radius)
+            .with_required_radius(0)
+            .with_keep_margin(2);
+        Self { terrain, stream }
     }
 
     pub fn with_budgets(mut self, jobs: usize, uploads: usize) -> Self {
-        self.max_jobs_per_frame = jobs.max(1);
-        self.max_uploads_per_frame = uploads.max(1);
+        self.stream = self.stream.with_budgets(jobs, uploads);
+        self
+    }
+
+    pub fn with_keep_margin(mut self, margin: i32) -> Self {
+        self.stream = self.stream.with_keep_margin(margin);
+        self
+    }
+
+    /// Ring that must be resident before the walker may move.
+    pub fn with_required_radius(mut self, radius: i32) -> Self {
+        self.stream = self.stream.with_required_radius(radius);
         self
     }
 
@@ -334,130 +206,229 @@ impl SurfaceStream {
         &self.terrain
     }
 
+    pub fn stream(&self) -> &ChunkStream {
+        &self.stream
+    }
+
     pub fn height_at(&self, x: f32, z: f32) -> f32 {
         self.terrain.height_at(x, z)
+    }
+
+    /// Height of the drawn triangle under the walker, when that chunk is resident.
+    pub fn contact_height(&self, x: f32, z: f32) -> Option<f32> {
+        self.stream.contact_height(GlobalXZ::at(x as f64, z as f64))
     }
 
     pub fn sample(&self, x: f32, z: f32) -> SurfaceSample {
         self.terrain.sample(x, z)
     }
 
-    fn desired_ring(&self, focus: Vec3) -> (ChunkKey, HashSet<ChunkKey>) {
-        let center = self.terrain.chunk_key_for(focus.x, focus.z);
-        let center_key = (center.x, center.z);
-        let r = self.radius;
-        let mut desired = HashSet::new();
-        for dz in -r..=r {
-            for dx in -r..=r {
-                desired.insert((center.x + dx, center.z + dz));
-            }
-        }
-        (center_key, desired)
+    pub fn loaded_count(&self) -> usize {
+        self.stream.resident_count()
     }
 
-    fn drain_ready(&mut self) {
-        while let Ok(item) = self.rx.try_recv() {
-            self.inflight.remove(&item.0);
-            self.ready_queue.push_back(item);
-        }
+    pub fn pending_count(&self) -> usize {
+        self.stream.pending_count()
     }
 
-    fn upload_ready(&mut self, world: &mut World, focus: Vec3, desired: &HashSet<ChunkKey>) {
-        let center = self.terrain.chunk_key_for(focus.x, focus.z);
-        let mut batch: Vec<(ChunkKey, BuiltMesh)> = self.ready_queue.drain(..).collect();
-        batch.sort_by_key(|(k, _)| (k.0 - center.x).abs() + (k.1 - center.z).abs());
-        let mut uploaded = 0;
-        let mut rest = VecDeque::new();
-        for (key, built) in batch {
-            if !desired.contains(&key) || self.loaded.contains_key(&key) {
-                continue;
-            }
-            if uploaded < self.max_uploads_per_frame {
-                world.set_chunk_built(IVec3::new(key.0, 0, key.1), built);
-                self.loaded.insert(key, ());
-                uploaded += 1;
+    pub fn is_loaded(&self, cx: i32, cz: i32) -> bool {
+        self.stream.is_resident(ChunkCoord::new(cx, cz))
+    }
+
+    pub fn chunk_span(&self) -> f32 {
+        self.terrain.chunk_span().metres() as f32
+    }
+
+    pub fn sync(&mut self, world: &mut World, focus: Vec3) -> EngineResult<()> {
+        self.sync_ex(world, focus, None)
+    }
+
+    /// `priority` biases the queue towards where the walker is heading.
+    pub fn sync_ex(
+        &mut self,
+        world: &mut World,
+        focus: Vec3,
+        priority: Option<Vec3>,
+    ) -> EngineResult<()> {
+        let focus_xz = GlobalXZ::at(focus.x as f64, focus.z as f64);
+        let lead = priority.map(|p| GlobalXZ::at(p.x as f64, p.z as f64));
+        self.stream.sync(world, focus_xz, lead)
+    }
+
+    /// Build the required ring inline (tests / screenshots / first entry).
+    pub fn sync_blocking(&mut self, world: &mut World, focus: Vec3) -> EngineResult<()> {
+        let focus_xz = GlobalXZ::at(focus.x as f64, focus.z as f64);
+        self.stream.ensure_required_blocking(world, focus_xz)?;
+        self.stream.sync(world, focus_xz, None)
+    }
+}
+
+impl std::fmt::Debug for SurfaceStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SurfaceStream")
+            .field("stream", &self.stream)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::space::{ChunkId, GlobalXZ};
+    use crate::surface::SurfaceSample;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    struct TestSurface;
+
+    impl SurfaceSource for TestSurface {
+        fn sample(&self, x: f32, z: f32) -> SurfaceSample {
+            let ground = 20.0 + (x * 0.01).sin() * 4.0 + (z * 0.013).cos() * 3.0;
+            if x > 300.0 {
+                SurfaceSample::wet(ground - 4.0, ground)
             } else {
-                rest.push_back((key, built));
+                SurfaceSample::dry(ground)
             }
         }
-        self.ready_queue = rest;
     }
 
-    fn spawn_jobs(&mut self, focus: Vec3, desired: &HashSet<ChunkKey>) {
-        let center = self.terrain.chunk_key_for(focus.x, focus.z);
-        let mut missing: Vec<ChunkKey> = desired
-            .iter()
-            .copied()
-            .filter(|k| !self.loaded.contains_key(k) && !self.inflight.contains(k))
-            .collect();
-        missing.sort_by_key(|k| (k.0 - center.x).abs() + (k.1 - center.z).abs());
-        let budget = self.max_jobs_per_frame.min(missing.len());
-        for key in missing.into_iter().take(budget) {
-            self.inflight.insert(key);
-            let terrain = Arc::clone(&self.terrain);
-            let tx = self.tx.clone();
-            rayon::spawn(move || {
-                let built = terrain.build_chunk_built(key.0, key.1);
-                let _ = tx.send((key, built));
-            });
+    struct CountingSurface(Arc<AtomicUsize>);
+
+    impl SurfaceSource for CountingSurface {
+        fn sample(&self, _x: f32, _z: f32) -> SurfaceSample {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            SurfaceSample::dry(0.0)
         }
     }
 
-    fn ensure_focus_chunk(&mut self, world: &mut World, center_key: ChunkKey) {
-        if self.loaded.contains_key(&center_key) {
-            return;
+    fn tiny_style() -> SurfaceMeshStyle {
+        SurfaceMeshStyle {
+            chunk_cells: 4,
+            cell_size: 8.0,
+            ..SurfaceMeshStyle::default()
         }
-        self.inflight.remove(&center_key);
-        let built = self.terrain.build_chunk_built(center_key.0, center_key.1);
-        world.set_chunk_built(IVec3::new(center_key.0, 0, center_key.1), built);
-        self.loaded.insert(center_key, ());
     }
 
-    pub fn sync(&mut self, world: &mut World, focus: Vec3) {
-        let (center_key, desired) = self.desired_ring(focus);
-        let stale: Vec<ChunkKey> = self
-            .loaded
-            .keys()
-            .copied()
-            .filter(|k| !desired.contains(k))
-            .collect();
-        for key in stale {
-            world.clear_chunk(IVec3::new(key.0, 0, key.1));
-            self.loaded.remove(&key);
-        }
-        self.drain_ready();
-        self.ensure_focus_chunk(world, center_key);
-        self.upload_ready(world, focus, &desired);
-        self.spawn_jobs(focus, &desired);
+    fn make_stream(radius: i32) -> SurfaceStream {
+        let terrain = SurfaceTerrain::new(Arc::new(TestSurface), tiny_style());
+        SurfaceStream::new(terrain, radius)
     }
 
-    pub fn sync_blocking(&mut self, world: &mut World, focus: Vec3) {
-        let (_center_key, desired) = self.desired_ring(focus);
-        let stale: Vec<ChunkKey> = self
-            .loaded
-            .keys()
-            .copied()
-            .filter(|k| !desired.contains(k))
-            .collect();
-        for key in stale {
-            world.clear_chunk(IVec3::new(key.0, 0, key.1));
-            self.loaded.remove(&key);
-        }
-        self.drain_ready();
-        self.ready_queue.clear();
-        self.inflight.clear();
-        let mut keys: Vec<ChunkKey> = desired.into_iter().collect();
-        keys.sort_by_key(|k| (k.0, k.1));
-        let built: Vec<(ChunkKey, BuiltMesh)> = keys
-            .par_iter()
-            .map(|key| (*key, self.terrain.build_chunk_built(key.0, key.1)))
-            .collect();
-        for (key, mesh) in built {
-            if self.loaded.contains_key(&key) {
-                continue;
+    fn pump(stream: &mut SurfaceStream, world: &mut World, focus: Vec3, frames: usize) {
+        for _ in 0..frames {
+            stream.sync(world, focus).expect("sync");
+            if stream.pending_count() == 0 {
+                break;
             }
-            world.set_chunk_built(IVec3::new(key.0, 0, key.1), mesh);
-            self.loaded.insert(key, ());
+            std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn chunk_vertices_are_local_to_the_chunk_anchor() {
+        let terrain = SurfaceTerrain::new(Arc::new(TestSurface), tiny_style());
+        let built = terrain.build_chunk_built(ChunkCoord::new(1000, -250));
+        let span = terrain.chunk_span().metres() as f32;
+        for p in &built.positions {
+            assert!(
+                p.x >= -0.001 && p.x <= span + 0.001 && p.z >= -0.001 && p.z <= span + 0.001,
+                "vertex {p} escaped chunk-local bounds (span {span})"
+            );
+        }
+    }
+
+    #[test]
+    fn focus_chunk_is_resident_after_blocking_sync() {
+        let mut world = World::new();
+        let mut stream = make_stream(1).with_required_radius(1);
+        let focus = Vec3::new(70.0, 0.0, 70.0);
+        stream.sync_blocking(&mut world, focus).expect("sync");
+        let coord = stream.terrain().chunk_coord_for(focus.x, focus.z);
+        assert!(stream.is_loaded(coord.x, coord.z));
+        assert!(world.has_anchored_chunk(ChunkId::new(coord, ChunkLayer::Land)));
+    }
+
+    #[test]
+    fn contact_height_matches_the_drawn_surface() {
+        let mut world = World::new();
+        let mut stream = make_stream(1).with_required_radius(0);
+        let focus = Vec3::new(10.0, 0.0, 10.0);
+        stream.sync_blocking(&mut world, focus).expect("sync");
+        // Exactly on a sample point the triangle and the formula must agree.
+        let contact = stream.contact_height(8.0, 8.0).expect("resident contact");
+        let direct = stream.sample(8.0, 8.0).ground();
+        assert!(
+            (contact - direct).abs() < 1e-3,
+            "contact {contact} vs surface {direct}"
+        );
+    }
+
+    #[test]
+    fn async_ring_fills_and_unloads_behind_the_walker() {
+        let mut world = World::new();
+        let mut stream = make_stream(1).with_keep_margin(0).with_budgets(9, 9);
+        let near = Vec3::new(16.0, 0.0, 16.0);
+        pump(&mut stream, &mut world, near, 400);
+        assert!(stream.is_loaded(0, 0));
+
+        let far = Vec3::new(16.0 + 32.0 * 6.0, 0.0, 16.0);
+        pump(&mut stream, &mut world, far, 400);
+        assert!(
+            !stream.is_loaded(0, 0),
+            "chunks far behind the walker must unload"
+        );
+        let coord = stream.terrain().chunk_coord_for(far.x, far.z);
+        assert!(stream.is_loaded(coord.x, coord.z));
+    }
+
+    #[test]
+    fn wet_columns_use_the_bed_tint() {
+        let terrain = SurfaceTerrain::new(Arc::new(TestSurface), tiny_style());
+        let dry = terrain.sample(0.0, 0.0);
+        let wet = terrain.sample(400.0, 0.0);
+        assert!(!dry.is_wet());
+        assert!(wet.is_wet());
+        assert!(wet.water_top().expect("sheet") > wet.ground());
+    }
+
+    #[test]
+    fn background_jobs_do_the_sampling_work() {
+        let samples_bg = Arc::new(AtomicUsize::new(0));
+        let terrain = SurfaceTerrain::new(
+            Arc::new(CountingSurface(Arc::clone(&samples_bg))),
+            tiny_style(),
+        );
+        let mut world = World::new();
+        let mut stream = SurfaceStream::new(terrain, 3).with_budgets(16, 16);
+        let focus = Vec3::new(0.0, 0.0, 0.0);
+        stream.sync(&mut world, focus).expect("sync");
+        for _ in 0..400 {
+            stream.sync(&mut world, focus).expect("sync");
+            if stream.pending_count() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(samples_bg.load(Ordering::Relaxed) > 0);
+        assert_eq!(stream.loaded_count(), 49);
+    }
+
+    #[test]
+    fn rebasing_keeps_chunks_over_the_same_ground() {
+        let mut world = World::new();
+        let mut stream = make_stream(1).with_required_radius(1);
+        let focus = Vec3::new(10.0, 0.0, 10.0);
+        stream.sync_blocking(&mut world, focus).expect("sync");
+        let before = world.anchored_chunk_count();
+        world
+            .set_render_origin(crate::space::RenderOrigin::new(GlobalXZ::at(
+                1_000_000.0,
+                -500_000.0,
+            )))
+            .expect("rebase");
+        assert_eq!(world.anchored_chunk_count(), before);
+        // The chunk under the walker keeps its global identity across a rebase.
+        let coord = stream.terrain().chunk_coord_for(focus.x, focus.z);
+        assert!(world.has_anchored_chunk(ChunkId::new(coord, ChunkLayer::Land)));
     }
 }

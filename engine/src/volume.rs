@@ -65,9 +65,7 @@ impl Volume {
     pub fn try_new(voxel_size: f32) -> EngineResult<Self> {
         ensure_finite(voxel_size, "voxel_size")?;
         if voxel_size <= 0.0 {
-            return Err(EngineError::InvalidValue(
-                "voxel_size must be > 0".into(),
-            ));
+            return Err(EngineError::InvalidValue("voxel_size must be > 0".into()));
         }
         Ok(Self {
             voxel_size,
@@ -82,12 +80,7 @@ impl Volume {
         nx.saturating_mul(ny).saturating_mul(nz)
     }
 
-    fn check_paint_budget(
-        &self,
-        min: Vec3,
-        max: Vec3,
-        limits: &EngineLimits,
-    ) -> EngineResult<()> {
+    fn check_paint_budget(&self, min: Vec3, max: Vec3, limits: &EngineLimits) -> EngineResult<()> {
         ensure_finite3(min, "paint min")?;
         ensure_finite3(max, "paint max")?;
         let samples = Self::estimate_samples(min, max, self.voxel_size);
@@ -464,8 +457,12 @@ fn built_to_editable_mesh(built: &BuiltMesh) -> Mesh {
         ids.push(id);
     }
     for tri in built.indices.chunks_exact(3) {
-        mesh.add_face(&[ids[tri[0] as usize], ids[tri[1] as usize], ids[tri[2] as usize]])
-            .expect("built face");
+        mesh.add_face(&[
+            ids[tri[0] as usize],
+            ids[tri[1] as usize],
+            ids[tri[2] as usize],
+        ])
+        .expect("built face");
     }
     mesh
 }
@@ -529,11 +526,7 @@ impl ChunkStreamer {
     }
 
     pub fn unload_outside(&mut self, desired: &HashSet<IVec3>) -> Vec<IVec3> {
-        let removed: Vec<IVec3> = self
-            .loaded
-            .difference(desired)
-            .copied()
-            .collect();
+        let removed: Vec<IVec3> = self.loaded.difference(desired).copied().collect();
         for k in &removed {
             self.loaded.remove(k);
         }

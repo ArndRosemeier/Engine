@@ -75,7 +75,11 @@ impl UiBackend {
     }
 
     /// Run egui for one frame while the caller builds UI via [`UiFrame`].
-    pub fn run_ui<R>(&mut self, window: &Window, build: impl FnOnce(&UiFrame) -> R) -> (R, FullOutput) {
+    pub fn run_ui<R>(
+        &mut self,
+        window: &Window,
+        build: impl FnOnce(&UiFrame) -> R,
+    ) -> (R, FullOutput) {
         let raw_input = self.state.take_egui_input(window);
         let textures = Rc::clone(&self.textures);
         let ctx = self.ctx.clone();

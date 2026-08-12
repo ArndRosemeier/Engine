@@ -1,57 +1,128 @@
 //! Rock-solid ground + water column sample.
 //!
-//! Land, water draw, feet, and tests must all use [`SurfaceSample::is_wet`].
-//! The shoreline is the iso-surface where wetness flips — not a separate mesh.
+//! Wetness is part of the type, not a sentinel float: a column either carries a
+//! [`WaterSurface`] or it does not. A water body may only be constructed when
+//! the bed sits at least [`WATER_CLEARANCE`] below the sheet, so draw, walk, and
+//! collision can never disagree about where the shoreline is.
 
+use crate::error::{EngineError, EngineResult};
 use std::sync::Arc;
 
-/// Bed must sit this far below `water_top` for a column to count as wet.
-/// Draw, walk, and contract tests share this constant.
+/// Bed must sit this far below the sheet for a column to hold water.
+/// Draw, walk, and generation share this constant.
 pub const WATER_CLEARANCE: f32 = 0.02;
+
+/// Standing water on top of a column.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaterSurface {
+    top: f32,
+    depth: f32,
+}
+
+impl WaterSurface {
+    /// Sheet height in metres.
+    #[inline]
+    pub fn top(self) -> f32 {
+        self.top
+    }
+
+    /// Distance from bed to sheet — always `>= WATER_CLEARANCE`.
+    #[inline]
+    pub fn depth(self) -> f32 {
+        self.depth
+    }
+}
 
 /// One column of the continuous surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceSample {
-    /// Solid ground / bed height (metres).
-    pub ground: f32,
-    /// Water sheet height. Use `f32::NEG_INFINITY` when no body applies.
-    pub water_top: f32,
+    ground: f32,
+    water: Option<WaterSurface>,
 }
 
 impl SurfaceSample {
+    /// Dry column. Panics on a non-finite height — a broken generator must be
+    /// loud here, not silently produce holes in the mesh.
     pub fn dry(ground: f32) -> Self {
-        Self {
-            ground,
-            water_top: f32::NEG_INFINITY,
-        }
+        Self::try_dry(ground).expect("dry surface sample")
     }
 
-    pub fn wet_body(ground: f32, water_top: f32) -> Self {
-        Self { ground, water_top }
+    /// Column under standing water.
+    ///
+    /// Panics unless the bed clears the sheet by [`WATER_CLEARANCE`]. Callers
+    /// carve the bed first; they must not hand over an unresolved column and
+    /// hope the sample decides for them.
+    pub fn wet(ground: f32, water_top: f32) -> Self {
+        Self::try_wet(ground, water_top).expect("wet surface sample")
+    }
+
+    pub fn try_dry(ground: f32) -> EngineResult<Self> {
+        if !ground.is_finite() {
+            return Err(EngineError::InvalidValue(format!(
+                "ground height must be finite, got {ground}"
+            )));
+        }
+        Ok(Self {
+            ground,
+            water: None,
+        })
+    }
+
+    pub fn try_wet(ground: f32, water_top: f32) -> EngineResult<Self> {
+        if !ground.is_finite() || !water_top.is_finite() {
+            return Err(EngineError::InvalidValue(format!(
+                "wet column heights must be finite, got ground {ground} / top {water_top}"
+            )));
+        }
+        let depth = water_top - ground;
+        if depth < WATER_CLEARANCE {
+            return Err(EngineError::InvalidValue(format!(
+                "water sheet {water_top} sits {depth} above bed {ground}; \
+                 carve the bed to at least {WATER_CLEARANCE} clearance or report the column dry"
+            )));
+        }
+        Ok(Self {
+            ground,
+            water: Some(WaterSurface {
+                top: water_top,
+                depth,
+            }),
+        })
+    }
+
+    /// Solid ground / bed height in metres.
+    #[inline]
+    pub fn ground(self) -> f32 {
+        self.ground
+    }
+
+    #[inline]
+    pub fn water(self) -> Option<WaterSurface> {
+        self.water
+    }
+
+    #[inline]
+    pub fn water_top(self) -> Option<f32> {
+        self.water.map(|w| w.top)
+    }
+
+    #[inline]
+    pub fn depth(self) -> f32 {
+        self.water.map(|w| w.depth).unwrap_or(0.0)
     }
 
     /// Single wetness predicate for draw / walk / tests.
     #[inline]
     pub fn is_wet(self) -> bool {
-        self.water_top.is_finite() && (self.water_top - self.ground) >= WATER_CLEARANCE
-    }
-
-    /// How far the bed sits above the required clearance floor (0 = ok).
-    #[inline]
-    pub fn contract_error(self) -> f32 {
-        if !self.is_wet() {
-            return 0.0;
-        }
-        (self.ground - (self.water_top - WATER_CLEARANCE)).max(0.0)
+        self.water.is_some()
     }
 
     /// Walkable height: water sheet when wet, else ground.
     #[inline]
     pub fn walk_height(self) -> f32 {
-        if self.is_wet() {
-            self.water_top
-        } else {
-            self.ground
+        match self.water {
+            Some(w) => w.top,
+            None => self.ground,
         }
     }
 }
@@ -72,11 +143,36 @@ where
 
 pub type SharedSurface = Arc<dyn SurfaceSource>;
 
-/// Dense-grid contract check: every wet column must clear the bed floor.
-pub fn max_contract_error(source: &dyn SurfaceSource, samples: &[(f32, f32)]) -> f32 {
-    let mut max_err = 0.0_f32;
-    for &(x, z) in samples {
-        max_err = max_err.max(source.sample(x, z).contract_error());
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dry_column_has_no_water() {
+        let s = SurfaceSample::dry(12.5);
+        assert!(!s.is_wet());
+        assert_eq!(s.water_top(), None);
+        assert_eq!(s.walk_height(), 12.5);
     }
-    max_err
+
+    #[test]
+    fn wet_column_reports_sheet_and_depth() {
+        let s = SurfaceSample::wet(3.0, 9.0);
+        assert!(s.is_wet());
+        assert_eq!(s.water_top(), Some(9.0));
+        assert_eq!(s.depth(), 6.0);
+        assert_eq!(s.walk_height(), 9.0);
+    }
+
+    #[test]
+    fn sheet_without_clearance_is_rejected() {
+        let err = SurfaceSample::try_wet(1.0, 1.0 + WATER_CLEARANCE * 0.5).unwrap_err();
+        assert!(matches!(err, EngineError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn non_finite_heights_are_rejected() {
+        assert!(SurfaceSample::try_dry(f32::NAN).is_err());
+        assert!(SurfaceSample::try_wet(0.0, f32::INFINITY).is_err());
+    }
 }

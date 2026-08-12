@@ -34,7 +34,12 @@ impl Camera {
     }
 
     /// Orbit around `target` at `distance`, with yaw/pitch in degrees.
-    pub fn orbit(target: impl Into<Vec3>, distance: f32, yaw_degrees: f32, pitch_degrees: f32) -> Self {
+    pub fn orbit(
+        target: impl Into<Vec3>,
+        distance: f32,
+        yaw_degrees: f32,
+        pitch_degrees: f32,
+    ) -> Self {
         let target = target.into();
         let yaw = yaw_degrees.to_radians();
         let pitch = pitch_degrees.to_radians();
@@ -54,12 +59,7 @@ impl Camera {
     /// Third-person camera behind a walker.
     ///
     /// `yaw_degrees` is the walker's facing (0 = +Z). Camera sits behind and above.
-    pub fn follow(
-        target: impl Into<Vec3>,
-        yaw_degrees: f32,
-        distance: f32,
-        height: f32,
-    ) -> Self {
+    pub fn follow(target: impl Into<Vec3>, yaw_degrees: f32, distance: f32, height: f32) -> Self {
         let target = target.into();
         let yaw = yaw_degrees.to_radians();
         let forward = Vec3::new(yaw.sin(), 0.0, yaw.cos());

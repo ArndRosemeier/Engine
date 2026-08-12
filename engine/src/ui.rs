@@ -30,10 +30,7 @@ impl Default for UiFrame {
 }
 
 impl UiFrame {
-    pub(crate) fn new(
-        ctx: Context,
-        textures: Rc<RefCell<HashMap<String, TextureHandle>>>,
-    ) -> Self {
+    pub(crate) fn new(ctx: Context, textures: Rc<RefCell<HashMap<String, TextureHandle>>>) -> Self {
         Self {
             ctx,
             textures,

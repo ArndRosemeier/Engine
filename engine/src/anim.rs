@@ -406,19 +406,18 @@ fn load_animated_document(
                 continue;
             }
 
-            let joints_iter = reader.read_joints(0).ok_or_else(|| {
-                EngineError::Model("skinned mesh missing JOINTS_0".into())
-            })?;
+            let joints_iter = reader
+                .read_joints(0)
+                .ok_or_else(|| EngineError::Model("skinned mesh missing JOINTS_0".into()))?;
             let joints: Vec<[u16; 4]> = match joints_iter {
-                gltf::mesh::util::ReadJoints::U8(i) => {
-                    i.map(|j| [j[0] as u16, j[1] as u16, j[2] as u16, j[3] as u16])
-                        .collect()
-                }
+                gltf::mesh::util::ReadJoints::U8(i) => i
+                    .map(|j| [j[0] as u16, j[1] as u16, j[2] as u16, j[3] as u16])
+                    .collect(),
                 gltf::mesh::util::ReadJoints::U16(i) => i.collect(),
             };
-            let weights_iter = reader.read_weights(0).ok_or_else(|| {
-                EngineError::Model("skinned mesh missing WEIGHTS_0".into())
-            })?;
+            let weights_iter = reader
+                .read_weights(0)
+                .ok_or_else(|| EngineError::Model("skinned mesh missing WEIGHTS_0".into()))?;
             let mut weights: Vec<[f32; 4]> = match weights_iter {
                 gltf::mesh::util::ReadWeights::U8(i) => i
                     .map(|w| {
@@ -747,8 +746,7 @@ mod tests {
     fn deer_asset_loads_with_clips() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         // Demo asset lives next to examples; fall back if missing during crate-only checks.
-        let path = root
-            .join("../examples/animated_animal/assets/deer.gltf");
+        let path = root.join("../examples/animated_animal/assets/deer.gltf");
         if !path.exists() {
             return;
         }
@@ -768,6 +766,9 @@ mod tests {
                 .iter()
                 .any(|c| c.x < 0.95 || c.y < 0.95 || c.z < 0.95)
         });
-        assert!(has_tinted, "expected material baseColorFactor applied to vertices");
+        assert!(
+            has_tinted,
+            "expected material baseColorFactor applied to vertices"
+        );
     }
 }
