@@ -2,14 +2,17 @@ use crate::error::{EngineError, EngineResult};
 use crate::space::{GlobalPosition, RenderOrigin};
 use glam::{Mat4, Vec3};
 
-/// Friendly transform: position + yaw (degrees) + uniform scale.
+/// Friendly transform: position + yaw (degrees) + scale.
 ///
-/// Hides raw matrices from everyday scene setup.
+/// [`Self::scale`] is uniform. [`Self::stretch`] is the per-axis factor, default
+/// `Vec3::ONE`, so a foundation skirt can be one unit cube instanced at many
+/// footprint × height sizes without a unique mesh per house.
 #[derive(Clone, Copy, Debug)]
 pub struct Place {
     pub position: Vec3,
     pub yaw_degrees: f32,
     pub scale: f32,
+    pub stretch: Vec3,
 }
 
 impl Default for Place {
@@ -18,6 +21,7 @@ impl Default for Place {
             position: Vec3::ZERO,
             yaw_degrees: 0.0,
             scale: 1.0,
+            stretch: Vec3::ONE,
         }
     }
 }
@@ -64,10 +68,26 @@ impl Place {
         self
     }
 
+    pub fn with_stretch(mut self, stretch: Vec3) -> Self {
+        self.stretch = stretch;
+        self
+    }
+
+    pub fn stretch(mut self, stretch: Vec3) -> EngineResult<Self> {
+        ensure_finite3(stretch, "stretch")?;
+        if stretch.x <= 0.0 || stretch.y <= 0.0 || stretch.z <= 0.0 {
+            return Err(EngineError::InvalidValue(
+                "stretch components must be > 0".into(),
+            ));
+        }
+        self.stretch = stretch;
+        Ok(self)
+    }
+
     pub fn to_matrix(self) -> Mat4 {
         let t = Mat4::from_translation(self.position);
         let r = Mat4::from_rotation_y(self.yaw_degrees.to_radians());
-        let s = Mat4::from_scale(Vec3::splat(self.scale));
+        let s = Mat4::from_scale(self.stretch * self.scale);
         t * r * s
     }
 }
@@ -82,6 +102,7 @@ pub struct GlobalPlace {
     pub position: GlobalPosition,
     pub yaw_degrees: f32,
     pub scale: f32,
+    pub stretch: Vec3,
 }
 
 impl GlobalPlace {
@@ -90,6 +111,7 @@ impl GlobalPlace {
             position,
             yaw_degrees: 0.0,
             scale: 1.0,
+            stretch: Vec3::ONE,
         }
     }
 
@@ -103,6 +125,11 @@ impl GlobalPlace {
         self
     }
 
+    pub fn with_stretch(mut self, stretch: Vec3) -> Self {
+        self.stretch = stretch;
+        self
+    }
+
     /// Resolve into render space against the active origin.
     pub fn to_place(self, origin: RenderOrigin) -> EngineResult<Place> {
         if !self.yaw_degrees.is_finite() {
@@ -113,10 +140,17 @@ impl GlobalPlace {
                 "scale must be finite and > 0".into(),
             ));
         }
+        ensure_finite3(self.stretch, "stretch")?;
+        if self.stretch.x <= 0.0 || self.stretch.y <= 0.0 || self.stretch.z <= 0.0 {
+            return Err(EngineError::InvalidValue(
+                "stretch components must be > 0".into(),
+            ));
+        }
         Ok(Place {
             position: self.position.to_render(origin)?.vec3(),
             yaw_degrees: self.yaw_degrees,
             scale: self.scale,
+            stretch: self.stretch,
         })
     }
 }

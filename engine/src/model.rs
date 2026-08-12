@@ -258,6 +258,7 @@ pub fn scatter_places(
             position: *p,
             yaw_degrees: y_rotation_degrees(i),
             scale,
+            stretch: Vec3::ONE,
         })
         .collect()
 }

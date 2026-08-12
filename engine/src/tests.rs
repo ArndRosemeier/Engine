@@ -165,6 +165,13 @@ fn place_builds_matrix() {
 }
 
 #[test]
+fn place_stretch_scales_axes_independently() {
+    let p = Place::new(0.0, 0.0, 0.0).with_stretch(Vec3::new(2.0, 3.0, 4.0));
+    let t = p.to_matrix().transform_point3(Vec3::ONE);
+    assert!((t - Vec3::new(2.0, 3.0, 4.0)).length() < 1e-4);
+}
+
+#[test]
 fn frame_first_flag_exists() {
     let f = Frame {
         dt: 0.016,
