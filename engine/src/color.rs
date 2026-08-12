@@ -1,7 +1,13 @@
 use crate::error::{EngineError, EngineResult};
 use glam::{Vec3, Vec4};
 
-/// Display color stored as linear RGBA in 0..1 (`a = 1` is fully opaque).
+/// A colour in **linear** RGBA, 0..1 (`a = 1` is fully opaque).
+///
+/// Linear is what shading maths and the GPU want. Bytes are what people
+/// author — a hex code out of a palette is sRGB — so [`Color::rgb`] and
+/// [`Color::rgba`] convert on the way in, exactly as an `Rgba8UnormSrgb`
+/// texture does when it is sampled. Float constructors take linear values and
+/// pass them straight through, which is also what glTF factors are.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color {
     pub r: f32,
@@ -24,27 +30,27 @@ impl Color {
         a: 1.0,
     };
 
-    /// Friendly byte RGB (0..=255), opaque.
+    /// An sRGB byte triple (0..=255) as it would be written in hex, opaque.
     pub fn rgb(r: u8, g: u8, b: u8) -> Self {
         Self::rgba(r, g, b, 255)
     }
 
-    /// Friendly byte RGBA (0..=255).
+    /// An sRGB byte quad (0..=255); alpha is a plain fraction, not a colour.
     pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self {
-            r: r as f32 / 255.0,
-            g: g as f32 / 255.0,
-            b: b as f32 / 255.0,
+            r: srgb_to_linear(r),
+            g: srgb_to_linear(g),
+            b: srgb_to_linear(b),
             a: a as f32 / 255.0,
         }
     }
 
-    /// Float RGB in 0..1, opaque. Rejects non-finite values.
+    /// Linear float RGB in 0..1, opaque. Rejects non-finite values.
     pub fn rgb01(r: f32, g: f32, b: f32) -> EngineResult<Self> {
         Self::rgba01(r, g, b, 1.0)
     }
 
-    /// Float RGBA in 0..1. Rejects non-finite values.
+    /// Linear float RGBA in 0..1. Rejects non-finite values.
     pub fn rgba01(r: f32, g: f32, b: f32, a: f32) -> EngineResult<Self> {
         if !r.is_finite() || !g.is_finite() || !b.is_finite() || !a.is_finite() {
             return Err(EngineError::InvalidColor(
@@ -91,6 +97,16 @@ impl From<Color> for Vec3 {
 impl From<Color> for Vec4 {
     fn from(c: Color) -> Self {
         c.to_vec4()
+    }
+}
+
+/// The sRGB transfer curve, byte in, linear out.
+fn srgb_to_linear(c: u8) -> f32 {
+    let s = c as f32 / 255.0;
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
     }
 }
 

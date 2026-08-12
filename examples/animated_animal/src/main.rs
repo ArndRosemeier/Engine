@@ -32,10 +32,7 @@ fn main() {
             let id = world
                 .spawn_animated(
                     model.clone(),
-                    Place::at(0.0, 0.0, 0.0)
-                        .unwrap()
-                        .scale(0.45)
-                        .unwrap(),
+                    Place::at(0.0, 0.0, 0.0).unwrap().scale(0.45).unwrap(),
                 )
                 .expect("spawn deer");
             world.play_animation(id, "Idle").expect("Idle");

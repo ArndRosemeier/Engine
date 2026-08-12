@@ -10,7 +10,8 @@ use crate::proc_terrain::{HeightField, ProcTerrain};
 use crate::space::{ChunkId, GlobalPosition, GlobalXZ, RenderOrigin};
 use crate::texture::{
     generate_terrain_albedo, load_rgba8_png, CpuTexture, MaterialId, TerrainAlbedo,
-    TerrainMaterial, TerrainMaterialDesc, TextureId,
+    TerrainMaterial, TerrainMaterialDesc, TextureId, WaterMaterial, WaterMaterialDesc,
+    WaterMaterialId,
 };
 use crate::ui::UiFrame;
 use glam::{IVec3, Mat4, Vec3};
@@ -47,14 +48,27 @@ impl Default for Light {
     }
 }
 
+/// Which world-space material an entity is drawn with, if any.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SurfaceMaterialRef {
+    /// World-XZ grass/sand/rock ground.
+    Terrain(MaterialId),
+    /// Animated water sheet.
+    Water(WaterMaterialId),
+}
+
 #[derive(Clone, Debug)]
 pub struct Entity {
     pub(crate) mesh: BuiltMesh,
     pub(crate) transform: Mat4,
-    /// If non-empty, drawn with GPU instancing.
+    /// Per-instance transforms for GPU instancing.
     pub(crate) instances: Vec<Mat4>,
-    /// Optional terrain material (world-XZ grass/sand/rock).
-    pub(crate) material: Option<MaterialId>,
+    /// Whether `instances` is authoritative, even when it is empty.
+    ///
+    /// An instanced entity with nothing to place draws nothing; a plain entity
+    /// with no instances draws once at `transform`.
+    pub(crate) instanced: bool,
+    pub(crate) material: Option<SurfaceMaterialRef>,
 }
 
 impl Entity {
@@ -66,7 +80,7 @@ impl Entity {
         self.transform
     }
 
-    pub fn material(&self) -> Option<MaterialId> {
+    pub fn material(&self) -> Option<SurfaceMaterialRef> {
         self.material
     }
 }
@@ -122,10 +136,15 @@ pub struct World {
     pub(crate) materials: HashMap<MaterialId, TerrainMaterial>,
     next_texture_id: u64,
     next_material_id: u64,
+    pub(crate) water_materials: HashMap<WaterMaterialId, WaterMaterial>,
     /// Applied to fully-opaque `set_chunk_built` uploads when set.
     pub(crate) default_terrain_material: Option<MaterialId>,
+    /// Applied to fully-translucent chunk layers when set.
+    pub(crate) default_water_material: Option<WaterMaterialId>,
     /// Whether the game wants the pointer pinned for mouse-look.
     pointer_lock: bool,
+    /// Seconds since start, for animated materials.
+    time: f32,
 }
 
 impl Default for World {
@@ -150,8 +169,11 @@ impl Default for World {
             materials: HashMap::new(),
             next_texture_id: 1,
             next_material_id: 1,
+            water_materials: HashMap::new(),
             default_terrain_material: None,
+            default_water_material: None,
             pointer_lock: false,
+            time: 0.0,
         }
     }
 }
@@ -199,6 +221,14 @@ impl World {
         Ok(self.spawn_built_instanced(mesh.build(), instances))
     }
 
+    /// Spawn an instanced entity that starts with nothing placed.
+    ///
+    /// The mesh is uploaded once; [`Self::set_instances`] then drives where it
+    /// appears.
+    pub fn spawn_instanced(&mut self, mesh: Mesh) -> EntityId {
+        self.spawn_built_instanced(mesh.build(), Vec::new())
+    }
+
     pub(crate) fn spawn_built(&mut self, mesh: BuiltMesh, transform: Mat4) -> EntityId {
         let id = EntityId(self.next_id);
         self.next_id += 1;
@@ -208,6 +238,7 @@ impl World {
                 mesh,
                 transform,
                 instances: Vec::new(),
+                instanced: false,
                 material: None,
             },
         );
@@ -228,6 +259,7 @@ impl World {
                 mesh,
                 transform: Mat4::IDENTITY,
                 instances,
+                instanced: true,
                 material: None,
             },
         );
@@ -333,16 +365,13 @@ impl World {
             // Remesh needs a new GPU upload — swap entity id so the renderer rebuilds.
             self.despawn(existing.entity);
         }
-        let apply_terrain = built.opaque_index_count == built.index_count()
-            && self.default_terrain_material.is_some();
+        let material = self.chunk_material(&built);
         let entity = self.spawn_built(built, Mat4::from_translation(offset));
-        if apply_terrain {
-            if let Some(mat) = self.default_terrain_material {
-                self.entities
-                    .get_mut(&entity)
-                    .expect("just spawned")
-                    .material = Some(mat);
-            }
+        if material.is_some() {
+            self.entities
+                .get_mut(&entity)
+                .expect("just spawned")
+                .material = material;
         }
         self.anchored_chunks
             .insert(id, AnchoredChunk { entity, anchor });
@@ -528,16 +557,32 @@ impl World {
             self.despawn(id);
             self.chunk_entities.remove(&key);
         }
-        let apply_terrain = built.opaque_index_count == built.index_count()
-            && self.default_terrain_material.is_some();
+        let material = self.chunk_material(&built);
         let id = self.spawn_built(built, Mat4::IDENTITY);
-        if apply_terrain {
-            if let Some(mat) = self.default_terrain_material {
-                self.entities.get_mut(&id).expect("just spawned").material = Some(mat);
-            }
+        if material.is_some() {
+            self.entities.get_mut(&id).expect("just spawned").material = material;
         }
         self.chunk_entities.insert(key, id);
         id
+    }
+
+    /// Pick the default material for a streamed layer from its opacity.
+    ///
+    /// A fully opaque layer is ground; a fully translucent one is a water
+    /// sheet. Mixed layers are left to the plain lit pipeline.
+    fn chunk_material(&self, built: &BuiltMesh) -> Option<SurfaceMaterialRef> {
+        if built.index_count() == 0 {
+            return None;
+        }
+        if built.opaque_index_count == built.index_count() {
+            return self
+                .default_terrain_material
+                .map(SurfaceMaterialRef::Terrain);
+        }
+        if built.opaque_index_count == 0 {
+            return self.default_water_material.map(SurfaceMaterialRef::Water);
+        }
+        None
     }
 
     /// Create an RGBA8 texture from raw bytes (`width * height * 4`).
@@ -620,15 +665,40 @@ impl World {
         self.default_terrain_material = material;
     }
 
+    /// Create an animated water material.
+    pub fn create_water_material(
+        &mut self,
+        desc: WaterMaterialDesc,
+    ) -> EngineResult<WaterMaterialId> {
+        if desc.depth_scale_m <= 0.0 || desc.wave_length_m <= 0.0 {
+            return Err(EngineError::InvalidValue(
+                "water depth scale and wave length must be > 0".into(),
+            ));
+        }
+        let id = WaterMaterialId(self.next_material_id);
+        self.next_material_id += 1;
+        self.water_materials.insert(id, WaterMaterial { desc });
+        Ok(id)
+    }
+
+    /// Fully-translucent chunk layers receive this material.
+    pub fn set_default_water_material(&mut self, material: Option<WaterMaterialId>) {
+        self.default_water_material = material;
+    }
+
     pub fn set_entity_material(
         &mut self,
         id: EntityId,
-        material: Option<MaterialId>,
+        material: Option<SurfaceMaterialRef>,
     ) -> EngineResult<()> {
-        if let Some(mat) = material {
-            if !self.materials.contains_key(&mat) {
-                return Err(EngineError::UnknownMaterial);
+        match material {
+            Some(SurfaceMaterialRef::Terrain(mat)) if !self.materials.contains_key(&mat) => {
+                return Err(EngineError::UnknownMaterial)
             }
+            Some(SurfaceMaterialRef::Water(mat)) if !self.water_materials.contains_key(&mat) => {
+                return Err(EngineError::UnknownMaterial)
+            }
+            _ => {}
         }
         let e = self
             .entities
@@ -638,12 +708,51 @@ impl World {
         Ok(())
     }
 
+    /// Replace the placements of an instanced entity (see [`Self::spawn_many`]).
+    ///
+    /// Only the instance buffer is rewritten, so a scatter layer can follow the
+    /// streamed world every frame without re-uploading its mesh.
+    pub fn set_instances(&mut self, id: EntityId, places: &[Place]) -> EngineResult<()> {
+        if places.len() as u64 > self.limits.max_instances_per_spawn {
+            return Err(EngineError::ResourceLimit(format!(
+                "set_instances has {} instances (limit {})",
+                places.len(),
+                self.limits.max_instances_per_spawn
+            )));
+        }
+        let e = self
+            .entities
+            .get_mut(&id)
+            .ok_or(EngineError::UnknownEntity)?;
+        if !e.instanced {
+            return Err(EngineError::InvalidValue(format!(
+                "entity {id} was not spawned instanced; use set_place"
+            )));
+        }
+        e.instances.clear();
+        e.instances.extend(places.iter().map(|p| p.to_matrix()));
+        Ok(())
+    }
+
+    /// Seconds since start, for materials that animate.
+    pub fn set_time(&mut self, seconds: f32) {
+        self.time = seconds;
+    }
+
+    pub fn time(&self) -> f32 {
+        self.time
+    }
+
     pub(crate) fn textures(&self) -> &HashMap<TextureId, CpuTexture> {
         &self.textures
     }
 
     pub(crate) fn materials(&self) -> &HashMap<MaterialId, TerrainMaterial> {
         &self.materials
+    }
+
+    pub(crate) fn water_materials(&self) -> &HashMap<WaterMaterialId, WaterMaterial> {
+        &self.water_materials
     }
 
     /// Remove a streamed chunk if present.

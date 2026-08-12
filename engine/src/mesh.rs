@@ -77,6 +77,18 @@ impl Mesh {
         Ok(())
     }
 
+    /// Paint every point one colour.
+    ///
+    /// Meshes imported from glTF that carry their look in textures arrive with
+    /// no usable vertex colour, and this pipeline has none to sample; the game
+    /// says what the thing is coloured instead.
+    pub fn paint_all(&mut self, color: Color) {
+        let c = color.to_vec4();
+        for slot in &mut self.colors {
+            *slot = c;
+        }
+    }
+
     /// Connect 3 or 4 existing points into a face.
     pub fn add_face(&mut self, points: &[PointId]) -> EngineResult<()> {
         if points.len() != 3 && points.len() != 4 {

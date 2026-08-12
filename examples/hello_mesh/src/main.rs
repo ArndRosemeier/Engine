@@ -59,8 +59,12 @@ fn main() {
     Engine::run("hello_mesh", move |world, frame| {
         if frame.first {
             world.spawn(house());
-            world.spawn(Shape::box_at((0.0, -0.05, 0.0), (14.0, 0.1, 14.0), rgb(87, 143, 77)).unwrap());
-            world.spawn(Shape::box_at((0.0, 0.06, -1.95), (0.85, 0.08, 2.2), rgb(140, 128, 107)).unwrap());
+            world.spawn(
+                Shape::box_at((0.0, -0.05, 0.0), (14.0, 0.1, 14.0), rgb(87, 143, 77)).unwrap(),
+            );
+            world.spawn(
+                Shape::box_at((0.0, 0.06, -1.95), (0.85, 0.08, 2.2), rgb(140, 128, 107)).unwrap(),
+            );
             world.set_sun((0.4, 1.0, -0.55), 0.2);
         }
 

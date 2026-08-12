@@ -30,7 +30,9 @@ fn main() {
 
     Engine::run("populate_world", move |world, frame| {
         if frame.first {
-            world.spawn(Shape::box_at((0.0, -0.05, 0.0), (60.0, 0.1, 60.0), rgb(84, 133, 71)).unwrap());
+            world.spawn(
+                Shape::box_at((0.0, -0.05, 0.0), (60.0, 0.1, 60.0), rgb(84, 133, 71)).unwrap(),
+            );
 
             let tree_positions = scatter_on_xz(
                 99,
@@ -60,9 +62,7 @@ fn main() {
                     rgb(128, 128, 122),
                 )
                 .unwrap();
-                world
-                    .place(rock, Place::new(p.x, 0.35, p.z))
-                    .expect("rock");
+                world.place(rock, Place::new(p.x, 0.35, p.z)).expect("rock");
             }
 
             world.set_sun((0.5, 1.0, 0.25), 0.26);

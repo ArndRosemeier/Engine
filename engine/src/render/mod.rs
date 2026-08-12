@@ -3,10 +3,11 @@ mod gpu_mesh;
 mod pipeline;
 mod skinned;
 mod terrain_pipeline;
+mod water_pipeline;
 
 use crate::mesh::InstanceRaw;
-use crate::texture::{MaterialId, TextureId};
-use crate::world::{EntityId, World};
+use crate::texture::{MaterialId, TextureId, WaterMaterialId};
+use crate::world::{EntityId, SurfaceMaterialRef, World};
 use clipmap::ClipmapRenderer;
 use gpu_mesh::GpuMesh;
 use pipeline::{create_pipelines, Pipelines, Uniforms};
@@ -15,6 +16,9 @@ use std::collections::HashMap;
 use terrain_pipeline::{
     build_terrain_material, create_terrain_pipelines, upload_texture, GpuTerrainMaterial,
     GpuTexture, TerrainPipelines,
+};
+use water_pipeline::{
+    build_water_material, create_water_pipelines, GpuWaterMaterial, WaterPipelines,
 };
 use winit::dpi::PhysicalSize;
 
@@ -25,6 +29,7 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     pipelines: Pipelines,
     terrain: TerrainPipelines,
+    water: WaterPipelines,
     skinned: SkinnedPipelines,
     clipmap: Option<ClipmapRenderer>,
     depth_view: wgpu::TextureView,
@@ -33,6 +38,7 @@ pub struct Renderer {
     gpu_skinned: HashMap<EntityId, GpuSkinnedEntity>,
     gpu_textures: HashMap<TextureId, GpuTexture>,
     gpu_materials: HashMap<MaterialId, GpuTerrainMaterial>,
+    gpu_water_materials: HashMap<WaterMaterialId, GpuWaterMaterial>,
     /// Origin the terrain material phases were last written for.
     terrain_origin: crate::space::RenderOrigin,
     size: PhysicalSize<u32>,
@@ -102,6 +108,7 @@ impl Renderer {
 
         let pipelines = create_pipelines(&device, format);
         let terrain = create_terrain_pipelines(&device, format, &pipelines.bind_layout);
+        let water = create_water_pipelines(&device, format, &pipelines.bind_layout);
         let skinned = create_skinned_pipelines(&device, format, &pipelines.bind_layout);
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
 
@@ -112,6 +119,7 @@ impl Renderer {
             config,
             pipelines,
             terrain,
+            water,
             skinned,
             clipmap: None,
             depth_view,
@@ -120,6 +128,7 @@ impl Renderer {
             gpu_skinned: HashMap::new(),
             gpu_textures: HashMap::new(),
             gpu_materials: HashMap::new(),
+            gpu_water_materials: HashMap::new(),
             terrain_origin: crate::space::RenderOrigin::default(),
             size,
         }
@@ -177,15 +186,24 @@ impl Renderer {
         self.gpu_meshes.retain(|id, _| live.contains(id));
 
         for (id, entity) in world.entities() {
-            let instances: Vec<InstanceRaw> = if entity.instances.is_empty() {
-                vec![InstanceRaw::from_matrix(entity.transform)]
-            } else {
+            let instances: Vec<InstanceRaw> = if entity.instanced {
                 entity
                     .instances
                     .iter()
                     .map(|m| InstanceRaw::from_matrix(entity.transform * *m))
                     .collect()
+            } else {
+                vec![InstanceRaw::from_matrix(entity.transform)]
             };
+            // An empty instance buffer cannot be created, so an instanced entity
+            // with nothing placed either drops to a zero draw or stays unuploaded
+            // until it has work.
+            if instances.is_empty() {
+                if let Some(gpu) = self.gpu_meshes.get_mut(&id) {
+                    gpu.clear_instances();
+                }
+                continue;
+            }
 
             match self.gpu_meshes.get_mut(&id) {
                 Some(gpu) => {
@@ -385,7 +403,7 @@ impl Renderer {
             light_color: world.light.color.into(),
             _pad: 0.0,
             eye: [eye.x, eye.y, eye.z],
-            _pad2: 0.0,
+            time: world.time(),
         };
         self.queue.write_buffer(
             &self.pipelines.uniform_buf,
@@ -459,7 +477,7 @@ impl Renderer {
 
         pass.set_pipeline(&self.terrain.opaque);
         for (id, entity) in world.entities() {
-            let Some(mid) = entity.material else {
+            let Some(SurfaceMaterialRef::Terrain(mid)) = entity.material else {
                 continue;
             };
             let Some(gpu) = self.gpu_meshes.get(&id) else {
@@ -496,7 +514,10 @@ impl Renderer {
         pass.set_bind_group(0, &self.pipelines.bind_group, &[]);
 
         pass.set_pipeline(&self.pipelines.transparent);
-        for (id, _entity) in world.entities() {
+        for (id, entity) in world.entities() {
+            if matches!(entity.material, Some(SurfaceMaterialRef::Water(_))) {
+                continue;
+            }
             let Some(gpu) = self.gpu_meshes.get(&id) else {
                 continue;
             };
@@ -513,7 +534,31 @@ impl Renderer {
             );
         }
 
-        // Translucent water after meshes so the walker can occlude shorelines.
+        // Water sheets last, so everything standing in them is already in the
+        // colour buffer to blend against.
+        pass.set_pipeline(&self.water.blend);
+        for (id, entity) in world.entities() {
+            let Some(SurfaceMaterialRef::Water(mid)) = entity.material else {
+                continue;
+            };
+            let Some(gpu) = self.gpu_meshes.get(&id) else {
+                continue;
+            };
+            let Some(mat) = self.gpu_water_materials.get(&mid) else {
+                continue;
+            };
+            pass.set_bind_group(1, &mat.bind_group, &[]);
+            pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
+            pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
+            pass.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(
+                gpu.opaque_index_count as u32..gpu.index_count as u32,
+                0,
+                0..gpu.instance_count as u32,
+            );
+        }
+
+        // Translucent clipmap water after meshes so the walker can occlude shorelines.
         if let Some(clip) = self.clipmap.as_ref() {
             clip.draw_water(&mut pass);
         }
@@ -563,11 +608,29 @@ impl Renderer {
         self.gpu_materials
             .retain(|id, _| world.materials().contains_key(id));
 
+        for (id, mat) in world.water_materials() {
+            if self.gpu_water_materials.contains_key(id) {
+                continue;
+            }
+            let gpu = build_water_material(
+                &self.device,
+                &self.water.mat_bind_layout,
+                &mat.desc,
+                world.render_origin(),
+            );
+            self.gpu_water_materials.insert(*id, gpu);
+        }
+        self.gpu_water_materials
+            .retain(|id, _| world.water_materials().contains_key(id));
+
         // Rebase moved render space under the terrain; re-phase the tiling so
-        // the ground texture stays locked to world coordinates.
+        // the ground texture and the waves stay locked to world coordinates.
         if world.render_origin() != self.terrain_origin {
             self.terrain_origin = world.render_origin();
             for mat in self.gpu_materials.values() {
+                mat.write_origin(&self.queue, self.terrain_origin);
+            }
+            for mat in self.gpu_water_materials.values() {
                 mat.write_origin(&self.queue, self.terrain_origin);
             }
         }

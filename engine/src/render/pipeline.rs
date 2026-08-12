@@ -10,7 +10,8 @@ pub struct Uniforms {
     pub light_color: [f32; 3],
     pub _pad: f32,
     pub eye: [f32; 3],
-    pub _pad2: f32,
+    /// Seconds since start, for materials that animate.
+    pub time: f32,
 }
 
 const SHADER: &str = r#"
@@ -21,7 +22,7 @@ struct Uniforms {
     light_color: vec3<f32>,
     _pad: f32,
     eye: vec3<f32>,
-    _pad2: f32,
+    time: f32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -61,9 +62,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.world_n);
     let l = normalize(u.light_dir);
     let ndl = max(dot(n, l), 0.0);
-    // Soft wrap lighting — enough contrast for smooth heightfields to read as hills.
+    // Soft wrap lighting — enough contrast for smooth heightfields to read as
+    // hills. Sky and sun share one budget, so raising ambient fills the shadows
+    // instead of blowing out everything the sun already reaches.
     let wrap = ndl * 0.65 + 0.35;
-    let lit = in.color.rgb * (u.ambient + wrap * wrap * u.light_color);
+    let lit = in.color.rgb * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color);
     // Soft fresnel rim for translucent surfaces (keep grazing alpha modest so
     // water stays see-through from typical third-person angles).
     var alpha = in.color.a;
@@ -101,7 +104,7 @@ pub fn create_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> P
             light_color: [1.0, 1.0, 1.0],
             _pad: 0.0,
             eye: [0.0, 0.0, 0.0],
-            _pad2: 0.0,
+            time: 0.0,
         }),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });

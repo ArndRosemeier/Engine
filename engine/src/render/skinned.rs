@@ -58,7 +58,7 @@ struct Uniforms {
     light_color: vec3<f32>,
     _pad: f32,
     eye: vec3<f32>,
-    _pad2: f32,
+    time: f32,
 };
 
 struct Joints {

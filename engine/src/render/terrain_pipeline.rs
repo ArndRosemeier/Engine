@@ -45,7 +45,7 @@ struct Uniforms {
     light_color: vec3<f32>,
     _pad: f32,
     eye: vec3<f32>,
-    _pad2: f32,
+    time: f32,
 };
 
 struct TerrainParams {
@@ -95,10 +95,18 @@ fn vs_main(v: VsIn) -> VsOut {
     return out;
 }
 
+/// Three octaves of the same tile, plus macro variation.
+///
+/// One tiling texture repeats visibly within a few metres. Adding a far
+/// coarser sample of the same image both fills in large-scale shape and, used
+/// as a brightness modulator, breaks the grid the eye would otherwise lock on.
 fn sample_albedo(tex: texture_2d<f32>, uv: vec2<f32>) -> vec3<f32> {
-    let a = textureSample(tex, tex_sampler, uv).rgb;
-    let b = textureSample(tex, tex_sampler, uv * 3.7 + vec2<f32>(0.17, 0.31)).rgb;
-    return a * 0.72 + b * 0.28;
+    let base = textureSample(tex, tex_sampler, uv).rgb;
+    let fine = textureSample(tex, tex_sampler, uv * 3.7 + vec2<f32>(0.17, 0.31)).rgb;
+    let wide = textureSample(tex, tex_sampler, uv * 0.137 + vec2<f32>(0.61, 0.44)).rgb;
+    let c = base * 0.64 + fine * 0.24 + wide * 0.12;
+    let macro_luma = dot(wide, vec3<f32>(0.299, 0.587, 0.114));
+    return c * (0.86 + 0.26 * macro_luma);
 }
 
 @fragment
@@ -113,7 +121,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let rock = sample_albedo(rock_tex, uv * 0.85);
 
     let slope = 1.0 - clamp(n.y, 0.0, 1.0);
-    let rock_w = smoothstep(tp.rock_slope_start, tp.rock_slope_end, slope);
+    // Wobble the slope threshold with the ground itself, so the rock line is a
+    // ragged edge instead of a contour drawn around the hill.
+    let edge = (dot(rock, vec3<f32>(0.333, 0.333, 0.333)) - 0.35) * 0.22;
+    let rock_w = smoothstep(tp.rock_slope_start, tp.rock_slope_end, slope + edge);
     let h = in.world_p.y - tp.sea_surface_z;
     let sand_w = (1.0 - smoothstep(0.0, tp.sand_height_band, h)) * (1.0 - rock_w);
     let grass_w = max(1.0 - rock_w - sand_w, 0.0);
@@ -131,7 +142,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let l = normalize(u.light_dir);
     let ndl = max(dot(n, l), 0.0);
     let wrap = ndl * 0.65 + 0.35;
-    let lit = albedo * (u.ambient + wrap * wrap * u.light_color);
+    let lit = albedo * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color);
     return vec4<f32>(lit, 1.0);
 }
 "#;

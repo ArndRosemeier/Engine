@@ -42,6 +42,11 @@ impl GpuMesh {
         }
     }
 
+    /// Draw nothing without touching the (non-empty) instance buffer.
+    pub fn clear_instances(&mut self) {
+        self.instance_count = 0;
+    }
+
     pub fn update_instances(
         &mut self,
         device: &wgpu::Device,

@@ -9,6 +9,17 @@ use crate::world::Frame;
 use glam::Vec3;
 use std::path::PathBuf;
 
+/// An opaque one-metre floor patch, for tests that only need some geometry.
+fn unit_quad() -> Mesh {
+    let mut m = Mesh::new();
+    let a = m.add_point((0.0, 0.0, 0.0)).unwrap();
+    let b = m.add_point((1.0, 0.0, 0.0)).unwrap();
+    let c = m.add_point((1.0, 0.0, 1.0)).unwrap();
+    let d = m.add_point((0.0, 0.0, 1.0)).unwrap();
+    m.add_face(&[a, b, c, d]).unwrap();
+    m
+}
+
 #[test]
 fn mesh_quad_builds_two_triangles() {
     let mut m = Mesh::new();
@@ -490,11 +501,113 @@ fn terrain_texture_phase_is_continuous_across_rebase() {
 }
 
 #[test]
-fn color_rgb_bytes() {
+fn a_scatter_layer_reuses_its_mesh_when_the_placements_change() {
+    use crate::world::World;
+
+    let mut world = World::new();
+    let id = world.spawn_instanced(unit_quad());
+    assert_eq!(world.entity(id).unwrap().instances.len(), 0);
+
+    let places: Vec<Place> = (0..3)
+        .map(|i| Place::new(i as f32 * 2.0, 0.0, 0.0))
+        .collect();
+    world.set_instances(id, &places).unwrap();
+    assert_eq!(world.entity(id).unwrap().instances.len(), 3);
+
+    // Emptying the set hides the layer instead of dropping it back to one copy
+    // sitting at the origin.
+    world.set_instances(id, &[]).unwrap();
+    let e = world.entity(id).unwrap();
+    assert!(e.instanced && e.instances.is_empty());
+}
+
+#[test]
+fn placing_instances_on_a_plain_entity_is_an_error() {
+    use crate::world::World;
+
+    let mut world = World::new();
+    let id = world.spawn(unit_quad());
+    assert!(world
+        .set_instances(id, &[Place::new(1.0, 0.0, 0.0)])
+        .is_err());
+}
+
+#[test]
+fn a_translucent_chunk_layer_becomes_water_and_an_opaque_one_ground() {
+    use crate::color::rgba;
+    use crate::space::{ChunkCoord, ChunkId, ChunkLayer, GlobalXZ};
+    use crate::texture::{TerrainAlbedo, TerrainMaterialDesc, WaterMaterialDesc};
+    use crate::world::{SurfaceMaterialRef, World};
+
+    let mut world = World::new();
+    let grass = world
+        .create_terrain_albedo(TerrainAlbedo::Grass, 16, 1)
+        .unwrap();
+    let sand = world
+        .create_terrain_albedo(TerrainAlbedo::Sand, 16, 2)
+        .unwrap();
+    let rock = world
+        .create_terrain_albedo(TerrainAlbedo::Rock, 16, 3)
+        .unwrap();
+    let ground = world
+        .create_terrain_material(TerrainMaterialDesc {
+            grass,
+            sand,
+            rock,
+            ..TerrainMaterialDesc::default()
+        })
+        .unwrap();
+    let water = world
+        .create_water_material(WaterMaterialDesc::default())
+        .unwrap();
+    world.set_default_terrain_material(Some(ground));
+    world.set_default_water_material(Some(water));
+
+    let anchor = GlobalXZ::at(0.0, 0.0).with_height(0.0).unwrap();
+    let coord = ChunkCoord::new(0, 0);
+
+    let land = world
+        .set_anchored_chunk(
+            ChunkId::new(coord, ChunkLayer::Land),
+            anchor,
+            unit_quad().build(),
+        )
+        .unwrap();
+    let mut sheet = Mesh::new();
+    let a = sheet.add_point((0.0, 0.0, 0.0)).unwrap();
+    let b = sheet.add_point((1.0, 0.0, 0.0)).unwrap();
+    let c = sheet.add_point((0.0, 0.0, 1.0)).unwrap();
+    for p in [a, b, c] {
+        sheet.set_point_color(p, rgba(40, 110, 160, 128)).unwrap();
+    }
+    sheet.add_triangle(a, b, c).unwrap();
+    let wet = world
+        .set_anchored_chunk(
+            ChunkId::new(coord, ChunkLayer::Water),
+            anchor,
+            sheet.build(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        world.entity(land).unwrap().material(),
+        Some(SurfaceMaterialRef::Terrain(ground))
+    );
+    assert_eq!(
+        world.entity(wet).unwrap().material(),
+        Some(SurfaceMaterialRef::Water(water))
+    );
+}
+
+#[test]
+fn byte_colours_arrive_in_the_same_space_textures_do() {
+    // Bytes are authored in sRGB; the GPU shades in linear. Handing 128 through
+    // as 0.502 made every hand-written colour render pale and washed out next
+    // to a texture, which the hardware decodes properly.
     let c = rgb(255, 0, 128);
     assert!((c.r - 1.0).abs() < 1e-5);
     assert!(c.g.abs() < 1e-5);
-    assert!((c.b - 128.0 / 255.0).abs() < 1e-5);
+    assert!((c.b - 0.2158).abs() < 1e-3, "mid grey came out {}", c.b);
     assert!((c.a - 1.0).abs() < 1e-5);
 }
 

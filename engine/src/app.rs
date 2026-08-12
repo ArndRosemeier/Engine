@@ -217,6 +217,7 @@ impl ApplicationHandler for App {
                 let wants_lock = self.world.pointer_lock();
                 self.apply_pointer_lock(&window, wants_lock);
 
+                self.world.set_time(time);
                 self.world.tick_animations(dt);
 
                 if let Some(renderer) = self.renderer.as_mut() {
