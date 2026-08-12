@@ -48,11 +48,48 @@ impl Default for Light {
     }
 }
 
+/// A procedural sky dome: zenith, horizon, ground, and a sun.
+///
+/// Drawn as a fullscreen pass behind every surface. Pair the horizon colour
+/// with [`Haze::color`] so distant ground dissolves into the same band the
+/// sky is already showing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sky {
+    pub zenith: Color,
+    pub horizon: Color,
+    pub ground: Color,
+    pub sun_color: Color,
+    /// Angular radius of the sun disc, in degrees.
+    pub sun_size_degrees: f32,
+    /// How far the sun's bloom reaches past the disc, in degrees.
+    pub sun_bloom_degrees: f32,
+    /// 0 is an even wash from zenith to horizon; 1 pins colour at the horizon.
+    pub curve: f32,
+}
+
+impl Sky {
+    /// Cool daylight: deeper blue above, a pale warm horizon, a low sun.
+    ///
+    /// Colours follow the title vista: slate zenith, gold near the sun, a
+    /// long bloom rather than a hard disc.
+    pub fn daylight() -> Self {
+        Self {
+            zenith: Color::rgb(74, 114, 168),
+            horizon: Color::rgb(214, 208, 198),
+            ground: Color::rgb(98, 108, 112),
+            sun_color: Color::rgb(255, 244, 220),
+            sun_size_degrees: 1.4,
+            sun_bloom_degrees: 22.0,
+            curve: 0.22,
+        }
+    }
+}
+
 /// The air between the eye and the world.
 ///
 /// Distance haze is what stops a view distance from reading as an edge: with
 /// it, ground far enough away is indistinguishable from sky, so the last chunk
-/// dissolves instead of ending. Set the colour to the sky the game draws.
+/// dissolves instead of ending. Set the colour to the sky's horizon.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Haze {
     pub color: Color,
@@ -192,6 +229,8 @@ pub struct World {
     view_distance: f32,
     /// The air, when the game wants any.
     haze: Option<Haze>,
+    /// Procedural sky behind the scene, when the game wants one.
+    sky: Option<Sky>,
 }
 
 impl Default for World {
@@ -223,6 +262,7 @@ impl Default for World {
             time: 0.0,
             view_distance: Camera::default().far,
             haze: None,
+            sky: None,
         }
     }
 }
@@ -480,6 +520,24 @@ impl World {
         Ok(())
     }
 
+    /// Look from one global point at another. A title shot, a cutscene, anything
+    /// that is not a walker.
+    pub fn look_at_global(
+        &mut self,
+        eye: GlobalPosition,
+        target: GlobalPosition,
+    ) -> EngineResult<()> {
+        let e = self.to_render(eye)?;
+        let t = self.to_render(target)?;
+        let fov = self.camera.fov_y_degrees;
+        let near = self.camera.near;
+        self.camera = Camera::look_at(e, t);
+        self.camera.fov_y_degrees = fov;
+        self.camera.near = near;
+        self.camera.far = self.view_distance;
+        Ok(())
+    }
+
     /// Follow camera around an anchored target, expressed globally.
     pub fn look_follow_global(
         &mut self,
@@ -590,6 +648,15 @@ impl World {
 
     pub fn haze(&self) -> Option<Haze> {
         self.haze
+    }
+
+    /// Put a sky behind the scene, or fall back to [`Self::clear_color`].
+    pub fn set_sky(&mut self, sky: Option<Sky>) {
+        self.sky = sky;
+    }
+
+    pub fn sky(&self) -> Option<Sky> {
+        self.sky
     }
 
     pub fn entity(&self, id: EntityId) -> EngineResult<&Entity> {

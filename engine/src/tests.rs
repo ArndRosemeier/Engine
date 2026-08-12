@@ -660,3 +660,25 @@ fn transparent_faces_draw_after_opaque() {
     assert!(built.colors[0].w > 0.99);
     assert!(built.colors[3].w < 0.99);
 }
+
+#[test]
+fn a_daylight_sky_is_deeper_at_the_zenith() {
+    let sky = crate::Sky::daylight();
+    let zenith = sky.zenith.r + sky.zenith.g + sky.zenith.b;
+    let horizon = sky.horizon.r + sky.horizon.g + sky.horizon.b;
+    assert!(
+        horizon > zenith,
+        "horizon {horizon} should be paler than zenith {zenith}"
+    );
+    assert!(sky.zenith.b > sky.zenith.r);
+    assert!(sky.sun_size_degrees > 0.0);
+    assert!(sky.sun_bloom_degrees > sky.sun_size_degrees);
+}
+
+#[test]
+fn a_world_can_wear_a_sky() {
+    let mut world = crate::World::default();
+    assert!(world.sky().is_none());
+    world.set_sky(Some(crate::Sky::daylight()));
+    assert_eq!(world.sky(), Some(crate::Sky::daylight()));
+}

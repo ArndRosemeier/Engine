@@ -3,6 +3,7 @@ mod frustum;
 mod gpu_mesh;
 mod pipeline;
 mod skinned;
+mod sky_pipeline;
 mod terrain_pipeline;
 mod water_pipeline;
 
@@ -14,6 +15,7 @@ use frustum::Frustum;
 use gpu_mesh::GpuMesh;
 use pipeline::{create_pipelines, Pipelines, Uniforms};
 use skinned::{create_skinned_pipelines, GpuSkinnedEntity, SkinnedPipelines};
+use sky_pipeline::{create_sky_pipelines, SkyPipelines, SkyUniforms};
 use std::collections::HashMap;
 use terrain_pipeline::{
     build_terrain_material, create_terrain_pipelines, upload_texture, GpuTerrainMaterial,
@@ -41,6 +43,7 @@ pub struct Renderer {
     terrain: TerrainPipelines,
     water: WaterPipelines,
     skinned: SkinnedPipelines,
+    sky: SkyPipelines,
     clipmap: Option<ClipmapRenderer>,
     depth_view: wgpu::TextureView,
     depth_texture: wgpu::Texture,
@@ -122,6 +125,7 @@ impl Renderer {
         let terrain = create_terrain_pipelines(&device, format, &pipelines.bind_layout);
         let water = create_water_pipelines(&device, format, &pipelines.bind_layout);
         let skinned = create_skinned_pipelines(&device, format, &pipelines.bind_layout);
+        let sky = create_sky_pipelines(&device, format);
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
 
         Self {
@@ -133,6 +137,7 @@ impl Renderer {
             terrain,
             water,
             skinned,
+            sky,
             clipmap: None,
             depth_view,
             depth_texture,
@@ -432,6 +437,11 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&uniforms),
         );
+        if let Some(sky) = world.sky() {
+            let sky_u = SkyUniforms::from_scene(&sky, &world.camera, &world.light, aspect, world.time());
+            self.queue
+                .write_buffer(&self.sky.uniform_buf, 0, bytemuck::bytes_of(&sky_u));
+        }
     }
 
     fn encode_pass(
@@ -467,6 +477,12 @@ impl Renderer {
             occlusion_query_set: None,
             timestamp_writes: None,
         });
+
+        if world.sky().is_some() {
+            pass.set_pipeline(&self.sky.pipeline);
+            pass.set_bind_group(0, &self.sky.bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
 
         // GPU procgen terrain (depth-writing land), then entity meshes.
         if let Some(clip) = self.clipmap.as_ref() {
