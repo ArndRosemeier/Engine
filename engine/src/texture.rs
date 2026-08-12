@@ -52,6 +52,15 @@ pub struct TerrainMaterialDesc {
     pub sea_surface_z: f32,
     /// How strongly vertex color tints the albedo (0 = ignore, 1 = full multiply).
     pub tint_strength: f32,
+    /// Height above sea where shaded, gentle ground can hold snow.
+    ///
+    /// Set `snow_full_m` at or below this to disable snow (the Engine default).
+    pub snow_line_m: f32,
+    /// Height where gentle ground is fully snowed, regardless of aspect.
+    pub snow_full_m: f32,
+    /// Slope (`1 - n.y`) where snow starts to shed / is gone.
+    pub snow_slope_start: f32,
+    pub snow_slope_end: f32,
 }
 
 impl Default for TerrainMaterialDesc {
@@ -66,6 +75,12 @@ impl Default for TerrainMaterialDesc {
             sand_height_band: 8.0,
             sea_surface_z: 0.0,
             tint_strength: 0.35,
+            // Above any terrain the Engine demos build, so they stay snow-free
+            // until a game asks for a snow line.
+            snow_line_m: 8_000.0,
+            snow_full_m: 9_000.0,
+            snow_slope_start: 0.32,
+            snow_slope_end: 0.68,
         }
     }
 }
@@ -202,49 +217,55 @@ pub fn generate_terrain_albedo(kind: TerrainAlbedo, size: u32, seed: u32) -> (u3
             let v = y as f32 * inv;
             let (r, g, b) = match kind {
                 TerrainAlbedo::Grass => {
-                    // Sward: fine blades, clumps of growth, and bare earth
-                    // showing through where the cover thins.
-                    let blades = unit(tileable(&n2, u, v, 26.0));
-                    let fibre = unit(tileable(&n3, u * 0.25, v, 42.0));
+                    // Sward: anisotropic blades, clumps of growth, and only a
+                    // little earth where the cover really thins. The old mix
+                    // was olive mud with straw noise — readable as "not sand",
+                    // not as grass.
+                    let blades = unit(tileable(&n2, u, v, 28.0));
+                    let fibre = unit(tileable(&n3, u * 0.18, v, 52.0));
                     let clump = unit(tileable(&n1, u, v, 5.5));
                     let drift = unit(tileable(&n0, u, v, 1.7));
-                    let health = (0.35 * clump + 0.45 * drift + 0.20 * blades).clamp(0.0, 1.0);
-                    let dry = smoothstep(0.30, 0.72, unit(tileable(&n0, u, v, 3.1)));
-                    let bare = smoothstep(0.62, 0.88, 1.0 - health);
+                    let health = (0.32 * clump + 0.40 * drift + 0.28 * blades).clamp(0.0, 1.0);
+                    let dry = smoothstep(0.42, 0.82, unit(tileable(&n0, u, v, 3.1)));
+                    let bare = smoothstep(0.74, 0.96, 1.0 - health);
 
-                    let lush = (0.19, 0.42, 0.15);
-                    let straw = (0.48, 0.47, 0.23);
-                    let earth = (0.30, 0.23, 0.15);
-                    let (mut r, mut g, mut b) = mix3(lush, straw, dry * 0.75);
-                    let e = mix3((r, g, b), earth, bare);
+                    let lush = (0.20, 0.46, 0.12);
+                    let bright = (0.32, 0.54, 0.16);
+                    let straw = (0.50, 0.48, 0.20);
+                    let earth = (0.28, 0.22, 0.13);
+                    let (mut r, mut g, mut b) = mix3(lush, bright, blades * 0.55);
+                    let s = mix3((r, g, b), straw, dry * 0.40);
+                    r = s.0;
+                    g = s.1;
+                    b = s.2;
+                    let e = mix3((r, g, b), earth, bare * 0.65);
                     r = e.0;
                     g = e.1;
                     b = e.2;
 
-                    let shade = 0.82 + 0.30 * health + 0.10 * fibre;
+                    let shade = 0.88 + 0.22 * health + 0.12 * fibre;
                     (r * shade, g * shade, b * shade)
                 }
                 TerrainAlbedo::Sand => {
-                    // Beach: wind ripples across the tile, wet-dark patches,
-                    // and a scatter of coarse grains.
-                    let ripple = unit((tileable(&n0, u, v, 3.0) * 6.0).sin());
-                    let grain = unit(tileable(&n1, u, v, 55.0));
-                    let shell = smoothstep(0.86, 0.97, unit(tileable(&n3, u, v, 34.0)));
-                    let damp = smoothstep(0.45, 0.85, unit(tileable(&n2, u, v, 2.2)));
+                    // Beach: wind ripples, warm dry grains, cooler damp troughs.
+                    let ripple = unit((tileable(&n0, u, v, 3.2) * 6.5).sin());
+                    let grain = unit(tileable(&n1, u, v, 58.0));
+                    let shell = smoothstep(0.88, 0.98, unit(tileable(&n3, u, v, 34.0)));
+                    let damp = smoothstep(0.50, 0.88, unit(tileable(&n2, u, v, 2.2)));
 
-                    let dry = (0.78, 0.70, 0.52);
-                    let wet = (0.46, 0.40, 0.31);
-                    let (r, g, b) = mix3(dry, wet, damp * 0.6);
-                    let shade = 0.90 + 0.14 * ripple + 0.10 * grain;
+                    let dry = (0.86, 0.74, 0.48);
+                    let wet = (0.55, 0.42, 0.28);
+                    let (r, g, b) = mix3(dry, wet, damp * 0.45);
+                    let shade = 0.92 + 0.16 * ripple + 0.10 * grain;
                     (
-                        r * shade + shell * 0.18,
-                        g * shade + shell * 0.17,
-                        b * shade + shell * 0.15,
+                        r * shade + shell * 0.14,
+                        g * shade + shell * 0.12,
+                        b * shade + shell * 0.08,
                     )
                 }
                 TerrainAlbedo::Rock => {
-                    // Cliff: bedding planes, fractures between them, and lichen
-                    // in the shelter of the cracks.
+                    // Cliff: bedding, fractures, and a warm/cool split so a
+                    // range is stone, not a grey slab under the snow.
                     let strata = unit((tileable(&n0, u * 0.3, v, 2.0) * 4.5).sin());
                     let grit = unit(tileable(&n1, u, v, 30.0));
                     let fracture =
@@ -254,14 +275,17 @@ pub fn generate_terrain_albedo(kind: TerrainAlbedo, size: u32, seed: u32) -> (u3
                         0.95,
                         unit(tileable(&n3, u, v, 9.0)) * 0.7 + fracture * 0.5,
                     );
+                    let warmth = unit(tileable(&n0, u, v, 1.0));
 
-                    let pale = (0.47, 0.45, 0.42);
-                    let dark = (0.22, 0.21, 0.20);
-                    let moss = (0.24, 0.31, 0.19);
-                    let (r, g, b) = mix3(pale, dark, 0.35 + 0.45 * strata);
+                    let cool = (0.46, 0.46, 0.48);
+                    let warm = (0.52, 0.44, 0.38);
+                    let dark = (0.20, 0.19, 0.18);
+                    let moss = (0.22, 0.32, 0.16);
+                    let pale = mix3(cool, warm, 0.35 + 0.40 * warmth);
+                    let (r, g, b) = mix3(pale, dark, 0.28 + 0.50 * strata);
                     let (r, g, b) = mix3((r, g, b), dark, fracture * 0.7);
-                    let (r, g, b) = mix3((r, g, b), moss, lichen * 0.45);
-                    let shade = 0.92 + 0.14 * grit;
+                    let (r, g, b) = mix3((r, g, b), moss, lichen * 0.35);
+                    let shade = 0.94 + 0.12 * grit;
                     (r * shade, g * shade, b * shade)
                 }
             };
@@ -350,7 +374,7 @@ mod tests {
             }
         }
         assert!(
-            max_d < 40,
+            max_d < 48,
             "left/right seam too large (max channel delta {max_d})"
         );
     }

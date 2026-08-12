@@ -18,6 +18,10 @@ pub struct TerrainParams {
     /// is continuous across a floating-origin rebase.
     pub world_offset_x: f32,
     pub world_offset_z: f32,
+    pub snow_line_m: f32,
+    pub snow_full_m: f32,
+    pub snow_slope_start: f32,
+    pub snow_slope_end: f32,
 }
 
 impl TerrainParams {
@@ -33,6 +37,10 @@ impl TerrainParams {
             tint_strength: d.tint_strength.clamp(0.0, 1.0),
             world_offset_x: phase[0],
             world_offset_z: phase[1],
+            snow_line_m: d.snow_line_m,
+            snow_full_m: d.snow_full_m.max(d.snow_line_m + 1.0),
+            snow_slope_start: d.snow_slope_start,
+            snow_slope_end: d.snow_slope_end.max(d.snow_slope_start + 0.01),
         }
     }
 }
@@ -47,6 +55,10 @@ struct TerrainParams {
     tint_strength: f32,
     world_offset_x: f32,
     world_offset_z: f32,
+    snow_line_m: f32,
+    snow_full_m: f32,
+    snow_slope_start: f32,
+    snow_slope_end: f32,
 };
 
 @group(1) @binding(0) var grass_tex: texture_2d<f32>;
@@ -95,7 +107,12 @@ fn sample_albedo(tex: texture_2d<f32>, uv: vec2<f32>) -> vec3<f32> {
     let wide = textureSample(tex, tex_sampler, uv * 0.137 + vec2<f32>(0.61, 0.44)).rgb;
     let c = base * 0.64 + fine * 0.24 + wide * 0.12;
     let macro_luma = dot(wide, vec3<f32>(0.299, 0.587, 0.114));
-    return c * (0.86 + 0.26 * macro_luma);
+    return c * (0.90 + 0.20 * macro_luma);
+}
+
+fn saturate_rgb(c: vec3<f32>, amount: f32) -> vec3<f32> {
+    let luma = dot(c, vec3<f32>(0.299, 0.587, 0.114));
+    return mix(vec3<f32>(luma), c, amount);
 }
 
 @fragment
@@ -105,16 +122,25 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // camera-local frame: rebasing must not slide the ground texture.
     let world_xz = in.world_p.xz + vec2<f32>(tp.world_offset_x, tp.world_offset_z);
     let uv = world_xz / tp.metres_per_tile;
-    let grass = sample_albedo(grass_tex, uv);
+    // Grass tiles are olive-noise; a little extra chroma stops the sward
+    // reading as dirt from a few hundred metres.
+    let grass = saturate_rgb(sample_albedo(grass_tex, uv), 1.18);
     let sand = sample_albedo(sand_tex, uv * 1.15);
     let rock = sample_albedo(rock_tex, uv * 0.85);
 
     let slope = 1.0 - clamp(n.y, 0.0, 1.0);
     // Wobble the slope threshold with the ground itself, so the rock line is a
     // ragged edge instead of a contour drawn around the hill.
-    let edge = (dot(rock, vec3<f32>(0.333, 0.333, 0.333)) - 0.35) * 0.22;
-    let rock_w = smoothstep(tp.rock_slope_start, tp.rock_slope_end, slope + edge);
+    let rock_luma = dot(rock, vec3<f32>(0.333, 0.333, 0.333));
+    let edge = (rock_luma - 0.35) * 0.22;
     let h = in.world_p.y - tp.sea_surface_z;
+    // High ground bares at gentler slopes, so an upland is rock and snow rather
+    // than the same grass as the valley. The snow line is the game's; when it
+    // sits above any real terrain this mix is a no-op.
+    let alpine = smoothstep(tp.snow_line_m * 0.55, tp.snow_line_m, h);
+    let rock_lo = mix(tp.rock_slope_start, tp.rock_slope_start * 0.50, alpine);
+    let rock_hi = mix(tp.rock_slope_end, max(rock_lo + 0.08, tp.rock_slope_end * 0.72), alpine);
+    let rock_w = smoothstep(rock_lo, rock_hi, slope + edge);
     let sand_w = (1.0 - smoothstep(0.0, tp.sand_height_band, h)) * (1.0 - rock_w);
     let grass_w = max(1.0 - rock_w - sand_w, 0.0);
 
@@ -126,13 +152,37 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let bed_w = clamp(1.0 - in.color.a, 0.0, 1.0);
     let mud = sand * vec3<f32>(0.42, 0.34, 0.26) + rock * vec3<f32>(0.18, 0.14, 0.12);
     albedo = mix(albedo, mud, bed_w);
-    // Mild vertex-color tint (biome / slope authoring) — skip on beds.
+    // Mild vertex-color tint (biome / slope authoring) — skip on beds, and
+    // never on snow: multiplying grey rock into the cap is what made it ash.
     albedo = mix(albedo, albedo * in.color.rgb, tp.tint_strength * (1.0 - bed_w));
 
     let l = normalize(u.light_dir);
     let ndl = max(dot(n, l), 0.0);
     let wrap = ndl * 0.65 + 0.35;
-    let lit = albedo * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color);
+    // Shade is sky, not mud. A north slope of grass or snow has to stay the
+    // colour it is, just dimmer.
+    let hemi = mix(vec3<f32>(0.42, 0.40, 0.38), vec3<f32>(0.72, 0.80, 0.96), n.y * 0.5 + 0.5);
+    let ground_light = u.ambient * hemi + wrap * wrap * (1.0 - u.ambient) * u.light_color;
+    var lit = albedo * ground_light;
+
+    // Snow is its own material. Mixing a grey into dark rock and lighting the
+    // result as dirt is why caps read as ash; light a bright, sky-filled
+    // surface and composite that.
+    let shade = 1.0 - ndl;
+    let line = mix(tp.snow_line_m + 160.0, tp.snow_line_m - 240.0, shade);
+    var snow_w = smoothstep(line, tp.snow_full_m, h);
+    let cling = 1.0 - smoothstep(tp.snow_slope_start, tp.snow_slope_end, slope);
+    snow_w = snow_w * cling + snow_w * snow_w * 0.22 * (1.0 - cling);
+    snow_w *= 0.82 + 0.28 * (rock_luma - 0.28);
+    snow_w = clamp(snow_w, 0.0, 1.0) * (1.0 - bed_w);
+    let view = normalize(u.eye - in.world_p);
+    let half_v = normalize(l + view);
+    let sparkle = pow(max(dot(n, half_v), 0.0), 48.0) * (0.12 + 0.28 * rock_luma);
+    let snow_sky = mix(vec3<f32>(0.70, 0.80, 0.96), vec3<f32>(1.04, 1.04, 1.06), ndl);
+    let snow_light = u.ambient * 1.2 * snow_sky + wrap * (1.0 - u.ambient * 0.45) * u.light_color;
+    let snow_lit = vec3<f32>(0.93, 0.96, 0.99) * snow_light + sparkle * u.light_color;
+    lit = mix(lit, snow_lit, snow_w);
+
     return vec4<f32>(haze(lit, in.world_p), 1.0);
 }
 "#;

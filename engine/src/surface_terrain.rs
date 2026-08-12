@@ -44,9 +44,9 @@ impl Default for SurfaceMeshStyle {
         Self {
             chunk_cells: 48,
             cell_size: 4.0,
-            grass: rgb(92, 140, 70),
-            sand: rgb(194, 178, 128),
-            rock: rgb(120, 118, 112),
+            grass: rgb(78, 150, 52),
+            sand: rgb(214, 186, 112),
+            rock: rgb(142, 132, 118),
             bed: rgba(110, 125, 95, 0),
             rock_height: 400.0,
         }
