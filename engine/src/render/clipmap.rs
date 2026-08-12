@@ -368,9 +368,9 @@ impl ClipmapRenderer {
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
+                format: super::DEPTH_FORMAT,
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_compare: super::DEPTH_COMPARE,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -409,9 +409,9 @@ impl ClipmapRenderer {
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
+                format: super::DEPTH_FORMAT,
                 depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_compare: super::DEPTH_COMPARE,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

@@ -48,6 +48,49 @@ impl Default for Light {
     }
 }
 
+/// The air between the eye and the world.
+///
+/// Distance haze is what stops a view distance from reading as an edge: with
+/// it, ground far enough away is indistinguishable from sky, so the last chunk
+/// dissolves instead of ending. Set the colour to the sky the game draws.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Haze {
+    pub color: Color,
+    /// Distance at which a surface has all but dissolved into `color`.
+    pub visibility_m: f32,
+    /// Altitude the air starts to thin from.
+    pub base_y: f32,
+    /// Every this many metres above `base_y`, the air is `1/e` as thick, so
+    /// mountains stand clear of the murk their valleys are buried in.
+    pub height_m: f32,
+}
+
+impl Haze {
+    /// Air of `visibility_m`, thinning over a kilometre of altitude.
+    pub fn new(color: Color, visibility_m: f32) -> Self {
+        Self {
+            color,
+            visibility_m,
+            base_y: 0.0,
+            height_m: 1_000.0,
+        }
+    }
+
+    pub fn thinning_above(mut self, base_y: f32, height_m: f32) -> Self {
+        self.base_y = base_y;
+        self.height_m = height_m;
+        self
+    }
+
+    /// Reciprocal metres for the shader, from the visibility distance.
+    ///
+    /// `1 - exp(-(d·k)²)` reaches 0.98 at `d = visibility`, which is where a
+    /// surface stops being distinguishable from the sky behind it.
+    pub fn density(&self) -> f32 {
+        1.978 / self.visibility_m.max(1.0)
+    }
+}
+
 /// Which world-space material an entity is drawn with, if any.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SurfaceMaterialRef {
@@ -145,6 +188,10 @@ pub struct World {
     pointer_lock: bool,
     /// Seconds since start, for animated materials.
     time: f32,
+    /// How far the camera helpers put their far plane.
+    view_distance: f32,
+    /// The air, when the game wants any.
+    haze: Option<Haze>,
 }
 
 impl Default for World {
@@ -174,6 +221,8 @@ impl Default for World {
             default_water_material: None,
             pointer_lock: false,
             time: 0.0,
+            view_distance: Camera::default().far,
+            haze: None,
         }
     }
 }
@@ -405,6 +454,12 @@ impl World {
     /// While locked, look deltas arrive as [`crate::input::Input::mouse_delta`]
     /// and the UI no longer steals input on hover. Release it before showing a
     /// menu or map the player has to click.
+    ///
+    /// This is a request, not a guarantee: the window drops the grab when it
+    /// loses focus and when Escape is pressed, and clears the flag with it, so
+    /// a game that wants the pointer back has to ask again. Nothing should pin
+    /// the cursor without the player having asked for it — a grab taken on
+    /// startup follows them out of the window.
     pub fn set_pointer_lock(&mut self, locked: bool) {
         self.pointer_lock = locked;
     }
@@ -515,6 +570,7 @@ impl World {
         pitch_degrees: f32,
     ) {
         self.camera = Camera::orbit(target, distance, yaw_degrees, pitch_degrees);
+        self.camera.far = self.view_distance;
     }
 
     /// Set sun direction (need not be normalized) and ambient 0..1.
@@ -525,6 +581,15 @@ impl World {
 
     pub fn set_clear_color(&mut self, color: Color) {
         self.clear_color = color;
+    }
+
+    /// Put air in the scene, or take it out again with `None`.
+    pub fn set_haze(&mut self, haze: Option<Haze>) {
+        self.haze = haze;
+    }
+
+    pub fn haze(&self) -> Option<Haze> {
+        self.haze
     }
 
     pub fn entity(&self, id: EntityId) -> EngineResult<&Entity> {
@@ -774,6 +839,7 @@ impl World {
         pitch_degrees: f32,
     ) {
         self.camera = Camera::first_person(eye, yaw_degrees, pitch_degrees);
+        self.camera.far = self.view_distance;
     }
 
     /// Third-person follow camera (yaw in degrees, 0 = +Z).
@@ -785,6 +851,28 @@ impl World {
         height: f32,
     ) {
         self.camera = Camera::follow(target, yaw_degrees, distance, height);
+        self.camera.far = self.view_distance;
+    }
+
+    /// How far the camera helpers may see, in metres.
+    ///
+    /// The helpers rebuild the camera every frame, so a game that reaches into
+    /// `world.camera.far` has it overwritten on the next one; this is the knob
+    /// that survives. Depth is reversed, so a horizon-scale distance costs
+    /// nothing in precision.
+    pub fn set_view_distance(&mut self, metres: f32) -> EngineResult<()> {
+        if !(metres.is_finite() && metres > self.camera.near) {
+            return Err(EngineError::InvalidValue(format!(
+                "view distance must be finite and beyond the near plane, got {metres}"
+            )));
+        }
+        self.view_distance = metres;
+        self.camera.far = metres;
+        Ok(())
+    }
+
+    pub fn view_distance(&self) -> f32 {
+        self.view_distance
     }
 
     /// Enable GPU procedural terrain (clipmap). Replaces any previous proc terrain.

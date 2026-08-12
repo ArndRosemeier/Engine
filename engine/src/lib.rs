@@ -39,7 +39,7 @@ pub use chunk_stream::{ChunkBuilder, ChunkPayload, ChunkStream};
 pub use color::{rgb, rgba, Color};
 pub use contact::ContactGrid;
 pub use error::{EngineError, EngineResult};
-pub use input::{Input, Key};
+pub use input::{Input, Key, MouseButton};
 pub use landscape::Landscape;
 pub use limits::EngineLimits;
 pub use mesh::{Mesh, PointId, Shape};
@@ -47,7 +47,7 @@ pub use model::{scatter_places, Model};
 pub use place::{GlobalPlace, Place};
 pub use proc_terrain::{demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain};
 pub use space::{
-    ChunkCoord, ChunkId, ChunkLayer, ChunkSpan, GlobalPosition, GlobalXZ, RenderOrigin,
+    ChunkCoord, ChunkId, ChunkLayer, ChunkLevel, ChunkSpan, GlobalPosition, GlobalXZ, RenderOrigin,
     RenderPosition,
 };
 pub use surface::{SurfaceSample, SurfaceSource, WaterSurface, WATER_CLEARANCE};
@@ -59,7 +59,7 @@ pub use texture::{
 };
 pub use ui::{egui, UiFrame, UiPanel};
 pub use water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
-pub use world::{AnimatedEntity, EntityId, Frame, Light, World};
+pub use world::{AnimatedEntity, EntityId, Frame, Haze, Light, World};
 
 /// Entry point matching the planned `Engine::run` shape.
 pub struct Engine;

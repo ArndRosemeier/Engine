@@ -2,3 +2,6 @@
 /demoshots/
 **/*.rs.bk
 .DS_Store
+__pycache__/
+# run_examples.py smoke captures
+examples/**/smoke.png

@@ -11,7 +11,9 @@
 use crate::contact::ContactGrid;
 use crate::error::{EngineError, EngineResult};
 use crate::mesh::BuiltMesh;
-use crate::space::{ChunkCoord, ChunkId, ChunkLayer, ChunkSpan, GlobalPosition, GlobalXZ};
+use crate::space::{
+    ChunkCoord, ChunkId, ChunkLayer, ChunkLevel, ChunkSpan, GlobalPosition, GlobalXZ,
+};
 use crate::world::World;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -92,10 +94,13 @@ struct JobResult {
 pub struct ChunkStream {
     builder: Arc<dyn ChunkBuilder>,
     span: ChunkSpan,
+    level: ChunkLevel,
     /// Async load ring (Chebyshev radius in chunks).
     pub radius: i32,
     /// Ring that must be resident before gameplay may start or continue.
     pub required_radius: i32,
+    /// Chunks this close to the focus are left to a finer tier.
+    pub hole_radius: Option<i32>,
     /// Extra chunks kept beyond the load ring before unloading (hysteresis).
     pub keep_margin: i32,
     pub max_jobs_per_frame: usize,
@@ -115,8 +120,10 @@ impl ChunkStream {
         Self {
             builder,
             span,
+            level: ChunkLevel::FINEST,
             radius: radius.max(1),
             required_radius: 1,
+            hole_radius: None,
             keep_margin: 1,
             max_jobs_per_frame: 6,
             max_uploads_per_frame: 2,
@@ -131,6 +138,26 @@ impl ChunkStream {
 
     pub fn with_required_radius(mut self, radius: i32) -> Self {
         self.required_radius = radius.max(0);
+        self
+    }
+
+    /// Which detail tier these chunks belong to.
+    ///
+    /// Two streams at the same level would fight over the same chunk ids in
+    /// the world, so every tier past the finest needs its own.
+    pub fn with_level(mut self, level: ChunkLevel) -> Self {
+        self.level = level;
+        self
+    }
+
+    /// Leave the chunks within `radius` of the focus to a finer tier.
+    ///
+    /// The hole must be no larger than what that finer tier is *guaranteed* to
+    /// cover, or the ground will be missing between them: a hole of radius `h`
+    /// reaches `(h + 1) × span` from the player in the worst case, since the
+    /// player may stand at the edge of their own chunk.
+    pub fn with_hole_radius(mut self, radius: i32) -> Self {
+        self.hole_radius = Some(radius.max(0));
         self
     }
 
@@ -181,9 +208,10 @@ impl ChunkStream {
     /// world change can never upload geometry from the world we just left.
     pub fn reset(&mut self, world: &mut World) {
         self.epoch += 1;
+        let level = self.level;
         for (coord, chunk) in self.resident.drain() {
             for layer in chunk.layers {
-                world.clear_anchored_chunk(ChunkId::new(coord, layer));
+                world.clear_anchored_chunk(ChunkId::at_level(coord, layer, level));
             }
         }
         self.inflight.clear();
@@ -196,7 +224,12 @@ impl ChunkStream {
         let center = self.focus_chunk(focus);
         Self::ring(center, self.required_radius)
             .into_iter()
+            .filter(|c| !self.in_hole(*c, center))
             .all(|c| self.resident.contains_key(&c))
+    }
+
+    pub fn level(&self) -> ChunkLevel {
+        self.level
     }
 
     /// Height of the drawn land surface under `p`, if that chunk is resident.
@@ -206,6 +239,11 @@ impl ChunkStream {
             .get(&coord)
             .and_then(|c| c.contact.as_ref())
             .and_then(|g| g.height_at(p))
+    }
+
+    fn in_hole(&self, coord: ChunkCoord, center: ChunkCoord) -> bool {
+        self.hole_radius
+            .is_some_and(|hole| coord.ring_distance(center) <= hole)
     }
 
     fn ring(center: ChunkCoord, radius: i32) -> Vec<ChunkCoord> {
@@ -227,9 +265,15 @@ impl ChunkStream {
         priority: Option<GlobalXZ>,
     ) -> EngineResult<()> {
         let center = self.focus_chunk(focus);
-        let load: HashSet<ChunkCoord> = Self::ring(center, self.radius).into_iter().collect();
+        let load: HashSet<ChunkCoord> = Self::ring(center, self.radius)
+            .into_iter()
+            .filter(|c| !self.in_hole(*c, center))
+            .collect();
+        // The hole has no hysteresis: a chunk that the finer tier has taken
+        // over must go now, or two resolutions of the same ground fight.
         let keep: HashSet<ChunkCoord> = Self::ring(center, self.radius + self.keep_margin)
             .into_iter()
+            .filter(|c| !self.in_hole(*c, center))
             .collect();
 
         let stale: Vec<ChunkCoord> = self
@@ -261,7 +305,7 @@ impl ChunkStream {
         let center = self.focus_chunk(focus);
         let mut missing: Vec<ChunkCoord> = Self::ring(center, self.required_radius)
             .into_iter()
-            .filter(|c| !self.resident.contains_key(c))
+            .filter(|c| !self.resident.contains_key(c) && !self.in_hole(*c, center))
             .collect();
         missing.sort_by_key(|c| (c.walk_distance(center), c.x, c.z));
         for coord in missing {
@@ -277,7 +321,7 @@ impl ChunkStream {
     fn unload(&mut self, world: &mut World, coord: ChunkCoord) {
         if let Some(chunk) = self.resident.remove(&coord) {
             for layer in chunk.layers {
-                world.clear_anchored_chunk(ChunkId::new(coord, layer));
+                world.clear_anchored_chunk(ChunkId::at_level(coord, layer, self.level));
             }
         }
     }
@@ -359,7 +403,7 @@ impl ChunkStream {
         } = payload;
         let mut installed = Vec::with_capacity(layers.len());
         for (layer, mesh) in layers {
-            world.set_anchored_chunk(ChunkId::new(coord, layer), anchor, mesh)?;
+            world.set_anchored_chunk(ChunkId::at_level(coord, layer, self.level), anchor, mesh)?;
             installed.push(layer);
         }
         self.resident.insert(
@@ -420,6 +464,7 @@ impl std::fmt::Debug for ChunkStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChunkStream")
             .field("span_m", &self.span.metres())
+            .field("level", &self.level.index())
             .field("radius", &self.radius)
             .field("required_radius", &self.required_radius)
             .field("resident", &self.resident.len())
@@ -598,6 +643,61 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(saw_error, "a failing bake must not be silently dropped");
+    }
+
+    #[test]
+    fn a_coarse_tier_leaves_a_hole_and_does_not_evict_the_fine_one() {
+        // Both tiers address chunk (0, 0). Before the level was part of the
+        // identity, whichever uploaded last owned the entity and the other
+        // tier's ground vanished.
+        let mut world = World::new();
+        let mut fine = ChunkStream::new(Arc::new(FlatBuilder::new()), 1)
+            .with_required_radius(1)
+            .with_budgets(8, 8);
+        let coarse = ChunkLevel::new(1);
+        let mut wide = ChunkStream::new(Arc::new(FlatBuilder::new()), 2)
+            .with_level(coarse)
+            .with_required_radius(0)
+            .with_hole_radius(0)
+            .with_budgets(8, 8);
+
+        let focus = GlobalXZ::at(50.0, 50.0);
+        pump(&mut fine, &mut world, focus, 400);
+        pump(&mut wide, &mut world, focus, 400);
+
+        let home = ChunkCoord::new(0, 0);
+        assert!(world.has_anchored_chunk(ChunkId::new(home, ChunkLayer::Land)));
+        assert!(
+            !world.has_anchored_chunk(ChunkId::at_level(home, ChunkLayer::Land, coarse)),
+            "the chunk under the player belongs to the fine tier"
+        );
+        assert!(
+            world.has_anchored_chunk(ChunkId::at_level(
+                ChunkCoord::new(2, 0),
+                ChunkLayer::Land,
+                coarse
+            )),
+            "the coarse tier still covers everything outside its hole"
+        );
+        assert_eq!(wide.resident_count(), 24, "5x5 minus the hole");
+    }
+
+    #[test]
+    fn walking_out_of_a_hole_fills_it_in() {
+        // The hole follows the player, so ground the fine tier has left behind
+        // has to come back at the coarse resolution rather than stay missing.
+        let mut world = World::new();
+        let mut wide = ChunkStream::new(Arc::new(FlatBuilder::new()), 2)
+            .with_level(ChunkLevel::new(1))
+            .with_required_radius(0)
+            .with_hole_radius(0)
+            .with_budgets(8, 8);
+        pump(&mut wide, &mut world, GlobalXZ::at(50.0, 50.0), 400);
+        assert!(!wide.is_resident(ChunkCoord::new(0, 0)));
+
+        pump(&mut wide, &mut world, GlobalXZ::at(250.0, 50.0), 400);
+        assert!(wide.is_resident(ChunkCoord::new(0, 0)));
+        assert!(!wide.is_resident(ChunkCoord::new(2, 0)));
     }
 
     #[test]

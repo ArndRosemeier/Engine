@@ -52,16 +52,6 @@ impl WaterParams {
 }
 
 const SHADER: &str = r#"
-struct Uniforms {
-    view_proj: mat4x4<f32>,
-    light_dir: vec3<f32>,
-    ambient: f32,
-    light_color: vec3<f32>,
-    _pad: f32,
-    eye: vec3<f32>,
-    time: f32,
-};
-
 struct WaterParams {
     shallow: vec3<f32>,
     depth_scale_m: f32,
@@ -75,7 +65,6 @@ struct WaterParams {
     world_offset_z: f32,
 };
 
-@group(0) @binding(0) var<uniform> u: Uniforms;
 @group(1) @binding(0) var<uniform> wp: WaterParams;
 
 struct VsIn {
@@ -171,7 +160,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var alpha = mix(0.55, 0.96, deepness);
     alpha = max(alpha, foam * 0.85);
     alpha = clamp(alpha + fresnel * 0.20, 0.0, 1.0);
-    return vec4<f32>(color, alpha);
+    // Distant sea has to close up as well as pale out, or the haze shows the
+    // land through a sheet that should already be sky.
+    let air = haze(color, in.world_p);
+    alpha = mix(alpha, 1.0, clamp(length(air - color) * 2.0, 0.0, 1.0));
+    return vec4<f32>(air, alpha);
 }
 "#;
 
@@ -200,7 +193,7 @@ pub fn create_water_pipelines(
 ) -> WaterPipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("water-shader"),
-        source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        source: wgpu::ShaderSource::Wgsl(format!("{}{SHADER}", super::pipeline::SCENE_WGSL).into()),
     });
 
     let mat_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -250,9 +243,9 @@ pub fn create_water_pipelines(
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
+            format: super::DEPTH_FORMAT,
             depth_write_enabled: false,
-            depth_compare: wgpu::CompareFunction::Less,
+            depth_compare: super::DEPTH_COMPARE,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),

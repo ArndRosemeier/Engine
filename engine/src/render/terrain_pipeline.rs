@@ -38,16 +38,6 @@ impl TerrainParams {
 }
 
 const SHADER: &str = r#"
-struct Uniforms {
-    view_proj: mat4x4<f32>,
-    light_dir: vec3<f32>,
-    ambient: f32,
-    light_color: vec3<f32>,
-    _pad: f32,
-    eye: vec3<f32>,
-    time: f32,
-};
-
 struct TerrainParams {
     metres_per_tile: f32,
     rock_slope_start: f32,
@@ -59,7 +49,6 @@ struct TerrainParams {
     world_offset_z: f32,
 };
 
-@group(0) @binding(0) var<uniform> u: Uniforms;
 @group(1) @binding(0) var grass_tex: texture_2d<f32>;
 @group(1) @binding(1) var sand_tex: texture_2d<f32>;
 @group(1) @binding(2) var rock_tex: texture_2d<f32>;
@@ -143,7 +132,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ndl = max(dot(n, l), 0.0);
     let wrap = ndl * 0.65 + 0.35;
     let lit = albedo * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color);
-    return vec4<f32>(lit, 1.0);
+    return vec4<f32>(haze(lit, in.world_p), 1.0);
 }
 "#;
 
@@ -183,7 +172,7 @@ pub fn create_terrain_pipelines(
 ) -> TerrainPipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("terrain-lit-shader"),
-        source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        source: wgpu::ShaderSource::Wgsl(format!("{}{SHADER}", super::pipeline::SCENE_WGSL).into()),
     });
 
     let mat_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -243,9 +232,9 @@ pub fn create_terrain_pipelines(
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
+            format: super::DEPTH_FORMAT,
             depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::Less,
+            depth_compare: super::DEPTH_COMPARE,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),

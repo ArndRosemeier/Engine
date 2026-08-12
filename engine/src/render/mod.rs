@@ -1,4 +1,5 @@
 mod clipmap;
+mod frustum;
 mod gpu_mesh;
 mod pipeline;
 mod skinned;
@@ -9,6 +10,7 @@ use crate::mesh::InstanceRaw;
 use crate::texture::{MaterialId, TextureId, WaterMaterialId};
 use crate::world::{EntityId, SurfaceMaterialRef, World};
 use clipmap::ClipmapRenderer;
+use frustum::Frustum;
 use gpu_mesh::GpuMesh;
 use pipeline::{create_pipelines, Pipelines, Uniforms};
 use skinned::{create_skinned_pipelines, GpuSkinnedEntity, SkinnedPipelines};
@@ -21,6 +23,14 @@ use water_pipeline::{
     build_water_material, create_water_pipelines, GpuWaterMaterial, WaterPipelines,
 };
 use winit::dpi::PhysicalSize;
+
+/// Depth is reversed: near is 1, far is 0, so a horizon-scale far plane keeps
+/// its precision (see [`crate::camera::Camera::projection_matrix`]). Every
+/// pipeline compares this way and the pass clears to [`DEPTH_CLEAR`]; the
+/// three must agree or the world draws inside out.
+pub(crate) const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::Greater;
+pub(crate) const DEPTH_CLEAR: f32 = 0.0;
+pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
@@ -41,6 +51,8 @@ pub struct Renderer {
     gpu_water_materials: HashMap<WaterMaterialId, GpuWaterMaterial>,
     /// Origin the terrain material phases were last written for.
     terrain_origin: crate::space::RenderOrigin,
+    /// This frame's view volume, for skipping draws outside it.
+    frustum: Frustum,
     size: PhysicalSize<u32>,
 }
 
@@ -130,6 +142,7 @@ impl Renderer {
             gpu_materials: HashMap::new(),
             gpu_water_materials: HashMap::new(),
             terrain_origin: crate::space::RenderOrigin::default(),
+            frustum: Frustum::default(),
             size,
         }
     }
@@ -391,11 +404,13 @@ impl Renderer {
             .unwrap_or_else(|e| panic!("failed to save screenshot: {e}"));
     }
 
-    fn write_uniforms(&self, world: &World) {
+    fn write_uniforms(&mut self, world: &World) {
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         let vp = world.camera.view_projection(aspect);
+        self.frustum = Frustum::from_view_projection(vp);
         let light_dir = world.light.direction.normalize_or_zero();
         let eye = world.camera.eye;
+        let haze = world.haze();
         let uniforms = Uniforms {
             view_proj: vp.to_cols_array_2d(),
             light_dir: [light_dir.x, light_dir.y, light_dir.z],
@@ -404,6 +419,13 @@ impl Renderer {
             _pad: 0.0,
             eye: [eye.x, eye.y, eye.z],
             time: world.time(),
+            haze_color: haze
+                .map(|h| h.color.to_vec3().into())
+                .unwrap_or([1.0, 1.0, 1.0]),
+            haze_density: haze.map(|h| h.density()).unwrap_or(0.0),
+            haze_height_m: haze.map(|h| h.height_m.max(1.0)).unwrap_or(1.0),
+            haze_base_y: haze.map(|h| h.base_y).unwrap_or(0.0),
+            _pad2: [0.0, 0.0],
         };
         self.queue.write_buffer(
             &self.pipelines.uniform_buf,
@@ -437,7 +459,7 @@ impl Renderer {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.depth_view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: wgpu::LoadOp::Clear(DEPTH_CLEAR),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -462,7 +484,7 @@ impl Renderer {
             let Some(gpu) = self.gpu_meshes.get(&id) else {
                 continue;
             };
-            if gpu.opaque_index_count == 0 {
+            if gpu.opaque_index_count == 0 || self.hidden(gpu) {
                 continue;
             }
             pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
@@ -486,7 +508,7 @@ impl Renderer {
             let Some(mat) = self.gpu_materials.get(&mid) else {
                 continue;
             };
-            if gpu.opaque_index_count == 0 {
+            if gpu.opaque_index_count == 0 || self.hidden(gpu) {
                 continue;
             }
             pass.set_bind_group(1, &mat.bind_group, &[]);
@@ -521,7 +543,7 @@ impl Renderer {
             let Some(gpu) = self.gpu_meshes.get(&id) else {
                 continue;
             };
-            if gpu.opaque_index_count >= gpu.index_count {
+            if gpu.opaque_index_count >= gpu.index_count || self.hidden(gpu) {
                 continue;
             }
             pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
@@ -547,6 +569,9 @@ impl Renderer {
             let Some(mat) = self.gpu_water_materials.get(&mid) else {
                 continue;
             };
+            if self.hidden(gpu) {
+                continue;
+            }
             pass.set_bind_group(1, &mat.bind_group, &[]);
             pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
             pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
@@ -566,6 +591,18 @@ impl Renderer {
 
     pub fn size(&self) -> PhysicalSize<u32> {
         self.size
+    }
+
+    /// Whether this mesh is entirely outside the view volume.
+    ///
+    /// A mesh with no bounds has nothing to draw, and one whose sphere reaches
+    /// into the frustum is kept: the test errs towards drawing, because the
+    /// cost of a wrong answer is terrain blinking out at the edge of the screen.
+    fn hidden(&self, gpu: &GpuMesh) -> bool {
+        match gpu.bounds {
+            Some(bounds) => !self.frustum.intersects(bounds),
+            None => true,
+        }
     }
 
     fn sync_textures_and_materials(&mut self, world: &World) {
@@ -652,7 +689,7 @@ fn create_depth(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Depth32Float,
+        format: DEPTH_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });

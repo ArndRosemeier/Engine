@@ -46,11 +46,32 @@ impl Key {
     }
 }
 
+/// Mouse buttons the engine tracks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+impl MouseButton {
+    fn from_winit(button: winit::event::MouseButton) -> Option<Self> {
+        Some(match button {
+            winit::event::MouseButton::Left => Self::Left,
+            winit::event::MouseButton::Right => Self::Right,
+            winit::event::MouseButton::Middle => Self::Middle,
+            _ => return None,
+        })
+    }
+}
+
 /// Snapshot of held keys, fresh presses, and mouse motion for one frame.
 #[derive(Clone, Debug, Default)]
 pub struct Input {
     down: HashSet<Key>,
     pressed: HashSet<Key>,
+    mouse_down: HashSet<MouseButton>,
+    mouse_clicked: HashSet<MouseButton>,
     mouse_delta: Vec2,
 }
 
@@ -74,15 +95,37 @@ impl Input {
         }
     }
 
+    pub(crate) fn set_mouse_button(&mut self, button: winit::event::MouseButton, pressed: bool) {
+        let Some(button) = MouseButton::from_winit(button) else {
+            return;
+        };
+        if pressed {
+            self.mouse_down.insert(button);
+            self.mouse_clicked.insert(button);
+        } else {
+            self.mouse_down.remove(&button);
+        }
+    }
+
     /// Accumulate raw pointer motion (device counts, not window pixels).
     pub(crate) fn add_mouse_delta(&mut self, dx: f32, dy: f32) {
         self.mouse_delta += Vec2::new(dx, dy);
     }
 
-    /// Forget one frame's edges and motion, keeping which keys are held.
+    /// Forget one frame's edges and motion, keeping what is still held.
     pub(crate) fn end_frame(&mut self) {
         self.pressed.clear();
+        self.mouse_clicked.clear();
         self.mouse_delta = Vec2::ZERO;
+    }
+
+    pub fn mouse_down(&self, button: MouseButton) -> bool {
+        self.mouse_down.contains(&button)
+    }
+
+    /// True on the frame a mouse button goes down.
+    pub fn mouse_clicked(&self, button: MouseButton) -> bool {
+        self.mouse_clicked.contains(&button)
     }
 
     pub fn down(&self, key: Key) -> bool {

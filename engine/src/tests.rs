@@ -600,6 +600,24 @@ fn a_translucent_chunk_layer_becomes_water_and_an_opaque_one_ground() {
 }
 
 #[test]
+fn a_mouse_click_is_an_edge_and_holding_is_not() {
+    use crate::input::MouseButton;
+    let mut input = crate::input::Input::new();
+    input.set_mouse_button(winit::event::MouseButton::Left, true);
+    assert!(input.mouse_clicked(MouseButton::Left));
+    assert!(input.mouse_down(MouseButton::Left));
+
+    // Holding the button must not read as a click again, or a game that
+    // captures the pointer on click would fight the player every frame.
+    input.end_frame();
+    assert!(!input.mouse_clicked(MouseButton::Left));
+    assert!(input.mouse_down(MouseButton::Left));
+
+    input.set_mouse_button(winit::event::MouseButton::Left, false);
+    assert!(!input.mouse_down(MouseButton::Left));
+}
+
+#[test]
 fn byte_colours_arrive_in_the_same_space_textures_do() {
     // Bytes are authored in sRGB; the GPU shades in linear. Handing 128 through
     // as 0.502 made every hand-written colour render pale and washed out next

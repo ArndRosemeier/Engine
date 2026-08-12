@@ -1,4 +1,6 @@
+use super::frustum::Bounds;
 use crate::mesh::{BuiltMesh, InstanceRaw};
+use glam::Mat4;
 use wgpu::util::DeviceExt;
 
 pub struct GpuMesh {
@@ -10,6 +12,10 @@ pub struct GpuMesh {
     pub vertex_count: usize,
     pub instance_count: usize,
     pub instance_capacity: usize,
+    /// Local sphere around the vertices, before any instance transform.
+    local_bounds: Option<Bounds>,
+    /// What the draw actually covers: the local sphere at every instance.
+    pub bounds: Option<Bounds>,
 }
 
 impl GpuMesh {
@@ -30,6 +36,7 @@ impl GpuMesh {
             contents: bytemuck::cast_slice(instances),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
+        let local_bounds = Bounds::around(&mesh.positions);
         Self {
             vertex_buf,
             index_buf,
@@ -39,12 +46,15 @@ impl GpuMesh {
             vertex_count: mesh.positions.len(),
             instance_count: instances.len(),
             instance_capacity: instances.len().max(1),
+            local_bounds,
+            bounds: spread_over(local_bounds, instances),
         }
     }
 
     /// Draw nothing without touching the (non-empty) instance buffer.
     pub fn clear_instances(&mut self) {
         self.instance_count = 0;
+        self.bounds = None;
     }
 
     pub fn update_instances(
@@ -64,5 +74,15 @@ impl GpuMesh {
             queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
         }
         self.instance_count = instances.len();
+        self.bounds = spread_over(self.local_bounds, instances);
     }
+}
+
+/// The sphere covering `local` placed at each instance.
+fn spread_over(local: Option<Bounds>, instances: &[InstanceRaw]) -> Option<Bounds> {
+    let local = local?;
+    instances
+        .iter()
+        .map(|i| local.transformed(Mat4::from_cols_array_2d(&i.model)))
+        .reduce(Bounds::union)
 }

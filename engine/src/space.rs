@@ -284,16 +284,47 @@ impl ChunkLayer {
     pub const ALL: [ChunkLayer; 2] = [ChunkLayer::Land, ChunkLayer::Water];
 }
 
+/// Which detail tier a streamed chunk belongs to.
+///
+/// Tiers each have their own span, so chunk `(0, 0)` at 200 m and chunk
+/// `(0, 0)` at 8 km are different places. Without the level in the identity a
+/// coarse tier would evict a fine chunk that merely shares its address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ChunkLevel(u8);
+
+impl ChunkLevel {
+    /// The detailed tier the player walks on.
+    pub const FINEST: Self = Self(0);
+
+    pub fn new(level: u8) -> Self {
+        Self(level)
+    }
+
+    pub fn index(self) -> u8 {
+        self.0
+    }
+}
+
 /// Identity of one uploaded chunk mesh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ChunkId {
     pub coord: ChunkCoord,
     pub layer: ChunkLayer,
+    pub level: ChunkLevel,
 }
 
 impl ChunkId {
+    /// A chunk of the finest tier.
     pub fn new(coord: ChunkCoord, layer: ChunkLayer) -> Self {
-        Self { coord, layer }
+        Self::at_level(coord, layer, ChunkLevel::FINEST)
+    }
+
+    pub fn at_level(coord: ChunkCoord, layer: ChunkLayer, level: ChunkLevel) -> Self {
+        Self {
+            coord,
+            layer,
+            level,
+        }
     }
 }
 

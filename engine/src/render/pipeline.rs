@@ -12,9 +12,41 @@ pub struct Uniforms {
     pub eye: [f32; 3],
     /// Seconds since start, for materials that animate.
     pub time: f32,
+    pub haze_color: [f32; 3],
+    /// Reciprocal metres; zero switches the haze off.
+    pub haze_density: f32,
+    /// Scale height of the air: every this many metres it thins by `1/e`.
+    pub haze_height_m: f32,
+    /// Altitude the air starts thinning from.
+    pub haze_base_y: f32,
+    pub _pad2: [f32; 2],
 }
 
-const SHADER: &str = r#"
+impl Uniforms {
+    pub fn empty() -> Self {
+        Self {
+            view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            light_dir: [0.0, 1.0, 0.0],
+            ambient: 0.2,
+            light_color: [1.0, 1.0, 1.0],
+            _pad: 0.0,
+            eye: [0.0, 0.0, 0.0],
+            time: 0.0,
+            haze_color: [1.0, 1.0, 1.0],
+            haze_density: 0.0,
+            haze_height_m: 1.0,
+            haze_base_y: 0.0,
+            _pad2: [0.0, 0.0],
+        }
+    }
+}
+
+/// Declarations every surface shader shares: the frame uniforms and the air
+/// between the eye and what it is looking at.
+///
+/// One copy, because four shaders drifting apart on the layout of a single
+/// uniform buffer is a class of bug that only shows up as garbage on screen.
+pub const SCENE_WGSL: &str = r#"
 struct Uniforms {
     view_proj: mat4x4<f32>,
     light_dir: vec3<f32>,
@@ -23,10 +55,43 @@ struct Uniforms {
     _pad: f32,
     eye: vec3<f32>,
     time: f32,
+    haze_color: vec3<f32>,
+    haze_density: f32,
+    haze_height_m: f32,
+    haze_base_y: f32,
+    _pad2: vec2<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
+// Fade a surface into the sky by how much air the view ray crossed.
+//
+// Without this the ground simply ends at the last chunk. Air thins with height,
+// so the amount crossed is the integral of exp(-(y - base) / H) along the ray,
+// which has a closed form: a summit looks out over tens of kilometres while the
+// valley below it is milk within five. Taking the density at the midpoint
+// instead — the obvious shortcut — all but switches the haze off as soon as the
+// eye climbs a mountain, and the view from up there is the one that matters.
+fn haze(color: vec3<f32>, world_p: vec3<f32>) -> vec3<f32> {
+    if u.haze_density <= 0.0 {
+        return color;
+    }
+    let d = distance(u.eye, world_p);
+    let h = max(u.haze_height_m, 1.0);
+    let a0 = exp(-max(u.eye.y - u.haze_base_y, 0.0) / h);
+    let a1 = exp(-max(world_p.y - u.haze_base_y, 0.0) / h);
+    let rise = world_p.y - u.eye.y;
+    var air = d * a0;
+    if abs(rise) > 1.0 {
+        air = d * h * (a0 - a1) / rise;
+    }
+    let optical = air * u.haze_density;
+    let f = 1.0 - exp(-optical * optical);
+    return mix(color, u.haze_color, clamp(f, 0.0, 1.0));
+}
+"#;
+
+const SHADER: &str = r#"
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -77,7 +142,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     } else {
         alpha = 1.0;
     }
-    return vec4<f32>(lit, alpha);
+    return vec4<f32>(haze(lit, in.world_p), alpha);
 }
 "#;
 
@@ -92,20 +157,12 @@ pub struct Pipelines {
 pub fn create_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> Pipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("lit-shader"),
-        source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        source: wgpu::ShaderSource::Wgsl(format!("{SCENE_WGSL}{SHADER}").into()),
     });
 
     let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("uniforms"),
-        contents: bytemuck::bytes_of(&Uniforms {
-            view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
-            light_dir: [0.0, 1.0, 0.0],
-            ambient: 0.2,
-            light_color: [1.0, 1.0, 1.0],
-            _pad: 0.0,
-            eye: [0.0, 0.0, 0.0],
-            time: 0.0,
-        }),
+        contents: bytemuck::bytes_of(&Uniforms::empty()),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
@@ -166,9 +223,9 @@ pub fn create_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> P
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
+                    format: super::DEPTH_FORMAT,
                     depth_write_enabled: depth_write,
-                    depth_compare: wgpu::CompareFunction::Less,
+                    depth_compare: super::DEPTH_COMPARE,
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),

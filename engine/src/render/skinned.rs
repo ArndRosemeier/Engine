@@ -51,21 +51,10 @@ impl JointPalette {
 }
 
 const SKINNED_SHADER: &str = r#"
-struct Uniforms {
-    view_proj: mat4x4<f32>,
-    light_dir: vec3<f32>,
-    ambient: f32,
-    light_color: vec3<f32>,
-    _pad: f32,
-    eye: vec3<f32>,
-    time: f32,
-};
-
 struct Joints {
     m: array<mat4x4<f32>, 128>,
 };
 
-@group(0) @binding(0) var<uniform> u: Uniforms;
 @group(1) @binding(0) var<uniform> bones: Joints;
 
 struct VsIn {
@@ -122,7 +111,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let ndl = max(dot(n, l), 0.0);
     let wrap = ndl * 0.5 + 0.5;
     let lit = in.color.rgb * (u.ambient + wrap * wrap * u.light_color);
-    return vec4<f32>(lit, 1.0);
+    return vec4<f32>(haze(lit, in.world_p), 1.0);
 }
 "#;
 
@@ -138,7 +127,9 @@ pub fn create_skinned_pipelines(
 ) -> SkinnedPipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("skinned-shader"),
-        source: wgpu::ShaderSource::Wgsl(SKINNED_SHADER.into()),
+        source: wgpu::ShaderSource::Wgsl(
+            format!("{}{SKINNED_SHADER}", super::pipeline::SCENE_WGSL).into(),
+        ),
     });
 
     let joint_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -200,9 +191,9 @@ pub fn create_skinned_pipelines(
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
+            format: super::DEPTH_FORMAT,
             depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::Less,
+            depth_compare: super::DEPTH_COMPARE,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),

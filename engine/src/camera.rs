@@ -121,8 +121,17 @@ impl Camera {
         Mat4::look_at_rh(self.eye, self.target, self.up)
     }
 
+    /// Perspective projection with **reversed depth**: near maps to 1, far to 0.
+    ///
+    /// Swapping the planes is what makes a horizon-scale `far` usable. A
+    /// conventional mapping spends almost all of a float's precision in the
+    /// first few metres, so at `far = 40 km` distant hills z-fight into mush;
+    /// reversed depth pairs the float's dense range near zero with the far
+    /// distance and holds up over the whole view. The pipelines compare with
+    /// [`wgpu::CompareFunction::Greater`] and the pass clears depth to 0 to
+    /// match — all three have to agree or nothing draws.
     pub fn projection_matrix(&self, aspect: f32) -> Mat4 {
-        Mat4::perspective_rh(self.fov_y_degrees.to_radians(), aspect, self.near, self.far)
+        Mat4::perspective_rh(self.fov_y_degrees.to_radians(), aspect, self.far, self.near)
     }
 
     pub fn view_projection(&self, aspect: f32) -> Mat4 {

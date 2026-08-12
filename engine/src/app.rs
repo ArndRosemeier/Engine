@@ -144,6 +144,18 @@ impl ApplicationHandler for App {
                     self.input.set_key(event.physical_key, pressed);
                 }
             }
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.input
+                    .set_mouse_button(button, state == ElementState::Pressed);
+            }
+            // Whatever the game wanted, a window that is not in front has no
+            // business holding the desktop's pointer.
+            WindowEvent::Focused(false) => {
+                self.world.set_pointer_lock(false);
+                if let Some(window) = self.window.clone() {
+                    self.apply_pointer_lock(&window, false);
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.resize(size);
@@ -209,9 +221,16 @@ impl ApplicationHandler for App {
                 };
                 self.input.end_frame();
 
+                // Escape gives the mouse back before it closes the window: a
+                // player whose cursor is pinned reaches for Escape to get it
+                // out, not to quit.
                 if ui_backend.take_escape_pressed() && !modal_was_open {
-                    event_loop.exit();
-                    return;
+                    if self.world.pointer_lock() {
+                        self.world.set_pointer_lock(false);
+                    } else {
+                        event_loop.exit();
+                        return;
+                    }
                 }
 
                 let wants_lock = self.world.pointer_lock();
