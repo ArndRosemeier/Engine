@@ -126,7 +126,8 @@ impl Mesh {
         Ok(())
     }
 
-    pub(crate) fn albedo(&self) -> Option<&AlbedoMap> {
+    /// Baked albedo, if this mesh carries one. Sampled with the point UVs.
+    pub fn albedo(&self) -> Option<&AlbedoMap> {
         self.albedo.as_ref()
     }
 
