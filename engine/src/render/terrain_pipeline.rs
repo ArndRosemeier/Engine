@@ -71,10 +71,11 @@ struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
-    @location(3) m0: vec4<f32>,
-    @location(4) m1: vec4<f32>,
-    @location(5) m2: vec4<f32>,
-    @location(6) m3: vec4<f32>,
+    @location(3) uv: vec2<f32>,
+    @location(4) m0: vec4<f32>,
+    @location(5) m1: vec4<f32>,
+    @location(6) m2: vec4<f32>,
+    @location(7) m3: vec4<f32>,
 };
 
 struct VsOut {
@@ -189,6 +190,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
 pub struct GpuTexture {
     pub view: wgpu::TextureView,
+    #[allow(dead_code)]
+    pub texture: wgpu::Texture,
     #[allow(dead_code)]
     pub width: u32,
     #[allow(dead_code)]
@@ -369,6 +372,7 @@ pub fn upload_texture(
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     GpuTexture {
         view,
+        texture,
         width,
         height,
     }

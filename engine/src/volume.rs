@@ -331,6 +331,7 @@ impl Volume {
             positions: Vec::new(),
             normals: Vec::new(),
             colors: Vec::new(),
+            uvs: Vec::new(),
             indices: Vec::new(),
             opaque_index_count: 0,
         };

@@ -4,7 +4,7 @@ use crate::color::Color;
 use crate::error::{EngineError, EngineResult};
 use crate::input::Input;
 use crate::limits::EngineLimits;
-use crate::mesh::{BuiltMesh, Mesh};
+use crate::mesh::{AlbedoMap, BuiltMesh, Mesh};
 use crate::place::{GlobalPlace, Place};
 use crate::proc_terrain::{HeightField, ProcTerrain};
 use crate::space::{ChunkId, GlobalPosition, GlobalXZ, RenderOrigin};
@@ -149,6 +149,8 @@ pub struct Entity {
     /// with no instances draws once at `transform`.
     pub(crate) instanced: bool,
     pub(crate) material: Option<SurfaceMaterialRef>,
+    /// Optional baked albedo sampled with mesh UVs. `None` uses a white 1×1.
+    pub(crate) albedo: Option<TextureId>,
 }
 
 impl Entity {
@@ -289,7 +291,10 @@ impl World {
 
     /// Spawn a mesh at a friendly [`Place`].
     pub fn place(&mut self, mesh: Mesh, place: Place) -> EngineResult<EntityId> {
-        Ok(self.spawn_built(mesh.build(), place.to_matrix()))
+        let albedo = mesh.albedo().cloned();
+        let id = self.spawn_built(mesh.build(), place.to_matrix());
+        self.attach_albedo(id, albedo)?;
+        Ok(id)
     }
 
     /// Spawn one mesh at many places (GPU instancing).
@@ -307,7 +312,10 @@ impl World {
             )));
         }
         let instances: Vec<Mat4> = places.into_iter().map(Place::to_matrix).collect();
-        Ok(self.spawn_built_instanced(mesh.build(), instances))
+        let albedo = mesh.albedo().cloned();
+        let id = self.spawn_built_instanced(mesh.build(), instances);
+        self.attach_albedo(id, albedo)?;
+        Ok(id)
     }
 
     /// Spawn an instanced entity that starts with nothing placed.
@@ -315,7 +323,11 @@ impl World {
     /// The mesh is uploaded once; [`Self::set_instances`] then drives where it
     /// appears.
     pub fn spawn_instanced(&mut self, mesh: Mesh) -> EntityId {
-        self.spawn_built_instanced(mesh.build(), Vec::new())
+        let albedo = mesh.albedo().cloned();
+        let id = self.spawn_built_instanced(mesh.build(), Vec::new());
+        self.attach_albedo(id, albedo)
+            .expect("albedo upload at spawn_instanced");
+        id
     }
 
     pub(crate) fn spawn_built(&mut self, mesh: BuiltMesh, transform: Mat4) -> EntityId {
@@ -329,6 +341,7 @@ impl World {
                 instances: Vec::new(),
                 instanced: false,
                 material: None,
+                albedo: None,
             },
         );
         self.order.push(id);
@@ -350,10 +363,23 @@ impl World {
                 instances,
                 instanced: true,
                 material: None,
+                albedo: None,
             },
         );
         self.order.push(id);
         id
+    }
+
+    fn attach_albedo(&mut self, id: EntityId, albedo: Option<AlbedoMap>) -> EngineResult<()> {
+        let Some(map) = albedo else {
+            return Ok(());
+        };
+        let tid = self.create_texture_rgba(map.width, map.height, map.rgba)?;
+        self.entities
+            .get_mut(&id)
+            .expect("entity was just spawned")
+            .albedo = Some(tid);
+        Ok(())
     }
 
     pub fn despawn(&mut self, id: EntityId) {

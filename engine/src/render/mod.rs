@@ -50,6 +50,7 @@ pub struct Renderer {
     gpu_meshes: HashMap<EntityId, GpuMesh>,
     gpu_skinned: HashMap<EntityId, GpuSkinnedEntity>,
     gpu_textures: HashMap<TextureId, GpuTexture>,
+    gpu_mesh_albedo: HashMap<TextureId, wgpu::BindGroup>,
     gpu_materials: HashMap<MaterialId, GpuTerrainMaterial>,
     gpu_water_materials: HashMap<WaterMaterialId, GpuWaterMaterial>,
     /// Origin the terrain material phases were last written for.
@@ -121,7 +122,7 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        let pipelines = create_pipelines(&device, format);
+        let pipelines = create_pipelines(&device, &queue, format);
         let terrain = create_terrain_pipelines(&device, format, &pipelines.bind_layout);
         let water = create_water_pipelines(&device, format, &pipelines.bind_layout);
         let skinned = create_skinned_pipelines(&device, format, &pipelines.bind_layout);
@@ -144,6 +145,7 @@ impl Renderer {
             gpu_meshes: HashMap::new(),
             gpu_skinned: HashMap::new(),
             gpu_textures: HashMap::new(),
+            gpu_mesh_albedo: HashMap::new(),
             gpu_materials: HashMap::new(),
             gpu_water_materials: HashMap::new(),
             terrain_origin: crate::space::RenderOrigin::default(),
@@ -503,6 +505,11 @@ impl Renderer {
             if gpu.opaque_index_count == 0 || self.hidden(gpu) {
                 continue;
             }
+            let albedo = entity
+                .albedo
+                .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
+                .unwrap_or(&self.pipelines.white_albedo);
+            pass.set_bind_group(1, albedo, &[]);
             pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
             pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
             pass.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
@@ -562,6 +569,11 @@ impl Renderer {
             if gpu.opaque_index_count >= gpu.index_count || self.hidden(gpu) {
                 continue;
             }
+            let albedo = entity
+                .albedo
+                .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
+                .unwrap_or(&self.pipelines.white_albedo);
+            pass.set_bind_group(1, albedo, &[]);
             pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
             pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
             pass.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
@@ -630,6 +642,36 @@ impl Renderer {
             self.gpu_textures.insert(*id, gpu);
         }
         self.gpu_textures
+            .retain(|id, _| world.textures().contains_key(id));
+
+        for (_, entity) in world.entities() {
+            let Some(tid) = entity.albedo else {
+                continue;
+            };
+            if self.gpu_mesh_albedo.contains_key(&tid) {
+                continue;
+            }
+            let gpu = self
+                .gpu_textures
+                .get(&tid)
+                .expect("mesh albedo missing on GPU");
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("mesh-albedo"),
+                layout: &self.pipelines.albedo_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&gpu.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.pipelines.albedo_sampler),
+                    },
+                ],
+            });
+            self.gpu_mesh_albedo.insert(tid, bind);
+        }
+        self.gpu_mesh_albedo
             .retain(|id, _| world.textures().contains_key(id));
 
         for (id, mat) in world.materials() {

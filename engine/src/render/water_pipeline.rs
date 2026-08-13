@@ -71,10 +71,11 @@ struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
-    @location(3) m0: vec4<f32>,
-    @location(4) m1: vec4<f32>,
-    @location(5) m2: vec4<f32>,
-    @location(6) m3: vec4<f32>,
+    @location(3) uv: vec2<f32>,
+    @location(4) m0: vec4<f32>,
+    @location(5) m1: vec4<f32>,
+    @location(6) m2: vec4<f32>,
+    @location(7) m3: vec4<f32>,
 };
 
 struct VsOut {

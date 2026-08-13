@@ -14,6 +14,14 @@ impl PointId {
     }
 }
 
+/// Baked RGBA8 albedo sampled in the fragment shader.
+#[derive(Clone, Debug)]
+pub struct AlbedoMap {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 /// A CPU-side triangle mesh built from human-friendly points and faces.
 ///
 /// Faces may be triangles or quads. Call [`Mesh::build`] (or let the world do it
@@ -24,7 +32,9 @@ impl PointId {
 pub struct Mesh {
     points: Vec<Vec3>,
     colors: Vec<Vec4>,
+    uvs: Vec<[f32; 2]>,
     faces: Vec<Vec<PointId>>,
+    albedo: Option<AlbedoMap>,
 }
 
 /// Friendly alias — same type as [`Mesh`].
@@ -61,6 +71,7 @@ impl Mesh {
         let id = PointId(self.points.len() as u32);
         self.points.push(position);
         self.colors.push(Color::rgb(191, 191, 191).to_vec4());
+        self.uvs.push([0.0, 0.0]);
         Ok(id)
     }
 
@@ -77,11 +88,52 @@ impl Mesh {
         Ok(())
     }
 
+    /// Set the albedo UV of an existing point (`TEXCOORD_0` from glTF).
+    pub fn set_point_uv(&mut self, id: PointId, uv: [f32; 2]) -> EngineResult<()> {
+        let idx = id.0 as usize;
+        if idx >= self.uvs.len() {
+            return Err(EngineError::InvalidMesh(format!(
+                "point id {} is out of range",
+                id.0
+            )));
+        }
+        self.uvs[idx] = uv;
+        Ok(())
+    }
+
+    /// Attach a baked albedo. The renderer samples it with the point UVs.
+    pub fn set_albedo_rgba(&mut self, width: u32, height: u32, rgba: Vec<u8>) -> EngineResult<()> {
+        if width == 0 || height == 0 {
+            return Err(EngineError::InvalidMesh(
+                "albedo size must be non-zero".into(),
+            ));
+        }
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| EngineError::InvalidMesh("albedo dimensions overflow".into()))?;
+        if rgba.len() != expected {
+            return Err(EngineError::InvalidMesh(format!(
+                "albedo rgba len {} != {width}x{height}x4",
+                rgba.len()
+            )));
+        }
+        self.albedo = Some(AlbedoMap {
+            width,
+            height,
+            rgba,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn albedo(&self) -> Option<&AlbedoMap> {
+        self.albedo.as_ref()
+    }
+
     /// Paint every point one colour.
     ///
-    /// Meshes imported from glTF that carry their look in textures arrive with
-    /// no usable vertex colour, and this pipeline has none to sample; the game
-    /// says what the thing is coloured instead.
+    /// Vertex colour still tints a sampled albedo (`color * texture`). Untextured
+    /// meshes keep a white 1×1 albedo, so this is the whole look.
     pub fn paint_all(&mut self, color: Color) {
         let c = color.to_vec4();
         for slot in &mut self.colors {
@@ -200,12 +252,14 @@ impl Mesh {
         let mut positions = Vec::new();
         let mut normals = Vec::new();
         let mut colors = Vec::new();
+        let mut uvs = Vec::new();
         let mut indices = Vec::new();
 
         let emit = |faces: &[&[PointId]],
                     positions: &mut Vec<Vec3>,
                     normals: &mut Vec<Vec3>,
                     colors: &mut Vec<Vec4>,
+                    uvs: &mut Vec<[f32; 2]>,
                     indices: &mut Vec<u32>| {
             for face in faces {
                 let tris: [[PointId; 3]; 2] = match face.len() {
@@ -250,6 +304,9 @@ impl Mesh {
                     colors.push(self.colors[tri[0].0 as usize]);
                     colors.push(self.colors[tri[1].0 as usize]);
                     colors.push(self.colors[tri[2].0 as usize]);
+                    uvs.push(self.uvs[tri[0].0 as usize]);
+                    uvs.push(self.uvs[tri[1].0 as usize]);
+                    uvs.push(self.uvs[tri[2].0 as usize]);
                     indices.extend([base, base + 1, base + 2]);
                 }
             }
@@ -260,6 +317,7 @@ impl Mesh {
             &mut positions,
             &mut normals,
             &mut colors,
+            &mut uvs,
             &mut indices,
         );
         let opaque_index_count = indices.len();
@@ -268,6 +326,7 @@ impl Mesh {
             &mut positions,
             &mut normals,
             &mut colors,
+            &mut uvs,
             &mut indices,
         );
 
@@ -275,6 +334,7 @@ impl Mesh {
             positions,
             normals,
             colors,
+            uvs,
             indices,
             opaque_index_count,
         }
@@ -322,6 +382,7 @@ pub struct BuiltMesh {
     pub positions: Vec<Vec3>,
     pub normals: Vec<Vec3>,
     pub colors: Vec<Vec4>,
+    pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     /// Indices `[0..opaque_index_count)` are opaque; the rest use alpha blending.
     pub opaque_index_count: usize,
@@ -344,11 +405,12 @@ impl BuiltMesh {
         self.positions
             .iter()
             .zip(self.normals.iter())
-            .zip(self.colors.iter())
-            .map(|((p, n), c)| Vertex {
+            .enumerate()
+            .map(|(i, (p, n))| Vertex {
                 position: (*p).into(),
                 normal: (*n).into(),
-                color: (*c).into(),
+                color: self.colors[i].into(),
+                uv: self.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
             })
             .collect()
     }
@@ -358,6 +420,7 @@ impl BuiltMesh {
         let mut positions = Vec::new();
         let mut normals = Vec::new();
         let mut colors = Vec::new();
+        let mut uvs = Vec::new();
         let mut indices = Vec::new();
 
         let push_range = |src: &BuiltMesh,
@@ -367,6 +430,7 @@ impl BuiltMesh {
                           positions: &mut Vec<Vec3>,
                           normals: &mut Vec<Vec3>,
                           colors: &mut Vec<Vec4>,
+                          uvs: &mut Vec<[f32; 2]>,
                           indices: &mut Vec<u32>| {
             let mut remap = HashMap::new();
             for &old in &src.indices[index_start..index_end] {
@@ -376,6 +440,7 @@ impl BuiltMesh {
                     positions.push(src.positions[i] + translation);
                     normals.push(src.normals[i]);
                     colors.push(src.colors[i]);
+                    uvs.push(src.uvs.get(i).copied().unwrap_or([0.0, 0.0]));
                     id
                 });
                 indices.push(new);
@@ -390,6 +455,7 @@ impl BuiltMesh {
             &mut positions,
             &mut normals,
             &mut colors,
+            &mut uvs,
             &mut indices,
         );
         push_range(
@@ -400,6 +466,7 @@ impl BuiltMesh {
             &mut positions,
             &mut normals,
             &mut colors,
+            &mut uvs,
             &mut indices,
         );
         let opaque_index_count = indices.len();
@@ -411,6 +478,7 @@ impl BuiltMesh {
             &mut positions,
             &mut normals,
             &mut colors,
+            &mut uvs,
             &mut indices,
         );
         push_range(
@@ -421,12 +489,14 @@ impl BuiltMesh {
             &mut positions,
             &mut normals,
             &mut colors,
+            &mut uvs,
             &mut indices,
         );
 
         self.positions = positions;
         self.normals = normals;
         self.colors = colors;
+        self.uvs = uvs;
         self.indices = indices;
         self.opaque_index_count = opaque_index_count;
     }
@@ -438,6 +508,7 @@ pub(crate) struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 4],
+    pub uv: [f32; 2],
 }
 
 impl Vertex {
@@ -448,6 +519,7 @@ impl Vertex {
             0 => Float32x3,
             1 => Float32x3,
             2 => Float32x4,
+            3 => Float32x2,
         ],
     };
 }
@@ -469,10 +541,10 @@ impl InstanceRaw {
         array_stride: std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &wgpu::vertex_attr_array![
-            3 => Float32x4,
             4 => Float32x4,
             5 => Float32x4,
             6 => Float32x4,
+            7 => Float32x4,
         ],
     };
 }

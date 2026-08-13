@@ -3,7 +3,7 @@
 use crate::color::Color;
 use crate::error::{EngineError, EngineResult};
 use crate::limits::EngineLimits;
-use crate::mesh::{BuiltMesh, Mesh};
+use crate::mesh::{AlbedoMap, BuiltMesh, Mesh};
 use crate::place::Place;
 use glam::{Mat4, Vec3};
 use std::path::{Path, PathBuf};
@@ -34,7 +34,7 @@ impl Model {
             )));
         }
 
-        let (document, buffers, _images) =
+        let (document, buffers, images) =
             gltf::import(&path).map_err(|e| EngineError::Model(e.to_string()))?;
 
         let total_buf: u64 = buffers.iter().map(|b| b.0.len() as u64).sum();
@@ -46,7 +46,11 @@ impl Model {
         }
 
         let built = load_gltf_document(&document, &buffers, limits)?;
-        built_to_mesh(&built)
+        let mut mesh = built_to_mesh(&built)?;
+        if let Some(map) = first_base_color_albedo(&document, &images)? {
+            mesh.set_albedo_rgba(map.width, map.height, map.rgba)?;
+        }
+        Ok(mesh)
     }
 }
 
@@ -82,6 +86,7 @@ fn load_gltf_document(
         positions: Vec::new(),
         normals: Vec::new(),
         colors: Vec::new(),
+        uvs: Vec::new(),
         indices: Vec::new(),
         opaque_index_count: 0,
     };
@@ -171,10 +176,25 @@ fn load_gltf_document(
                 (0..positions.len() as u32).collect()
             };
 
+            let uvs: Vec<[f32; 2]> = if let Some(iter) = reader.read_tex_coords(0) {
+                match iter {
+                    gltf::mesh::util::ReadTexCoords::U8(i) => i
+                        .map(|t| [t[0] as f32 / 255.0, t[1] as f32 / 255.0])
+                        .collect(),
+                    gltf::mesh::util::ReadTexCoords::U16(i) => i
+                        .map(|t| [t[0] as f32 / 65535.0, t[1] as f32 / 65535.0])
+                        .collect(),
+                    gltf::mesh::util::ReadTexCoords::F32(i) => i.collect(),
+                }
+            } else {
+                vec![[0.0, 0.0]; positions.len()]
+            };
+
             let part = BuiltMesh {
                 positions: positions.into_iter().map(Vec3::from).collect(),
                 normals,
                 colors,
+                uvs,
                 opaque_index_count: indices.len(),
                 indices,
             };
@@ -233,6 +253,9 @@ fn built_to_mesh(built: &BuiltMesh) -> EngineResult<Mesh> {
         let id = mesh.add_point(*p)?;
         let c = built.colors[i];
         mesh.set_point_color(id, Color::rgba01(c.x, c.y, c.z, c.w).expect("color"))?;
+        if let Some(uv) = built.uvs.get(i) {
+            mesh.set_point_uv(id, *uv)?;
+        }
         ids.push(id);
     }
     for tri in built.indices.chunks_exact(3) {
@@ -243,6 +266,59 @@ fn built_to_mesh(built: &BuiltMesh) -> EngineResult<Mesh> {
         ])?;
     }
     Ok(mesh)
+}
+
+fn first_base_color_albedo(
+    document: &gltf::Document,
+    images: &[gltf::image::Data],
+) -> EngineResult<Option<AlbedoMap>> {
+    for mesh in document.meshes() {
+        for primitive in mesh.primitives() {
+            let Some(info) = primitive
+                .material()
+                .pbr_metallic_roughness()
+                .base_color_texture()
+            else {
+                continue;
+            };
+            let index = info.texture().source().index();
+            let Some(image) = images.get(index) else {
+                return Err(EngineError::Model(format!(
+                    "glTF baseColorTexture index {index} is missing"
+                )));
+            };
+            return Ok(Some(image_to_albedo(image)?));
+        }
+    }
+    Ok(None)
+}
+
+fn image_to_albedo(image: &gltf::image::Data) -> EngineResult<AlbedoMap> {
+    let rgba = match image.format {
+        gltf::image::Format::R8G8B8A8 => image.pixels.clone(),
+        gltf::image::Format::R8G8B8 => {
+            let mut rgba = Vec::with_capacity(image.pixels.len() / 3 * 4);
+            for chunk in image.pixels.chunks_exact(3) {
+                rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+            }
+            rgba
+        }
+        gltf::image::Format::R8 => image
+            .pixels
+            .iter()
+            .flat_map(|v| [*v, *v, *v, 255])
+            .collect(),
+        other => {
+            return Err(EngineError::Model(format!(
+                "unsupported glTF image format {other:?}"
+            )))
+        }
+    };
+    Ok(AlbedoMap {
+        width: image.width,
+        height: image.height,
+        rgba,
+    })
 }
 
 /// Build [`Place`]s for scattering a model through the world.

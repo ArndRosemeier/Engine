@@ -92,14 +92,18 @@ fn haze(color: vec3<f32>, world_p: vec3<f32>) -> vec3<f32> {
 "#;
 
 const SHADER: &str = r#"
+@group(1) @binding(0) var albedo_tex: texture_2d<f32>;
+@group(1) @binding(1) var albedo_sampler: sampler;
+
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
-    @location(3) m0: vec4<f32>,
-    @location(4) m1: vec4<f32>,
-    @location(5) m2: vec4<f32>,
-    @location(6) m3: vec4<f32>,
+    @location(3) uv: vec2<f32>,
+    @location(4) m0: vec4<f32>,
+    @location(5) m1: vec4<f32>,
+    @location(6) m2: vec4<f32>,
+    @location(7) m3: vec4<f32>,
 };
 
 struct VsOut {
@@ -107,6 +111,7 @@ struct VsOut {
     @location(0) world_n: vec3<f32>,
     @location(1) color: vec4<f32>,
     @location(2) world_p: vec3<f32>,
+    @location(3) uv: vec2<f32>,
 };
 
 @vertex
@@ -119,6 +124,7 @@ fn vs_main(v: VsIn) -> VsOut {
     out.world_n = normalize((model * vec4<f32>(v.normal, 0.0)).xyz);
     out.color = v.color;
     out.world_p = world.xyz;
+    out.uv = v.uv;
     return out;
 }
 
@@ -127,14 +133,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.world_n);
     let l = normalize(u.light_dir);
     let ndl = max(dot(n, l), 0.0);
+    let texel = textureSample(albedo_tex, albedo_sampler, in.uv);
+    let base = in.color * texel;
     // Soft wrap lighting — enough contrast for smooth heightfields to read as
     // hills. Sky and sun share one budget, so raising ambient fills the shadows
     // instead of blowing out everything the sun already reaches.
     let wrap = ndl * 0.65 + 0.35;
-    let lit = in.color.rgb * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color);
+    let lit = base.rgb * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color);
     // Soft fresnel rim for translucent surfaces (keep grazing alpha modest so
     // water stays see-through from typical third-person angles).
-    var alpha = in.color.a;
+    var alpha = base.a;
     if alpha < 0.999 {
         let view = normalize(u.eye - in.world_p);
         let fresnel = pow(1.0 - max(dot(n, view), 0.0), 2.0);
@@ -152,9 +160,19 @@ pub struct Pipelines {
     pub uniform_buf: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
     pub bind_layout: wgpu::BindGroupLayout,
+    pub albedo_layout: wgpu::BindGroupLayout,
+    pub albedo_sampler: wgpu::Sampler,
+    /// Keeps the 1×1 white texel alive for `white_albedo`.
+    #[allow(dead_code)]
+    pub white_texture: wgpu::Texture,
+    pub white_albedo: wgpu::BindGroup,
 }
 
-pub fn create_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> Pipelines {
+pub fn create_pipelines(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    format: wgpu::TextureFormat,
+) -> Pipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("lit-shader"),
         source: wgpu::ShaderSource::Wgsl(format!("{SCENE_WGSL}{SHADER}").into()),
@@ -189,9 +207,89 @@ pub fn create_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> P
         }],
     });
 
+    let albedo_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("mesh-albedo-layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let albedo_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("mesh-albedo-sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    let white_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mesh-albedo-white-tex"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &white_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &[255, 255, 255, 255],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    let white_view = white_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let white_albedo = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("mesh-albedo-white"),
+        layout: &albedo_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&white_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&albedo_sampler),
+            },
+        ],
+    });
+
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("pipeline-layout"),
-        bind_group_layouts: &[&bind_layout],
+        bind_group_layouts: &[&bind_layout, &albedo_layout],
         push_constant_ranges: &[],
     });
 
@@ -254,5 +352,9 @@ pub fn create_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> P
         uniform_buf,
         bind_group,
         bind_layout,
+        albedo_layout,
+        albedo_sampler,
+        white_texture,
+        white_albedo,
     }
 }
