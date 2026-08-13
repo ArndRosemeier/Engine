@@ -604,6 +604,12 @@ fn a_translucent_chunk_layer_becomes_water_and_an_opaque_one_ground() {
     let grass = world
         .create_terrain_albedo(TerrainAlbedo::Grass, 16, 1)
         .unwrap();
+    let grass_dry = world
+        .create_terrain_albedo(TerrainAlbedo::GrassDry, 16, 4)
+        .unwrap();
+    let grass_moor = world
+        .create_terrain_albedo(TerrainAlbedo::GrassMoor, 16, 5)
+        .unwrap();
     let sand = world
         .create_terrain_albedo(TerrainAlbedo::Sand, 16, 2)
         .unwrap();
@@ -613,6 +619,8 @@ fn a_translucent_chunk_layer_becomes_water_and_an_opaque_one_ground() {
     let ground = world
         .create_terrain_material(TerrainMaterialDesc {
             grass,
+            grass_dry,
+            grass_moor,
             sand,
             rock,
             ..TerrainMaterialDesc::default()

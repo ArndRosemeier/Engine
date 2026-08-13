@@ -1,7 +1,7 @@
 //! CPU-side textures and terrain materials.
 //!
-//! GPU upload happens in the renderer on sync. Sampling for terrain is
-//! world-XZ tiling (no mesh UVs required).
+//! GPU upload happens in the renderer on sync. Terrain albedos are sampled in
+//! world XZ; mesh UVs, when present, are soil splat weights (dry, moor).
 
 use crate::color::Color;
 use crate::error::{EngineError, EngineResult};
@@ -19,7 +19,7 @@ impl fmt::Display for TextureId {
     }
 }
 
-/// Opaque terrain-material handle (grass / sand / rock blend).
+/// Opaque terrain-material handle (lush / dry / moor / sand / rock blend).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MaterialId(pub(crate) u64);
 
@@ -39,7 +39,12 @@ pub(crate) struct CpuTexture {
 /// Description for a world-XZ terrain material.
 #[derive(Clone, Debug)]
 pub struct TerrainMaterialDesc {
+    /// Rank lowland sward.
     pub grass: TextureId,
+    /// Straw / steppe. Vertex UV.x blends this over [`Self::grass`].
+    pub grass_dry: TextureId,
+    /// Peat and duff. Vertex UV.y blends this over [`Self::grass`].
+    pub grass_moor: TextureId,
     pub sand: TextureId,
     pub rock: TextureId,
     /// World metres covered by one texture tile.
@@ -67,6 +72,8 @@ impl Default for TerrainMaterialDesc {
     fn default() -> Self {
         Self {
             grass: TextureId(0),
+            grass_dry: TextureId(0),
+            grass_moor: TextureId(0),
             sand: TextureId(0),
             rock: TextureId(0),
             metres_per_tile: 14.0,
@@ -193,6 +200,10 @@ pub fn save_rgba8_png(path: impl AsRef<Path>, w: u32, h: u32, rgba: &[u8]) -> En
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerrainAlbedo {
     Grass,
+    /// Straw and earth: the dry flank of a meadow, not a second sand.
+    GrassDry,
+    /// Dark peat and leaf-mould: banks, wetlands, and the floor of a stand.
+    GrassMoor,
     Sand,
     Rock,
 }
@@ -244,6 +255,44 @@ pub fn generate_terrain_albedo(kind: TerrainAlbedo, size: u32, seed: u32) -> (u3
                     b = e.2;
 
                     let shade = 0.88 + 0.22 * health + 0.12 * fibre;
+                    (r * shade, g * shade, b * shade)
+                }
+                TerrainAlbedo::GrassDry => {
+                    // Steppe: the same sward grammar, but straw and earth win.
+                    // A dry hill has to read as grass that thirsted, not as sand
+                    // that climbed inland.
+                    let blades = unit(tileable(&n2, u, v, 24.0));
+                    let fibre = unit(tileable(&n3, u * 0.22, v, 40.0));
+                    let clump = unit(tileable(&n1, u, v, 4.8));
+                    let drift = unit(tileable(&n0, u, v, 1.4));
+                    let health = (0.22 * clump + 0.38 * drift + 0.40 * blades).clamp(0.0, 1.0);
+                    let straw_w = smoothstep(0.18, 0.62, unit(tileable(&n0, u, v, 2.6)));
+                    let bare = smoothstep(0.52, 0.88, 1.0 - health);
+
+                    let straw = (0.58, 0.50, 0.22);
+                    let ochre = (0.48, 0.38, 0.16);
+                    let earth = (0.34, 0.26, 0.14);
+                    let leftover = (0.30, 0.42, 0.14);
+                    let (r, g, b) = mix3(leftover, straw, 0.45 + 0.40 * straw_w);
+                    let (r, g, b) = mix3((r, g, b), ochre, 0.22 * fibre);
+                    let (r, g, b) = mix3((r, g, b), earth, bare * 0.70);
+                    let shade = 0.90 + 0.16 * health + 0.08 * drift;
+                    (r * shade, g * shade, b * shade)
+                }
+                TerrainAlbedo::GrassMoor => {
+                    // Peat: dark, wet, a little russet. Duff under a wood is
+                    // this, not a greener multiply of the meadow.
+                    let clump = unit(tileable(&n1, u, v, 4.2));
+                    let fibre = unit(tileable(&n3, u * 0.15, v, 36.0));
+                    let wet = smoothstep(0.35, 0.82, unit(tileable(&n2, u, v, 2.0)));
+                    let moss = smoothstep(0.62, 0.92, unit(tileable(&n0, u, v, 8.5)));
+
+                    let peat = (0.16, 0.14, 0.10);
+                    let russet = (0.32, 0.22, 0.12);
+                    let sedge = (0.18, 0.26, 0.12);
+                    let (r, g, b) = mix3(peat, russet, 0.28 + 0.35 * clump);
+                    let (r, g, b) = mix3((r, g, b), sedge, moss * 0.40);
+                    let shade = 0.78 + 0.14 * fibre - 0.12 * wet;
                     (r * shade, g * shade, b * shade)
                 }
                 TerrainAlbedo::Sand => {
@@ -324,6 +373,8 @@ fn mix3(a: (f32, f32, f32), b: (f32, f32, f32), t: f32) -> (f32, f32, f32) {
 fn kind_seed(kind: TerrainAlbedo) -> u32 {
     match kind {
         TerrainAlbedo::Grass => 0x67A55,
+        TerrainAlbedo::GrassDry => 0xD8A11,
+        TerrainAlbedo::GrassMoor => 0x3EA7,
         TerrainAlbedo::Sand => 0x5A11D,
         TerrainAlbedo::Rock => 0x20C6,
     }
@@ -350,11 +401,22 @@ mod tests {
 
     #[test]
     fn albedo_size_and_opaque() {
-        let (w, h, rgba) = generate_terrain_albedo(TerrainAlbedo::Grass, 64, 1);
-        assert_eq!(w, 64);
-        assert_eq!(h, 64);
-        assert_eq!(rgba.len(), 64 * 64 * 4);
-        assert!(rgba.chunks(4).all(|c| c[3] == 255));
+        for kind in [
+            TerrainAlbedo::Grass,
+            TerrainAlbedo::GrassDry,
+            TerrainAlbedo::GrassMoor,
+            TerrainAlbedo::Sand,
+            TerrainAlbedo::Rock,
+        ] {
+            let (w, h, rgba) = generate_terrain_albedo(kind, 64, 1);
+            assert_eq!(w, 64);
+            assert_eq!(h, 64);
+            assert_eq!(rgba.len(), 64 * 64 * 4);
+            assert!(
+                rgba.chunks(4).all(|c| c[3] == 255),
+                "{kind:?} albedo is not opaque"
+            );
+        }
     }
 
     #[test]

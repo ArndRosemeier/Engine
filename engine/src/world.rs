@@ -860,7 +860,7 @@ impl World {
         self.create_texture_rgba(w, h, rgba)
     }
 
-    /// Create a built-in tileable terrain albedo (`Grass` / `Sand` / `Rock`).
+    /// Create a built-in tileable terrain albedo.
     pub fn create_terrain_albedo(
         &mut self,
         kind: TerrainAlbedo,
@@ -871,12 +871,18 @@ impl World {
         self.create_texture_rgba(w, h, rgba)
     }
 
-    /// Create a grass/sand/rock terrain material (world-XZ sampling).
+    /// Create a lush/dry/moor/sand/rock terrain material (world-XZ sampling).
     pub fn create_terrain_material(
         &mut self,
         desc: TerrainMaterialDesc,
     ) -> EngineResult<MaterialId> {
-        for tid in [desc.grass, desc.sand, desc.rock] {
+        for tid in [
+            desc.grass,
+            desc.grass_dry,
+            desc.grass_moor,
+            desc.sand,
+            desc.rock,
+        ] {
             if !self.textures.contains_key(&tid) {
                 return Err(EngineError::UnknownTexture);
             }

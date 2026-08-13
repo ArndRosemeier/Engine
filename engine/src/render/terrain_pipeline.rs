@@ -62,10 +62,12 @@ struct TerrainParams {
 };
 
 @group(1) @binding(0) var grass_tex: texture_2d<f32>;
-@group(1) @binding(1) var sand_tex: texture_2d<f32>;
-@group(1) @binding(2) var rock_tex: texture_2d<f32>;
-@group(1) @binding(3) var tex_sampler: sampler;
-@group(1) @binding(4) var<uniform> tp: TerrainParams;
+@group(1) @binding(1) var grass_dry_tex: texture_2d<f32>;
+@group(1) @binding(2) var grass_moor_tex: texture_2d<f32>;
+@group(1) @binding(3) var sand_tex: texture_2d<f32>;
+@group(1) @binding(4) var rock_tex: texture_2d<f32>;
+@group(1) @binding(5) var tex_sampler: sampler;
+@group(1) @binding(6) var<uniform> tp: TerrainParams;
 
 struct VsIn {
     @location(0) position: vec3<f32>,
@@ -83,6 +85,7 @@ struct VsOut {
     @location(0) world_n: vec3<f32>,
     @location(1) color: vec4<f32>,
     @location(2) world_p: vec3<f32>,
+    @location(3) splat: vec2<f32>,
 };
 
 @vertex
@@ -94,6 +97,7 @@ fn vs_main(v: VsIn) -> VsOut {
     out.world_n = normalize((model * vec4<f32>(v.normal, 0.0)).xyz);
     out.color = v.color;
     out.world_p = world.xyz;
+    out.splat = v.uv;
     return out;
 }
 
@@ -125,7 +129,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let uv = world_xz / tp.metres_per_tile;
     // Grass tiles are olive-noise; a little extra chroma stops the sward
     // reading as dirt from a few hundred metres.
-    let grass = saturate_rgb(sample_albedo(grass_tex, uv), 1.18);
+    let grass_lush = saturate_rgb(sample_albedo(grass_tex, uv), 1.18);
+    let grass_dry = saturate_rgb(sample_albedo(grass_dry_tex, uv * 1.07), 1.06);
+    let grass_moor = sample_albedo(grass_moor_tex, uv * 0.92);
+    // Vertex UV carries soil weights from the cover field: x = dry sward,
+    // y = peat/duff. Remainder is lush. Empty UVs (Engine demos) stay lush.
+    let dry_w = clamp(in.splat.x, 0.0, 1.0);
+    let moor_w = clamp(in.splat.y, 0.0, 1.0);
+    let lush_w = max(1.0 - dry_w - moor_w, 0.0);
+    let grass = grass_lush * lush_w + grass_dry * dry_w + grass_moor * moor_w;
     let sand = sample_albedo(sand_tex, uv * 1.15);
     let rock = sample_albedo(rock_tex, uv * 0.85);
 
@@ -235,14 +247,16 @@ pub fn create_terrain_pipelines(
             tex_entry(0),
             tex_entry(1),
             tex_entry(2),
+            tex_entry(3),
+            tex_entry(4),
             wgpu::BindGroupLayoutEntry {
-                binding: 3,
+                binding: 5,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
             wgpu::BindGroupLayoutEntry {
-                binding: 4,
+                binding: 6,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
@@ -382,12 +396,12 @@ pub fn build_terrain_material(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
-    // Grass, sand, rock albedo in that order.
-    layers: [&GpuTexture; 3],
+    // Lush, dry, moor, sand, rock albedo in that order.
+    layers: [&GpuTexture; 5],
     desc: &TerrainMaterialDesc,
     origin: RenderOrigin,
 ) -> GpuTerrainMaterial {
-    let [grass, sand, rock] = layers;
+    let [grass, grass_dry, grass_moor, sand, rock] = layers;
     let params = TerrainParams::from_desc(desc, origin);
     let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("terrain-params"),
@@ -404,18 +418,26 @@ pub fn build_terrain_material(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::TextureView(&sand.view),
+                resource: wgpu::BindingResource::TextureView(&grass_dry.view),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: wgpu::BindingResource::TextureView(&rock.view),
+                resource: wgpu::BindingResource::TextureView(&grass_moor.view),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
-                resource: wgpu::BindingResource::Sampler(sampler),
+                resource: wgpu::BindingResource::TextureView(&sand.view),
             },
             wgpu::BindGroupEntry {
                 binding: 4,
+                resource: wgpu::BindingResource::TextureView(&rock.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
                 resource: params_buf.as_entire_binding(),
             },
         ],
