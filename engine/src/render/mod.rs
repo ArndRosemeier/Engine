@@ -58,6 +58,12 @@ pub struct Renderer {
     /// This frame's view volume, for skipping draws outside it.
     frustum: Frustum,
     size: PhysicalSize<u32>,
+    /// Reused while packing instance rows for a dirty entity.
+    instance_scratch: Vec<InstanceRaw>,
+    draw_opaque: Vec<EntityId>,
+    draw_terrain: Vec<EntityId>,
+    draw_transparent: Vec<EntityId>,
+    draw_water: Vec<EntityId>,
 }
 
 impl Renderer {
@@ -151,6 +157,11 @@ impl Renderer {
             terrain_origin: crate::space::RenderOrigin::default(),
             frustum: Frustum::default(),
             size,
+            instance_scratch: Vec::new(),
+            draw_opaque: Vec::new(),
+            draw_terrain: Vec::new(),
+            draw_transparent: Vec::new(),
+            draw_water: Vec::new(),
         }
     }
 
@@ -201,51 +212,62 @@ impl Renderer {
             self.clipmap = None;
         }
 
-        let live: std::collections::HashSet<EntityId> =
-            world.entities().map(|(id, _)| id).collect();
-        self.gpu_meshes.retain(|id, _| live.contains(id));
+        self.gpu_meshes.retain(|id, _| world.contains_entity(*id));
 
         for (id, entity) in world.entities() {
-            let instances: Vec<InstanceRaw> = if entity.instanced {
-                entity
-                    .instances
-                    .iter()
-                    .map(|m| InstanceRaw::from_matrix(entity.transform * *m))
-                    .collect()
-            } else {
-                vec![InstanceRaw::from_matrix(entity.transform)]
-            };
-            // An empty instance buffer cannot be created, so an instanced entity
-            // with nothing placed either drops to a zero draw or stays unuploaded
-            // until it has work.
-            if instances.is_empty() {
+            if entity.instanced && entity.instances.is_empty() {
                 if let Some(gpu) = self.gpu_meshes.get_mut(&id) {
-                    gpu.clear_instances();
+                    if gpu.xform_rev != entity.xform_rev {
+                        gpu.clear_instances();
+                        gpu.xform_rev = entity.xform_rev;
+                    }
                 }
                 continue;
             }
 
+            if let Some(gpu) = self.gpu_meshes.get(&id) {
+                if gpu.vertex_count == entity.mesh().vertex_count()
+                    && gpu.index_count == entity.mesh().index_count()
+                    && gpu.xform_rev == entity.xform_rev
+                {
+                    continue;
+                }
+            }
+
+            self.instance_scratch.clear();
+            if entity.instanced {
+                self.instance_scratch.extend(
+                    entity
+                        .instances
+                        .iter()
+                        .map(|m| InstanceRaw::from_matrix(entity.transform * *m)),
+                );
+            } else {
+                self.instance_scratch
+                    .push(InstanceRaw::from_matrix(entity.transform));
+            }
+
             match self.gpu_meshes.get_mut(&id) {
                 Some(gpu) => {
-                    // Rebuild if topology changed (index count / vertex count).
                     if gpu.vertex_count != entity.mesh().vertex_count()
                         || gpu.index_count != entity.mesh().index_count()
                     {
-                        *gpu = GpuMesh::upload(&self.device, entity.mesh(), &instances);
+                        *gpu = GpuMesh::upload(&self.device, entity.mesh(), &self.instance_scratch);
                     } else {
-                        gpu.update_instances(&self.device, &self.queue, &instances);
+                        gpu.update_instances(&self.device, &self.queue, &self.instance_scratch);
                     }
+                    gpu.xform_rev = entity.xform_rev;
                 }
                 None => {
-                    self.gpu_meshes
-                        .insert(id, GpuMesh::upload(&self.device, entity.mesh(), &instances));
+                    let mut gpu =
+                        GpuMesh::upload(&self.device, entity.mesh(), &self.instance_scratch);
+                    gpu.xform_rev = entity.xform_rev;
+                    self.gpu_meshes.insert(id, gpu);
                 }
             }
         }
 
-        let live_anim: std::collections::HashSet<EntityId> =
-            world.animated_entities().map(|(id, _)| *id).collect();
-        self.gpu_skinned.retain(|id, _| live_anim.contains(id));
+        self.gpu_skinned.retain(|id, _| world.contains_animated(*id));
 
         for (id, anim) in world.animated_entities() {
             let joints = anim.animator.joint_matrices();
@@ -447,11 +469,13 @@ impl Renderer {
     }
 
     fn encode_pass(
-        &self,
+        &mut self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         world: &World,
     ) {
+        self.collect_draws(world);
+
         let clear = world.clear_color.to_vec3();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("main-pass"),
@@ -495,16 +519,9 @@ impl Renderer {
 
         // Opaque untextured, then terrain-textured, then skinned / transparent.
         pass.set_pipeline(&self.pipelines.opaque);
-        for (id, entity) in world.entities() {
-            if entity.material.is_some() {
-                continue;
-            }
-            let Some(gpu) = self.gpu_meshes.get(&id) else {
-                continue;
-            };
-            if gpu.opaque_index_count == 0 || self.hidden(gpu) {
-                continue;
-            }
+        for &id in &self.draw_opaque {
+            let entity = world.entity(id).expect("draw list is live");
+            let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
             let albedo = entity
                 .albedo
                 .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
@@ -521,19 +538,15 @@ impl Renderer {
         }
 
         pass.set_pipeline(&self.terrain.opaque);
-        for (id, entity) in world.entities() {
+        for &id in &self.draw_terrain {
+            let entity = world.entity(id).expect("draw list is live");
+            let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
             let Some(SurfaceMaterialRef::Terrain(mid)) = entity.material else {
-                continue;
-            };
-            let Some(gpu) = self.gpu_meshes.get(&id) else {
                 continue;
             };
             let Some(mat) = self.gpu_materials.get(&mid) else {
                 continue;
             };
-            if gpu.opaque_index_count == 0 || self.hidden(gpu) {
-                continue;
-            }
             pass.set_bind_group(1, &mat.bind_group, &[]);
             pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
             pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
@@ -559,16 +572,9 @@ impl Renderer {
         pass.set_bind_group(0, &self.pipelines.bind_group, &[]);
 
         pass.set_pipeline(&self.pipelines.transparent);
-        for (id, entity) in world.entities() {
-            if matches!(entity.material, Some(SurfaceMaterialRef::Water(_))) {
-                continue;
-            }
-            let Some(gpu) = self.gpu_meshes.get(&id) else {
-                continue;
-            };
-            if gpu.opaque_index_count >= gpu.index_count || self.hidden(gpu) {
-                continue;
-            }
+        for &id in &self.draw_transparent {
+            let entity = world.entity(id).expect("draw list is live");
+            let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
             let albedo = entity
                 .albedo
                 .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
@@ -587,19 +593,15 @@ impl Renderer {
         // Water sheets last, so everything standing in them is already in the
         // colour buffer to blend against.
         pass.set_pipeline(&self.water.blend);
-        for (id, entity) in world.entities() {
+        for &id in &self.draw_water {
+            let entity = world.entity(id).expect("draw list is live");
+            let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
             let Some(SurfaceMaterialRef::Water(mid)) = entity.material else {
-                continue;
-            };
-            let Some(gpu) = self.gpu_meshes.get(&id) else {
                 continue;
             };
             let Some(mat) = self.gpu_water_materials.get(&mid) else {
                 continue;
             };
-            if self.hidden(gpu) {
-                continue;
-            }
             pass.set_bind_group(1, &mat.bind_group, &[]);
             pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
             pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
@@ -619,6 +621,51 @@ impl Renderer {
 
     pub fn size(&self) -> PhysicalSize<u32> {
         self.size
+    }
+
+    /// One walk of the live entities, bucketed for the four mesh passes.
+    fn collect_draws(&mut self, world: &World) {
+        self.draw_opaque.clear();
+        self.draw_terrain.clear();
+        self.draw_transparent.clear();
+        self.draw_water.clear();
+        for (id, entity) in world.entities() {
+            let (has_opaque, has_xlucent) = {
+                let Some(gpu) = self.gpu_meshes.get(&id) else {
+                    continue;
+                };
+                if gpu.instance_count == 0 || self.hidden(gpu) {
+                    continue;
+                }
+                (
+                    gpu.opaque_index_count > 0,
+                    gpu.opaque_index_count < gpu.index_count,
+                )
+            };
+            match entity.material {
+                None => {
+                    if has_opaque {
+                        self.draw_opaque.push(id);
+                    }
+                    if has_xlucent {
+                        self.draw_transparent.push(id);
+                    }
+                }
+                Some(SurfaceMaterialRef::Terrain(_)) => {
+                    if has_opaque {
+                        self.draw_terrain.push(id);
+                    }
+                    if has_xlucent {
+                        self.draw_transparent.push(id);
+                    }
+                }
+                Some(SurfaceMaterialRef::Water(_)) => {
+                    if has_xlucent {
+                        self.draw_water.push(id);
+                    }
+                }
+            }
+        }
     }
 
     /// Whether this mesh is entirely outside the view volume.

@@ -147,7 +147,7 @@ impl SurfaceTerrain {
     }
 
     pub fn build_chunk_built(&self, coord: ChunkCoord) -> BuiltMesh {
-        self.build_chunk(coord).0.build()
+        self.build_chunk(coord).0.build_smooth()
     }
 }
 
@@ -168,7 +168,7 @@ impl ChunkBuilder for SurfaceTerrain {
         )?;
         Ok(Some(
             ChunkPayload::new(origin.with_height(0.0)?)
-                .with_layer(ChunkLayer::Land, mesh.build())?
+                .with_layer(ChunkLayer::Land, mesh.build_smooth())?
                 .with_contact(contact),
         ))
     }

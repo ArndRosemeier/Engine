@@ -222,16 +222,20 @@ impl Mesh {
     /// Opaque faces are packed first; [`BuiltMesh::opaque_index_count`] marks the split
     /// so the renderer can draw transparent triangles in a second pass.
     pub fn build(&self) -> BuiltMesh {
-        self.build_with_normals(false)
+        self.build_flat()
     }
 
     /// Like [`Self::build`], but averages face normals at shared authoring points
     /// so heightfields / ribbons shade as continuous surfaces instead of facets.
+    ///
+    /// GPU vertices are shared per authoring point (opaque and translucent
+    /// ranges stay split), so a heightfield of N×N samples stays N² vertices
+    /// rather than six per quad.
     pub fn build_smooth(&self) -> BuiltMesh {
-        self.build_with_normals(true)
+        self.build_indexed_smooth()
     }
 
-    fn build_with_normals(&self, smooth: bool) -> BuiltMesh {
+    fn build_flat(&self) -> BuiltMesh {
         let mut opaque_faces = Vec::new();
         let mut xlucent_faces = Vec::new();
         for face in &self.faces {
@@ -242,12 +246,6 @@ impl Mesh {
                 opaque_faces.push(face.as_slice());
             }
         }
-
-        let smooth_normals = if smooth {
-            Some(self.averaged_vertex_normals())
-        } else {
-            None
-        };
 
         let mut positions = Vec::new();
         let mut normals = Vec::new();
@@ -284,23 +282,7 @@ impl Mesh {
                     positions.push(a);
                     positions.push(b);
                     positions.push(c);
-                    if let Some(sn) = smooth_normals.as_ref() {
-                        let mut n0 = sn[tri[0].0 as usize];
-                        let mut n1 = sn[tri[1].0 as usize];
-                        let mut n2 = sn[tri[2].0 as usize];
-                        if n0.length_squared() < 1e-10 {
-                            n0 = face_n;
-                        }
-                        if n1.length_squared() < 1e-10 {
-                            n1 = face_n;
-                        }
-                        if n2.length_squared() < 1e-10 {
-                            n2 = face_n;
-                        }
-                        normals.extend([n0, n1, n2]);
-                    } else {
-                        normals.extend([face_n, face_n, face_n]);
-                    }
+                    normals.extend([face_n, face_n, face_n]);
                     colors.push(self.colors[tri[0].0 as usize]);
                     colors.push(self.colors[tri[1].0 as usize]);
                     colors.push(self.colors[tri[2].0 as usize]);
@@ -337,6 +319,111 @@ impl Mesh {
             uvs,
             indices,
             opaque_index_count,
+        }
+    }
+
+    /// Indexed smooth bake: one GPU vertex per authoring point per opacity pass.
+    fn build_indexed_smooth(&self) -> BuiltMesh {
+        let mut opaque_faces = Vec::new();
+        let mut xlucent_faces = Vec::new();
+        for face in &self.faces {
+            let transparent = face.iter().any(|p| self.colors[p.0 as usize].w < 0.999);
+            if transparent {
+                xlucent_faces.push(face.as_slice());
+            } else {
+                opaque_faces.push(face.as_slice());
+            }
+        }
+
+        let smooth_normals = self.averaged_vertex_normals();
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut colors = Vec::new();
+        let mut uvs = Vec::new();
+        let mut indices = Vec::new();
+        let mut remap = vec![u32::MAX; self.points.len()];
+
+        self.emit_indexed_faces(
+            &opaque_faces,
+            &smooth_normals,
+            &mut remap,
+            &mut positions,
+            &mut normals,
+            &mut colors,
+            &mut uvs,
+            &mut indices,
+        );
+        let opaque_index_count = indices.len();
+        self.emit_indexed_faces(
+            &xlucent_faces,
+            &smooth_normals,
+            &mut remap,
+            &mut positions,
+            &mut normals,
+            &mut colors,
+            &mut uvs,
+            &mut indices,
+        );
+
+        BuiltMesh {
+            positions,
+            normals,
+            colors,
+            uvs,
+            indices,
+            opaque_index_count,
+        }
+    }
+
+    fn emit_indexed_faces(
+        &self,
+        faces: &[&[PointId]],
+        smooth_normals: &[Vec3],
+        remap: &mut [u32],
+        positions: &mut Vec<Vec3>,
+        normals: &mut Vec<Vec3>,
+        colors: &mut Vec<Vec4>,
+        uvs: &mut Vec<[f32; 2]>,
+        indices: &mut Vec<u32>,
+    ) {
+        remap.fill(u32::MAX);
+        for face in faces {
+            let tris: [[PointId; 3]; 2] = match face.len() {
+                3 => [[face[0], face[1], face[2]], [face[0], face[0], face[0]]],
+                4 => [[face[0], face[1], face[2]], [face[0], face[2], face[3]]],
+                _ => unreachable!("add_face only allows 3 or 4 points"),
+            };
+            let tri_count = if face.len() == 3 { 1 } else { 2 };
+            for tri in tris.iter().take(tri_count) {
+                let a = self.points[tri[0].0 as usize];
+                let b = self.points[tri[1].0 as usize];
+                let c = self.points[tri[2].0 as usize];
+                let face_n = {
+                    let raw = (b - a).cross(c - a);
+                    if raw.length_squared() > 0.0 {
+                        raw.normalize()
+                    } else {
+                        Vec3::Y
+                    }
+                };
+                let mut gpu = [0u32; 3];
+                for k in 0..3 {
+                    let pi = tri[k].0 as usize;
+                    if remap[pi] == u32::MAX {
+                        remap[pi] = positions.len() as u32;
+                        positions.push(self.points[pi]);
+                        let mut n = smooth_normals[pi];
+                        if n.length_squared() < 1e-10 {
+                            n = face_n;
+                        }
+                        normals.push(n);
+                        colors.push(self.colors[pi]);
+                        uvs.push(self.uvs[pi]);
+                    }
+                    gpu[k] = remap[pi];
+                }
+                indices.extend(gpu);
+            }
         }
     }
 

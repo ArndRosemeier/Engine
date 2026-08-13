@@ -151,6 +151,9 @@ pub struct Entity {
     pub(crate) material: Option<SurfaceMaterialRef>,
     /// Optional baked albedo sampled with mesh UVs. `None` uses a white 1×1.
     pub(crate) albedo: Option<TextureId>,
+    /// Bumped when transform or instance list changes. The renderer skips
+    /// rewriting the GPU instance buffer when this matches the last upload.
+    pub(crate) xform_rev: u64,
 }
 
 impl Entity {
@@ -164,6 +167,10 @@ impl Entity {
 
     pub fn material(&self) -> Option<SurfaceMaterialRef> {
         self.material
+    }
+
+    fn bump_xform(&mut self) {
+        self.xform_rev = self.xform_rev.wrapping_add(1);
     }
 }
 
@@ -342,6 +349,7 @@ impl World {
                 instanced: false,
                 material: None,
                 albedo: None,
+                xform_rev: 1,
             },
         );
         self.order.push(id);
@@ -364,6 +372,7 @@ impl World {
                 instanced: true,
                 material: None,
                 albedo: None,
+                xform_rev: 1,
             },
         );
         self.order.push(id);
@@ -417,6 +426,7 @@ impl World {
                 .get_mut(&id)
                 .ok_or(EngineError::UnknownEntity)?;
             e.transform = local.to_matrix();
+            e.bump_xform();
         }
         let chunks: Vec<AnchoredChunk> = self.anchored_chunks.values().copied().collect();
         for chunk in chunks {
@@ -426,6 +436,7 @@ impl World {
                 .get_mut(&chunk.entity)
                 .ok_or(EngineError::UnknownEntity)?;
             e.transform = Mat4::from_translation(offset);
+            e.bump_xform();
         }
         Ok(())
     }
@@ -461,6 +472,7 @@ impl World {
             .get_mut(&id)
             .ok_or(EngineError::UnknownEntity)?;
         e.transform = local.to_matrix();
+        e.bump_xform();
         self.anchored_entities.insert(id, place);
         Ok(())
     }
@@ -585,6 +597,7 @@ impl World {
     pub fn set_place(&mut self, id: EntityId, place: Place) -> EngineResult<()> {
         if let Some(e) = self.entities.get_mut(&id) {
             e.transform = place.to_matrix();
+            e.bump_xform();
             return Ok(());
         }
         if let Some(e) = self.animated.get_mut(&id) {
@@ -697,6 +710,14 @@ impl World {
         self.order
             .iter()
             .filter_map(|id| self.entities.get(id).map(|e| (*id, e)))
+    }
+
+    pub(crate) fn contains_entity(&self, id: EntityId) -> bool {
+        self.entities.contains_key(&id)
+    }
+
+    pub(crate) fn contains_animated(&self, id: EntityId) -> bool {
+        self.animated.contains_key(&id)
     }
 
     pub fn entity_count(&self) -> usize {
@@ -889,6 +910,7 @@ impl World {
         }
         e.instances.clear();
         e.instances.extend(places.iter().map(|p| p.to_matrix()));
+        e.bump_xform();
         Ok(())
     }
 

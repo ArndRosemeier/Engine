@@ -236,7 +236,7 @@ impl HeightTerrain {
 
     /// Build + triangulate on a worker-friendly path.
     pub fn build_chunk_built(&self, cx: i32, cz: i32) -> BuiltMesh {
-        self.build_chunk(cx, cz).build()
+        self.build_chunk(cx, cz).build_smooth()
     }
 
     pub fn chunk_key_for(&self, x: f32, z: f32) -> IVec3 {

@@ -16,6 +16,8 @@ pub struct GpuMesh {
     local_bounds: Option<Bounds>,
     /// What the draw actually covers: the local sphere at every instance.
     pub bounds: Option<Bounds>,
+    /// `Entity::xform_rev` at the last instance upload.
+    pub xform_rev: u64,
 }
 
 impl GpuMesh {
@@ -48,6 +50,7 @@ impl GpuMesh {
             instance_capacity: instances.len().max(1),
             local_bounds,
             bounds: spread_over(local_bounds, instances),
+            xform_rev: 0,
         }
     }
 

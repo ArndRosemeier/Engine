@@ -281,6 +281,9 @@ pub struct ClipmapRenderer {
     index_buf: wgpu::Buffer,
     rings: Vec<RingGpu>,
     config: ClipmapConfig,
+    last_frame: Option<FrameUniform>,
+    last_params: Option<TerrainParamsUniform>,
+    last_ring_center: Option<[f32; 2]>,
 }
 
 impl ClipmapRenderer {
@@ -455,6 +458,9 @@ impl ClipmapRenderer {
             index_buf,
             rings,
             config,
+            last_frame: None,
+            last_params: None,
+            last_ring_center: None,
         }
     }
 
@@ -492,10 +498,16 @@ impl ClipmapRenderer {
             eye: [eye.x, eye.y, eye.z],
             _pad2: 0.0,
         };
-        queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&frame));
+        if self.last_frame.as_ref().map(bytemuck::bytes_of) != Some(bytemuck::bytes_of(&frame)) {
+            queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&frame));
+            self.last_frame = Some(frame);
+        }
 
         let params = TerrainParamsUniform::from_rules(&proc.rules);
-        queue.write_buffer(&self.terrain_buf, 0, bytemuck::bytes_of(&params));
+        if self.last_params.as_ref().map(bytemuck::bytes_of) != Some(bytemuck::bytes_of(&params)) {
+            queue.write_buffer(&self.terrain_buf, 0, bytemuck::bytes_of(&params));
+            self.last_params = Some(params);
+        }
 
         // Snap every ring to the finest cell so nested holes stay aligned.
         // Per-ring cell snaps drift apart and let coarser (higher) facets win
@@ -503,13 +515,17 @@ impl ClipmapRenderer {
         let fine_cell = self.config.cell_size.max(1e-4);
         let snapped_x = (proc.focus.x / fine_cell).floor() * fine_cell;
         let snapped_z = (proc.focus.z / fine_cell).floor() * fine_cell;
-        for ring in &self.rings {
-            let u = RingUniform {
-                center: [snapped_x, snapped_z],
-                extent: ring.extent,
-                _pad: 0.0,
-            };
-            queue.write_buffer(&ring.uniform_buf, 0, bytemuck::bytes_of(&u));
+        let center = [snapped_x, snapped_z];
+        if self.last_ring_center != Some(center) {
+            self.last_ring_center = Some(center);
+            for ring in &self.rings {
+                let u = RingUniform {
+                    center,
+                    extent: ring.extent,
+                    _pad: 0.0,
+                };
+                queue.write_buffer(&ring.uniform_buf, 0, bytemuck::bytes_of(&u));
+            }
         }
     }
 

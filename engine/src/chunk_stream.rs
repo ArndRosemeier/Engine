@@ -113,6 +113,13 @@ pub struct ChunkStream {
     ready: VecDeque<(ChunkCoord, ChunkPayload)>,
     tx: Sender<JobResult>,
     rx: Receiver<JobResult>,
+    load: HashSet<ChunkCoord>,
+    keep: HashSet<ChunkCoord>,
+    stale: Vec<ChunkCoord>,
+    missing: Vec<ChunkCoord>,
+    upload_scratch: Vec<(ChunkCoord, ChunkPayload)>,
+    /// Resident chunks whose mesh is stale. Still drawn until the replacement lands.
+    dirty: HashSet<ChunkCoord>,
 }
 
 impl ChunkStream {
@@ -135,6 +142,12 @@ impl ChunkStream {
             ready: VecDeque::new(),
             tx,
             rx,
+            load: HashSet::new(),
+            keep: HashSet::new(),
+            stale: Vec::new(),
+            missing: Vec::new(),
+            upload_scratch: Vec::new(),
+            dirty: HashSet::new(),
         }
     }
 
@@ -183,7 +196,7 @@ impl ChunkStream {
     }
 
     pub fn pending_count(&self) -> usize {
-        self.inflight.len() + self.ready.len()
+        self.inflight.len() + self.ready.len() + self.dirty.len()
     }
 
     /// Bakes running on worker threads right now.
@@ -204,6 +217,27 @@ impl ChunkStream {
         ChunkCoord::containing(focus, self.span)
     }
 
+    /// Mark these resident chunks stale so the next sync bakes them again.
+    ///
+    /// The current mesh stays drawn until the replacement uploads: dropping it
+    /// first leaves a hole (bright sky through the ground) for as long as the
+    /// bake takes. Bumps the epoch so in-flight results from the old content
+    /// cannot land.
+    pub fn invalidate(&mut self, _world: &mut World, coords: &[ChunkCoord]) {
+        if coords.is_empty() {
+            return;
+        }
+        self.epoch += 1;
+        self.inflight.clear();
+        self.ready.clear();
+        while self.rx.try_recv().is_ok() {}
+        for &coord in coords {
+            if self.resident.contains_key(&coord) {
+                self.dirty.insert(coord);
+            }
+        }
+    }
+
     /// Invalidate every in-flight bake and drop all resident chunks.
     ///
     /// Results from the previous epoch are discarded when they arrive, so a
@@ -218,6 +252,12 @@ impl ChunkStream {
         }
         self.inflight.clear();
         self.ready.clear();
+        self.load.clear();
+        self.keep.clear();
+        self.stale.clear();
+        self.missing.clear();
+        self.upload_scratch.clear();
+        self.dirty.clear();
         while self.rx.try_recv().is_ok() {}
     }
 
@@ -259,6 +299,24 @@ impl ChunkStream {
             .is_some_and(|hole| coord.ring_distance(center) <= hole)
     }
 
+    fn fill_ring(
+        center: ChunkCoord,
+        radius: i32,
+        hole_radius: Option<i32>,
+        out: &mut HashSet<ChunkCoord>,
+    ) {
+        out.clear();
+        for dz in -radius..=radius {
+            for dx in -radius..=radius {
+                let c = center.offset(dx, dz);
+                let in_hole = hole_radius.is_some_and(|hole| c.ring_distance(center) <= hole);
+                if !in_hole {
+                    out.insert(c);
+                }
+            }
+        }
+    }
+
     fn ring(center: ChunkCoord, radius: i32) -> Vec<ChunkCoord> {
         let mut keys = Vec::new();
         for dz in -radius..=radius {
@@ -278,30 +336,28 @@ impl ChunkStream {
         priority: Option<GlobalXZ>,
     ) -> EngineResult<()> {
         let center = self.focus_chunk(focus);
-        let load: HashSet<ChunkCoord> = Self::ring(center, self.radius)
-            .into_iter()
-            .filter(|c| !self.in_hole(*c, center))
-            .collect();
-        // The hole has no hysteresis: a chunk that the finer tier has taken
-        // over must go now, or two resolutions of the same ground fight.
-        let keep: HashSet<ChunkCoord> = Self::ring(center, self.radius + self.keep_margin)
-            .into_iter()
-            .filter(|c| !self.in_hole(*c, center))
-            .collect();
+        let radius = self.radius;
+        let keep_r = self.radius + self.keep_margin;
+        let hole = self.hole_radius;
+        Self::fill_ring(center, radius, hole, &mut self.load);
+        Self::fill_ring(center, keep_r, hole, &mut self.keep);
 
-        let stale: Vec<ChunkCoord> = self
-            .resident
-            .keys()
-            .copied()
-            .filter(|c| !keep.contains(c))
-            .collect();
-        for coord in stale {
+        self.stale.clear();
+        self.stale.extend(
+            self.resident
+                .keys()
+                .copied()
+                .filter(|c| !self.keep.contains(c)),
+        );
+        let mut stale = std::mem::take(&mut self.stale);
+        for coord in stale.drain(..) {
             self.unload(world, coord);
         }
+        self.stale = stale;
 
         self.drain_ready()?;
-        self.upload_ready(world, center, &keep)?;
-        self.spawn_jobs(center, &load, priority.map(|p| self.focus_chunk(p)));
+        self.upload_ready(world, center)?;
+        self.spawn_jobs(center, priority.map(|p| self.focus_chunk(p)));
         Ok(())
     }
 
@@ -332,6 +388,7 @@ impl ChunkStream {
     }
 
     fn unload(&mut self, world: &mut World, coord: ChunkCoord) {
+        self.dirty.remove(&coord);
         if let Some(chunk) = self.resident.remove(&coord) {
             for layer in chunk.layers {
                 world.clear_anchored_chunk(ChunkId::at_level(coord, layer, self.level));
@@ -356,18 +413,18 @@ impl ChunkStream {
         Ok(())
     }
 
-    fn upload_ready(
-        &mut self,
-        world: &mut World,
-        center: ChunkCoord,
-        keep: &HashSet<ChunkCoord>,
-    ) -> EngineResult<()> {
-        let mut batch: Vec<(ChunkCoord, ChunkPayload)> = self.ready.drain(..).collect();
+    fn upload_ready(&mut self, world: &mut World, center: ChunkCoord) -> EngineResult<()> {
+        let mut batch = std::mem::take(&mut self.upload_scratch);
+        batch.clear();
+        batch.extend(self.ready.drain(..));
         batch.sort_by_key(|(c, _)| self.upload_priority(*c, center));
         let mut uploaded = 0usize;
         let mut rest = VecDeque::new();
-        for (coord, payload) in batch {
-            if !keep.contains(&coord) || self.resident.contains_key(&coord) {
+        for (coord, payload) in batch.drain(..) {
+            if !self.keep.contains(&coord) {
+                continue;
+            }
+            if self.resident.contains_key(&coord) && !self.dirty.contains(&coord) {
                 continue;
             }
             // Required chunks always upload: gameplay is blocked until they land.
@@ -379,6 +436,7 @@ impl ChunkStream {
                 rest.push_back((coord, payload));
             }
         }
+        self.upload_scratch = batch;
         self.ready = rest;
         Ok(())
     }
@@ -400,6 +458,7 @@ impl ChunkStream {
     ) -> EngineResult<()> {
         let Some(payload) = payload else {
             // Deliberately empty address (outside the world) — resident, no mesh.
+            self.dirty.remove(&coord);
             self.resident.insert(
                 coord,
                 ResidentChunk {
@@ -414,6 +473,14 @@ impl ChunkStream {
             layers,
             contact,
         } = payload;
+        self.dirty.remove(&coord);
+        if let Some(old) = self.resident.remove(&coord) {
+            for layer in &old.layers {
+                if !layers.iter().any(|(l, _)| l == layer) {
+                    world.clear_anchored_chunk(ChunkId::at_level(coord, *layer, self.level));
+                }
+            }
+        }
         let mut installed = Vec::with_capacity(layers.len());
         for (layer, mesh) in layers {
             world.set_anchored_chunk(ChunkId::at_level(coord, layer, self.level), anchor, mesh)?;
@@ -429,17 +496,13 @@ impl ChunkStream {
         Ok(())
     }
 
-    fn spawn_jobs(
-        &mut self,
-        center: ChunkCoord,
-        load: &HashSet<ChunkCoord>,
-        priority: Option<ChunkCoord>,
-    ) {
-        let mut missing: Vec<ChunkCoord> = load
-            .iter()
-            .copied()
-            .filter(|c| !self.resident.contains_key(c) && !self.inflight.contains(c))
-            .collect();
+    fn spawn_jobs(&mut self, center: ChunkCoord, priority: Option<ChunkCoord>) {
+        let mut missing = std::mem::take(&mut self.missing);
+        missing.clear();
+        missing.extend(self.load.iter().copied().filter(|c| {
+            !self.inflight.contains(c)
+                && (!self.resident.contains_key(c) || self.dirty.contains(c))
+        }));
         // Required ring first, then the movement leading edge, then nearest.
         // Never block the main thread on the leading edge — that froze the
         // window on the first movement key.
@@ -456,7 +519,7 @@ impl ChunkStream {
             (required, lead, c.walk_distance(center), c.x, c.z)
         });
         let budget = self.max_jobs_per_frame.min(missing.len());
-        for coord in missing.into_iter().take(budget) {
+        for coord in missing.iter().copied().take(budget) {
             self.inflight.insert(coord);
             let builder = Arc::clone(&self.builder);
             let tx = self.tx.clone();
@@ -470,6 +533,7 @@ impl ChunkStream {
                 });
             });
         }
+        self.missing = missing;
     }
 }
 

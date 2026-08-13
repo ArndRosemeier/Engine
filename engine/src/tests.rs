@@ -49,14 +49,29 @@ fn mesh_build_smooth_shares_normals_across_ridge() {
     m.add_quad(p10, p11, p21, p20).unwrap();
     let flat = m.build();
     let smooth = m.build_smooth();
-    let mut max_dot_gap = 0.0_f32;
-    for i in 0..flat.normals.len() {
-        let d = flat.normals[i].dot(smooth.normals[i]);
-        max_dot_gap = max_dot_gap.max(1.0 - d);
+    assert_eq!(smooth.vertex_count(), 6, "smooth bake shares authoring points");
+    assert_eq!(smooth.index_count(), 12);
+    assert!(
+        smooth.vertex_count() < flat.vertex_count(),
+        "indexed smooth must emit fewer GPU verts than the faceted bake"
+    );
+    // Ridge points p10/p11 are used by both quads; their averaged normal
+    // must not match either flat face.
+    let ridge = Vec3::new(1.0, 0.0, 0.0);
+    let ridge_n = smooth
+        .positions
+        .iter()
+        .zip(smooth.normals.iter())
+        .find(|(p, _)| (*p - ridge).length() < 1e-5)
+        .map(|(_, n)| *n)
+        .expect("ridge vertex");
+    let mut max_gap = 0.0_f32;
+    for n in &flat.normals {
+        max_gap = max_gap.max(1.0 - n.dot(ridge_n));
     }
     assert!(
-        max_dot_gap > 0.02,
-        "smooth normals should differ from flat on a bent heightfield (gap={max_dot_gap})"
+        max_gap > 0.02,
+        "smooth ridge normal should differ from flat faces (gap={max_gap})"
     );
 }
 
@@ -526,6 +541,26 @@ fn a_scatter_layer_reuses_its_mesh_when_the_placements_change() {
     world.set_instances(id, &[]).unwrap();
     let e = world.entity(id).unwrap();
     assert!(e.instanced && e.instances.is_empty());
+}
+
+#[test]
+fn moving_or_scattering_an_entity_bumps_xform_rev() {
+    use crate::world::World;
+
+    let mut world = World::new();
+    let id = world.spawn(unit_quad());
+    let rev = world.entity(id).unwrap().xform_rev;
+    world
+        .set_place(id, Place::new(3.0, 0.0, 1.0))
+        .unwrap();
+    assert_ne!(world.entity(id).unwrap().xform_rev, rev);
+
+    let scatter = world.spawn_instanced(unit_quad());
+    let rev = world.entity(scatter).unwrap().xform_rev;
+    world
+        .set_instances(scatter, &[Place::new(1.0, 0.0, 0.0)])
+        .unwrap();
+    assert_ne!(world.entity(scatter).unwrap().xform_rev, rev);
 }
 
 #[test]
