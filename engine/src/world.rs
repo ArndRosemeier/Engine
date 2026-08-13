@@ -1,6 +1,7 @@
 use crate::anim::{AnimatedModel, Animator};
 use crate::camera::Camera;
 use crate::color::Color;
+use crate::contact::ContactSnapshot;
 use crate::error::{EngineError, EngineResult};
 use crate::input::Input;
 use crate::limits::EngineLimits;
@@ -44,6 +45,36 @@ impl Default for Light {
             direction: Vec3::new(0.4, 1.0, 0.25),
             color: Vec3::splat(1.0),
             ambient: 0.22,
+        }
+    }
+}
+
+/// Nearby mesh cascades plus optional height-field raymarch.
+///
+/// Shadows are on by default once a sun is set. Pass `None` to [`World::set_shadows`]
+/// to turn them off.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShadowSettings {
+    /// Camera-distance splits for the three cascaded maps, in metres.
+    pub cascade_end_m: [f32; 3],
+    /// Edge length of each cascade depth map.
+    pub map_size: u32,
+    /// Raymarch a height source (clipmap formula or resident contact atlas).
+    pub raymarch_height: bool,
+    /// World-XZ extent of the contact height atlas, in metres.
+    pub atlas_extent_m: f32,
+    /// Edge length of the contact height atlas.
+    pub atlas_size: u32,
+}
+
+impl Default for ShadowSettings {
+    fn default() -> Self {
+        Self {
+            cascade_end_m: [12.0, 40.0, 120.0],
+            map_size: 1024,
+            raymarch_height: true,
+            atlas_extent_m: 1024.0,
+            atlas_size: 1024,
         }
     }
 }
@@ -251,6 +282,11 @@ pub struct World {
     haze: Option<Haze>,
     /// Procedural sky behind the scene, when the game wants one.
     sky: Option<Sky>,
+    /// Nearby mesh CSM + height raymarch. `None` disables shadows.
+    shadows: Option<ShadowSettings>,
+    /// Resident contact grids, pushed by the chunk streamer when they change.
+    shadow_contact: ContactSnapshot,
+    shadow_contact_epoch: u64,
 }
 
 impl Default for World {
@@ -283,6 +319,9 @@ impl Default for World {
             view_distance: Camera::default().far,
             haze: None,
             sky: None,
+            shadows: Some(ShadowSettings::default()),
+            shadow_contact: ContactSnapshot::default(),
+            shadow_contact_epoch: 0,
         }
     }
 }
@@ -662,7 +701,16 @@ impl World {
 
     /// Spawn a skinned model with clip playback.
     pub fn spawn_animated(&mut self, model: AnimatedModel, place: Place) -> EngineResult<EntityId> {
-        let animator = Animator::new(Arc::new(model))?;
+        self.spawn_animated_shared(Arc::new(model), place)
+    }
+
+    /// Spawn from a shared model so a herd does not clone the mesh per animal.
+    pub fn spawn_animated_shared(
+        &mut self,
+        model: Arc<AnimatedModel>,
+        place: Place,
+    ) -> EngineResult<EntityId> {
+        let animator = Animator::new(model)?;
         let id = EntityId(self.next_id);
         self.next_id += 1;
         self.animated.insert(
@@ -727,6 +775,30 @@ impl World {
     pub fn set_sun(&mut self, direction: impl Into<Vec3>, ambient: f32) {
         self.light.direction = direction.into();
         self.light.ambient = ambient.clamp(0.0, 1.0);
+    }
+
+    /// Enable hybrid sun shadows, or pass `None` to turn them off.
+    pub fn set_shadows(&mut self, shadows: Option<ShadowSettings>) {
+        self.shadows = shadows;
+    }
+
+    pub fn shadows(&self) -> Option<ShadowSettings> {
+        self.shadows
+    }
+
+    pub(crate) fn note_shadow_contact(&mut self, snap: ContactSnapshot, epoch: u64) {
+        if self.shadow_contact_epoch != epoch {
+            self.shadow_contact_epoch = epoch;
+            self.shadow_contact = snap;
+        }
+    }
+
+    pub(crate) fn shadow_contact(&self) -> &ContactSnapshot {
+        &self.shadow_contact
+    }
+
+    pub(crate) fn shadow_contact_epoch(&self) -> u64 {
+        self.shadow_contact_epoch
     }
 
     pub fn set_clear_color(&mut self, color: Color) {
@@ -1090,6 +1162,11 @@ impl World {
 
     pub(crate) fn proc_terrain(&self) -> Option<&ProcTerrain> {
         self.proc_terrain.as_ref()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn height_field(&self) -> Option<&HeightField> {
+        self.height_field.as_ref()
     }
 }
 

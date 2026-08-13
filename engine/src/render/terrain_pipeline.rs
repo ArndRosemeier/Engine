@@ -174,8 +174,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let wrap = ndl * 0.65 + 0.35;
     // Shade is sky, not mud. A north slope of grass or snow has to stay the
     // colour it is, just dimmer.
+    let vis = sun_visibility(in.world_p, n, u.eye);
     let hemi = mix(vec3<f32>(0.42, 0.40, 0.38), vec3<f32>(0.72, 0.80, 0.96), n.y * 0.5 + 0.5);
-    let ground_light = u.ambient * hemi + wrap * wrap * (1.0 - u.ambient) * u.light_color;
+    let ground_light = u.ambient * hemi + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis;
     var lit = albedo * ground_light;
 
     // Snow is its own material. Mixing a grey into dark rock and lighting the
@@ -192,8 +193,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let half_v = normalize(l + view);
     let sparkle = pow(max(dot(n, half_v), 0.0), 48.0) * (0.12 + 0.28 * rock_luma);
     let snow_sky = mix(vec3<f32>(0.70, 0.80, 0.96), vec3<f32>(1.04, 1.04, 1.06), ndl);
-    let snow_light = u.ambient * 1.2 * snow_sky + wrap * (1.0 - u.ambient * 0.45) * u.light_color;
-    let snow_lit = vec3<f32>(0.93, 0.96, 0.99) * snow_light + sparkle * u.light_color;
+    let snow_light = u.ambient * 1.2 * snow_sky + wrap * (1.0 - u.ambient * 0.45) * u.light_color * vis;
+    let snow_lit = vec3<f32>(0.93, 0.96, 0.99) * snow_light + sparkle * u.light_color * vis;
     lit = mix(lit, snow_lit, snow_w);
 
     return vec4<f32>(haze(lit, in.world_p), 1.0);
@@ -238,7 +239,7 @@ pub fn create_terrain_pipelines(
 ) -> TerrainPipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("terrain-lit-shader"),
-        source: wgpu::ShaderSource::Wgsl(format!("{}{SHADER}", super::pipeline::SCENE_WGSL).into()),
+        source: wgpu::ShaderSource::Wgsl(format!("{}{SHADER}", super::pipeline::scene_shader_prefix()).into()),
     });
 
     let mat_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

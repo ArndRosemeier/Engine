@@ -136,7 +136,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ndl = max(dot(n, l), 0.0);
     // Sky and sun share one budget, as on land, or water lit from both ends up
     // brighter than the sand beside it.
-    let diffuse = u.ambient + (0.35 + 0.65 * ndl) * (1.0 - u.ambient) * u.light_color;
+    let vis = sun_visibility(in.world_p, n, u.eye);
+    let diffuse = u.ambient + (0.35 + 0.65 * ndl) * (1.0 - u.ambient) * u.light_color * vis;
 
     // Sky reflection at grazing angles is what makes flat water read as water.
     // Capped well below a mirror: with no reflection buffer, a full fresnel
@@ -147,7 +148,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     let half_v = normalize(l + view);
     let glint = pow(max(dot(n, half_v), 0.0), 220.0) * wp.glint;
-    color += u.light_color * glint;
+    color += u.light_color * glint * vis;
 
     // Foam where the bed comes up to meet the sheet, torn along the wave tilt
     // so the shoreline is a moving edge rather than a painted band.
@@ -194,7 +195,7 @@ pub fn create_water_pipelines(
 ) -> WaterPipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("water-shader"),
-        source: wgpu::ShaderSource::Wgsl(format!("{}{SHADER}", super::pipeline::SCENE_WGSL).into()),
+        source: wgpu::ShaderSource::Wgsl(format!("{}{SHADER}", super::pipeline::scene_shader_prefix()).into()),
     });
 
     let mat_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

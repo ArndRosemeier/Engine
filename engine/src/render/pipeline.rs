@@ -91,6 +91,16 @@ fn haze(color: vec3<f32>, world_p: vec3<f32>) -> vec3<f32> {
 }
 "#;
 
+pub fn scene_shader_prefix() -> String {
+    format!(
+        "{}{}{}{}",
+        SCENE_WGSL,
+        super::shadow::SHADOW_UNIFORMS_WGSL,
+        super::shadow::SCENE_SHADOW_WGSL,
+        super::shadow::SHADOW_EVAL_WGSL
+    )
+}
+
 const SHADER: &str = r#"
 @group(1) @binding(0) var albedo_tex: texture_2d<f32>;
 @group(1) @binding(1) var albedo_sampler: sampler;
@@ -139,7 +149,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // hills. Sky and sun share one budget, so raising ambient fills the shadows
     // instead of blowing out everything the sun already reaches.
     let wrap = ndl * 0.65 + 0.35;
-    let lit = base.rgb * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color);
+    let vis = sun_visibility(in.world_p, n, u.eye);
+    let lit = base.rgb * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis);
     // Soft fresnel rim for translucent surfaces (keep grazing alpha modest so
     // water stays see-through from typical third-person angles).
     var alpha = base.a;
@@ -172,10 +183,11 @@ pub fn create_pipelines(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     format: wgpu::TextureFormat,
+    shadow: &super::shadow::ShadowGpu,
 ) -> Pipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("lit-shader"),
-        source: wgpu::ShaderSource::Wgsl(format!("{SCENE_WGSL}{SHADER}").into()),
+        source: wgpu::ShaderSource::Wgsl(format!("{}{SHADER}", scene_shader_prefix()).into()),
     });
 
     let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -186,25 +198,14 @@ pub fn create_pipelines(
 
     let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("uniform-layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        }],
+        entries: &super::shadow::ShadowGpu::scene_layout_entries(),
     });
 
+    let scene_entries = shadow.scene_bind_entries(uniform_buf.as_entire_binding());
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("uniform-bind"),
         layout: &bind_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: uniform_buf.as_entire_binding(),
-        }],
+        entries: &scene_entries,
     });
 
     let albedo_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

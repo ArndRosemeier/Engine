@@ -216,7 +216,8 @@ fn fs_land(in: VsOut) -> @location(0) vec4<f32> {
     let l = normalize(frame.light_dir);
     let ndl = max(dot(n, l), 0.0);
     let wrap = ndl * 0.5 + 0.5;
-    let lit = in.color.rgb * (frame.ambient + wrap * wrap * frame.light_color);
+    let vis = sun_visibility(in.world_p, n, frame.eye);
+    let lit = in.color.rgb * (frame.ambient + wrap * wrap * vis * frame.light_color);
     return vec4(lit, 1.0);
 }
 
@@ -253,7 +254,8 @@ fn fs_water(in: WaterVsOut) -> @location(0) vec4<f32> {
     let fresnel = pow(1.0 - max(dot(n, view), 0.0), 2.0);
     let ndl = max(dot(n, l), 0.0);
     let wrap = ndl * 0.5 + 0.5;
-    let lit = in.color.rgb * (frame.ambient + wrap * wrap * frame.light_color);
+    let vis = sun_visibility(in.world_p, n, frame.eye);
+    let lit = in.color.rgb * (frame.ambient + wrap * wrap * vis * frame.light_color);
     var alpha = in.color.a;
     alpha = mix(alpha, min(alpha + 0.18, 0.55), fresnel * 0.65);
     return vec4(lit, alpha);
@@ -284,13 +286,27 @@ pub struct ClipmapRenderer {
     last_frame: Option<FrameUniform>,
     last_params: Option<TerrainParamsUniform>,
     last_ring_center: Option<[f32; 2]>,
+    shadow_layout: wgpu::BindGroupLayout,
 }
 
 impl ClipmapRenderer {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, config: ClipmapConfig) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        config: ClipmapConfig,
+        shadow_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("clipmap-shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "{SHADER}{}{}{}",
+                    super::shadow::SHADOW_UNIFORMS_WGSL,
+                    super::shadow::CLIPMAP_SHADOW_WGSL,
+                    super::shadow::SHADOW_EVAL_WGSL
+                )
+                .into(),
+            ),
         });
 
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -331,7 +347,7 @@ impl ClipmapRenderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("clipmap-pipeline-layout"),
-            bind_group_layouts: &[&bind_layout],
+            bind_group_layouts: &[&bind_layout, shadow_layout],
             push_constant_ranges: &[],
         });
 
@@ -461,6 +477,7 @@ impl ClipmapRenderer {
             last_frame: None,
             last_params: None,
             last_ring_center: None,
+            shadow_layout: shadow_layout.clone(),
         }
     }
 
@@ -476,7 +493,7 @@ impl ClipmapRenderer {
         {
             return;
         }
-        *self = Self::new(device, format, config.clone());
+        *self = Self::new(device, format, config.clone(), &self.shadow_layout.clone());
     }
 
     pub fn prepare(
@@ -529,8 +546,13 @@ impl ClipmapRenderer {
         }
     }
 
-    pub fn draw_land<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
+    pub fn draw_land<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        shadow_bind: &'a wgpu::BindGroup,
+    ) {
         pass.set_pipeline(&self.land_pipeline);
+        pass.set_bind_group(1, shadow_bind, &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
         // Coarse → fine so finer wins depth.
@@ -541,8 +563,13 @@ impl ClipmapRenderer {
         }
     }
 
-    pub fn draw_water<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
+    pub fn draw_water<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        shadow_bind: &'a wgpu::BindGroup,
+    ) {
         pass.set_pipeline(&self.water_pipeline);
+        pass.set_bind_group(1, shadow_bind, &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
         for ring in self.rings.iter().rev() {

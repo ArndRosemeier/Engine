@@ -120,6 +120,7 @@ pub struct ChunkStream {
     upload_scratch: Vec<(ChunkCoord, ChunkPayload)>,
     /// Resident chunks whose mesh is stale. Still drawn until the replacement lands.
     dirty: HashSet<ChunkCoord>,
+    contact_epoch: u64,
 }
 
 impl ChunkStream {
@@ -148,6 +149,7 @@ impl ChunkStream {
             missing: Vec::new(),
             upload_scratch: Vec::new(),
             dirty: HashSet::new(),
+            contact_epoch: 0,
         }
     }
 
@@ -358,6 +360,7 @@ impl ChunkStream {
         self.drain_ready()?;
         self.upload_ready(world, center)?;
         self.spawn_jobs(center, priority.map(|p| self.focus_chunk(p)));
+        world.note_shadow_contact(self.contact_snapshot(), self.contact_epoch);
         Ok(())
     }
 
@@ -384,12 +387,14 @@ impl ChunkStream {
             let payload = self.builder.build(coord)?;
             self.install(world, coord, payload)?;
         }
+        world.note_shadow_contact(self.contact_snapshot(), self.contact_epoch);
         Ok(())
     }
 
     fn unload(&mut self, world: &mut World, coord: ChunkCoord) {
         self.dirty.remove(&coord);
         if let Some(chunk) = self.resident.remove(&coord) {
+            self.contact_epoch = self.contact_epoch.wrapping_add(1);
             for layer in chunk.layers {
                 world.clear_anchored_chunk(ChunkId::at_level(coord, layer, self.level));
             }
@@ -466,6 +471,7 @@ impl ChunkStream {
                     contact: None,
                 },
             );
+            self.contact_epoch = self.contact_epoch.wrapping_add(1);
             return Ok(());
         };
         let ChunkPayload {
@@ -493,6 +499,7 @@ impl ChunkStream {
                 contact: contact.map(Arc::new),
             },
         );
+        self.contact_epoch = self.contact_epoch.wrapping_add(1);
         Ok(())
     }
 

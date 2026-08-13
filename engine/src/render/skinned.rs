@@ -110,7 +110,8 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let l = normalize(u.light_dir);
     let ndl = max(dot(n, l), 0.0);
     let wrap = ndl * 0.5 + 0.5;
-    let lit = in.color.rgb * (u.ambient + wrap * wrap * u.light_color);
+    let vis = sun_visibility(in.world_p, n, u.eye);
+    let lit = in.color.rgb * (u.ambient + wrap * wrap * u.light_color * vis);
     return vec4<f32>(haze(lit, in.world_p), 1.0);
 }
 "#;
@@ -120,19 +121,8 @@ pub struct SkinnedPipelines {
     pub joint_bind_layout: wgpu::BindGroupLayout,
 }
 
-pub fn create_skinned_pipelines(
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-    scene_bind_layout: &wgpu::BindGroupLayout,
-) -> SkinnedPipelines {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("skinned-shader"),
-        source: wgpu::ShaderSource::Wgsl(
-            format!("{}{SKINNED_SHADER}", super::pipeline::SCENE_WGSL).into(),
-        ),
-    });
-
-    let joint_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+pub fn joint_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("joint-layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
@@ -144,6 +134,20 @@ pub fn create_skinned_pipelines(
             },
             count: None,
         }],
+    })
+}
+
+pub fn create_skinned_pipelines(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    scene_bind_layout: &wgpu::BindGroupLayout,
+    joint_bind_layout: wgpu::BindGroupLayout,
+) -> SkinnedPipelines {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("skinned-shader"),
+        source: wgpu::ShaderSource::Wgsl(
+            format!("{}{SKINNED_SHADER}", super::pipeline::scene_shader_prefix()).into(),
+        ),
     });
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -208,6 +212,7 @@ pub fn create_skinned_pipelines(
     }
 }
 
+#[derive(Clone)]
 pub struct GpuSkinnedMesh {
     pub vertex_buf: wgpu::Buffer,
     pub index_buf: wgpu::Buffer,
@@ -252,17 +257,14 @@ pub struct GpuSkinnedEntity {
 }
 
 impl GpuSkinnedEntity {
-    pub fn upload(
+    /// Same GPU vertices as another animal of this model; only pose buffers are new.
+    pub fn from_shared_meshes(
         device: &wgpu::Device,
         joint_layout: &wgpu::BindGroupLayout,
-        meshes: &[SkinMesh],
+        meshes: Vec<GpuSkinnedMesh>,
         transform: Mat4,
         joints: &[Mat4],
     ) -> Self {
-        let gpu_meshes = meshes
-            .iter()
-            .map(|m| GpuSkinnedMesh::upload(device, m))
-            .collect();
         let instance = InstanceRaw::from_matrix(transform);
         let instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("skinned-instance"),
@@ -284,7 +286,7 @@ impl GpuSkinnedEntity {
             }],
         });
         Self {
-            meshes: gpu_meshes,
+            meshes,
             instance_buf,
             joint_buf,
             joint_bind,

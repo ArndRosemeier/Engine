@@ -282,6 +282,43 @@ fn resolve_allowed_path(path: &Path, base_dir: &Path) -> EngineResult<PathBuf> {
     Ok(canonical)
 }
 
+fn nearest_joint(
+    mut node: usize,
+    node_parent: &HashMap<usize, usize>,
+    node_to_joint: &HashMap<usize, usize>,
+) -> Option<usize> {
+    loop {
+        if let Some(&ji) = node_to_joint.get(&node) {
+            return Some(ji);
+        }
+        node = *node_parent.get(&node)?;
+    }
+}
+
+fn node_global_matrix(
+    document: &gltf::Document,
+    node_index: usize,
+    node_parent: &HashMap<usize, usize>,
+) -> Mat4 {
+    let mut chain = Vec::new();
+    let mut cur = Some(node_index);
+    while let Some(i) = cur {
+        chain.push(i);
+        cur = node_parent.get(&i).copied();
+    }
+    chain.reverse();
+    let mut m = Mat4::IDENTITY;
+    for i in chain {
+        let node = document
+            .nodes()
+            .nth(i)
+            .expect("node index from the same glTF parent map");
+        let (t, r, s) = node_local_trs(&node);
+        m *= Mat4::from_scale_rotation_translation(s, r, t);
+    }
+    m
+}
+
 fn node_local_trs(node: &gltf::Node<'_>) -> (Vec3, Quat, Vec3) {
     match node.transform() {
         gltf::scene::Transform::Matrix { matrix } => {
@@ -398,7 +435,7 @@ fn load_animated_document(
                 continue;
             }
             let reader = primitive.reader(|buffer| Some(buffers[buffer.index()].0.as_slice()));
-            let positions: Vec<[f32; 3]> = reader
+            let mut positions: Vec<[f32; 3]> = reader
                 .read_positions()
                 .ok_or_else(|| EngineError::Model("skinned mesh missing POSITION".into()))?
                 .collect();
@@ -406,40 +443,65 @@ fn load_animated_document(
                 continue;
             }
 
-            let joints_iter = reader
-                .read_joints(0)
-                .ok_or_else(|| EngineError::Model("skinned mesh missing JOINTS_0".into()))?;
-            let joints: Vec<[u16; 4]> = match joints_iter {
-                gltf::mesh::util::ReadJoints::U8(i) => i
-                    .map(|j| [j[0] as u16, j[1] as u16, j[2] as u16, j[3] as u16])
-                    .collect(),
-                gltf::mesh::util::ReadJoints::U16(i) => i.collect(),
+            let (joints, extra_weights) = match reader.read_joints(0) {
+                Some(joints_iter) => {
+                    let joints: Vec<[u16; 4]> = match joints_iter {
+                        gltf::mesh::util::ReadJoints::U8(i) => i
+                            .map(|j| [j[0] as u16, j[1] as u16, j[2] as u16, j[3] as u16])
+                            .collect(),
+                        gltf::mesh::util::ReadJoints::U16(i) => i.collect(),
+                    };
+                    (joints, None)
+                }
+                None => {
+                    let joint_i = nearest_joint(node.index(), &node_parent, &node_to_joint)
+                        .ok_or_else(|| {
+                            EngineError::Model(format!(
+                                "mesh '{}' has no JOINTS_0 and is not parented to a joint",
+                                node.name().unwrap_or("unnamed")
+                            ))
+                        })?;
+                    let n = positions.len();
+                    (
+                        vec![[joint_i as u16, 0, 0, 0]; n],
+                        Some(vec![[1.0, 0.0, 0.0, 0.0]; n]),
+                    )
+                }
             };
-            let weights_iter = reader
-                .read_weights(0)
-                .ok_or_else(|| EngineError::Model("skinned mesh missing WEIGHTS_0".into()))?;
-            let mut weights: Vec<[f32; 4]> = match weights_iter {
-                gltf::mesh::util::ReadWeights::U8(i) => i
-                    .map(|w| {
-                        [
-                            w[0] as f32 / 255.0,
-                            w[1] as f32 / 255.0,
-                            w[2] as f32 / 255.0,
-                            w[3] as f32 / 255.0,
-                        ]
-                    })
-                    .collect(),
-                gltf::mesh::util::ReadWeights::U16(i) => i
-                    .map(|w| {
-                        [
-                            w[0] as f32 / 65535.0,
-                            w[1] as f32 / 65535.0,
-                            w[2] as f32 / 65535.0,
-                            w[3] as f32 / 65535.0,
-                        ]
-                    })
-                    .collect(),
-                gltf::mesh::util::ReadWeights::F32(i) => i.collect(),
+            let bake_to_joint = extra_weights.is_some();
+            let mut weights: Vec<[f32; 4]> = if let Some(w) = extra_weights {
+                let xform = node_global_matrix(document, node.index(), &node_parent);
+                for p in &mut positions {
+                    *p = xform.transform_point3(Vec3::from(*p)).to_array();
+                }
+                w
+            } else {
+                let weights_iter = reader
+                    .read_weights(0)
+                    .ok_or_else(|| EngineError::Model("skinned mesh missing WEIGHTS_0".into()))?;
+                match weights_iter {
+                    gltf::mesh::util::ReadWeights::U8(i) => i
+                        .map(|w| {
+                            [
+                                w[0] as f32 / 255.0,
+                                w[1] as f32 / 255.0,
+                                w[2] as f32 / 255.0,
+                                w[3] as f32 / 255.0,
+                            ]
+                        })
+                        .collect(),
+                    gltf::mesh::util::ReadWeights::U16(i) => i
+                        .map(|w| {
+                            [
+                                w[0] as f32 / 65535.0,
+                                w[1] as f32 / 65535.0,
+                                w[2] as f32 / 65535.0,
+                                w[3] as f32 / 65535.0,
+                            ]
+                        })
+                        .collect(),
+                    gltf::mesh::util::ReadWeights::F32(i) => i.collect(),
+                }
             };
 
             if joints.len() != positions.len() || weights.len() != positions.len() {
@@ -459,11 +521,20 @@ fn load_animated_document(
                 }
             }
 
-            let normals: Vec<[f32; 3]> = if let Some(iter) = reader.read_normals() {
+            let mut normals: Vec<[f32; 3]> = if let Some(iter) = reader.read_normals() {
                 iter.collect()
             } else {
                 vec![[0.0, 1.0, 0.0]; positions.len()]
             };
+            if bake_to_joint {
+                let xform = node_global_matrix(document, node.index(), &node_parent);
+                for n in &mut normals {
+                    *n = xform
+                        .transform_vector3(Vec3::from(*n))
+                        .normalize_or_zero()
+                        .to_array();
+                }
+            }
 
             // glTF: final color = COLOR_0 * baseColorFactor (* texture if present).
             // Quaternius animals ship white COLOR_0 and put the look in material factors.

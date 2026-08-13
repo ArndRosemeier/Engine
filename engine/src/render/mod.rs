@@ -2,6 +2,7 @@ mod clipmap;
 mod frustum;
 mod gpu_mesh;
 mod pipeline;
+mod shadow;
 mod skinned;
 mod sky_pipeline;
 mod terrain_pipeline;
@@ -9,14 +10,18 @@ mod water_pipeline;
 
 use crate::mesh::InstanceRaw;
 use crate::texture::{MaterialId, TextureId, WaterMaterialId};
-use crate::world::{Entity, EntityId, SurfaceMaterialRef, World};
+use crate::world::{Entity, EntityId, ShadowSettings, SurfaceMaterialRef, World};
 use clipmap::ClipmapRenderer;
 use frustum::Frustum;
 use gpu_mesh::GpuMesh;
 use pipeline::{create_pipelines, Pipelines, Uniforms};
-use skinned::{create_skinned_pipelines, GpuSkinnedEntity, SkinnedPipelines};
+use shadow::ShadowGpu;
+use skinned::{
+    create_skinned_pipelines, joint_bind_layout, GpuSkinnedEntity, GpuSkinnedMesh, SkinnedPipelines,
+};
+use std::sync::Arc;
 use sky_pipeline::{create_sky_pipelines, SkyPipelines, SkyUniforms};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use terrain_pipeline::{
     build_terrain_material, create_terrain_pipelines, upload_texture, GpuTerrainMaterial,
     GpuTexture, TerrainPipelines,
@@ -44,11 +49,15 @@ pub struct Renderer {
     water: WaterPipelines,
     skinned: SkinnedPipelines,
     sky: SkyPipelines,
+    shadow: ShadowGpu,
+    shadow_vp: [glam::Mat4; 3],
     clipmap: Option<ClipmapRenderer>,
     depth_view: wgpu::TextureView,
     depth_texture: wgpu::Texture,
     gpu_meshes: HashMap<EntityId, GpuMesh>,
     gpu_skinned: HashMap<EntityId, GpuSkinnedEntity>,
+    /// Vertex/index buffers keyed by `Arc::as_ptr` of the shared [`AnimatedModel`].
+    gpu_skinned_meshes: HashMap<usize, Vec<GpuSkinnedMesh>>,
     gpu_textures: HashMap<TextureId, GpuTexture>,
     gpu_mesh_albedo: HashMap<TextureId, wgpu::BindGroup>,
     gpu_materials: HashMap<MaterialId, GpuTerrainMaterial>,
@@ -128,10 +137,12 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        let pipelines = create_pipelines(&device, &queue, format);
+        let joint_layout = joint_bind_layout(&device);
+        let shadow = ShadowGpu::new(&device, &queue, ShadowSettings::default(), &joint_layout);
+        let pipelines = create_pipelines(&device, &queue, format, &shadow);
         let terrain = create_terrain_pipelines(&device, format, &pipelines.bind_layout);
         let water = create_water_pipelines(&device, format, &pipelines.bind_layout);
-        let skinned = create_skinned_pipelines(&device, format, &pipelines.bind_layout);
+        let skinned = create_skinned_pipelines(&device, format, &pipelines.bind_layout, joint_layout);
         let sky = create_sky_pipelines(&device, format);
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
 
@@ -145,11 +156,14 @@ impl Renderer {
             water,
             skinned,
             sky,
+            shadow,
+            shadow_vp: [glam::Mat4::IDENTITY; 3],
             clipmap: None,
             depth_view,
             depth_texture,
             gpu_meshes: HashMap::new(),
             gpu_skinned: HashMap::new(),
+            gpu_skinned_meshes: HashMap::new(),
             gpu_textures: HashMap::new(),
             gpu_mesh_albedo: HashMap::new(),
             gpu_materials: HashMap::new(),
@@ -191,6 +205,7 @@ impl Renderer {
                         &self.device,
                         format,
                         proc.config.clone(),
+                        &self.shadow.resource_layout,
                     ));
                 }
             }
@@ -228,18 +243,37 @@ impl Renderer {
 
         self.gpu_skinned
             .retain(|id, _| world.contains_animated(*id));
+        let live_models: HashSet<usize> = world
+            .animated_entities()
+            .map(|(_, anim)| Arc::as_ptr(&anim.animator.model) as usize)
+            .collect();
+        self.gpu_skinned_meshes.retain(|k, _| live_models.contains(k));
 
         for (id, anim) in world.animated_entities() {
             let joints = anim.animator.joint_matrices();
             match self.gpu_skinned.get_mut(id) {
                 Some(gpu) => gpu.update(&self.queue, anim.transform, &joints),
                 None => {
+                    let key = Arc::as_ptr(&anim.animator.model) as usize;
+                    let meshes = if let Some(shared) = self.gpu_skinned_meshes.get(&key) {
+                        shared.clone()
+                    } else {
+                        let uploaded: Vec<GpuSkinnedMesh> = anim
+                            .animator
+                            .model
+                            .meshes
+                            .iter()
+                            .map(|m| GpuSkinnedMesh::upload(&self.device, m))
+                            .collect();
+                        self.gpu_skinned_meshes.insert(key, uploaded.clone());
+                        uploaded
+                    };
                     self.gpu_skinned.insert(
                         *id,
-                        GpuSkinnedEntity::upload(
+                        GpuSkinnedEntity::from_shared_meshes(
                             &self.device,
                             &self.skinned.joint_bind_layout,
-                            &anim.animator.model.meshes,
+                            meshes,
                             anim.transform,
                             &joints,
                         ),
@@ -337,6 +371,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame-encoder"),
             });
+        self.encode_shadow_pass(&mut encoder, world);
         self.encode_pass(&mut encoder, &view, world);
         after(&self.device, &self.queue, &mut encoder, &view);
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -398,6 +433,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("capture-encoder"),
             });
+        self.encode_shadow_pass(&mut encoder, world);
         self.encode_pass(&mut encoder, &view, world);
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -491,6 +527,7 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.sky.uniform_buf, 0, bytemuck::bytes_of(&sky_u));
         }
+        self.shadow_vp = self.shadow.prepare(&self.queue, world);
     }
 
     fn encode_pass(
@@ -537,7 +574,7 @@ impl Renderer {
 
         // GPU procgen terrain (depth-writing land), then entity meshes.
         if let Some(clip) = self.clipmap.as_ref() {
-            clip.draw_land(&mut pass);
+            clip.draw_land(&mut pass, &self.shadow.resource_bind);
         }
 
         pass.set_bind_group(0, &self.pipelines.bind_group, &[]);
@@ -640,7 +677,55 @@ impl Renderer {
 
         // Translucent clipmap water after meshes so the walker can occlude shorelines.
         if let Some(clip) = self.clipmap.as_ref() {
-            clip.draw_water(&mut pass);
+            clip.draw_water(&mut pass, &self.shadow.resource_bind);
+        }
+    }
+
+    fn encode_shadow_pass(&mut self, encoder: &mut wgpu::CommandEncoder, world: &World) {
+        if world.shadows().is_none() {
+            return;
+        }
+        let far = world
+            .shadows()
+            .map(|s| s.cascade_end_m[2])
+            .unwrap_or(120.0);
+        let focus = world.camera.target;
+        for i in 0..3 {
+            let frustum = Frustum::from_view_projection(self.shadow_vp[i]);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow-csm"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow.layer_views[i],
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            self.shadow
+                .draw_mesh_casters(&mut pass, i, world, &self.gpu_meshes, &frustum);
+            pass.set_pipeline(&self.shadow.skinned_pipeline);
+            pass.set_bind_group(0, &self.shadow.cascade_binds[i], &[]);
+            for (id, anim) in world.animated_entities() {
+                let Some(gpu) = self.gpu_skinned.get(id) else {
+                    continue;
+                };
+                let t = anim.transform().w_axis.truncate();
+                if t.distance(focus) > far + 16.0 {
+                    continue;
+                }
+                pass.set_bind_group(1, &gpu.joint_bind, &[]);
+                pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
+                for mesh in &gpu.meshes {
+                    pass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
+                    pass.set_index_buffer(mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
+            }
         }
     }
 
