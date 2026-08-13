@@ -19,9 +19,9 @@ use shadow::ShadowGpu;
 use skinned::{
     create_skinned_pipelines, joint_bind_layout, GpuSkinnedEntity, GpuSkinnedMesh, SkinnedPipelines,
 };
-use std::sync::Arc;
 use sky_pipeline::{create_sky_pipelines, SkyPipelines, SkyUniforms};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use terrain_pipeline::{
     build_terrain_material, create_terrain_pipelines, upload_texture, GpuTerrainMaterial,
     GpuTexture, TerrainPipelines,
@@ -35,6 +35,40 @@ use winit::dpi::PhysicalSize;
 /// its precision (see [`crate::camera::Camera::projection_matrix`]). Every
 /// pipeline compares this way and the pass clears to [`DEPTH_CLEAR`]; the
 /// three must agree or the world draws inside out.
+/// GPU work counted during sync + draw, for the hitch log.
+#[derive(Clone, Debug, Default)]
+pub struct GpuFrameStats {
+    pub mesh_new: u32,
+    pub mesh_rebuild: u32,
+    pub instance_rewrites: u32,
+    pub skinned_new: u32,
+    pub skinned_model_uploads: u32,
+    pub skinned_pose_writes: u32,
+    pub shadow_atlas: bool,
+    pub entities: u32,
+    pub animated: u32,
+}
+
+impl GpuFrameStats {
+    pub fn sync_line(&self) -> String {
+        format!(
+            "mesh_new={} rebuild={} inst={} skinned_new={} skinned_model={} pose={} entities={} animated={}",
+            self.mesh_new,
+            self.mesh_rebuild,
+            self.instance_rewrites,
+            self.skinned_new,
+            self.skinned_model_uploads,
+            self.skinned_pose_writes,
+            self.entities,
+            self.animated
+        )
+    }
+
+    pub fn draw_line(&self) -> String {
+        format!("shadow_atlas={}", self.shadow_atlas)
+    }
+}
+
 pub(crate) const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::Greater;
 pub(crate) const DEPTH_CLEAR: f32 = 0.0;
 pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -73,6 +107,10 @@ pub struct Renderer {
     draw_terrain: Vec<EntityId>,
     draw_transparent: Vec<EntityId>,
     draw_water: Vec<EntityId>,
+    gpu_stats: GpuFrameStats,
+    joint_locals: Vec<(glam::Vec3, glam::Quat, glam::Vec3)>,
+    joint_global: Vec<glam::Mat4>,
+    joint_out: Vec<glam::Mat4>,
 }
 
 impl Renderer {
@@ -142,7 +180,8 @@ impl Renderer {
         let pipelines = create_pipelines(&device, &queue, format, &shadow);
         let terrain = create_terrain_pipelines(&device, format, &pipelines.bind_layout);
         let water = create_water_pipelines(&device, format, &pipelines.bind_layout);
-        let skinned = create_skinned_pipelines(&device, format, &pipelines.bind_layout, joint_layout);
+        let skinned =
+            create_skinned_pipelines(&device, format, &pipelines.bind_layout, joint_layout);
         let sky = create_sky_pipelines(&device, format);
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
 
@@ -176,6 +215,10 @@ impl Renderer {
             draw_terrain: Vec::new(),
             draw_transparent: Vec::new(),
             draw_water: Vec::new(),
+            gpu_stats: GpuFrameStats::default(),
+            joint_locals: Vec::new(),
+            joint_global: Vec::new(),
+            joint_out: Vec::new(),
         }
     }
 
@@ -193,7 +236,14 @@ impl Renderer {
         self.depth_view = depth_view;
     }
 
+    pub fn take_gpu_stats(&mut self) -> GpuFrameStats {
+        std::mem::take(&mut self.gpu_stats)
+    }
+
     pub fn sync_world(&mut self, world: &World) {
+        self.gpu_stats = GpuFrameStats::default();
+        self.gpu_stats.entities = world.entities().count() as u32;
+        self.gpu_stats.animated = world.animated_entities().count() as u32;
         self.sync_textures_and_materials(world);
 
         if let Some(proc) = world.proc_terrain() {
@@ -247,12 +297,24 @@ impl Renderer {
             .animated_entities()
             .map(|(_, anim)| Arc::as_ptr(&anim.animator.model) as usize)
             .collect();
-        self.gpu_skinned_meshes.retain(|k, _| live_models.contains(k));
+        self.gpu_skinned_meshes
+            .retain(|k, _| live_models.contains(k));
 
         for (id, anim) in world.animated_entities() {
-            let joints = anim.animator.joint_matrices();
+            crate::anim::write_joint_matrices(
+                &anim.animator.model,
+                anim.animator.clip_index,
+                anim.animator.time,
+                &mut self.joint_locals,
+                &mut self.joint_global,
+                &mut self.joint_out,
+            );
+            let joints = std::mem::take(&mut self.joint_out);
             match self.gpu_skinned.get_mut(id) {
-                Some(gpu) => gpu.update(&self.queue, anim.transform, &joints),
+                Some(gpu) => {
+                    gpu.update(&self.queue, anim.transform, &joints);
+                    self.gpu_stats.skinned_pose_writes += 1;
+                }
                 None => {
                     let key = Arc::as_ptr(&anim.animator.model) as usize;
                     let meshes = if let Some(shared) = self.gpu_skinned_meshes.get(&key) {
@@ -266,8 +328,10 @@ impl Renderer {
                             .map(|m| GpuSkinnedMesh::upload(&self.device, m))
                             .collect();
                         self.gpu_skinned_meshes.insert(key, uploaded.clone());
+                        self.gpu_stats.skinned_model_uploads += 1;
                         uploaded
                     };
+                    self.gpu_stats.skinned_new += 1;
                     self.gpu_skinned.insert(
                         *id,
                         GpuSkinnedEntity::from_shared_meshes(
@@ -280,6 +344,7 @@ impl Renderer {
                     );
                 }
             }
+            self.joint_out = joints;
         }
     }
 
@@ -327,8 +392,10 @@ impl Renderer {
                         || gpu.index_count != entity.mesh().index_count())
                 {
                     *gpu = GpuMesh::upload(&self.device, entity.mesh(), &self.instance_scratch);
+                    self.gpu_stats.mesh_rebuild += 1;
                 } else {
                     gpu.update_instances(&self.device, &self.queue, &self.instance_scratch);
+                    self.gpu_stats.instance_rewrites += 1;
                 }
                 gpu.xform_rev = entity.xform_rev;
             }
@@ -343,6 +410,7 @@ impl Renderer {
                 };
                 gpu.xform_rev = entity.xform_rev;
                 self.gpu_meshes.insert(id, gpu);
+                self.gpu_stats.mesh_new += 1;
             }
         }
     }
@@ -528,6 +596,7 @@ impl Renderer {
                 .write_buffer(&self.sky.uniform_buf, 0, bytemuck::bytes_of(&sky_u));
         }
         self.shadow_vp = self.shadow.prepare(&self.queue, world);
+        self.gpu_stats.shadow_atlas = self.shadow.atlas_wrote();
     }
 
     fn encode_pass(
@@ -685,10 +754,7 @@ impl Renderer {
         if world.shadows().is_none() {
             return;
         }
-        let far = world
-            .shadows()
-            .map(|s| s.cascade_end_m[2])
-            .unwrap_or(120.0);
+        let far = world.shadows().map(|s| s.cascade_end_m[2]).unwrap_or(120.0);
         let focus = world.camera.target;
         for i in 0..3 {
             let frustum = Frustum::from_view_projection(self.shadow_vp[i]);

@@ -18,7 +18,7 @@ use crate::ui::UiFrame;
 use glam::{IVec3, Mat4, Vec3};
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Opaque handle to a spawned entity.
@@ -191,6 +191,8 @@ pub struct Entity {
     /// CPU mesh and re-uploading it per bin is a hitch; this keeps one prototype
     /// mesh and gives each bin its own instance buffer.
     pub(crate) instance_of: Option<EntityId>,
+    /// Mesh casters only. Terrain and water never cast, even when this is set.
+    pub(crate) casts_shadow: bool,
 }
 
 impl Entity {
@@ -209,6 +211,10 @@ impl Entity {
     /// Prototype this instance list is drawn with, if it does not own a mesh.
     pub fn instance_of(&self) -> Option<EntityId> {
         self.instance_of
+    }
+
+    pub fn casts_shadow(&self) -> bool {
+        self.casts_shadow
     }
 
     fn bump_xform(&mut self) {
@@ -287,6 +293,10 @@ pub struct World {
     /// Resident contact grids, pushed by the chunk streamer when they change.
     shadow_contact: ContactSnapshot,
     shadow_contact_epoch: u64,
+    /// Named costs for the current frame. Printed only on a hitch, and only
+    /// when [`Self::set_hitch_log`] has a path.
+    hitch_spans: Vec<HitchSpan>,
+    hitch_log: Option<PathBuf>,
 }
 
 impl Default for World {
@@ -322,6 +332,8 @@ impl Default for World {
             shadows: Some(ShadowSettings::default()),
             shadow_contact: ContactSnapshot::default(),
             shadow_contact_epoch: 0,
+            hitch_spans: Vec::new(),
+            hitch_log: None,
         }
     }
 }
@@ -338,6 +350,36 @@ impl World {
 
     pub fn limits(&self) -> &EngineLimits {
         &self.limits
+    }
+
+    /// Record a named cost on this frame. Printed only if the frame hitches.
+    pub fn hitch_span(&mut self, name: impl Into<String>, ms: f32, detail: impl Into<String>) {
+        if !ms.is_finite() || ms < 0.0 {
+            panic!("hitch span ms must be finite and >= 0, got {ms}");
+        }
+        self.hitch_spans.push(HitchSpan {
+            name: name.into(),
+            ms,
+            detail: detail.into(),
+        });
+    }
+
+    pub(crate) fn take_hitch_spans(&mut self) -> Vec<HitchSpan> {
+        std::mem::take(&mut self.hitch_spans)
+    }
+
+    /// Append hitch reports to `path`, or pass `None` to stop logging.
+    pub fn set_hitch_log(&mut self, path: Option<PathBuf>) {
+        if let Some(p) = &path {
+            if p.as_os_str().is_empty() {
+                panic!("hitch log path must not be empty");
+            }
+        }
+        self.hitch_log = path;
+    }
+
+    pub fn hitch_log(&self) -> Option<&Path> {
+        self.hitch_log.as_deref()
     }
 
     /// Spawn a mesh at the origin.
@@ -408,6 +450,7 @@ impl World {
         }
         let albedo = src.albedo;
         let material = src.material;
+        let casts_shadow = src.casts_shadow;
         let id = EntityId(self.next_id);
         self.next_id += 1;
         self.entities.insert(
@@ -421,6 +464,7 @@ impl World {
                 albedo,
                 xform_rev: 1,
                 instance_of: Some(prototype),
+                casts_shadow,
             },
         );
         self.order.push(id);
@@ -441,6 +485,7 @@ impl World {
                 albedo: None,
                 xform_rev: 1,
                 instance_of: None,
+                casts_shadow: true,
             },
         );
         self.order.push(id);
@@ -465,10 +510,21 @@ impl World {
                 albedo: None,
                 xform_rev: 1,
                 instance_of: None,
+                casts_shadow: true,
             },
         );
         self.order.push(id);
         id
+    }
+
+    /// Grass and far stand-ins should not enter the cascaded depth maps.
+    pub fn set_casts_shadow(&mut self, id: EntityId, casts: bool) -> EngineResult<()> {
+        let e = self
+            .entities
+            .get_mut(&id)
+            .ok_or(EngineError::UnknownEntity)?;
+        e.casts_shadow = casts;
+        Ok(())
     }
 
     fn attach_albedo(&mut self, id: EntityId, albedo: Option<AlbedoMap>) -> EngineResult<()> {
@@ -1168,6 +1224,14 @@ impl World {
     pub(crate) fn height_field(&self) -> Option<&HeightField> {
         self.height_field.as_ref()
     }
+}
+
+/// One timed slice of a frame, kept until the hitch log prints or discards it.
+#[derive(Clone, Debug)]
+pub struct HitchSpan {
+    pub name: String,
+    pub ms: f32,
+    pub detail: String,
 }
 
 /// Per-frame timing and input passed to the update closure.

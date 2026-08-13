@@ -744,3 +744,37 @@ fn a_world_can_wear_a_sky() {
     world.set_sky(Some(crate::Sky::daylight()));
     assert_eq!(world.sky(), Some(crate::Sky::daylight()));
 }
+
+#[test]
+fn hitch_spans_are_taken_once() {
+    let mut world = crate::World::default();
+    world.hitch_span("fauna", 4.5, "agents=12 born=2");
+    world.hitch_span("stream", 1.0, "resident=8");
+    let notes = world.take_hitch_spans();
+    assert_eq!(notes.len(), 2);
+    assert_eq!(notes[0].name, "fauna");
+    assert_eq!(notes[0].ms, 4.5);
+    assert!(world.take_hitch_spans().is_empty());
+}
+
+#[test]
+fn hitch_log_is_off_until_a_path_is_set() {
+    let mut world = crate::World::default();
+    assert!(world.hitch_log().is_none());
+    world.set_hitch_log(Some(std::path::PathBuf::from("hitch.log")));
+    assert_eq!(world.hitch_log().unwrap().as_os_str(), "hitch.log");
+    world.set_hitch_log(None);
+    assert!(world.hitch_log().is_none());
+}
+
+#[test]
+fn like_entities_inherit_whether_they_cast_shadow() {
+    let mut world = crate::World::default();
+    let proto = world.spawn_instanced(unit_quad());
+    world.set_casts_shadow(proto, false).expect("proto");
+    let like = world.spawn_instanced_like(proto).expect("like");
+    assert!(!world.entity(like).expect("like").casts_shadow());
+    let caster = world.spawn_instanced(unit_quad());
+    let like_cast = world.spawn_instanced_like(caster).expect("caster like");
+    assert!(world.entity(like_cast).expect("caster like").casts_shadow());
+}

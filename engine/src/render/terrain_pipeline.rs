@@ -239,7 +239,9 @@ pub fn create_terrain_pipelines(
 ) -> TerrainPipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("terrain-lit-shader"),
-        source: wgpu::ShaderSource::Wgsl(format!("{}{SHADER}", super::pipeline::scene_shader_prefix()).into()),
+        source: wgpu::ShaderSource::Wgsl(
+            format!("{}{SHADER}", super::pipeline::scene_shader_prefix()).into(),
+        ),
     });
 
     let mat_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

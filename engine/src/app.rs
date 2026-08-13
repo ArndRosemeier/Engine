@@ -1,8 +1,9 @@
 use crate::input::Input;
 use crate::limits::EngineLimits;
+use crate::render::GpuFrameStats;
 use crate::render::Renderer;
 use crate::ui_backend::UiBackend;
-use crate::world::{Frame, World};
+use crate::world::{Frame, HitchSpan, World};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,6 +32,7 @@ struct App {
     fps_accum_s: f32,
     fps_frames: u32,
     pointer_locked: bool,
+    hitch_ms: f32,
 }
 
 impl App {
@@ -59,6 +61,7 @@ impl App {
             fps_accum_s: 0.0,
             fps_frames: 0,
             pointer_locked: false,
+            hitch_ms: hitch_threshold_ms(),
         }
     }
 
@@ -201,6 +204,7 @@ impl ApplicationHandler for App {
                 let update = &mut self.update;
                 let world = &mut self.world;
                 let fps = self.fps;
+                let update_t = Instant::now();
                 let (modal_was_open, full_output) = {
                     let (ui_result, full_output) = ui_backend.run_ui(&window, |ui| {
                         let frame = Frame {
@@ -219,6 +223,7 @@ impl ApplicationHandler for App {
                     });
                     (ui_result, full_output)
                 };
+                let update_ms = elapsed_ms(update_t);
                 self.input.end_frame();
 
                 // Escape gives the mouse back before it closes the window: a
@@ -237,11 +242,16 @@ impl ApplicationHandler for App {
                 self.apply_pointer_lock(&window, wants_lock);
 
                 self.world.set_time(time);
+                let anim_t = Instant::now();
                 self.world.tick_animations(dt);
+                let anim_ms = elapsed_ms(anim_t);
 
                 if let Some(renderer) = self.renderer.as_mut() {
+                    let sync_t = Instant::now();
                     renderer.sync_world(&self.world);
+                    let sync_ms = elapsed_ms(sync_t);
                     let ui_backend = self.ui_backend.as_mut().expect("ui backend");
+                    let render_t = Instant::now();
                     match renderer.render_with(&self.world, |device, queue, encoder, view| {
                         ui_backend.paint(
                             &window,
@@ -264,6 +274,26 @@ impl ApplicationHandler for App {
                         Err(wgpu::SurfaceError::Timeout) => {}
                         Err(other) => panic!("surface error: {other}"),
                     }
+                    let render_ms = elapsed_ms(render_t);
+                    let gpu = renderer.take_gpu_stats();
+                    let notes = self.world.take_hitch_spans();
+                    let work_ms = update_ms + anim_ms + sync_ms + render_ms;
+                    if work_ms >= self.hitch_ms {
+                        if let Some(path) = self.world.hitch_log() {
+                            emit_hitch(
+                                path,
+                                self.frame_index,
+                                fps,
+                                dt * 1000.0,
+                                update_ms,
+                                anim_ms,
+                                sync_ms,
+                                render_ms,
+                                &notes,
+                                &gpu,
+                            );
+                        }
+                    }
 
                     self.frame_index += 1;
                     if let Some(path) = self.screenshot_path.clone() {
@@ -274,6 +304,8 @@ impl ApplicationHandler for App {
                             return;
                         }
                     }
+                } else {
+                    let _ = self.world.take_hitch_spans();
                 }
 
                 window.request_redraw();
@@ -294,6 +326,75 @@ impl ApplicationHandler for App {
             window.request_redraw();
         }
     }
+}
+
+fn hitch_threshold_ms() -> f32 {
+    match std::env::var("ENGINE_HITCH_MS") {
+        Ok(raw) => {
+            let ms = raw.parse::<f32>().unwrap_or_else(|e| {
+                panic!("ENGINE_HITCH_MS must be a finite millisecond budget, got {raw:?}: {e}")
+            });
+            if !ms.is_finite() || ms <= 0.0 {
+                panic!("ENGINE_HITCH_MS must be > 0, got {ms}");
+            }
+            ms
+        }
+        Err(_) => 33.0,
+    }
+}
+
+fn elapsed_ms(start: Instant) -> f32 {
+    start.elapsed().as_secs_f32() * 1000.0
+}
+
+fn emit_hitch(
+    path: &std::path::Path,
+    frame_index: u32,
+    fps: f32,
+    wall_ms: f32,
+    update_ms: f32,
+    anim_ms: f32,
+    sync_ms: f32,
+    render_ms: f32,
+    notes: &[HitchSpan],
+    gpu: &GpuFrameStats,
+) {
+    use std::io::Write;
+    let work_ms = update_ms + anim_ms + sync_ms + render_ms;
+    let mut text = format!(
+        "HITCH work={work_ms:.1}ms wall={wall_ms:.1}ms frame={frame_index} fps={fps:.0}  phases update={update_ms:.1} anim={anim_ms:.1} sync={sync_ms:.1} render={render_ms:.1}\n"
+    );
+    let mut notes = notes.to_vec();
+    notes.sort_by(|a, b| b.ms.total_cmp(&a.ms));
+    for note in &notes {
+        if note.detail.is_empty() {
+            text.push_str(&format!("  {:<12} {:>5.1}ms\n", note.name, note.ms));
+        } else {
+            text.push_str(&format!(
+                "  {:<12} {:>5.1}ms  {}\n",
+                note.name, note.ms, note.detail
+            ));
+        }
+    }
+    text.push_str(&format!(
+        "  {:<12} {:>5.1}ms  {}\n",
+        "gpu_sync",
+        sync_ms,
+        gpu.sync_line()
+    ));
+    text.push_str(&format!(
+        "  {:<12} {:>5.1}ms  {}\n",
+        "gpu_draw",
+        render_ms,
+        gpu.draw_line()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap_or_else(|e| panic!("hitch log {} could not be opened: {e}", path.display()));
+    file.write_all(text.as_bytes())
+        .unwrap_or_else(|e| panic!("hitch log {} could not be written: {e}", path.display()));
 }
 
 /// Run the engine: opens a window and calls `update` every frame.

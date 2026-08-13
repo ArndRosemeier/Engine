@@ -168,15 +168,43 @@ impl Animator {
 
     /// Skinning matrices: `global * inverse_bind` per joint.
     pub fn joint_matrices(&self) -> Vec<Mat4> {
-        sample_joint_matrices(&self.model, self.clip_index, self.time)
+        let mut out = Vec::new();
+        let mut locals = Vec::new();
+        let mut global = Vec::new();
+        write_joint_matrices(
+            &self.model,
+            self.clip_index,
+            self.time,
+            &mut locals,
+            &mut global,
+            &mut out,
+        );
+        out
     }
 }
 
 pub fn sample_joint_matrices(model: &AnimatedModel, clip_index: usize, time: f32) -> Vec<Mat4> {
+    let mut out = Vec::new();
+    let mut locals = Vec::new();
+    let mut global = Vec::new();
+    write_joint_matrices(model, clip_index, time, &mut locals, &mut global, &mut out);
+    out
+}
+
+/// Fill `out` without allocating when the scratches already have capacity.
+pub fn write_joint_matrices(
+    model: &AnimatedModel,
+    clip_index: usize,
+    time: f32,
+    locals: &mut Vec<(Vec3, Quat, Vec3)>,
+    global: &mut Vec<Mat4>,
+    out: &mut Vec<Mat4>,
+) {
     let skeleton = &model.skeleton;
     let n = skeleton.joint_names.len();
     let clip = &model.clips[clip_index];
-    let mut locals = model.bind_local.clone();
+    locals.clear();
+    locals.extend_from_slice(&model.bind_local);
 
     for (ji, channels) in clip.channels.iter().enumerate() {
         if ji >= n {
@@ -194,7 +222,8 @@ pub fn sample_joint_matrices(model: &AnimatedModel, clip_index: usize, time: f32
         }
     }
 
-    let mut global = vec![Mat4::IDENTITY; n];
+    global.clear();
+    global.resize(n, Mat4::IDENTITY);
     for i in 0..n {
         let (t, r, s) = locals[i];
         let local = Mat4::from_scale_rotation_translation(s, r, t);
@@ -204,9 +233,8 @@ pub fn sample_joint_matrices(model: &AnimatedModel, clip_index: usize, time: f32
         };
     }
 
-    (0..n)
-        .map(|i| global[i] * skeleton.inverse_bind[i])
-        .collect()
+    out.clear();
+    out.extend((0..n).map(|i| global[i] * skeleton.inverse_bind[i]));
 }
 
 fn sample_vec3(track: &Vec3Track, time: f32) -> Vec3 {

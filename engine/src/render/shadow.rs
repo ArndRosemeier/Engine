@@ -92,10 +92,7 @@ pub fn fill_height_atlas(
 ) {
     let size_n = size as usize;
     if pixels.len() != size_n * size_n {
-        panic!(
-            "height atlas pixels len {} != {size}×{size}",
-            pixels.len()
-        );
+        panic!("height atlas pixels len {} != {size}×{size}", pixels.len());
     }
     if size == 0 {
         panic!("height atlas size must be non-zero");
@@ -517,6 +514,7 @@ pub struct ShadowGpu {
     last_contact_epoch: u64,
     last_origin: RenderOrigin,
     last_focus_xz: [f32; 2],
+    atlas_wrote: bool,
 }
 
 impl ShadowGpu {
@@ -806,7 +804,12 @@ impl ShadowGpu {
             last_contact_epoch: u64::MAX,
             last_origin: RenderOrigin::default(),
             last_focus_xz: [f32::MAX, f32::MAX],
+            atlas_wrote: false,
         }
+    }
+
+    pub fn atlas_wrote(&self) -> bool {
+        self.atlas_wrote
     }
 
     pub fn scene_layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
@@ -857,6 +860,7 @@ impl ShadowGpu {
     }
 
     pub fn prepare(&mut self, queue: &wgpu::Queue, world: &World) -> [Mat4; CASCADE_COUNT] {
+        self.atlas_wrote = false;
         let mut uniforms = ShadowUniforms::zeroed();
         let light = world.light.direction.normalize_or_zero();
         uniforms.light_dir = [light.x, light.y, light.z];
@@ -908,6 +912,7 @@ impl ShadowGpu {
                     || moved > extent / 16.0
                     || (self.atlas_extent - extent).abs() > 1e-3;
                 if refresh {
+                    self.atlas_wrote = true;
                     let origin_xz = [focus.x - extent * 0.5, focus.z - extent * 0.5];
                     fill_height_atlas(
                         &mut self.atlas_pixels,
@@ -917,7 +922,12 @@ impl ShadowGpu {
                         origin,
                         world.shadow_contact(),
                     );
-                    upload_atlas(queue, &self.atlas_texture, &self.atlas_pixels, self.atlas_size);
+                    upload_atlas(
+                        queue,
+                        &self.atlas_texture,
+                        &self.atlas_pixels,
+                        self.atlas_size,
+                    );
                     self.atlas_origin_xz = origin_xz;
                     self.atlas_extent = extent;
                     self.last_contact_epoch = epoch;
@@ -944,7 +954,7 @@ impl ShadowGpu {
         pass.set_pipeline(&self.mesh_pipeline);
         pass.set_bind_group(0, &self.cascade_binds[cascade], &[]);
         for (id, entity) in world.entities() {
-            if !material_casts_shadow(entity.material()) {
+            if !entity.casts_shadow() || !material_casts_shadow(entity.material()) {
                 continue;
             }
             let Some(gpu) = meshes.get(&id) else {
