@@ -6,6 +6,7 @@ pub mod advanced;
 pub mod anim;
 pub mod camera;
 pub mod chunk_stream;
+pub mod collision;
 pub mod color;
 pub mod contact;
 pub mod error;
@@ -36,6 +37,9 @@ pub(crate) mod volume;
 pub use anim::{AnimatedModel, AnimationClip, Animator};
 pub use camera::Camera;
 pub use chunk_stream::{ChunkBuilder, ChunkPayload, ChunkStream};
+pub use collision::{
+    ActorBody, ColliderId, ColliderLayer, ColliderShape, CollisionWorld, StaticCollider,
+};
 pub use color::{rgb, rgba, Color};
 pub use contact::{ContactGrid, ContactSnapshot};
 pub use error::{EngineError, EngineResult};

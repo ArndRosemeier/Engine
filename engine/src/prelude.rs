@@ -3,6 +3,9 @@
 pub use crate::anim::AnimatedModel;
 pub use crate::camera::Camera;
 pub use crate::chunk_stream::{ChunkBuilder, ChunkPayload, ChunkStream};
+pub use crate::collision::{
+    ActorBody, ColliderId, ColliderLayer, ColliderShape, CollisionWorld, StaticCollider,
+};
 pub use crate::color::{rgb, rgba, Color};
 pub use crate::contact::{ContactGrid, ContactSnapshot};
 pub use crate::error::{EngineError, EngineResult};

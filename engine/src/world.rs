@@ -1,5 +1,6 @@
 use crate::anim::{AnimatedModel, Animator};
 use crate::camera::Camera;
+use crate::collision::{ActorBody, CollisionWorld};
 use crate::color::Color;
 use crate::contact::ContactSnapshot;
 use crate::error::{EngineError, EngineResult};
@@ -297,6 +298,8 @@ pub struct World {
     /// when [`Self::set_hitch_log`] has a path.
     hitch_spans: Vec<HitchSpan>,
     hitch_log: Option<PathBuf>,
+    /// Static obstacles actors slide against. Independent of render entities.
+    collision: CollisionWorld,
 }
 
 impl Default for World {
@@ -334,6 +337,7 @@ impl Default for World {
             shadow_contact_epoch: 0,
             hitch_spans: Vec::new(),
             hitch_log: None,
+            collision: CollisionWorld::new(),
         }
     }
 }
@@ -380,6 +384,20 @@ impl World {
 
     pub fn hitch_log(&self) -> Option<&Path> {
         self.hitch_log.as_deref()
+    }
+
+    /// Static obstacles actors slide against.
+    pub fn collision(&self) -> &CollisionWorld {
+        &self.collision
+    }
+
+    pub fn collision_mut(&mut self) -> &mut CollisionWorld {
+        &mut self.collision
+    }
+
+    /// Slide `from` by `(dx, dz)` using `body`. Collision-off bodies translate.
+    pub fn move_actor(&self, body: &ActorBody, from: GlobalXZ, dx: f64, dz: f64) -> GlobalXZ {
+        self.collision.move_xz(body, from, dx, dz)
     }
 
     /// Spawn a mesh at the origin.

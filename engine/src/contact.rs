@@ -1,9 +1,11 @@
 //! CPU terrain contact for streamed heightfield chunks.
 //!
-//! There is no general physics layer, so the drawn triangles *are* the
-//! collision surface. A [`ContactGrid`] is produced by the same chunk bake that
-//! produced the land mesh, from the same samples and the same diagonal split,
-//! so feet can never sink into or float above the geometry on screen.
+//! The drawn triangles *are* the walkable surface. A [`ContactGrid`] is produced
+//! by the same chunk bake that produced the land mesh, from the same samples and
+//! the same diagonal split, so feet can never sink into or float above the
+//! geometry on screen.
+//!
+//! Horizontal obstacles (trees, walls) live in [`crate::collision`], not here.
 
 use std::collections::HashMap;
 use std::sync::Arc;
