@@ -154,6 +154,12 @@ pub struct Entity {
     /// Bumped when transform or instance list changes. The renderer skips
     /// rewriting the GPU instance buffer when this matches the last upload.
     pub(crate) xform_rev: u64,
+    /// Another instanced entity whose GPU mesh this one shares.
+    ///
+    /// Scatter bins are many placements of one pine, not many pines. Cloning the
+    /// CPU mesh and re-uploading it per bin is a hitch; this keeps one prototype
+    /// mesh and gives each bin its own instance buffer.
+    pub(crate) instance_of: Option<EntityId>,
 }
 
 impl Entity {
@@ -167,6 +173,11 @@ impl Entity {
 
     pub fn material(&self) -> Option<SurfaceMaterialRef> {
         self.material
+    }
+
+    /// Prototype this instance list is drawn with, if it does not own a mesh.
+    pub fn instance_of(&self) -> Option<EntityId> {
+        self.instance_of
     }
 
     fn bump_xform(&mut self) {
@@ -337,6 +348,46 @@ impl World {
         id
     }
 
+    /// Another instanced entity that draws `prototype`'s mesh and albedo.
+    ///
+    /// The prototype must itself own a mesh (not be a like-entity). This one
+    /// starts with no placements; [`Self::set_instances`] fills them.
+    pub fn spawn_instanced_like(&mut self, prototype: EntityId) -> EngineResult<EntityId> {
+        let src = self
+            .entities
+            .get(&prototype)
+            .ok_or(EngineError::UnknownEntity)?;
+        if !src.instanced {
+            return Err(EngineError::InvalidValue(format!(
+                "entity {prototype} was not spawned instanced"
+            )));
+        }
+        if src.instance_of.is_some() {
+            return Err(EngineError::InvalidValue(format!(
+                "entity {prototype} is already a like-entity; instance the prototype"
+            )));
+        }
+        let albedo = src.albedo;
+        let material = src.material;
+        let id = EntityId(self.next_id);
+        self.next_id += 1;
+        self.entities.insert(
+            id,
+            Entity {
+                mesh: BuiltMesh::default(),
+                transform: Mat4::IDENTITY,
+                instances: Vec::new(),
+                instanced: true,
+                material,
+                albedo,
+                xform_rev: 1,
+                instance_of: Some(prototype),
+            },
+        );
+        self.order.push(id);
+        Ok(id)
+    }
+
     pub(crate) fn spawn_built(&mut self, mesh: BuiltMesh, transform: Mat4) -> EntityId {
         let id = EntityId(self.next_id);
         self.next_id += 1;
@@ -350,6 +401,7 @@ impl World {
                 material: None,
                 albedo: None,
                 xform_rev: 1,
+                instance_of: None,
             },
         );
         self.order.push(id);
@@ -373,6 +425,7 @@ impl World {
                 material: None,
                 albedo: None,
                 xform_rev: 1,
+                instance_of: None,
             },
         );
         self.order.push(id);

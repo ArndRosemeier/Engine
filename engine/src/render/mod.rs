@@ -9,7 +9,7 @@ mod water_pipeline;
 
 use crate::mesh::InstanceRaw;
 use crate::texture::{MaterialId, TextureId, WaterMaterialId};
-use crate::world::{EntityId, SurfaceMaterialRef, World};
+use crate::world::{Entity, EntityId, SurfaceMaterialRef, World};
 use clipmap::ClipmapRenderer;
 use frustum::Frustum;
 use gpu_mesh::GpuMesh;
@@ -214,60 +214,20 @@ impl Renderer {
 
         self.gpu_meshes.retain(|id, _| world.contains_entity(*id));
 
+        // Prototypes first so like-entities can share their GPU vertex buffers.
         for (id, entity) in world.entities() {
-            if entity.instanced && entity.instances.is_empty() {
-                if let Some(gpu) = self.gpu_meshes.get_mut(&id) {
-                    if gpu.xform_rev != entity.xform_rev {
-                        gpu.clear_instances();
-                        gpu.xform_rev = entity.xform_rev;
-                    }
-                }
-                continue;
+            if entity.instance_of.is_none() {
+                self.sync_entity_mesh(id, entity);
             }
-
-            if let Some(gpu) = self.gpu_meshes.get(&id) {
-                if gpu.vertex_count == entity.mesh().vertex_count()
-                    && gpu.index_count == entity.mesh().index_count()
-                    && gpu.xform_rev == entity.xform_rev
-                {
-                    continue;
-                }
-            }
-
-            self.instance_scratch.clear();
-            if entity.instanced {
-                self.instance_scratch.extend(
-                    entity
-                        .instances
-                        .iter()
-                        .map(|m| InstanceRaw::from_matrix(entity.transform * *m)),
-                );
-            } else {
-                self.instance_scratch
-                    .push(InstanceRaw::from_matrix(entity.transform));
-            }
-
-            match self.gpu_meshes.get_mut(&id) {
-                Some(gpu) => {
-                    if gpu.vertex_count != entity.mesh().vertex_count()
-                        || gpu.index_count != entity.mesh().index_count()
-                    {
-                        *gpu = GpuMesh::upload(&self.device, entity.mesh(), &self.instance_scratch);
-                    } else {
-                        gpu.update_instances(&self.device, &self.queue, &self.instance_scratch);
-                    }
-                    gpu.xform_rev = entity.xform_rev;
-                }
-                None => {
-                    let mut gpu =
-                        GpuMesh::upload(&self.device, entity.mesh(), &self.instance_scratch);
-                    gpu.xform_rev = entity.xform_rev;
-                    self.gpu_meshes.insert(id, gpu);
-                }
+        }
+        for (id, entity) in world.entities() {
+            if entity.instance_of.is_some() {
+                self.sync_entity_mesh(id, entity);
             }
         }
 
-        self.gpu_skinned.retain(|id, _| world.contains_animated(*id));
+        self.gpu_skinned
+            .retain(|id, _| world.contains_animated(*id));
 
         for (id, anim) in world.animated_entities() {
             let joints = anim.animator.joint_matrices();
@@ -285,6 +245,70 @@ impl Renderer {
                         ),
                     );
                 }
+            }
+        }
+    }
+
+    fn sync_entity_mesh(&mut self, id: EntityId, entity: &Entity) {
+        if entity.instanced && entity.instances.is_empty() {
+            if let Some(gpu) = self.gpu_meshes.get_mut(&id) {
+                if gpu.xform_rev != entity.xform_rev {
+                    gpu.clear_instances();
+                    gpu.xform_rev = entity.xform_rev;
+                }
+            } else if entity.instance_of.is_none() {
+                let mut gpu = GpuMesh::upload(&self.device, entity.mesh(), &[]);
+                gpu.xform_rev = entity.xform_rev;
+                self.gpu_meshes.insert(id, gpu);
+            }
+            return;
+        }
+
+        if let Some(gpu) = self.gpu_meshes.get(&id) {
+            let same_mesh = entity.instance_of.is_some()
+                || (gpu.vertex_count == entity.mesh().vertex_count()
+                    && gpu.index_count == entity.mesh().index_count());
+            if same_mesh && gpu.xform_rev == entity.xform_rev {
+                return;
+            }
+        }
+
+        self.instance_scratch.clear();
+        if entity.instanced {
+            self.instance_scratch.extend(
+                entity
+                    .instances
+                    .iter()
+                    .map(|m| InstanceRaw::from_matrix(entity.transform * *m)),
+            );
+        } else {
+            self.instance_scratch
+                .push(InstanceRaw::from_matrix(entity.transform));
+        }
+
+        match self.gpu_meshes.get_mut(&id) {
+            Some(gpu) => {
+                if entity.instance_of.is_none()
+                    && (gpu.vertex_count != entity.mesh().vertex_count()
+                        || gpu.index_count != entity.mesh().index_count())
+                {
+                    *gpu = GpuMesh::upload(&self.device, entity.mesh(), &self.instance_scratch);
+                } else {
+                    gpu.update_instances(&self.device, &self.queue, &self.instance_scratch);
+                }
+                gpu.xform_rev = entity.xform_rev;
+            }
+            None => {
+                let mut gpu = if let Some(proto) = entity.instance_of {
+                    let proto_gpu = self.gpu_meshes.get(&proto).unwrap_or_else(|| {
+                        panic!("instanced-like entity {id} has no GPU mesh for prototype {proto}")
+                    });
+                    GpuMesh::share_vertices(&self.device, proto_gpu, &self.instance_scratch)
+                } else {
+                    GpuMesh::upload(&self.device, entity.mesh(), &self.instance_scratch)
+                };
+                gpu.xform_rev = entity.xform_rev;
+                self.gpu_meshes.insert(id, gpu);
             }
         }
     }
@@ -462,7 +486,8 @@ impl Renderer {
             bytemuck::bytes_of(&uniforms),
         );
         if let Some(sky) = world.sky() {
-            let sky_u = SkyUniforms::from_scene(&sky, &world.camera, &world.light, aspect, world.time());
+            let sky_u =
+                SkyUniforms::from_scene(&sky, &world.camera, &world.light, aspect, world.time());
             self.queue
                 .write_buffer(&self.sky.uniform_buf, 0, bytemuck::bytes_of(&sky_u));
         }

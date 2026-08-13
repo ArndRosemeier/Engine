@@ -500,8 +500,7 @@ impl ChunkStream {
         let mut missing = std::mem::take(&mut self.missing);
         missing.clear();
         missing.extend(self.load.iter().copied().filter(|c| {
-            !self.inflight.contains(c)
-                && (!self.resident.contains_key(c) || self.dirty.contains(c))
+            !self.inflight.contains(c) && (!self.resident.contains_key(c) || self.dirty.contains(c))
         }));
         // Required ring first, then the movement leading edge, then nearest.
         // Never block the main thread on the leading edge — that froze the

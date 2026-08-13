@@ -49,7 +49,11 @@ fn mesh_build_smooth_shares_normals_across_ridge() {
     m.add_quad(p10, p11, p21, p20).unwrap();
     let flat = m.build();
     let smooth = m.build_smooth();
-    assert_eq!(smooth.vertex_count(), 6, "smooth bake shares authoring points");
+    assert_eq!(
+        smooth.vertex_count(),
+        6,
+        "smooth bake shares authoring points"
+    );
     assert_eq!(smooth.index_count(), 12);
     assert!(
         smooth.vertex_count() < flat.vertex_count(),
@@ -550,9 +554,7 @@ fn moving_or_scattering_an_entity_bumps_xform_rev() {
     let mut world = World::new();
     let id = world.spawn(unit_quad());
     let rev = world.entity(id).unwrap().xform_rev;
-    world
-        .set_place(id, Place::new(3.0, 0.0, 1.0))
-        .unwrap();
+    world.set_place(id, Place::new(3.0, 0.0, 1.0)).unwrap();
     assert_ne!(world.entity(id).unwrap().xform_rev, rev);
 
     let scatter = world.spawn_instanced(unit_quad());
@@ -561,6 +563,23 @@ fn moving_or_scattering_an_entity_bumps_xform_rev() {
         .set_instances(scatter, &[Place::new(1.0, 0.0, 0.0)])
         .unwrap();
     assert_ne!(world.entity(scatter).unwrap().xform_rev, rev);
+}
+
+#[test]
+fn spawn_instanced_like_shares_albedo_and_owns_no_mesh() {
+    use crate::world::World;
+
+    let mut world = World::new();
+    let proto = world.spawn_instanced(unit_quad());
+    let like = world.spawn_instanced_like(proto).expect("like");
+    assert_eq!(world.entity(like).unwrap().instance_of(), Some(proto));
+    assert_eq!(world.entity(like).unwrap().mesh().vertex_count(), 0);
+    assert!(world.entity(like).unwrap().instanced);
+    world
+        .set_instances(like, &[Place::new(2.0, 0.0, 0.0)])
+        .unwrap();
+    assert_eq!(world.entity(like).unwrap().instances.len(), 1);
+    assert!(world.spawn_instanced_like(like).is_err());
 }
 
 #[test]

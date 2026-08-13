@@ -33,19 +33,51 @@ impl GpuMesh {
             contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("instances"),
-            contents: bytemuck::cast_slice(instances),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        });
         let local_bounds = Bounds::around(&mesh.positions);
+        Self::with_buffers(
+            device,
+            vertex_buf,
+            index_buf,
+            mesh.indices.len(),
+            mesh.opaque_index_count.min(mesh.indices.len()),
+            mesh.positions.len(),
+            local_bounds,
+            instances,
+        )
+    }
+
+    /// Same vertex/index buffers as `src`; a new instance buffer.
+    pub fn share_vertices(device: &wgpu::Device, src: &Self, instances: &[InstanceRaw]) -> Self {
+        Self::with_buffers(
+            device,
+            src.vertex_buf.clone(),
+            src.index_buf.clone(),
+            src.index_count,
+            src.opaque_index_count,
+            src.vertex_count,
+            src.local_bounds,
+            instances,
+        )
+    }
+
+    fn with_buffers(
+        device: &wgpu::Device,
+        vertex_buf: wgpu::Buffer,
+        index_buf: wgpu::Buffer,
+        index_count: usize,
+        opaque_index_count: usize,
+        vertex_count: usize,
+        local_bounds: Option<Bounds>,
+        instances: &[InstanceRaw],
+    ) -> Self {
+        let instance_buf = instance_buffer(device, instances);
         Self {
             vertex_buf,
             index_buf,
             instance_buf,
-            index_count: mesh.indices.len(),
-            opaque_index_count: mesh.opaque_index_count.min(mesh.indices.len()),
-            vertex_count: mesh.positions.len(),
+            index_count,
+            opaque_index_count,
+            vertex_count,
             instance_count: instances.len(),
             instance_capacity: instances.len().max(1),
             local_bounds,
@@ -78,6 +110,26 @@ impl GpuMesh {
         }
         self.instance_count = instances.len();
         self.bounds = spread_over(self.local_bounds, instances);
+    }
+}
+
+fn instance_buffer(device: &wgpu::Device, instances: &[InstanceRaw]) -> wgpu::Buffer {
+    // wgpu rejects a zero-sized buffer. A prototype with nothing placed still
+    // needs its vertex mesh uploaded, so keep a dummy slot and draw zero instances.
+    if instances.is_empty() {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("instances"),
+            contents: bytemuck::bytes_of(&InstanceRaw {
+                model: Mat4::IDENTITY.to_cols_array_2d(),
+            }),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        })
+    } else {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("instances"),
+            contents: bytemuck::cast_slice(instances),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        })
     }
 }
 

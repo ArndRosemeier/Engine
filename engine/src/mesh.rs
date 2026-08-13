@@ -464,7 +464,7 @@ impl Mesh {
 }
 
 /// Triangulated mesh with normals, ready for GPU upload (advanced / internal).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct BuiltMesh {
     pub positions: Vec<Vec3>,
     pub normals: Vec<Vec3>,
