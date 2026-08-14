@@ -17,7 +17,7 @@ pub struct SpaceId(u32);
 
 impl SpaceId {
     /// The space [`crate::world::World::spawn`] uses until you say otherwise.
-    /// Sky and clipmap terrain draw only here.
+    /// Sky and clipmap terrain draw here, and in any named space that opts in.
     pub const DEFAULT: Self = Self(0);
 
     pub(crate) fn from_raw(id: u32) -> Self {
@@ -39,13 +39,25 @@ pub struct VisiblePortal {
     pub dst_center: Vec3,
     pub dst_normal: Vec3,
     pub dest_space: SpaceId,
+    pub view: PortalView,
+}
+
+/// How the destination camera is positioned while looking through a portal.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum PortalView {
+    /// Preserve the viewer's full offset from the source opening.
+    #[default]
+    Transformed,
+    /// Fix the camera at the destination threshold while preserving look direction.
+    Threshold { eye_offset_y: f32, setback: f32 },
 }
 
 /// Two openings that are the same doorway, dungeon mouth, or teleport.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PortalLink {
     pub a: EntityId,
     pub b: EntityId,
+    pub(crate) view: PortalView,
 }
 
 impl PortalLink {
@@ -132,6 +144,41 @@ pub fn teleport_camera(camera: &Camera, src: Mat4, dst: Mat4) -> Camera {
         fov_y_degrees: camera.fov_y_degrees,
         near: camera.near,
         far: camera.far,
+    }
+}
+
+/// Destination view from a stable eye position just behind the opening.
+///
+/// This avoids exposing unrelated geometry when the source and destination
+/// rooms have different depths. Look direction, pitch, FOV, and clipping still
+/// come from the character camera.
+pub fn threshold_camera(
+    camera: &Camera,
+    src: Mat4,
+    dst: Mat4,
+    dst_center: Vec3,
+    dst_normal: Vec3,
+    eye_offset_y: f32,
+    setback: f32,
+) -> Camera {
+    if !eye_offset_y.is_finite() || !setback.is_finite() || setback <= 0.0 {
+        panic!(
+            "portal threshold view needs finite eye offset and positive setback, got ({eye_offset_y}, {setback})"
+        );
+    }
+    let transformed = teleport_camera(camera, src, dst);
+    let look = transformed.target - transformed.eye;
+    if look.length_squared() <= 0.0 {
+        panic!("portal threshold view has zero look direction");
+    }
+    let eye = dst_center - dst_normal * setback + Vec3::Y * eye_offset_y;
+    Camera {
+        eye,
+        target: eye + look.normalize(),
+        up: transformed.up,
+        fov_y_degrees: transformed.fov_y_degrees,
+        near: transformed.near,
+        far: transformed.far,
     }
 }
 
@@ -279,6 +326,53 @@ mod tests {
     }
 
     #[test]
+    fn threshold_camera_ignores_source_room_depth() {
+        let src = door(Vec3::new(0.0, 1.0, 0.0), 0.0);
+        let dst = door(Vec3::new(20.0, 1.0, 0.0), 180.0);
+        let cam = Camera::look_at(Vec3::new(0.0, 1.6, 30.0), Vec3::new(0.0, 1.6, 0.0));
+        let dst_plane = PortalPlane::from_transform(dst, 0.6, 1.0);
+        let virt = threshold_camera(&cam, src, dst, dst_plane.center, dst_plane.normal, 0.6, 0.5);
+        let expected = dst_plane.center - dst_plane.normal * 0.5 + Vec3::Y * 0.6;
+        assert!(
+            virt.eye.distance(expected) < 1e-4,
+            "threshold eye drifted with source depth: {:?} != {:?}",
+            virt.eye,
+            expected
+        );
+        assert!((virt.eye.y - 1.6).abs() < 1e-4);
+        let clip_point = dst_plane.center + dst_plane.normal * 0.02;
+        let vp = oblique_view_projection(&virt, 16.0 / 9.0, clip_point, dst_plane.normal);
+        let beyond_door = dst_plane.center + dst_plane.normal * 5.0 + Vec3::Y * 0.6;
+        assert!(
+            clip_contains(vp, beyond_door),
+            "threshold view clipped everything beyond the destination door"
+        );
+
+        let reverse_cam = Camera::look_at(
+            dst_plane.center + dst_plane.normal * 30.0 + Vec3::Y * 0.6,
+            dst_plane.center + Vec3::Y * 0.6,
+        );
+        let src_plane = PortalPlane::from_transform(src, 0.6, 1.0);
+        let reverse = threshold_camera(
+            &reverse_cam,
+            dst,
+            src,
+            src_plane.center,
+            src_plane.normal,
+            0.6,
+            0.5,
+        );
+        let reverse_clip = src_plane.center + src_plane.normal * 0.02;
+        let reverse_vp =
+            oblique_view_projection(&reverse, 16.0 / 9.0, reverse_clip, src_plane.normal);
+        let reverse_beyond = src_plane.center + src_plane.normal * 5.0 + Vec3::Y * 0.6;
+        assert!(
+            clip_contains(reverse_vp, reverse_beyond),
+            "reverse threshold view clipped everything beyond the destination door"
+        );
+    }
+
+    #[test]
     fn oblique_near_clips_behind_the_destination_door() {
         let camera = Camera::look_at(Vec3::new(0.0, 1.6, -3.0), Vec3::new(0.0, 1.6, 0.0));
         let plane_point = Vec3::new(0.0, 1.0, 0.0);
@@ -292,6 +386,33 @@ mod tests {
         );
         assert!(
             !clip_contains(vp, behind_door),
+            "geometry behind the destination door must clip"
+        );
+    }
+
+    #[test]
+    fn portal_pair_virtual_view_sees_the_room() {
+        let src = door(Vec3::new(0.0, 1.18, -10.0), 0.0);
+        let dst = door(Vec3::new(0.0, 1.18, 10.0), 180.0);
+        let cam = Camera::first_person(Vec3::new(0.0, 1.6, 0.0), 180.0, 0.0);
+        let virt = teleport_camera(&cam, src, dst);
+        let dst_center = Vec3::new(0.0, 1.18, 10.0);
+        let dst_normal = -Vec3::Z;
+        let clip_point = dst_center + dst_normal * 0.02;
+        let vp = oblique_view_projection(&virt, 16.0 / 9.0, clip_point, dst_normal);
+        let room = Vec3::new(0.0, 1.0, 0.0);
+        let behind = Vec3::new(0.0, 1.18, 12.0);
+        assert!(
+            virt.eye.z > 10.0,
+            "virtual camera sits behind door B, got {:?}",
+            virt.eye
+        );
+        assert!(
+            clip_contains(vp, room),
+            "room centre must stay visible through the pair"
+        );
+        assert!(
+            !clip_contains(vp, behind),
             "geometry behind the destination door must clip"
         );
     }

@@ -824,6 +824,49 @@ fn like_entities_inherit_whether_they_cast_shadow() {
 }
 
 #[test]
+fn the_default_space_draws_the_outdoor_environment() {
+    let world = crate::World::default();
+    assert!(world.space_draws_environment(crate::SpaceId::DEFAULT));
+}
+
+#[test]
+fn a_named_space_can_opt_into_the_outdoor_environment() {
+    let mut world = crate::World::default();
+    let travel = world.space("travel").unwrap();
+    assert!(
+        !world.space_draws_environment(travel),
+        "a named space starts without sky and clipmap"
+    );
+    world.set_space_draws_environment(travel, true).unwrap();
+    assert!(world.space_draws_environment(travel));
+    world.set_space_draws_environment(travel, false).unwrap();
+    assert!(!world.space_draws_environment(travel));
+    assert!(
+        world.space_draws_environment(crate::SpaceId::DEFAULT),
+        "opting a named space in or out must not change the default space"
+    );
+}
+
+#[test]
+fn the_default_space_cannot_drop_the_outdoor_environment() {
+    let mut world = crate::World::default();
+    let err = world
+        .set_space_draws_environment(crate::SpaceId::DEFAULT, false)
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidValue(_)));
+    assert!(world.space_draws_environment(crate::SpaceId::DEFAULT));
+}
+
+#[test]
+fn environment_opt_in_rejects_an_unknown_space() {
+    let mut world = crate::World::default();
+    let err = world
+        .set_space_draws_environment(crate::SpaceId::from_raw(99), true)
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidValue(_)));
+}
+
+#[test]
 fn opening_faces_plus_z() {
     let mesh = Mesh::opening(1.2, 2.2).unwrap();
     let built = mesh.build();
@@ -911,6 +954,35 @@ fn same_space_portals_work_in_both_directions() {
         pos.z <= -3.0,
         "walking into B should come out near A, pos={pos}"
     );
+}
+
+#[test]
+fn unlink_stops_crossing() {
+    let mut world = crate::World::default();
+    let house = world.space("house").unwrap();
+    let outside = world
+        .place(
+            Mesh::opening(1.2, 2.2).unwrap(),
+            Place::new(0.0, 1.1, -1.2).with_yaw_deg(180.0),
+        )
+        .unwrap();
+    let inside = world
+        .place_in(
+            house,
+            Mesh::opening(1.2, 2.2).unwrap(),
+            Place::new(0.0, 1.1, -3.0),
+        )
+        .unwrap();
+    world.link(outside, inside).unwrap();
+    world.unlink(outside, inside).unwrap();
+    assert!(world.portals().is_empty());
+
+    let mut pos = Vec3::new(0.0, 1.6, -6.0);
+    let mut yaw = 0.0_f32;
+    assert!(world.travel(&mut pos, &mut yaw).is_none());
+    pos.z = 0.0;
+    assert!(world.travel(&mut pos, &mut yaw).is_none());
+    assert_eq!(world.living_in(), crate::SpaceId::DEFAULT);
 }
 
 #[test]

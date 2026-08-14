@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::error::{EngineError, EngineResult};
+use crate::portal::SpaceId;
 use crate::space::GlobalXZ;
 
 /// Horizontal radius and standing height of a moving character.
@@ -87,6 +88,24 @@ pub struct StaticCollider {
     /// Radians. Zero keeps the box aligned with world XZ.
     pub yaw: f32,
     pub shape: ColliderShape,
+    /// Only actors whose live space matches this are blocked.
+    pub space: SpaceId,
+}
+
+impl StaticCollider {
+    pub fn new(at: GlobalXZ, yaw: f32, shape: ColliderShape) -> Self {
+        Self {
+            at,
+            yaw,
+            shape,
+            space: SpaceId::DEFAULT,
+        }
+    }
+
+    pub fn in_space(mut self, space: SpaceId) -> Self {
+        self.space = space;
+        self
+    }
 }
 
 /// Spatial hash cell, in metres. Small enough that a walker hits a handful.
@@ -173,11 +192,23 @@ impl CollisionWorld {
         }
     }
 
-    /// Slide `from` by `(dx, dz)` against static colliders when `body.collides`.
+    /// Slide `from` by `(dx, dz)` against default-space colliders.
+    pub fn move_xz(&self, body: &ActorBody, from: GlobalXZ, dx: f64, dz: f64) -> GlobalXZ {
+        self.move_in(SpaceId::DEFAULT, body, from, dx, dz)
+    }
+
+    /// Slide `from` by `(dx, dz)` against colliders that live in `space`.
     ///
     /// Long steps are split so a sprint cannot tunnel through a thin wall.
     /// Collision-off bodies are translated with no query.
-    pub fn move_xz(&self, body: &ActorBody, from: GlobalXZ, dx: f64, dz: f64) -> GlobalXZ {
+    pub fn move_in(
+        &self,
+        space: SpaceId,
+        body: &ActorBody,
+        from: GlobalXZ,
+        dx: f64,
+        dz: f64,
+    ) -> GlobalXZ {
         if !dx.is_finite() || !dz.is_finite() {
             panic!("actor move must be finite, got ({dx}, {dz})");
         }
@@ -187,7 +218,7 @@ impl CollisionWorld {
         let radius = f64::from(body.radius);
         let dist = (dx * dx + dz * dz).sqrt();
         if dist <= INSIDE_EPS {
-            return self.depenetrate(from, radius);
+            return self.depenetrate(space, from, radius);
         }
         let step_m = radius;
         let steps = ((dist / step_m).ceil() as i32).max(1);
@@ -195,15 +226,15 @@ impl CollisionWorld {
         let mut pos = from;
         for _ in 0..steps {
             pos = displace(pos, dx * inv, dz * inv);
-            pos = self.depenetrate(pos, radius);
+            pos = self.depenetrate(space, pos, radius);
         }
         pos
     }
 
-    fn depenetrate(&self, mut pos: GlobalXZ, radius: f64) -> GlobalXZ {
+    fn depenetrate(&self, space: SpaceId, mut pos: GlobalXZ, radius: f64) -> GlobalXZ {
         for _ in 0..DEPENETRATE_ITERS {
             let mut pushed = false;
-            for collider in self.nearby(pos, radius) {
+            for collider in self.nearby(space, pos, radius) {
                 if let Some(mtv) = overlap_mtv(pos, radius, &collider) {
                     pos = displace(pos, mtv.0, mtv.1);
                     pushed = true;
@@ -216,7 +247,7 @@ impl CollisionWorld {
         pos
     }
 
-    fn nearby(&self, pos: GlobalXZ, radius: f64) -> Vec<StaticCollider> {
+    fn nearby(&self, space: SpaceId, pos: GlobalXZ, radius: f64) -> Vec<StaticCollider> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         for cell in aabb_cells((
@@ -233,7 +264,9 @@ impl CollisionWorld {
                     continue;
                 }
                 if let Some(entry) = self.by_id.get(id) {
-                    out.push(entry.collider);
+                    if entry.collider.space == space {
+                        out.push(entry.collider);
+                    }
                 }
             }
         }
@@ -398,19 +431,15 @@ mod tests {
     use super::*;
 
     fn cylinder(x: f64, z: f64, radius: f32) -> StaticCollider {
-        StaticCollider {
-            at: GlobalXZ::at(x, z),
-            yaw: 0.0,
-            shape: ColliderShape::Cylinder { radius },
-        }
+        StaticCollider::new(GlobalXZ::at(x, z), 0.0, ColliderShape::Cylinder { radius })
     }
 
     fn wall(x: f64, z: f64, half_x: f32, half_z: f32) -> StaticCollider {
-        StaticCollider {
-            at: GlobalXZ::at(x, z),
-            yaw: 0.0,
-            shape: ColliderShape::Box { half_x, half_z },
-        }
+        StaticCollider::new(
+            GlobalXZ::at(x, z),
+            0.0,
+            ColliderShape::Box { half_x, half_z },
+        )
     }
 
     #[test]
@@ -494,5 +523,27 @@ mod tests {
         let body = ActorBody::player();
         let to = world.move_xz(&body, GlobalXZ::at(0.0, 0.0), 8.0, 0.0);
         assert!(to.x < 1.0, "must not tunnel, got x={}", to.x);
+    }
+
+    #[test]
+    fn other_space_walls_are_ignored() {
+        let mut world = CollisionWorld::new();
+        let house = SpaceId::from_raw(3);
+        world
+            .insert(1, wall(2.0, 0.0, 0.25, 4.0).in_space(house))
+            .expect("insert");
+        let body = ActorBody::player();
+        let through = world.move_xz(&body, GlobalXZ::at(0.0, 0.0), 4.0, 0.0);
+        assert!(
+            (through.x - 4.0).abs() < 1e-6,
+            "default-space walk should ignore a house wall, got x={}",
+            through.x
+        );
+        let blocked = world.move_in(house, &body, GlobalXZ::at(0.0, 0.0), 4.0, 0.0);
+        assert!(
+            blocked.x < 1.5,
+            "house walk should hit the wall, got x={}",
+            blocked.x
+        );
     }
 }

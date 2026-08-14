@@ -9,7 +9,8 @@ use crate::limits::EngineLimits;
 use crate::mesh::{AlbedoMap, BuiltMesh, Mesh};
 use crate::place::{GlobalPlace, Place};
 use crate::portal::{
-    opening_extents, segment_crosses_opening, teleport_yaw, PortalLink, PortalPlane, SpaceId,
+    opening_extents, segment_crosses_opening, teleport_yaw, PortalLink, PortalPlane, PortalView,
+    SpaceId,
 };
 use crate::proc_terrain::{HeightField, ProcTerrain};
 use crate::space::{ChunkId, GlobalPosition, GlobalXZ, RenderOrigin};
@@ -20,7 +21,7 @@ use crate::texture::{
 };
 use crate::ui::UiFrame;
 use glam::{IVec3, Mat4, Vec3};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -356,6 +357,8 @@ pub struct World {
     next_space_id: u32,
     spawn_space: SpaceId,
     live_space: SpaceId,
+    /// Named spaces that also draw sky and clipmap. [`SpaceId::DEFAULT`] always does.
+    environment_spaces: HashSet<SpaceId>,
     portals: Vec<PortalLink>,
     travel_prev: Option<(SpaceId, Vec3)>,
 }
@@ -403,6 +406,7 @@ impl Default for World {
             next_space_id: 1,
             spawn_space: SpaceId::DEFAULT,
             live_space: SpaceId::DEFAULT,
+            environment_spaces: HashSet::new(),
             portals: Vec::new(),
             travel_prev: None,
         }
@@ -485,8 +489,9 @@ impl World {
     }
 
     /// Slide `from` by `(dx, dz)` using `body`. Collision-off bodies translate.
+    /// Only colliders in [`Self::living_in`] participate.
     pub fn move_actor(&self, body: &ActorBody, from: GlobalXZ, dx: f64, dz: f64) -> GlobalXZ {
-        self.collision.move_xz(body, from, dx, dz)
+        self.collision.move_in(self.live_space, body, from, dx, dz)
     }
 
     /// Intern a disconnected space. Does not change where new entities spawn;
@@ -535,9 +540,32 @@ impl World {
         self.spawn_space
     }
 
-    /// Sky and clipmap belong to the default outdoor space only.
+    /// Sky and clipmap belong to the default outdoor space, and to any named
+    /// space that opted in with [`Self::set_space_draws_environment`].
     pub fn space_draws_environment(&self, space: SpaceId) -> bool {
-        space == SpaceId::DEFAULT
+        space == SpaceId::DEFAULT || self.environment_spaces.contains(&space)
+    }
+
+    /// Let a named space draw the outdoor sky and clipmap, or take that back.
+    ///
+    /// The default space always draws the environment. Asking to disable it is
+    /// a caller bug, not a silent no-op.
+    pub fn set_space_draws_environment(&mut self, space: SpaceId, draws: bool) -> EngineResult<()> {
+        self.require_space(space)?;
+        if space == SpaceId::DEFAULT {
+            if draws {
+                return Ok(());
+            }
+            return Err(EngineError::InvalidValue(
+                "the default space always draws the outdoor environment".into(),
+            ));
+        }
+        if draws {
+            self.environment_spaces.insert(space);
+        } else {
+            self.environment_spaces.remove(&space);
+        }
+        Ok(())
     }
 
     fn require_space(&self, space: SpaceId) -> EngineResult<()> {
@@ -594,6 +622,36 @@ impl World {
     /// space (`+Z` local). Walking through teleports; looking through shows
     /// the other side as if the world continued.
     pub fn link(&mut self, a: EntityId, b: EntityId) -> EngineResult<()> {
+        self.link_with_view(a, b, PortalView::Transformed)
+    }
+
+    /// Link two openings with a stable destination view at the threshold.
+    ///
+    /// `eye_offset_y` is measured above the opening centre. `setback` places
+    /// the virtual eye just behind the destination plane.
+    pub fn link_threshold_view(
+        &mut self,
+        a: EntityId,
+        b: EntityId,
+        eye_offset_y: f32,
+        setback: f32,
+    ) -> EngineResult<()> {
+        if !eye_offset_y.is_finite() || !setback.is_finite() || setback <= 0.0 {
+            return Err(EngineError::InvalidValue(format!(
+                "portal threshold view needs finite eye offset and positive setback, got ({eye_offset_y}, {setback})"
+            )));
+        }
+        self.link_with_view(
+            a,
+            b,
+            PortalView::Threshold {
+                eye_offset_y,
+                setback,
+            },
+        )
+    }
+
+    fn link_with_view(&mut self, a: EntityId, b: EntityId, view: PortalView) -> EngineResult<()> {
         if a == b {
             return Err(EngineError::InvalidValue(
                 "a portal cannot link an opening to itself".into(),
@@ -616,7 +674,22 @@ impl World {
                 "opening is already linked".into(),
             ));
         }
-        self.portals.push(PortalLink { a, b });
+        self.portals.push(PortalLink { a, b, view });
+        self.bump_render_epoch();
+        Ok(())
+    }
+
+    /// Drop a previously linked pair. The opening entities stay; walking
+    /// through them no longer teleports until they are linked again.
+    pub fn unlink(&mut self, a: EntityId, b: EntityId) -> EngineResult<()> {
+        let before = self.portals.len();
+        self.portals
+            .retain(|p| !((p.a == a && p.b == b) || (p.a == b && p.b == a)));
+        if self.portals.len() == before {
+            return Err(EngineError::InvalidValue(
+                "those openings are not linked".into(),
+            ));
+        }
         self.bump_render_epoch();
         Ok(())
     }
@@ -667,6 +740,7 @@ impl World {
                     dst_center: dst_plane.center,
                     dst_normal: dst_plane.normal,
                     dest_space: dst_e.space,
+                    view: link.view,
                 };
                 if best.as_ref().is_none_or(|(best_dist, _)| dist < *best_dist) {
                     best = Some((dist, candidate));

@@ -13,7 +13,9 @@ mod water_pipeline;
 
 use crate::camera::Camera;
 use crate::mesh::InstanceRaw;
-use crate::portal::{oblique_view_projection, teleport_camera, SpaceId};
+use crate::portal::{
+    oblique_view_projection, teleport_camera, threshold_camera, PortalView, SpaceId,
+};
 use crate::texture::{MaterialId, TextureId, WaterMaterialId};
 use crate::world::{Entity, EntityId, InstanceSubmit, ShadowSettings, SurfaceMaterialRef, World};
 use clipmap::ClipmapRenderer;
@@ -189,6 +191,11 @@ pub(crate) const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::G
 pub(crate) const DEPTH_CLEAR: f32 = 0.0;
 pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+enum SceneUniformTarget {
+    Main,
+    Portal,
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -345,6 +352,7 @@ impl Renderer {
             config.width,
             config.height,
             &pipelines.bind_layout,
+            &shadow,
         );
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
         let instance_cull = InstanceCull::new(&device);
@@ -1007,6 +1015,7 @@ impl Renderer {
         world: &World,
         camera: &Camera,
         clip_plane: Option<(glam::Vec3, glam::Vec3)>,
+        target: SceneUniformTarget,
     ) {
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         let vp = match clip_plane {
@@ -1033,15 +1042,21 @@ impl Renderer {
             haze_base_y: haze.map(|h| h.base_y).unwrap_or(0.0),
             _pad2: [0.0, 0.0],
         };
-        self.queue.write_buffer(
-            &self.pipelines.uniform_buf,
-            0,
-            bytemuck::bytes_of(&uniforms),
-        );
-        if let Some(sky) = world.sky() {
-            let sky_u = SkyUniforms::from_scene(&sky, camera, &world.light, aspect, world.time());
-            self.queue
-                .write_buffer(&self.sky.uniform_buf, 0, bytemuck::bytes_of(&sky_u));
+        // Destination and live views share one encoder. Queue writes land
+        // before that encoder runs, so they cannot share a uniform buffer.
+        let uniform_buf = match target {
+            SceneUniformTarget::Main => &self.pipelines.uniform_buf,
+            SceneUniformTarget::Portal => &self.portal.scene_uniform_buf,
+        };
+        self.queue
+            .write_buffer(uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+        if matches!(target, SceneUniformTarget::Main) {
+            if let Some(sky) = world.sky() {
+                let sky_u =
+                    SkyUniforms::from_scene(&sky, camera, &world.light, aspect, world.time());
+                self.queue
+                    .write_buffer(&self.sky.uniform_buf, 0, bytemuck::bytes_of(&sky_u));
+            }
         }
     }
 
@@ -1056,12 +1071,12 @@ impl Renderer {
         color: &wgpu::TextureView,
         world: &World,
     ) {
-        self.write_scene_uniforms(world, &world.camera, None);
+        self.write_scene_uniforms(world, &world.camera, None, SceneUniformTarget::Main);
         self.write_shadows(world);
         self.begin_instance_cull_frame(world);
         self.encode_shadow_pass(encoder, world);
         let blit = self.encode_portal_view(encoder, world);
-        self.write_scene_uniforms(world, &world.camera, None);
+        self.write_scene_uniforms(world, &world.camera, None, SceneUniformTarget::Main);
         let live = world.living_in();
         let depth = self.depth_view.clone();
         self.encode_pass(
@@ -1086,9 +1101,30 @@ impl Renderer {
             return None;
         }
         let visible = world.visible_portal(world.camera.eye, look)?;
-        let virt = teleport_camera(&world.camera, visible.src_transform, visible.dst_transform);
+        let virt = match visible.view {
+            PortalView::Transformed => {
+                teleport_camera(&world.camera, visible.src_transform, visible.dst_transform)
+            }
+            PortalView::Threshold {
+                eye_offset_y,
+                setback,
+            } => threshold_camera(
+                &world.camera,
+                visible.src_transform,
+                visible.dst_transform,
+                visible.dst_center,
+                visible.dst_normal,
+                eye_offset_y,
+                setback,
+            ),
+        };
         let clip_point = visible.dst_center + visible.dst_normal * 0.02;
-        self.write_scene_uniforms(world, &virt, Some((clip_point, visible.dst_normal)));
+        self.write_scene_uniforms(
+            world,
+            &virt,
+            Some((clip_point, visible.dst_normal)),
+            SceneUniformTarget::Portal,
+        );
         let color = self.portal.color_view.clone();
         let depth = self.portal.depth_view.clone();
         self.encode_pass(
@@ -1116,7 +1152,9 @@ impl Renderer {
         force_direct: bool,
     ) {
         self.collect_draws(world, space);
-        self.prepare_terrain_bundle(world);
+        if !force_direct {
+            self.prepare_terrain_bundle(world);
+        }
         let submit = world.instance_submit();
         let main_cull = if !force_direct && submit == InstanceSubmit::GpuIndirect {
             let frustum = self.frustum;
@@ -1171,7 +1209,7 @@ impl Renderer {
             }
         }
 
-        pass.set_bind_group(0, &self.pipelines.bind_group, &[]);
+        pass.set_bind_group(0, self.scene_bind(force_direct), &[]);
 
         // Opaque untextured, then terrain-textured, then skinned / transparent.
         pass.set_pipeline(&self.pipelines.opaque);
@@ -1216,11 +1254,35 @@ impl Renderer {
             );
         }
 
-        if let Some(bundle) = self.terrain_bundle.as_ref() {
-            pass.execute_bundles(std::iter::once(bundle));
+        if !force_direct {
+            if let Some(bundle) = self.terrain_bundle.as_ref() {
+                pass.execute_bundles(std::iter::once(bundle));
+            }
         }
-        pass.set_bind_group(0, &self.pipelines.bind_group, &[]);
+        pass.set_bind_group(0, self.scene_bind(force_direct), &[]);
         pass.set_pipeline(&self.terrain.opaque);
+        if force_direct {
+            for &id in &self.draw_terrain {
+                let entity = world.entity(id).expect("draw list is live");
+                let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
+                let Some(SurfaceMaterialRef::Terrain(mid)) = entity.material else {
+                    panic!("terrain entity {id} lost its terrain material");
+                };
+                let mat = self
+                    .gpu_materials
+                    .get(&mid)
+                    .unwrap_or_else(|| panic!("terrain entity {id} material is not synced"));
+                pass.set_bind_group(1, &mat.bind_group, &[]);
+                submit_mesh_draw(
+                    &mut pass,
+                    gpu,
+                    MeshSubmit::Direct,
+                    0..gpu.opaque_index_count as u32,
+                    OPAQUE_INDIRECT_OFFSET,
+                    &mut self.gpu_stats.indirect_draws,
+                );
+            }
+        }
         for &prototype in &self.batch_terrain {
             let entity = world
                 .entity(prototype)
@@ -1265,7 +1327,7 @@ impl Renderer {
             }
         }
         // Restore scene bind group for subsequent passes.
-        pass.set_bind_group(0, &self.pipelines.bind_group, &[]);
+        pass.set_bind_group(0, self.scene_bind(force_direct), &[]);
 
         if let Some(src) = blit_portal {
             let gpu = self.gpu_meshes.get(&src).expect("portal mesh is synced");
@@ -1279,7 +1341,7 @@ impl Renderer {
                 OPAQUE_INDIRECT_OFFSET,
                 &mut self.gpu_stats.indirect_draws,
             );
-            pass.set_bind_group(0, &self.pipelines.bind_group, &[]);
+            pass.set_bind_group(0, self.scene_bind(force_direct), &[]);
         }
 
         pass.set_pipeline(&self.pipelines.transparent);
@@ -2148,6 +2210,16 @@ fn submit_mesh_draw(
         MeshSubmit::Direct => {
             pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
             pass.draw_indexed(indices, 0, 0..gpu.instance_count as u32);
+        }
+    }
+}
+
+impl Renderer {
+    fn scene_bind(&self, portal_dest: bool) -> &wgpu::BindGroup {
+        if portal_dest {
+            &self.portal.scene_bind_group
+        } else {
+            &self.pipelines.bind_group
         }
     }
 }

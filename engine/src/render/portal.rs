@@ -1,7 +1,9 @@
 //! Off-screen destination view, composited through an opening in screen space.
 
-use super::pipeline::SCENE_WGSL;
+use super::pipeline::{Uniforms, SCENE_WGSL};
+use super::shadow::ShadowGpu;
 use crate::mesh::{InstanceRaw, Vertex};
+use wgpu::util::DeviceExt;
 
 pub struct PortalGpu {
     pub pipeline: wgpu::RenderPipeline,
@@ -10,6 +12,10 @@ pub struct PortalGpu {
     depth: wgpu::Texture,
     pub depth_view: wgpu::TextureView,
     pub bind_group: wgpu::BindGroup,
+    /// Own scene uniforms so the destination pass can keep a virtual camera
+    /// after the main pass overwrites the shared frame buffer.
+    pub scene_uniform_buf: wgpu::Buffer,
+    pub scene_bind_group: wgpu::BindGroup,
     sampler: wgpu::Sampler,
     layout: wgpu::BindGroupLayout,
 }
@@ -21,6 +27,7 @@ impl PortalGpu {
         width: u32,
         height: u32,
         scene_layout: &wgpu::BindGroupLayout,
+        shadow: &ShadowGpu,
     ) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("portal-color-layout"),
@@ -100,6 +107,16 @@ impl PortalGpu {
         });
         let (color, color_view, depth, depth_view, bind_group) =
             create_targets(device, format, width, height, &layout, &sampler);
+        let scene_uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("portal-scene-uniforms"),
+            contents: bytemuck::bytes_of(&Uniforms::empty()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let scene_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("portal-scene-bind"),
+            layout: scene_layout,
+            entries: &shadow.scene_bind_entries(scene_uniform_buf.as_entire_binding()),
+        });
         Self {
             pipeline,
             color,
@@ -107,6 +124,8 @@ impl PortalGpu {
             depth,
             depth_view,
             bind_group,
+            scene_uniform_buf,
+            scene_bind_group,
             sampler,
             layout,
         }
