@@ -560,6 +560,38 @@ fn instance_submit_defaults_to_cpu_and_switches_explicitly() {
 }
 
 #[test]
+fn static_render_epoch_changes_only_for_effective_render_mutations() {
+    use crate::world::{InstanceSubmit, World};
+
+    let mut world = World::new();
+    let initial = world.render_epoch();
+    let id = world.spawn_instanced(unit_quad());
+    assert!(world.render_epoch() > initial);
+
+    let unchanged = world.render_epoch();
+    world.set_casts_shadow(id, true).expect("same shadow state");
+    world.set_instance_submit(InstanceSubmit::CpuIndexed);
+    assert_eq!(world.render_epoch(), unchanged);
+
+    world
+        .set_instances(id, &[Place::new(2.0, 0.0, 0.0)])
+        .expect("instance placement");
+    assert!(world.render_epoch() > unchanged);
+}
+
+#[test]
+fn resource_epoch_changes_when_a_texture_is_created() {
+    use crate::world::World;
+
+    let mut world = World::new();
+    let initial = world.resource_epoch();
+    world
+        .create_texture_rgba(1, 1, vec![255, 255, 255, 255])
+        .expect("one-pixel texture");
+    assert!(world.resource_epoch() > initial);
+}
+
+#[test]
 fn moving_or_scattering_an_entity_bumps_xform_rev() {
     use crate::world::World;
 

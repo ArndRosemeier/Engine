@@ -121,6 +121,34 @@ impl GpuMesh {
         self.local_bounds
     }
 
+    pub fn bounds_for_instances(&self, instances: &[InstanceRaw]) -> Option<Bounds> {
+        spread_over(self.local_bounds, instances)
+    }
+
+    pub fn write_instances_at(&self, queue: &wgpu::Queue, start: usize, instances: &[InstanceRaw]) {
+        let end = start
+            .checked_add(instances.len())
+            .expect("partial instance write range overflow");
+        if end > self.instance_capacity {
+            panic!(
+                "partial instance write {start}..{end} exceeds capacity {}",
+                self.instance_capacity
+            );
+        }
+        if instances.is_empty() {
+            return;
+        }
+        let byte_offset = start
+            .checked_mul(std::mem::size_of::<InstanceRaw>())
+            .and_then(|offset| u64::try_from(offset).ok())
+            .expect("partial instance write byte offset overflow");
+        queue.write_buffer(
+            &self.instance_buf,
+            byte_offset,
+            bytemuck::cast_slice(instances),
+        );
+    }
+
     /// Draw nothing without touching the (non-empty) instance buffer.
     pub fn clear_instances(&mut self) {
         self.instance_count = 0;
@@ -133,8 +161,9 @@ impl GpuMesh {
         queue: &wgpu::Queue,
         instances: &[InstanceRaw],
         cull: &InstanceCull,
-    ) {
-        if instances.len() > self.instance_capacity {
+    ) -> bool {
+        let reallocated = instances.len() > self.instance_capacity;
+        if reallocated {
             self.instance_buf = instance_buffer(device, instances, "instances");
             self.compact_buf = instance_buffer(device, instances, "instances-compact");
             self.cull_bind = cull.mesh_bind(
@@ -149,6 +178,7 @@ impl GpuMesh {
         }
         self.instance_count = instances.len();
         self.bounds = spread_over(self.local_bounds, instances);
+        reallocated
     }
 }
 

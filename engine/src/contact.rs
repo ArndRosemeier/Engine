@@ -130,14 +130,14 @@ impl ContactGrid {
 #[derive(Clone, Debug, Default)]
 pub struct ContactSnapshot {
     span: Option<ChunkSpan>,
-    grids: HashMap<ChunkCoord, Arc<ContactGrid>>,
+    grids: Arc<HashMap<ChunkCoord, Arc<ContactGrid>>>,
 }
 
 impl ContactSnapshot {
     pub fn new(span: ChunkSpan, grids: HashMap<ChunkCoord, Arc<ContactGrid>>) -> Self {
         Self {
             span: Some(span),
-            grids,
+            grids: Arc::new(grids),
         }
     }
 

@@ -289,6 +289,8 @@ pub struct World {
     next_id: u64,
     entities: HashMap<EntityId, Entity>,
     order: Vec<EntityId>,
+    /// Changes whenever static render state could require a GPU resync.
+    render_epoch: u64,
     animated: HashMap<EntityId, AnimatedEntity>,
     animated_order: Vec<EntityId>,
     /// Chunk key -> entity id for streamed volume meshes (advanced).
@@ -308,6 +310,8 @@ pub struct World {
     next_texture_id: u64,
     next_material_id: u64,
     pub(crate) water_materials: HashMap<WaterMaterialId, WaterMaterial>,
+    /// Changes whenever textures or material resources are added.
+    resource_epoch: u64,
     /// Applied to fully-opaque `set_chunk_built` uploads when set.
     pub(crate) default_terrain_material: Option<MaterialId>,
     /// Applied to fully-translucent chunk layers when set.
@@ -347,6 +351,7 @@ impl Default for World {
             next_id: 1,
             entities: HashMap::new(),
             order: Vec::new(),
+            render_epoch: 1,
             animated: HashMap::new(),
             animated_order: Vec::new(),
             chunk_entities: HashMap::new(),
@@ -360,6 +365,7 @@ impl Default for World {
             next_texture_id: 1,
             next_material_id: 1,
             water_materials: HashMap::new(),
+            resource_epoch: 1,
             default_terrain_material: None,
             default_water_material: None,
             pointer_lock: false,
@@ -390,6 +396,28 @@ impl World {
 
     pub fn limits(&self) -> &EngineLimits {
         &self.limits
+    }
+
+    fn bump_render_epoch(&mut self) {
+        self.render_epoch = self
+            .render_epoch
+            .checked_add(1)
+            .expect("world render epoch overflow");
+    }
+
+    fn bump_resource_epoch(&mut self) {
+        self.resource_epoch = self
+            .resource_epoch
+            .checked_add(1)
+            .expect("world resource epoch overflow");
+    }
+
+    pub(crate) fn render_epoch(&self) -> u64 {
+        self.render_epoch
+    }
+
+    pub(crate) fn resource_epoch(&self) -> u64 {
+        self.resource_epoch
     }
 
     /// Record a named cost on this frame. Printed only if the frame hitches.
@@ -522,6 +550,7 @@ impl World {
             },
         );
         self.order.push(id);
+        self.bump_render_epoch();
         Ok(id)
     }
 
@@ -543,6 +572,7 @@ impl World {
             },
         );
         self.order.push(id);
+        self.bump_render_epoch();
         id
     }
 
@@ -568,6 +598,7 @@ impl World {
             },
         );
         self.order.push(id);
+        self.bump_render_epoch();
         id
     }
 
@@ -577,7 +608,11 @@ impl World {
             .entities
             .get_mut(&id)
             .ok_or(EngineError::UnknownEntity)?;
+        if e.casts_shadow == casts {
+            return Ok(());
+        }
         e.casts_shadow = casts;
+        self.bump_render_epoch();
         Ok(())
     }
 
@@ -590,17 +625,21 @@ impl World {
             .get_mut(&id)
             .expect("entity was just spawned")
             .albedo = Some(tid);
+        self.bump_render_epoch();
         Ok(())
     }
 
     pub fn despawn(&mut self, id: EntityId) {
-        self.entities.remove(&id);
+        let removed_static = self.entities.remove(&id).is_some();
         self.order.retain(|x| *x != id);
         self.animated.remove(&id);
         self.animated_order.retain(|x| *x != id);
         self.chunk_entities.retain(|_, eid| *eid != id);
         self.anchored_entities.remove(&id);
         self.anchored_chunks.retain(|_, c| c.entity != id);
+        if removed_static {
+            self.bump_render_epoch();
+        }
     }
 
     /// Horizontal anchor that render-space coordinates are measured from.
@@ -615,6 +654,9 @@ impl World {
     /// Unanchored content (plain [`Self::spawn`] / [`Self::set_chunk_built`])
     /// is left alone: it was authored directly in render space.
     pub fn set_render_origin(&mut self, origin: RenderOrigin) -> EngineResult<()> {
+        if self.render_origin == origin {
+            return Ok(());
+        }
         self.render_origin = origin;
         let places: Vec<(EntityId, GlobalPlace)> = self
             .anchored_entities
@@ -640,6 +682,7 @@ impl World {
             e.transform = Mat4::from_translation(offset);
             e.bump_xform();
         }
+        self.bump_render_epoch();
         Ok(())
     }
 
@@ -676,6 +719,7 @@ impl World {
         e.transform = local.to_matrix();
         e.bump_xform();
         self.anchored_entities.insert(id, place);
+        self.bump_render_epoch();
         Ok(())
     }
 
@@ -800,6 +844,7 @@ impl World {
         if let Some(e) = self.entities.get_mut(&id) {
             e.transform = place.to_matrix();
             e.bump_xform();
+            self.bump_render_epoch();
             return Ok(());
         }
         if let Some(e) = self.animated.get_mut(&id) {
@@ -898,7 +943,11 @@ impl World {
 
     /// Choose the instanced submit path. Both are first-class; neither falls back.
     pub fn set_instance_submit(&mut self, submit: InstanceSubmit) {
+        if self.instance_submit == submit {
+            return;
+        }
         self.instance_submit = submit;
+        self.bump_render_epoch();
     }
 
     pub fn instance_submit(&self) -> InstanceSubmit {
@@ -1042,6 +1091,7 @@ impl World {
                 rgba,
             },
         );
+        self.bump_resource_epoch();
         Ok(id)
     }
 
@@ -1086,6 +1136,7 @@ impl World {
         let id = MaterialId(self.next_material_id);
         self.next_material_id += 1;
         self.materials.insert(id, TerrainMaterial { desc });
+        self.bump_resource_epoch();
         Ok(id)
     }
 
@@ -1107,6 +1158,7 @@ impl World {
         let id = WaterMaterialId(self.next_material_id);
         self.next_material_id += 1;
         self.water_materials.insert(id, WaterMaterial { desc });
+        self.bump_resource_epoch();
         Ok(id)
     }
 
@@ -1133,7 +1185,11 @@ impl World {
             .entities
             .get_mut(&id)
             .ok_or(EngineError::UnknownEntity)?;
+        if e.material == material {
+            return Ok(());
+        }
         e.material = material;
+        self.bump_render_epoch();
         Ok(())
     }
 
@@ -1161,6 +1217,7 @@ impl World {
         e.instances.clear();
         e.instances.extend(places.iter().map(|p| p.to_matrix()));
         e.bump_xform();
+        self.bump_render_epoch();
         Ok(())
     }
 

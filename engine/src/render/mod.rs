@@ -1,6 +1,7 @@
 mod clipmap;
 mod frustum;
 mod gpu_mesh;
+mod gpu_profile;
 mod instance_cull;
 mod pipeline;
 mod shadow;
@@ -13,8 +14,9 @@ use crate::mesh::InstanceRaw;
 use crate::texture::{MaterialId, TextureId, WaterMaterialId};
 use crate::world::{Entity, EntityId, InstanceSubmit, ShadowSettings, SurfaceMaterialRef, World};
 use clipmap::ClipmapRenderer;
-use frustum::{Frustum, Visibility};
+use frustum::{Bounds, Frustum, Visibility};
 use gpu_mesh::GpuMesh;
+use gpu_profile::GpuProfiler;
 use instance_cull::{
     CullDraws, CullJob, InstanceCull, OPAQUE_INDIRECT_OFFSET, TRANSLUCENT_INDIRECT_OFFSET,
     WORKGROUP,
@@ -48,6 +50,7 @@ pub struct GpuFrameStats {
     pub instance_rewrites: u32,
     pub instance_batches: u32,
     pub batch_rewrites: u32,
+    pub batch_partial_writes: u32,
     pub skinned_new: u32,
     pub skinned_model_uploads: u32,
     pub skinned_pose_writes: u32,
@@ -66,12 +69,13 @@ pub struct GpuFrameStats {
 impl GpuFrameStats {
     pub fn sync_line(&self) -> String {
         format!(
-            "mesh_new={} rebuild={} inst={} batches={} batch_rewrites={} skinned_new={} skinned_model={} pose={} entities={} animated={}",
+            "mesh_new={} rebuild={} inst={} batches={} batch_rewrites={} batch_partial={} skinned_new={} skinned_model={} pose={} entities={} animated={}",
             self.mesh_new,
             self.mesh_rebuild,
             self.instance_rewrites,
             self.instance_batches,
             self.batch_rewrites,
+            self.batch_partial_writes,
             self.skinned_new,
             self.skinned_model_uploads,
             self.skinned_pose_writes,
@@ -111,6 +115,7 @@ struct MainCullSelection {
     compacted: HashSet<EntityId>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ShadowDraw {
     id: EntityId,
     submit: MeshSubmit,
@@ -122,15 +127,44 @@ struct ShadowCullSelection {
     compact_batches: Vec<EntityId>,
 }
 
+#[derive(Default, PartialEq, Eq)]
+struct ShadowBundleKey {
+    draws: Vec<ShadowDraw>,
+    batch_draws: Vec<ShadowDraw>,
+}
+
 struct GpuInstanceBatch {
     gpu: GpuMesh,
-    /// Ordered source entities and the revisions packed into `gpu`.
-    sources: Vec<(EntityId, u64)>,
+    slots: Vec<BatchSlot>,
+}
+
+impl GpuInstanceBatch {
+    fn has_holes(&self) -> bool {
+        self.slots
+            .iter()
+            .any(|slot| slot.active_count < slot.capacity)
+    }
+}
+
+struct BatchSlot {
+    id: EntityId,
+    xform_rev: u64,
+    start: usize,
+    capacity: usize,
+    active_count: usize,
+    bounds: Option<Bounds>,
 }
 
 #[derive(Default)]
 struct BatchBuild {
-    sources: Vec<(EntityId, u64)>,
+    sources: Vec<BatchBuildSource>,
+}
+
+#[derive(Clone, Copy)]
+struct BatchBuildSource {
+    id: EntityId,
+    xform_rev: u64,
+    instance_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,6 +212,8 @@ pub struct Renderer {
     gpu_mesh_albedo: HashMap<TextureId, wgpu::BindGroup>,
     gpu_materials: HashMap<MaterialId, GpuTerrainMaterial>,
     gpu_water_materials: HashMap<WaterMaterialId, GpuWaterMaterial>,
+    synced_render_epoch: u64,
+    synced_resource_epoch: u64,
     /// Origin the terrain material phases were last written for.
     terrain_origin: crate::space::RenderOrigin,
     /// This frame's view volume, for skipping draws outside it.
@@ -185,6 +221,22 @@ pub struct Renderer {
     size: PhysicalSize<u32>,
     /// Reused while packing instance rows for a dirty entity.
     instance_scratch: Vec<InstanceRaw>,
+    draw_source_epoch: u64,
+    source_opaque: Vec<EntityId>,
+    source_terrain: Vec<EntityId>,
+    source_transparent: Vec<EntityId>,
+    source_water: Vec<EntityId>,
+    batch_source_opaque: Vec<EntityId>,
+    batch_source_terrain: Vec<EntityId>,
+    batch_source_transparent: Vec<EntityId>,
+    batch_source_water: Vec<EntityId>,
+    terrain_bundle_ids: Vec<EntityId>,
+    terrain_bundle: Option<wgpu::RenderBundle>,
+    shadow_source_epoch: u64,
+    shadow_mesh_sources: Vec<EntityId>,
+    shadow_batch_sources: Vec<EntityId>,
+    shadow_bundle_keys: [ShadowBundleKey; 3],
+    shadow_bundles: [Option<wgpu::RenderBundle>; 3],
     draw_opaque: Vec<EntityId>,
     draw_terrain: Vec<EntityId>,
     draw_transparent: Vec<EntityId>,
@@ -194,6 +246,7 @@ pub struct Renderer {
     batch_transparent: Vec<EntityId>,
     batch_water: Vec<EntityId>,
     gpu_stats: GpuFrameStats,
+    gpu_profiler: Option<GpuProfiler>,
     instance_cull: InstanceCull,
     joint_locals: Vec<(glam::Vec3, glam::Quat, glam::Vec3)>,
     joint_global: Vec<glam::Mat4>,
@@ -220,10 +273,21 @@ impl Renderer {
             .await
             .expect("no suitable GPU adapter");
 
+        let gpu_profile_interval = GpuProfiler::requested_interval();
+        let required_features = if gpu_profile_interval.is_some() {
+            let timestamp_features =
+                wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+            if !adapter.features().contains(timestamp_features) {
+                panic!("ENGINE_GPU_PROFILE_EVERY requested unsupported GPU timestamp queries");
+            }
+            timestamp_features
+        } else {
+            wgpu::Features::empty()
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("engine-device"),
-                required_features: wgpu::Features::empty(),
+                required_features,
                 required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::Performance,
                 trace: wgpu::Trace::Off,
@@ -272,6 +336,8 @@ impl Renderer {
         let sky = create_sky_pipelines(&device, format);
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
         let instance_cull = InstanceCull::new(&device);
+        let gpu_profiler = gpu_profile_interval
+            .map(|every| GpuProfiler::new(&device, queue.get_timestamp_period(), every));
 
         Self {
             surface,
@@ -298,10 +364,28 @@ impl Renderer {
             gpu_mesh_albedo: HashMap::new(),
             gpu_materials: HashMap::new(),
             gpu_water_materials: HashMap::new(),
+            synced_render_epoch: 0,
+            synced_resource_epoch: 0,
             terrain_origin: crate::space::RenderOrigin::default(),
             frustum: Frustum::default(),
             size,
             instance_scratch: Vec::new(),
+            draw_source_epoch: 0,
+            source_opaque: Vec::new(),
+            source_terrain: Vec::new(),
+            source_transparent: Vec::new(),
+            source_water: Vec::new(),
+            batch_source_opaque: Vec::new(),
+            batch_source_terrain: Vec::new(),
+            batch_source_transparent: Vec::new(),
+            batch_source_water: Vec::new(),
+            terrain_bundle_ids: Vec::new(),
+            terrain_bundle: None,
+            shadow_source_epoch: 0,
+            shadow_mesh_sources: Vec::new(),
+            shadow_batch_sources: Vec::new(),
+            shadow_bundle_keys: std::array::from_fn(|_| ShadowBundleKey::default()),
+            shadow_bundles: std::array::from_fn(|_| None),
             draw_opaque: Vec::new(),
             draw_terrain: Vec::new(),
             draw_transparent: Vec::new(),
@@ -311,6 +395,7 @@ impl Renderer {
             batch_transparent: Vec::new(),
             batch_water: Vec::new(),
             gpu_stats: GpuFrameStats::default(),
+            gpu_profiler,
             instance_cull,
             joint_locals: Vec::new(),
             joint_global: Vec::new(),
@@ -338,10 +423,17 @@ impl Renderer {
 
     pub fn sync_world(&mut self, world: &World) {
         self.gpu_stats = GpuFrameStats::default();
-        self.gpu_stats.entities = world.entities().count() as u32;
-        self.gpu_stats.animated = world.animated_entities().count() as u32;
+        self.gpu_stats.entities =
+            u32::try_from(world.entity_count()).expect("entity count exceeds u32");
+        self.gpu_stats.animated = u32::try_from(world.animated_entities().count())
+            .expect("animated entity count exceeds u32");
         self.gpu_stats.instance_submit = world.instance_submit();
-        self.sync_textures_and_materials(world);
+        if self.synced_resource_epoch != world.resource_epoch()
+            || self.terrain_origin != world.render_origin()
+        {
+            self.sync_textures_and_materials(world);
+            self.synced_resource_epoch = world.resource_epoch();
+        }
 
         if let Some(proc) = world.proc_terrain() {
             let format = self.config.format;
@@ -374,25 +466,31 @@ impl Renderer {
             self.clipmap = None;
         }
 
-        self.gpu_meshes.retain(|id, _| world.contains_entity(*id));
+        if self.synced_render_epoch != world.render_epoch() {
+            self.gpu_meshes.retain(|id, _| world.contains_entity(*id));
 
-        // Prototypes first so like-entities can share their GPU vertex buffers.
-        for (id, entity) in world.entities() {
-            if entity.instance_of.is_none() {
-                self.sync_entity_mesh(id, entity);
-            }
-        }
-        match world.instance_submit() {
-            InstanceSubmit::CpuIndexed => {
-                for (id, entity) in world.entities() {
-                    if entity.instance_of.is_some() {
-                        self.sync_entity_mesh(id, entity);
-                    }
+            // Prototypes first so like-entities can share their GPU vertex buffers.
+            for (id, entity) in world.entities() {
+                if entity.instance_of.is_none() {
+                    self.sync_entity_mesh(id, entity);
                 }
             }
-            InstanceSubmit::GpuIndirect => {
-                self.sync_gpu_instance_batches(world);
+            match world.instance_submit() {
+                InstanceSubmit::CpuIndexed => {
+                    for (id, entity) in world.entities() {
+                        if entity.instance_of.is_some() {
+                            self.sync_entity_mesh(id, entity);
+                        }
+                    }
+                }
+                InstanceSubmit::GpuIndirect => {
+                    self.sync_gpu_instance_batches(world);
+                }
             }
+            self.synced_render_epoch = world.render_epoch();
+        } else {
+            self.gpu_stats.instance_batches = u32::try_from(self.gpu_instance_batches.len())
+                .expect("GPU instance batch count exceeds u32");
         }
 
         self.gpu_skinned
@@ -490,9 +588,9 @@ impl Renderer {
                 .push(InstanceRaw::from_matrix(entity.transform));
         }
 
-        match self.gpu_meshes.get_mut(&id) {
+        let shadow_buffers_changed = match self.gpu_meshes.get_mut(&id) {
             Some(gpu) => {
-                if entity.instance_of.is_none()
+                let buffers_changed = if entity.instance_of.is_none()
                     && (gpu.vertex_count != entity.mesh().vertex_count()
                         || gpu.index_count != entity.mesh().index_count())
                 {
@@ -503,16 +601,19 @@ impl Renderer {
                         &self.instance_cull,
                     );
                     self.gpu_stats.mesh_rebuild += 1;
+                    true
                 } else {
-                    gpu.update_instances(
+                    let reallocated = gpu.update_instances(
                         &self.device,
                         &self.queue,
                         &self.instance_scratch,
                         &self.instance_cull,
                     );
                     self.gpu_stats.instance_rewrites += 1;
-                }
+                    reallocated
+                };
                 gpu.xform_rev = entity.xform_rev;
+                buffers_changed
             }
             None => {
                 let mut gpu = if let Some(proto) = entity.instance_of {
@@ -536,7 +637,21 @@ impl Renderer {
                 gpu.xform_rev = entity.xform_rev;
                 self.gpu_meshes.insert(id, gpu);
                 self.gpu_stats.mesh_new += 1;
+                false
             }
+        };
+        if shadow_buffers_changed {
+            self.invalidate_shadow_bundles();
+        }
+    }
+
+    fn invalidate_shadow_bundles(&mut self) {
+        for key in &mut self.shadow_bundle_keys {
+            key.draws.clear();
+            key.batch_draws.clear();
+        }
+        for bundle in &mut self.shadow_bundles {
+            *bundle = None;
         }
     }
 
@@ -582,59 +697,112 @@ impl Renderer {
                 .entry(source.prototype)
                 .or_default()
                 .sources
-                .push((source.id, source.xform_rev));
+                .push(BatchBuildSource {
+                    id: source.id,
+                    xform_rev: source.xform_rev,
+                    instance_count: source.instance_count,
+                });
         }
 
+        let batch_count_before = self.gpu_instance_batches.len();
         self.gpu_instance_batches
             .retain(|prototype, _| builds.contains_key(prototype));
+        let mut shadow_buffers_changed = self.gpu_instance_batches.len() != batch_count_before;
         for (prototype, build) in builds {
-            let unchanged = self
-                .gpu_instance_batches
-                .get(&prototype)
-                .is_some_and(|batch| batch.sources == build.sources);
-            if unchanged {
-                continue;
+            if let Some(mut batch) = self.gpu_instance_batches.remove(&prototype) {
+                let layout_fits = batch.slots.len() == build.sources.len()
+                    && batch
+                        .slots
+                        .iter()
+                        .zip(&build.sources)
+                        .all(|(slot, source)| {
+                            slot.id == source.id && source.instance_count <= slot.capacity
+                        });
+                if layout_fits {
+                    for (slot, source) in batch.slots.iter_mut().zip(&build.sources) {
+                        if slot.xform_rev == source.xform_rev
+                            && slot.active_count == source.instance_count
+                        {
+                            continue;
+                        }
+                        let entity = world.entity(source.id).unwrap_or_else(|_| {
+                            panic!("instance batch source {} disappeared", source.id)
+                        });
+                        self.instance_scratch.clear();
+                        self.instance_scratch.extend(
+                            entity
+                                .instances
+                                .iter()
+                                .map(|matrix| InstanceRaw::from_matrix(entity.transform * *matrix)),
+                        );
+                        slot.bounds = batch.gpu.bounds_for_instances(&self.instance_scratch);
+                        self.instance_scratch
+                            .resize(slot.capacity, inactive_instance());
+                        batch.gpu.write_instances_at(
+                            &self.queue,
+                            slot.start,
+                            &self.instance_scratch,
+                        );
+                        slot.xform_rev = source.xform_rev;
+                        slot.active_count = source.instance_count;
+                        self.gpu_stats.batch_partial_writes += 1;
+                    }
+                    batch.gpu.bounds = batch
+                        .slots
+                        .iter()
+                        .filter_map(|slot| slot.bounds)
+                        .reduce(|combined, bounds| combined.union(bounds));
+                    self.gpu_instance_batches.insert(prototype, batch);
+                    continue;
+                }
             }
 
+            let prototype_gpu = self.gpu_meshes.get(&prototype).unwrap_or_else(|| {
+                panic!("instance batch has no GPU mesh for prototype {prototype}")
+            });
             self.instance_scratch.clear();
-            for &(source, _) in &build.sources {
+            let mut slots = Vec::with_capacity(build.sources.len());
+            for source in build.sources {
                 let entity = world
-                    .entity(source)
-                    .unwrap_or_else(|_| panic!("instance batch source {source} disappeared"));
+                    .entity(source.id)
+                    .unwrap_or_else(|_| panic!("instance batch source {} disappeared", source.id));
+                let start = self.instance_scratch.len();
                 self.instance_scratch.extend(
                     entity
                         .instances
                         .iter()
                         .map(|matrix| InstanceRaw::from_matrix(entity.transform * *matrix)),
                 );
-            }
-
-            if let Some(batch) = self.gpu_instance_batches.get_mut(&prototype) {
-                batch.gpu.update_instances(
-                    &self.device,
-                    &self.queue,
-                    &self.instance_scratch,
-                    &self.instance_cull,
-                );
-                batch.sources = build.sources;
-            } else {
-                let prototype_gpu = self.gpu_meshes.get(&prototype).unwrap_or_else(|| {
-                    panic!("instance batch has no GPU mesh for prototype {prototype}")
+                let bounds = prototype_gpu.bounds_for_instances(&self.instance_scratch[start..]);
+                let capacity = batch_slot_capacity(source.instance_count);
+                self.instance_scratch
+                    .resize(start + capacity, inactive_instance());
+                slots.push(BatchSlot {
+                    id: source.id,
+                    xform_rev: source.xform_rev,
+                    start,
+                    capacity,
+                    active_count: source.instance_count,
+                    bounds,
                 });
-                self.gpu_instance_batches.insert(
-                    prototype,
-                    GpuInstanceBatch {
-                        gpu: GpuMesh::share_vertices(
-                            &self.device,
-                            prototype_gpu,
-                            &self.instance_scratch,
-                            &self.instance_cull,
-                        ),
-                        sources: build.sources,
-                    },
-                );
             }
+            let mut gpu = GpuMesh::share_vertices(
+                &self.device,
+                prototype_gpu,
+                &self.instance_scratch,
+                &self.instance_cull,
+            );
+            gpu.bounds = slots
+                .iter()
+                .filter_map(|slot| slot.bounds)
+                .reduce(|combined, bounds| combined.union(bounds));
+            self.gpu_instance_batches
+                .insert(prototype, GpuInstanceBatch { gpu, slots });
             self.gpu_stats.batch_rewrites += 1;
+            shadow_buffers_changed = true;
+        }
+        if shadow_buffers_changed {
+            self.invalidate_shadow_bundles();
         }
         std::mem::swap(
             &mut self.gpu_batch_sources,
@@ -669,10 +837,43 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame-encoder"),
             });
+        let profile_gpu = self
+            .gpu_profiler
+            .as_mut()
+            .is_some_and(GpuProfiler::begin_frame);
+        if profile_gpu {
+            self.gpu_profiler
+                .as_ref()
+                .expect("active GPU profiler")
+                .timestamp(&mut encoder, 0);
+        }
         self.encode_shadow_pass(&mut encoder, world);
+        if profile_gpu {
+            self.gpu_profiler
+                .as_ref()
+                .expect("active GPU profiler")
+                .timestamp(&mut encoder, 1);
+        }
         self.encode_pass(&mut encoder, &view, world);
+        if profile_gpu {
+            self.gpu_profiler
+                .as_ref()
+                .expect("active GPU profiler")
+                .timestamp(&mut encoder, 2);
+        }
         after(&self.device, &self.queue, &mut encoder, &view);
+        if profile_gpu {
+            let profiler = self.gpu_profiler.as_ref().expect("active GPU profiler");
+            profiler.timestamp(&mut encoder, 3);
+            profiler.resolve(&mut encoder);
+        }
         self.queue.submit(std::iter::once(encoder.finish()));
+        if profile_gpu {
+            self.gpu_profiler
+                .as_ref()
+                .expect("active GPU profiler")
+                .read_and_report(&self.device);
+        }
         frame.present();
         Ok(())
     }
@@ -837,6 +1038,7 @@ impl Renderer {
         world: &World,
     ) {
         self.collect_draws(world);
+        self.prepare_terrain_bundle(world);
         let submit = world.instance_submit();
         let main_cull = if submit == InstanceSubmit::GpuIndirect {
             let frustum = self.frustum;
@@ -934,26 +1136,11 @@ impl Renderer {
             );
         }
 
-        pass.set_pipeline(&self.terrain.opaque);
-        for &id in &self.draw_terrain {
-            let entity = world.entity(id).expect("draw list is live");
-            let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
-            let Some(SurfaceMaterialRef::Terrain(mid)) = entity.material else {
-                continue;
-            };
-            let Some(mat) = self.gpu_materials.get(&mid) else {
-                continue;
-            };
-            pass.set_bind_group(1, &mat.bind_group, &[]);
-            submit_mesh_draw(
-                &mut pass,
-                gpu,
-                mesh_submit(&main_cull.compacted, id),
-                0..gpu.opaque_index_count as u32,
-                OPAQUE_INDIRECT_OFFSET,
-                &mut self.gpu_stats.indirect_draws,
-            );
+        if let Some(bundle) = self.terrain_bundle.as_ref() {
+            pass.execute_bundles(std::iter::once(bundle));
         }
+        pass.set_bind_group(0, &self.pipelines.bind_group, &[]);
+        pass.set_pipeline(&self.terrain.opaque);
         for &prototype in &self.batch_terrain {
             let entity = world
                 .entity(prototype)
@@ -1091,6 +1278,57 @@ impl Renderer {
         }
     }
 
+    fn prepare_shadow_bundle(&mut self, cascade: usize, selection: &ShadowCullSelection) {
+        let key = &self.shadow_bundle_keys[cascade];
+        if key.draws == selection.draws && key.batch_draws == selection.batch_draws {
+            return;
+        }
+        self.shadow_bundle_keys[cascade]
+            .draws
+            .clone_from(&selection.draws);
+        self.shadow_bundle_keys[cascade]
+            .batch_draws
+            .clone_from(&selection.batch_draws);
+        if selection.draws.is_empty() && selection.batch_draws.is_empty() {
+            self.shadow_bundles[cascade] = None;
+            return;
+        }
+
+        let mut bundle =
+            self.device
+                .create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
+                    label: Some("visible-shadow-casters"),
+                    color_formats: &[],
+                    depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                        format: DEPTH_FORMAT,
+                        depth_read_only: false,
+                        stencil_read_only: true,
+                    }),
+                    sample_count: 1,
+                    multiview: None,
+                });
+        bundle.set_pipeline(&self.shadow.mesh_pipeline);
+        bundle.set_bind_group(0, &self.shadow.cascade_binds[cascade], &[]);
+        for draw in &selection.draws {
+            let gpu = self
+                .gpu_meshes
+                .get(&draw.id)
+                .expect("shadow bundle caster is synced");
+            encode_shadow_bundle_draw(&mut bundle, gpu, draw.submit);
+        }
+        for draw in &selection.batch_draws {
+            let gpu = &self
+                .gpu_instance_batches
+                .get(&draw.id)
+                .expect("shadow bundle batch is synced")
+                .gpu;
+            encode_shadow_bundle_draw(&mut bundle, gpu, draw.submit);
+        }
+        self.shadow_bundles[cascade] = Some(bundle.finish(&wgpu::RenderBundleDescriptor {
+            label: Some("visible-shadow-casters"),
+        }));
+    }
+
     fn encode_shadow_pass(&mut self, encoder: &mut wgpu::CommandEncoder, world: &World) {
         if world.shadows().is_none() {
             return;
@@ -1098,20 +1336,28 @@ impl Renderer {
         let far = world.shadows().map(|s| s.cascade_end_m[2]).unwrap_or(120.0);
         let focus = world.camera.target;
         let submit = world.instance_submit();
+        let frustums = self.shadow_vp.map(Frustum::from_view_projection);
+        let selections = self.select_shadow_culls(world, &frustums);
         for i in 0..3 {
-            let frustum = Frustum::from_view_projection(self.shadow_vp[i]);
-            let gpu_selection = if submit == InstanceSubmit::GpuIndirect {
-                let selection = self.select_shadow_culls(world, &frustum);
+            let frustum = &frustums[i];
+            let selection = &selections[i];
+            if submit == InstanceSubmit::GpuIndirect {
                 self.dispatch_instance_cull(
                     encoder,
-                    &frustum,
+                    frustum,
                     &selection.compact_batches,
                     CullView::Shadow,
                 );
-                Some(selection)
-            } else {
-                None
-            };
+            }
+            self.prepare_shadow_bundle(i, selection);
+            self.gpu_stats.indirect_draws += u32::try_from(
+                selection
+                    .batch_draws
+                    .iter()
+                    .filter(|draw| draw.submit == MeshSubmit::Compacted)
+                    .count(),
+            )
+            .expect("shadow indirect draw count exceeds u32");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow-csm"),
                 color_attachments: &[],
@@ -1126,49 +1372,8 @@ impl Renderer {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            match submit {
-                InstanceSubmit::CpuIndexed => {
-                    self.shadow
-                        .draw_mesh_casters(&mut pass, i, world, &self.gpu_meshes, &frustum);
-                }
-                InstanceSubmit::GpuIndirect => {
-                    pass.set_pipeline(&self.shadow.mesh_pipeline);
-                    pass.set_bind_group(0, &self.shadow.cascade_binds[i], &[]);
-                    for draw in &gpu_selection
-                        .as_ref()
-                        .expect("GPU selection exists in GPU mode")
-                        .draws
-                    {
-                        let gpu = self.gpu_meshes.get(&draw.id).expect("caster is synced");
-                        submit_mesh_draw(
-                            &mut pass,
-                            gpu,
-                            draw.submit,
-                            0..gpu.opaque_index_count as u32,
-                            OPAQUE_INDIRECT_OFFSET,
-                            &mut self.gpu_stats.indirect_draws,
-                        );
-                    }
-                    for draw in &gpu_selection
-                        .as_ref()
-                        .expect("GPU selection exists in GPU mode")
-                        .batch_draws
-                    {
-                        let gpu = &self
-                            .gpu_instance_batches
-                            .get(&draw.id)
-                            .expect("shadow instance batch is synced")
-                            .gpu;
-                        submit_mesh_draw(
-                            &mut pass,
-                            gpu,
-                            draw.submit,
-                            0..gpu.opaque_index_count as u32,
-                            OPAQUE_INDIRECT_OFFSET,
-                            &mut self.gpu_stats.indirect_draws,
-                        );
-                    }
-                }
+            if let Some(bundle) = self.shadow_bundles[i].as_ref() {
+                pass.execute_bundles(std::iter::once(bundle));
             }
             pass.set_pipeline(&self.shadow.skinned_pipeline);
             pass.set_bind_group(0, &self.shadow.cascade_binds[i], &[]);
@@ -1209,11 +1414,11 @@ impl Renderer {
                 if !seen.insert(prototype) {
                     continue;
                 }
-                let gpu = &self
+                let batch = self
                     .gpu_instance_batches
                     .get(&prototype)
-                    .expect("batch draw list is synced")
-                    .gpu;
+                    .expect("batch draw list is synced");
+                let gpu = &batch.gpu;
                 let bounds = gpu
                     .bounds
                     .unwrap_or_else(|| panic!("instance batch {prototype} has no bounds"));
@@ -1222,6 +1427,10 @@ impl Renderer {
                         panic!("draw list contains outside instance batch {prototype}")
                     }
                     Visibility::Intersecting => {
+                        ids.push(prototype);
+                        compacted.insert(prototype);
+                    }
+                    Visibility::Inside if batch.has_holes() => {
                         ids.push(prototype);
                         compacted.insert(prototype);
                     }
@@ -1235,13 +1444,82 @@ impl Renderer {
     fn select_shadow_culls(
         &mut self,
         world: &World,
-        light_frustum: &Frustum,
-    ) -> ShadowCullSelection {
-        let mut draws = Vec::new();
-        let mut batch_draws = Vec::new();
-        let mut compact_batches = Vec::new();
+        light_frustums: &[Frustum; 3],
+    ) -> [ShadowCullSelection; 3] {
+        if self.shadow_source_epoch != world.render_epoch() {
+            self.rebuild_shadow_sources(world);
+            self.shadow_source_epoch = world.render_epoch();
+        }
+        let mut selections = std::array::from_fn(|_| ShadowCullSelection {
+            draws: Vec::new(),
+            batch_draws: Vec::new(),
+            compact_batches: Vec::new(),
+        });
+        for &id in &self.shadow_mesh_sources {
+            let gpu = self
+                .gpu_meshes
+                .get(&id)
+                .expect("shadow mesh source is synced");
+            let Some(bounds) = gpu.bounds else {
+                continue;
+            };
+            for (selection, frustum) in selections.iter_mut().zip(light_frustums) {
+                match frustum.classify(bounds) {
+                    Visibility::Outside => {}
+                    Visibility::Inside | Visibility::Intersecting => {
+                        selection.draws.push(ShadowDraw {
+                            id,
+                            submit: MeshSubmit::Direct,
+                        });
+                    }
+                }
+            }
+        }
+        for &prototype in &self.shadow_batch_sources {
+            let batch = self
+                .gpu_instance_batches
+                .get(&prototype)
+                .expect("shadow batch source is synced");
+            let gpu = &batch.gpu;
+            let Some(bounds) = gpu.bounds else {
+                continue;
+            };
+            for (selection, frustum) in selections.iter_mut().zip(light_frustums) {
+                match frustum.classify(bounds) {
+                    Visibility::Outside => {}
+                    Visibility::Inside if batch.has_holes() => {
+                        selection.compact_batches.push(prototype);
+                        selection.batch_draws.push(ShadowDraw {
+                            id: prototype,
+                            submit: MeshSubmit::Compacted,
+                        });
+                    }
+                    Visibility::Inside => {
+                        self.gpu_stats.direct_inside_batches += 1;
+                        selection.batch_draws.push(ShadowDraw {
+                            id: prototype,
+                            submit: MeshSubmit::Direct,
+                        });
+                    }
+                    Visibility::Intersecting => {
+                        selection.compact_batches.push(prototype);
+                        selection.batch_draws.push(ShadowDraw {
+                            id: prototype,
+                            submit: MeshSubmit::Compacted,
+                        });
+                    }
+                }
+            }
+        }
+        selections
+    }
+
+    fn rebuild_shadow_sources(&mut self, world: &World) {
+        self.shadow_mesh_sources.clear();
+        self.shadow_batch_sources.clear();
+        let gpu_batches = world.instance_submit() == InstanceSubmit::GpuIndirect;
         for (id, entity) in world.entities() {
-            if entity.instanced()
+            if (gpu_batches && entity.instanced())
                 || !entity.casts_shadow()
                 || !material_casts_shadow(entity.material())
             {
@@ -1250,56 +1528,23 @@ impl Renderer {
             let Some(gpu) = self.gpu_meshes.get(&id) else {
                 continue;
             };
-            if gpu.instance_count == 0 || gpu.opaque_index_count == 0 {
-                continue;
-            }
-            let Some(bounds) = gpu.bounds else {
-                continue;
-            };
-            match light_frustum.classify(bounds) {
-                Visibility::Outside => {}
-                Visibility::Inside | Visibility::Intersecting => draws.push(ShadowDraw {
-                    id,
-                    submit: MeshSubmit::Direct,
-                }),
+            if gpu.instance_count > 0 && gpu.opaque_index_count > 0 {
+                self.shadow_mesh_sources.push(id);
             }
         }
-        for (&prototype, batch) in &self.gpu_instance_batches {
-            let entity = world
-                .entity(prototype)
-                .unwrap_or_else(|_| panic!("instance batch prototype {prototype} disappeared"));
-            if !entity.casts_shadow() || !material_casts_shadow(entity.material()) {
-                continue;
-            }
-            let gpu = &batch.gpu;
-            if gpu.instance_count == 0 || gpu.opaque_index_count == 0 {
-                continue;
-            }
-            let bounds = gpu
-                .bounds
-                .unwrap_or_else(|| panic!("non-empty instance batch {prototype} has no bounds"));
-            match light_frustum.classify(bounds) {
-                Visibility::Outside => {}
-                Visibility::Inside => {
-                    self.gpu_stats.direct_inside_batches += 1;
-                    batch_draws.push(ShadowDraw {
-                        id: prototype,
-                        submit: MeshSubmit::Direct,
-                    });
-                }
-                Visibility::Intersecting => {
-                    compact_batches.push(prototype);
-                    batch_draws.push(ShadowDraw {
-                        id: prototype,
-                        submit: MeshSubmit::Compacted,
-                    });
+        if gpu_batches {
+            for (&prototype, batch) in &self.gpu_instance_batches {
+                let entity = world
+                    .entity(prototype)
+                    .unwrap_or_else(|_| panic!("instance batch prototype {prototype} disappeared"));
+                if entity.casts_shadow()
+                    && material_casts_shadow(entity.material())
+                    && batch.gpu.instance_count > 0
+                    && batch.gpu.opaque_index_count > 0
+                {
+                    self.shadow_batch_sources.push(prototype);
                 }
             }
-        }
-        ShadowCullSelection {
-            draws,
-            batch_draws,
-            compact_batches,
         }
     }
 
@@ -1362,8 +1607,67 @@ impl Renderer {
         self.instance_cull.begin_frame(&self.device, max_jobs);
     }
 
-    /// One walk of the live entities, bucketed for the four mesh passes.
+    fn prepare_terrain_bundle(&mut self, world: &World) {
+        if self.terrain_bundle_ids == self.draw_terrain {
+            return;
+        }
+        self.terrain_bundle_ids.clone_from(&self.draw_terrain);
+        if self.draw_terrain.is_empty() {
+            self.terrain_bundle = None;
+            return;
+        }
+
+        let mut bundle =
+            self.device
+                .create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
+                    label: Some("visible-terrain-bundle"),
+                    color_formats: &[Some(self.config.format)],
+                    depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                        format: DEPTH_FORMAT,
+                        depth_read_only: false,
+                        stencil_read_only: true,
+                    }),
+                    sample_count: 1,
+                    multiview: None,
+                });
+        bundle.set_bind_group(0, &self.pipelines.bind_group, &[]);
+        bundle.set_pipeline(&self.terrain.opaque);
+        for &id in &self.draw_terrain {
+            let entity = world
+                .entity(id)
+                .unwrap_or_else(|_| panic!("terrain bundle entity {id} disappeared"));
+            let Some(SurfaceMaterialRef::Terrain(material_id)) = entity.material else {
+                panic!("terrain bundle entity {id} lost its terrain material");
+            };
+            let material = self
+                .gpu_materials
+                .get(&material_id)
+                .unwrap_or_else(|| panic!("terrain bundle entity {id} material is not synced"));
+            let gpu = self
+                .gpu_meshes
+                .get(&id)
+                .unwrap_or_else(|| panic!("terrain bundle entity {id} is not synced"));
+            let instance_count =
+                u32::try_from(gpu.instance_count).expect("terrain instance count exceeds u32");
+            let opaque_index_count = u32::try_from(gpu.opaque_index_count)
+                .expect("terrain opaque index count exceeds u32");
+            bundle.set_bind_group(1, &material.bind_group, &[]);
+            bundle.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
+            bundle.set_vertex_buffer(1, gpu.instance_buf.slice(..));
+            bundle.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+            bundle.draw_indexed(0..opaque_index_count, 0, 0..instance_count);
+        }
+        self.terrain_bundle = Some(bundle.finish(&wgpu::RenderBundleDescriptor {
+            label: Some("visible-terrain-bundle"),
+        }));
+    }
+
     fn collect_draws(&mut self, world: &World) {
+        if self.draw_source_epoch != world.render_epoch() {
+            self.rebuild_draw_sources(world);
+            self.draw_source_epoch = world.render_epoch();
+        }
+
         self.draw_opaque.clear();
         self.draw_terrain.clear();
         self.draw_transparent.clear();
@@ -1372,6 +1676,88 @@ impl Renderer {
         self.batch_terrain.clear();
         self.batch_transparent.clear();
         self.batch_water.clear();
+
+        let frustum = self.frustum;
+        for &id in &self.source_opaque {
+            let gpu = self.gpu_meshes.get(&id).expect("opaque source is synced");
+            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+                self.draw_opaque.push(id);
+            }
+        }
+        for &id in &self.source_terrain {
+            let gpu = self.gpu_meshes.get(&id).expect("terrain source is synced");
+            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+                self.draw_terrain.push(id);
+            }
+        }
+        for &id in &self.source_transparent {
+            let gpu = self
+                .gpu_meshes
+                .get(&id)
+                .expect("transparent source is synced");
+            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+                self.draw_transparent.push(id);
+            }
+        }
+        for &id in &self.source_water {
+            let gpu = self.gpu_meshes.get(&id).expect("water source is synced");
+            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+                self.draw_water.push(id);
+            }
+        }
+        for &prototype in &self.batch_source_opaque {
+            let gpu = &self
+                .gpu_instance_batches
+                .get(&prototype)
+                .expect("opaque batch source is synced")
+                .gpu;
+            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+                self.batch_opaque.push(prototype);
+            }
+        }
+        for &prototype in &self.batch_source_terrain {
+            let gpu = &self
+                .gpu_instance_batches
+                .get(&prototype)
+                .expect("terrain batch source is synced")
+                .gpu;
+            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+                self.batch_terrain.push(prototype);
+            }
+        }
+        for &prototype in &self.batch_source_transparent {
+            let gpu = &self
+                .gpu_instance_batches
+                .get(&prototype)
+                .expect("transparent batch source is synced")
+                .gpu;
+            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+                self.batch_transparent.push(prototype);
+            }
+        }
+        for &prototype in &self.batch_source_water {
+            let gpu = &self
+                .gpu_instance_batches
+                .get(&prototype)
+                .expect("water batch source is synced")
+                .gpu;
+            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+                self.batch_water.push(prototype);
+            }
+        }
+    }
+
+    /// Rebuild material/pass membership only when static world state changes.
+    fn rebuild_draw_sources(&mut self, world: &World) {
+        self.source_opaque.clear();
+        self.source_terrain.clear();
+        self.source_transparent.clear();
+        self.source_water.clear();
+        self.batch_source_opaque.clear();
+        self.batch_source_terrain.clear();
+        self.batch_source_transparent.clear();
+        self.batch_source_water.clear();
+
         let gpu_batches = world.instance_submit() == InstanceSubmit::GpuIndirect;
         for (id, entity) in world.entities() {
             if gpu_batches && entity.instanced() {
@@ -1381,9 +1767,6 @@ impl Renderer {
                 let Some(gpu) = self.gpu_meshes.get(&id) else {
                     continue;
                 };
-                if gpu.instance_count == 0 || self.hidden(gpu) {
-                    continue;
-                }
                 (
                     gpu.opaque_index_count > 0,
                     gpu.opaque_index_count < gpu.index_count,
@@ -1392,23 +1775,23 @@ impl Renderer {
             match entity.material {
                 None => {
                     if has_opaque {
-                        self.draw_opaque.push(id);
+                        self.source_opaque.push(id);
                     }
                     if has_xlucent {
-                        self.draw_transparent.push(id);
+                        self.source_transparent.push(id);
                     }
                 }
                 Some(SurfaceMaterialRef::Terrain(_)) => {
                     if has_opaque {
-                        self.draw_terrain.push(id);
+                        self.source_terrain.push(id);
                     }
                     if has_xlucent {
-                        self.draw_transparent.push(id);
+                        self.source_transparent.push(id);
                     }
                 }
                 Some(SurfaceMaterialRef::Water(_)) => {
                     if has_xlucent {
-                        self.draw_water.push(id);
+                        self.source_water.push(id);
                     }
                 }
             }
@@ -1428,9 +1811,6 @@ impl Renderer {
                     .get(&prototype)
                     .unwrap_or_else(|| panic!("instance batch {prototype} is not synced"));
                 let gpu = &batch.gpu;
-                if gpu.instance_count == 0 || self.hidden(gpu) {
-                    continue;
-                }
                 let entity = world
                     .entity(prototype)
                     .unwrap_or_else(|_| panic!("instance batch prototype {prototype} disappeared"));
@@ -1439,39 +1819,27 @@ impl Renderer {
                 match entity.material {
                     None => {
                         if has_opaque {
-                            self.batch_opaque.push(prototype);
+                            self.batch_source_opaque.push(prototype);
                         }
                         if has_xlucent {
-                            self.batch_transparent.push(prototype);
+                            self.batch_source_transparent.push(prototype);
                         }
                     }
                     Some(SurfaceMaterialRef::Terrain(_)) => {
                         if has_opaque {
-                            self.batch_terrain.push(prototype);
+                            self.batch_source_terrain.push(prototype);
                         }
                         if has_xlucent {
-                            self.batch_transparent.push(prototype);
+                            self.batch_source_transparent.push(prototype);
                         }
                     }
                     Some(SurfaceMaterialRef::Water(_)) => {
                         if has_xlucent {
-                            self.batch_water.push(prototype);
+                            self.batch_source_water.push(prototype);
                         }
                     }
                 }
             }
-        }
-    }
-
-    /// Whether this mesh is entirely outside the view volume.
-    ///
-    /// A mesh with no bounds has nothing to draw, and one whose sphere reaches
-    /// into the frustum is kept: the test errs towards drawing, because the
-    /// cost of a wrong answer is terrain blinking out at the edge of the screen.
-    fn hidden(&self, gpu: &GpuMesh) -> bool {
-        match gpu.bounds {
-            Some(bounds) => !self.frustum.intersects(bounds),
-            None => true,
         }
     }
 
@@ -1578,6 +1946,45 @@ impl Renderer {
             for mat in self.gpu_water_materials.values() {
                 mat.write_origin(&self.queue, self.terrain_origin);
             }
+        }
+    }
+}
+
+fn batch_slot_capacity(instance_count: usize) -> usize {
+    instance_count
+        .max(1)
+        .checked_next_power_of_two()
+        .expect("instance batch slot capacity overflow")
+        .max(8)
+}
+
+fn inactive_instance() -> InstanceRaw {
+    InstanceRaw::from_matrix(glam::Mat4::from_scale_rotation_translation(
+        glam::Vec3::ZERO,
+        glam::Quat::IDENTITY,
+        glam::Vec3::splat(1.0e20),
+    ))
+}
+
+fn encode_shadow_bundle_draw<'a>(
+    bundle: &mut wgpu::RenderBundleEncoder<'a>,
+    gpu: &'a GpuMesh,
+    submit: MeshSubmit,
+) {
+    let opaque_index_count =
+        u32::try_from(gpu.opaque_index_count).expect("shadow opaque index count exceeds u32");
+    bundle.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
+    bundle.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+    match submit {
+        MeshSubmit::Compacted => {
+            bundle.set_vertex_buffer(1, gpu.compact_buf.slice(..));
+            bundle.draw_indexed_indirect(&gpu.indirect_buf, OPAQUE_INDIRECT_OFFSET);
+        }
+        MeshSubmit::Direct => {
+            let instance_count =
+                u32::try_from(gpu.instance_count).expect("shadow instance count exceeds u32");
+            bundle.set_vertex_buffer(1, gpu.instance_buf.slice(..));
+            bundle.draw_indexed(0..opaque_index_count, 0, 0..instance_count);
         }
     }
 }

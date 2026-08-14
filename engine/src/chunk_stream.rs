@@ -121,6 +121,8 @@ pub struct ChunkStream {
     /// Resident chunks whose mesh is stale. Still drawn until the replacement lands.
     dirty: HashSet<ChunkCoord>,
     contact_epoch: u64,
+    contact_snapshot_epoch: u64,
+    contact_snapshot: ContactSnapshot,
 }
 
 impl ChunkStream {
@@ -150,6 +152,8 @@ impl ChunkStream {
             upload_scratch: Vec::new(),
             dirty: HashSet::new(),
             contact_epoch: 0,
+            contact_snapshot_epoch: 0,
+            contact_snapshot: ContactSnapshot::new(span, HashMap::new()),
         }
     }
 
@@ -287,13 +291,21 @@ impl ChunkStream {
 
     /// The ground bakes resident right now, for a worker thread to stand things on.
     pub fn contact_snapshot(&self) -> ContactSnapshot {
-        ContactSnapshot::new(
+        self.contact_snapshot.clone()
+    }
+
+    fn refresh_contact_snapshot(&mut self) {
+        if self.contact_snapshot_epoch == self.contact_epoch {
+            return;
+        }
+        self.contact_snapshot = ContactSnapshot::new(
             self.span,
             self.resident
                 .iter()
                 .filter_map(|(coord, chunk)| Some((*coord, Arc::clone(chunk.contact.as_ref()?))))
                 .collect(),
-        )
+        );
+        self.contact_snapshot_epoch = self.contact_epoch;
     }
 
     fn in_hole(&self, coord: ChunkCoord, center: ChunkCoord) -> bool {
@@ -360,6 +372,7 @@ impl ChunkStream {
         self.drain_ready()?;
         self.upload_ready(world, center)?;
         self.spawn_jobs(center, priority.map(|p| self.focus_chunk(p)));
+        self.refresh_contact_snapshot();
         world.note_shadow_contact(self.contact_snapshot(), self.contact_epoch);
         Ok(())
     }
@@ -387,6 +400,7 @@ impl ChunkStream {
             let payload = self.builder.build(coord)?;
             self.install(world, coord, payload)?;
         }
+        self.refresh_contact_snapshot();
         world.note_shadow_contact(self.contact_snapshot(), self.contact_epoch);
         Ok(())
     }
@@ -394,7 +408,10 @@ impl ChunkStream {
     fn unload(&mut self, world: &mut World, coord: ChunkCoord) {
         self.dirty.remove(&coord);
         if let Some(chunk) = self.resident.remove(&coord) {
-            self.contact_epoch = self.contact_epoch.wrapping_add(1);
+            self.contact_epoch = self
+                .contact_epoch
+                .checked_add(1)
+                .expect("chunk contact epoch overflow");
             for layer in chunk.layers {
                 world.clear_anchored_chunk(ChunkId::at_level(coord, layer, self.level));
             }
@@ -471,7 +488,10 @@ impl ChunkStream {
                     contact: None,
                 },
             );
-            self.contact_epoch = self.contact_epoch.wrapping_add(1);
+            self.contact_epoch = self
+                .contact_epoch
+                .checked_add(1)
+                .expect("chunk contact epoch overflow");
             return Ok(());
         };
         let ChunkPayload {
@@ -499,7 +519,10 @@ impl ChunkStream {
                 contact: contact.map(Arc::new),
             },
         );
-        self.contact_epoch = self.contact_epoch.wrapping_add(1);
+        self.contact_epoch = self
+            .contact_epoch
+            .checked_add(1)
+            .expect("chunk contact epoch overflow");
         Ok(())
     }
 

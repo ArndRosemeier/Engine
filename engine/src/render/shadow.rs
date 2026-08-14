@@ -8,14 +8,11 @@ use crate::contact::ContactSnapshot;
 use crate::mesh::{InstanceRaw, Vertex};
 use crate::space::{RenderOrigin, RenderPosition};
 use crate::terrain::TerrainRules;
-use crate::world::{EntityId, ShadowSettings, SurfaceMaterialRef, World};
+use crate::world::{ShadowSettings, SurfaceMaterialRef, World};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
-use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
-use super::frustum::Frustum;
-use super::gpu_mesh::GpuMesh;
 use super::skinned::SkinnedVertex;
 
 const _: () = assert!(MAX_JOINTS == 128);
@@ -941,41 +938,6 @@ impl ShadowGpu {
 
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         mats
-    }
-
-    pub fn draw_mesh_casters(
-        &self,
-        pass: &mut wgpu::RenderPass<'_>,
-        cascade: usize,
-        world: &World,
-        meshes: &HashMap<EntityId, GpuMesh>,
-        light_frustum: &Frustum,
-    ) {
-        pass.set_pipeline(&self.mesh_pipeline);
-        pass.set_bind_group(0, &self.cascade_binds[cascade], &[]);
-        for (id, entity) in world.entities() {
-            if !entity.casts_shadow() || !material_casts_shadow(entity.material()) {
-                continue;
-            }
-            let Some(gpu) = meshes.get(&id) else {
-                continue;
-            };
-            if gpu.instance_count == 0 || gpu.opaque_index_count == 0 {
-                continue;
-            }
-            match gpu.bounds {
-                Some(bounds) if light_frustum.intersects(bounds) => {}
-                _ => continue,
-            }
-            pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
-            pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
-            pass.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(
-                0..gpu.opaque_index_count as u32,
-                0,
-                0..gpu.instance_count as u32,
-            );
-        }
     }
 }
 
