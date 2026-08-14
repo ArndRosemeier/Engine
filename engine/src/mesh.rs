@@ -56,6 +56,28 @@ impl Mesh {
         Ok(mesh)
     }
 
+    /// A doorway, dungeon mouth, or teleport surface: a quad on the XY plane
+    /// facing `+Z`. Pair two of these with [`crate::world::World::link`].
+    pub fn opening(width: f32, height: f32) -> EngineResult<Self> {
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return Err(EngineError::InvalidMesh(
+                "opening width and height must be finite and > 0".into(),
+            ));
+        }
+        let mut mesh = Self::new();
+        let hx = width * 0.5;
+        let hy = height * 0.5;
+        let a = mesh.add_point((-hx, -hy, 0.0))?;
+        let b = mesh.add_point((hx, -hy, 0.0))?;
+        let c = mesh.add_point((hx, hy, 0.0))?;
+        let d = mesh.add_point((-hx, hy, 0.0))?;
+        for id in [a, b, c, d] {
+            mesh.set_point_color(id, Color::rgb(0, 0, 0))?;
+        }
+        mesh.add_quad(a, b, c, d)?;
+        Ok(mesh)
+    }
+
     pub fn point_count(&self) -> usize {
         self.points.len()
     }

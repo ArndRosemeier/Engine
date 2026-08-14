@@ -822,3 +822,101 @@ fn like_entities_inherit_whether_they_cast_shadow() {
     let like_cast = world.spawn_instanced_like(caster).expect("caster like");
     assert!(world.entity(like_cast).expect("caster like").casts_shadow());
 }
+
+#[test]
+fn opening_faces_plus_z() {
+    let mesh = Mesh::opening(1.2, 2.2).unwrap();
+    let built = mesh.build();
+    assert_eq!(built.triangle_count(), 2);
+    assert!(built.normals.iter().all(|n| n.z > 0.9));
+}
+
+#[test]
+fn spaces_keep_spawns_apart() {
+    let mut world = crate::World::default();
+    let house = world.space("house").unwrap();
+    let yard = world.spawn(unit_quad());
+    let table = world.spawn_in(house, unit_quad()).unwrap();
+    assert_eq!(world.entity(yard).unwrap().space(), crate::SpaceId::DEFAULT);
+    assert_eq!(world.entity(table).unwrap().space(), house);
+    world.live_in(house).unwrap();
+    assert_eq!(world.living_in(), house);
+}
+
+#[test]
+fn walking_through_a_door_switches_space() {
+    let mut world = crate::World::default();
+    let house = world.space("house").unwrap();
+    let outside = world
+        .place(
+            Mesh::opening(1.2, 2.2).unwrap(),
+            Place::new(0.0, 1.1, -1.2).with_yaw_deg(180.0),
+        )
+        .unwrap();
+    let inside = world
+        .place_in(
+            house,
+            Mesh::opening(1.2, 2.2).unwrap(),
+            Place::new(0.0, 1.1, -3.0),
+        )
+        .unwrap();
+    world.link(outside, inside).unwrap();
+
+    let mut pos = Vec3::new(0.0, 1.6, -6.0);
+    let mut yaw = 0.0_f32;
+    assert!(world.travel(&mut pos, &mut yaw).is_none());
+    pos.z = 0.0;
+    let entered = world.travel(&mut pos, &mut yaw);
+    assert_eq!(entered, Some(house));
+    assert_eq!(world.living_in(), house);
+    assert!(pos.z > -3.0, "should stand inside the room, pos={pos}");
+    assert!(yaw.abs() < 5.0, "forward should still be +Z, yaw={yaw}");
+}
+
+#[test]
+fn same_space_portals_work_in_both_directions() {
+    let mut world = crate::World::default();
+    let a = world
+        .place(Mesh::opening(1.2, 2.2).unwrap(), Place::new(0.0, 1.1, -4.0))
+        .unwrap();
+    let b = world
+        .place(
+            Mesh::opening(1.2, 2.2).unwrap(),
+            Place::new(0.0, 1.1, 4.0).with_yaw_deg(180.0),
+        )
+        .unwrap();
+    world.link(a, b).unwrap();
+
+    let mut pos = Vec3::new(0.0, 1.6, 0.0);
+    let mut yaw = 180.0_f32;
+    assert!(world.travel(&mut pos, &mut yaw).is_none());
+    pos.z = -5.0;
+    assert_eq!(
+        world.travel(&mut pos, &mut yaw),
+        Some(crate::SpaceId::DEFAULT)
+    );
+    assert!(
+        pos.z >= 3.0,
+        "walking into A should come out near B, pos={pos}"
+    );
+
+    pos = Vec3::new(0.0, 1.6, 2.0);
+    assert!(world.travel(&mut pos, &mut yaw).is_none());
+    pos.z = 5.0;
+    assert_eq!(
+        world.travel(&mut pos, &mut yaw),
+        Some(crate::SpaceId::DEFAULT)
+    );
+    assert!(
+        pos.z <= -3.0,
+        "walking into B should come out near A, pos={pos}"
+    );
+}
+
+#[test]
+fn link_rejects_a_self_door() {
+    let mut world = crate::World::default();
+    let door = world.spawn(Mesh::opening(1.0, 2.0).unwrap());
+    let err = world.link(door, door).unwrap_err();
+    assert!(matches!(err, EngineError::InvalidValue(_)));
+}

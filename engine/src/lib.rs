@@ -16,6 +16,7 @@ pub mod limits;
 pub mod mesh;
 pub mod model;
 pub mod place;
+pub mod portal;
 pub mod prelude;
 pub mod proc;
 pub mod proc_terrain;
@@ -49,6 +50,7 @@ pub use limits::EngineLimits;
 pub use mesh::{Mesh, PointId, Shape};
 pub use model::{scatter_places, Model};
 pub use place::{GlobalPlace, Place};
+pub use portal::{PortalLink, SpaceId};
 pub use proc_terrain::{demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain};
 pub use space::{
     ChunkCoord, ChunkId, ChunkLayer, ChunkLevel, ChunkSpan, GlobalPosition, GlobalXZ, RenderOrigin,

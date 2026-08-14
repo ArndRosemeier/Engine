@@ -8,6 +8,8 @@ members = [
     "examples/infinite_walker",
     "examples/ui_modal",
     "examples/animated_animal",
+    "examples/portals",
+    "examples/portal_pair",
 ]
 default-members = ["engine"]
 

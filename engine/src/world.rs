@@ -8,6 +8,9 @@ use crate::input::Input;
 use crate::limits::EngineLimits;
 use crate::mesh::{AlbedoMap, BuiltMesh, Mesh};
 use crate::place::{GlobalPlace, Place};
+use crate::portal::{
+    opening_extents, segment_crosses_opening, teleport_yaw, PortalLink, PortalPlane, SpaceId,
+};
 use crate::proc_terrain::{HeightField, ProcTerrain};
 use crate::space::{ChunkId, GlobalPosition, GlobalXZ, RenderOrigin};
 use crate::texture::{
@@ -222,6 +225,7 @@ pub struct Entity {
     pub(crate) instance_of: Option<EntityId>,
     /// Mesh casters only. Terrain and water never cast, even when this is set.
     pub(crate) casts_shadow: bool,
+    pub(crate) space: SpaceId,
 }
 
 impl Entity {
@@ -246,6 +250,10 @@ impl Entity {
         self.casts_shadow
     }
 
+    pub fn space(&self) -> SpaceId {
+        self.space
+    }
+
     /// Whether the instance list is the draw list, including when that list is empty.
     pub fn instanced(&self) -> bool {
         self.instanced
@@ -267,6 +275,7 @@ struct AnchoredChunk {
 pub struct AnimatedEntity {
     pub(crate) animator: Animator,
     pub(crate) transform: Mat4,
+    pub(crate) space: SpaceId,
 }
 
 impl AnimatedEntity {
@@ -276,6 +285,10 @@ impl AnimatedEntity {
 
     pub fn transform(&self) -> Mat4 {
         self.transform
+    }
+
+    pub fn space(&self) -> SpaceId {
+        self.space
     }
 }
 
@@ -339,6 +352,12 @@ pub struct World {
     hitch_log: Option<PathBuf>,
     /// Static obstacles actors slide against. Independent of render entities.
     collision: CollisionWorld,
+    space_by_name: HashMap<String, SpaceId>,
+    next_space_id: u32,
+    spawn_space: SpaceId,
+    live_space: SpaceId,
+    portals: Vec<PortalLink>,
+    travel_prev: Option<(SpaceId, Vec3)>,
 }
 
 impl Default for World {
@@ -380,6 +399,12 @@ impl Default for World {
             hitch_spans: Vec::new(),
             hitch_log: None,
             collision: CollisionWorld::new(),
+            space_by_name: HashMap::new(),
+            next_space_id: 1,
+            spawn_space: SpaceId::DEFAULT,
+            live_space: SpaceId::DEFAULT,
+            portals: Vec::new(),
+            travel_prev: None,
         }
     }
 }
@@ -464,10 +489,256 @@ impl World {
         self.collision.move_xz(body, from, dx, dz)
     }
 
+    /// Intern a disconnected space. Does not change where new entities spawn;
+    /// call [`Self::in_space`] or [`Self::spawn_in`] for that.
+    pub fn space(&mut self, name: impl Into<String>) -> EngineResult<SpaceId> {
+        let name = name.into();
+        if name.is_empty() {
+            return Err(EngineError::InvalidValue(
+                "space name must not be empty".into(),
+            ));
+        }
+        if let Some(&id) = self.space_by_name.get(&name) {
+            return Ok(id);
+        }
+        let id = SpaceId::from_raw(self.next_space_id);
+        self.next_space_id = self
+            .next_space_id
+            .checked_add(1)
+            .expect("space id overflow");
+        self.space_by_name.insert(name, id);
+        Ok(id)
+    }
+
+    /// Subsequent [`Self::spawn`] / [`Self::place`] calls go into `space`.
+    pub fn in_space(&mut self, space: SpaceId) -> EngineResult<()> {
+        self.require_space(space)?;
+        self.spawn_space = space;
+        Ok(())
+    }
+
+    /// Which space the main camera is standing in.
+    pub fn live_in(&mut self, space: SpaceId) -> EngineResult<()> {
+        self.require_space(space)?;
+        if self.live_space != space {
+            self.live_space = space;
+            self.travel_prev = None;
+        }
+        Ok(())
+    }
+
+    pub fn living_in(&self) -> SpaceId {
+        self.live_space
+    }
+
+    pub fn spawning_in(&self) -> SpaceId {
+        self.spawn_space
+    }
+
+    /// Sky and clipmap belong to the default outdoor space only.
+    pub fn space_draws_environment(&self, space: SpaceId) -> bool {
+        space == SpaceId::DEFAULT
+    }
+
+    fn require_space(&self, space: SpaceId) -> EngineResult<()> {
+        if space == SpaceId::DEFAULT || self.space_by_name.values().any(|&id| id == space) {
+            return Ok(());
+        }
+        Err(EngineError::InvalidValue(format!(
+            "unknown space {}",
+            space.raw()
+        )))
+    }
+
     /// Spawn a mesh at the origin.
     pub fn spawn(&mut self, mesh: Mesh) -> EntityId {
         self.place(mesh, Place::default())
             .expect("spawn at identity")
+    }
+
+    pub fn spawn_in(&mut self, space: SpaceId, mesh: Mesh) -> EngineResult<EntityId> {
+        self.require_space(space)?;
+        let prev = self.spawn_space;
+        self.spawn_space = space;
+        let id = self.spawn(mesh);
+        self.spawn_space = prev;
+        Ok(id)
+    }
+
+    pub fn place_in(&mut self, space: SpaceId, mesh: Mesh, place: Place) -> EngineResult<EntityId> {
+        self.require_space(space)?;
+        let prev = self.spawn_space;
+        self.spawn_space = space;
+        let id = self.place(mesh, place);
+        self.spawn_space = prev;
+        id
+    }
+
+    pub fn set_space(&mut self, id: EntityId, space: SpaceId) -> EngineResult<()> {
+        self.require_space(space)?;
+        if let Some(e) = self.entities.get_mut(&id) {
+            if e.space != space {
+                e.space = space;
+                self.bump_render_epoch();
+            }
+            return Ok(());
+        }
+        if let Some(e) = self.animated.get_mut(&id) {
+            e.space = space;
+            return Ok(());
+        }
+        Err(EngineError::UnknownEntity)
+    }
+
+    /// Two openings become the same hole. Both meshes should face their own
+    /// space (`+Z` local). Walking through teleports; looking through shows
+    /// the other side as if the world continued.
+    pub fn link(&mut self, a: EntityId, b: EntityId) -> EngineResult<()> {
+        if a == b {
+            return Err(EngineError::InvalidValue(
+                "a portal cannot link an opening to itself".into(),
+            ));
+        }
+        let plane_a = self.portal_plane(a)?;
+        let plane_b = self.portal_plane(b)?;
+        if plane_a.half_width <= 0.0 || plane_a.half_height <= 0.0 {
+            return Err(EngineError::InvalidValue(format!(
+                "entity {a} has no XY extent to use as an opening"
+            )));
+        }
+        if plane_b.half_width <= 0.0 || plane_b.half_height <= 0.0 {
+            return Err(EngineError::InvalidValue(format!(
+                "entity {b} has no XY extent to use as an opening"
+            )));
+        }
+        if self.is_portal_surface(a) || self.is_portal_surface(b) {
+            return Err(EngineError::InvalidValue(
+                "opening is already linked".into(),
+            ));
+        }
+        self.portals.push(PortalLink { a, b });
+        self.bump_render_epoch();
+        Ok(())
+    }
+
+    pub fn portals(&self) -> &[PortalLink] {
+        &self.portals
+    }
+
+    /// Closest opening in the live space that the camera is facing.
+    pub(crate) fn visible_portal(
+        &self,
+        eye: Vec3,
+        look: Vec3,
+    ) -> Option<crate::portal::VisiblePortal> {
+        let look = {
+            if look.length_squared() <= 0.0 {
+                panic!("visible_portal look direction is zero");
+            }
+            look.normalize()
+        };
+        let mut best: Option<(f32, crate::portal::VisiblePortal)> = None;
+        for link in &self.portals {
+            let (Some(a), Some(b)) = (self.entities.get(&link.a), self.entities.get(&link.b))
+            else {
+                continue;
+            };
+            for (src, dst) in link.directions(a.space, b.space, self.live_space) {
+                let src_e = if src == link.a { a } else { b };
+                let dst_e = if dst == link.a { a } else { b };
+                let Ok(src_plane) = self.portal_plane(src) else {
+                    continue;
+                };
+                if src_plane.signed_distance(eye) <= 0.05 {
+                    continue;
+                }
+                if look.dot(-src_plane.normal) <= 0.0 {
+                    continue;
+                }
+                let dist = eye.distance_squared(src_plane.center);
+                let Ok(dst_plane) = self.portal_plane(dst) else {
+                    continue;
+                };
+                let candidate = crate::portal::VisiblePortal {
+                    src,
+                    dst,
+                    src_transform: src_e.transform,
+                    dst_transform: dst_e.transform,
+                    dst_center: dst_plane.center,
+                    dst_normal: dst_plane.normal,
+                    dest_space: dst_e.space,
+                };
+                if best.as_ref().is_none_or(|(best_dist, _)| dist < *best_dist) {
+                    best = Some((dist, candidate));
+                }
+            }
+        }
+        best.map(|(_, p)| p)
+    }
+
+    pub fn is_portal_surface(&self, id: EntityId) -> bool {
+        self.portals.iter().any(|p| p.a == id || p.b == id)
+    }
+
+    pub(crate) fn portal_plane(&self, id: EntityId) -> EngineResult<PortalPlane> {
+        let e = self.entities.get(&id).ok_or(EngineError::UnknownEntity)?;
+        if e.instanced {
+            return Err(EngineError::InvalidValue(format!(
+                "entity {id} is instanced; openings must be a single mesh"
+            )));
+        }
+        let (half_w, half_h) = opening_extents(&e.mesh);
+        Ok(PortalPlane::from_transform(e.transform, half_w, half_h))
+    }
+
+    /// If `position` crossed an opening this frame, move it to the other side
+    /// and switch [`Self::living_in`]. Call before the camera helper.
+    ///
+    /// Returns the space you entered.
+    pub fn travel(&mut self, position: &mut Vec3, yaw_degrees: &mut f32) -> Option<SpaceId> {
+        if !position.is_finite() {
+            panic!("travel position must be finite, got {position}");
+        }
+        if !yaw_degrees.is_finite() {
+            panic!("travel yaw must be finite, got {yaw_degrees}");
+        }
+        let live = self.live_space;
+        let prev = match self.travel_prev {
+            Some((space, p)) if space == live => p,
+            _ => {
+                self.travel_prev = Some((live, *position));
+                return None;
+            }
+        };
+        let links: Vec<PortalLink> = self.portals.clone();
+        for link in links {
+            let a_space = self.entities.get(&link.a).map(|e| e.space);
+            let b_space = self.entities.get(&link.b).map(|e| e.space);
+            let (Some(a_space), Some(b_space)) = (a_space, b_space) else {
+                continue;
+            };
+            for (src, dst) in link.directions(a_space, b_space, live) {
+                let src_plane = self
+                    .portal_plane(src)
+                    .expect("linked opening still has a plane");
+                if !segment_crosses_opening(prev, *position, src_plane) {
+                    continue;
+                }
+                let dst_e = self
+                    .entities
+                    .get(&dst)
+                    .expect("linked opening still exists");
+                let t_src = src_plane.transform;
+                let t_dst = dst_e.transform;
+                *position = crate::portal::portal_matrix(t_src, t_dst).transform_point3(*position);
+                *yaw_degrees = teleport_yaw(*yaw_degrees, t_src, t_dst);
+                self.live_space = dst_e.space;
+                self.travel_prev = Some((self.live_space, *position));
+                return Some(self.live_space);
+            }
+        }
+        self.travel_prev = Some((live, *position));
+        None
     }
 
     /// Spawn a mesh at a friendly [`Place`].
@@ -547,6 +818,7 @@ impl World {
                 xform_rev: 1,
                 instance_of: Some(prototype),
                 casts_shadow,
+                space: self.spawn_space,
             },
         );
         self.order.push(id);
@@ -569,6 +841,7 @@ impl World {
                 xform_rev: 1,
                 instance_of: None,
                 casts_shadow: true,
+                space: self.spawn_space,
             },
         );
         self.order.push(id);
@@ -595,6 +868,7 @@ impl World {
                 xform_rev: 1,
                 instance_of: None,
                 casts_shadow: true,
+                space: self.spawn_space,
             },
         );
         self.order.push(id);
@@ -637,7 +911,9 @@ impl World {
         self.chunk_entities.retain(|_, eid| *eid != id);
         self.anchored_entities.remove(&id);
         self.anchored_chunks.retain(|_, c| c.entity != id);
-        if removed_static {
+        let linked = self.portals.iter().any(|p| p.a == id || p.b == id);
+        self.portals.retain(|p| p.a != id && p.b != id);
+        if removed_static || linked {
             self.bump_render_epoch();
         }
     }
@@ -873,6 +1149,7 @@ impl World {
             AnimatedEntity {
                 animator,
                 transform: place.to_matrix(),
+                space: self.spawn_space,
             },
         );
         self.animated_order.push(id);
