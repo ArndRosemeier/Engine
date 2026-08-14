@@ -76,6 +76,13 @@ pub struct Frustum {
     planes: [Vec4; 6],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Visibility {
+    Outside,
+    Intersecting,
+    Inside,
+}
+
 impl Frustum {
     /// Extract the planes from `vp`.
     ///
@@ -97,6 +104,25 @@ impl Frustum {
 
     pub fn intersects(&self, bounds: Bounds) -> bool {
         self.intersects_sphere(bounds.centre, bounds.radius)
+    }
+
+    /// Classify a sphere without confusing "visible" with "needs fine culling".
+    pub fn classify(&self, bounds: Bounds) -> Visibility {
+        let mut visibility = Visibility::Inside;
+        for plane in &self.planes {
+            let distance = plane.truncate().dot(bounds.centre) + plane.w;
+            if distance < -bounds.radius {
+                return Visibility::Outside;
+            }
+            if distance < bounds.radius {
+                visibility = Visibility::Intersecting;
+            }
+        }
+        visibility
+    }
+
+    pub(crate) fn planes(self) -> [Vec4; 6] {
+        self.planes
     }
 }
 
@@ -166,5 +192,31 @@ mod tests {
         for probe in [near, far] {
             assert!((probe.centre - both.centre).length() + probe.radius <= both.radius + 1e-3);
         }
+    }
+
+    #[test]
+    fn spheres_are_classified_outside_intersecting_or_inside() {
+        let frustum = looking_down_negative_z();
+        assert_eq!(
+            frustum.classify(Bounds {
+                centre: Vec3::new(0.0, 0.0, 100.0),
+                radius: 1.0,
+            }),
+            Visibility::Outside
+        );
+        assert_eq!(
+            frustum.classify(Bounds {
+                centre: Vec3::new(0.0, 0.0, -100.0),
+                radius: 1.0,
+            }),
+            Visibility::Inside
+        );
+        assert_eq!(
+            frustum.classify(Bounds {
+                centre: Vec3::new(400.0, 0.0, -100.0),
+                radius: 350.0,
+            }),
+            Visibility::Intersecting
+        );
     }
 }

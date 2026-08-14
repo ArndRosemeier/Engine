@@ -31,6 +31,6 @@ pub use crate::texture::{
 pub use crate::ui::{UiFrame, UiPanel};
 pub use crate::water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use crate::world::AnimatedEntity;
-pub use crate::world::{EntityId, Frame, Haze, ShadowSettings, Sky, World};
+pub use crate::world::{EntityId, Frame, Haze, InstanceSubmit, ShadowSettings, Sky, World};
 pub use crate::Engine;
 pub use glam::Vec3;

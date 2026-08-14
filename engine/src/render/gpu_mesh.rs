@@ -1,12 +1,24 @@
 use super::frustum::Bounds;
+use super::instance_cull::{DrawIndexedArgs, InstanceCull};
 use crate::mesh::{BuiltMesh, InstanceRaw};
 use glam::Mat4;
 use wgpu::util::DeviceExt;
+
+const INSTANCE_USAGES: wgpu::BufferUsages = wgpu::BufferUsages::VERTEX
+    .union(wgpu::BufferUsages::STORAGE)
+    .union(wgpu::BufferUsages::COPY_DST);
+
+const INDIRECT_USAGES: wgpu::BufferUsages = wgpu::BufferUsages::INDIRECT
+    .union(wgpu::BufferUsages::STORAGE)
+    .union(wgpu::BufferUsages::COPY_DST);
 
 pub struct GpuMesh {
     pub vertex_buf: wgpu::Buffer,
     pub index_buf: wgpu::Buffer,
     pub instance_buf: wgpu::Buffer,
+    pub compact_buf: wgpu::Buffer,
+    pub indirect_buf: wgpu::Buffer,
+    pub cull_bind: wgpu::BindGroup,
     pub index_count: usize,
     pub opaque_index_count: usize,
     pub vertex_count: usize,
@@ -21,7 +33,12 @@ pub struct GpuMesh {
 }
 
 impl GpuMesh {
-    pub fn upload(device: &wgpu::Device, mesh: &BuiltMesh, instances: &[InstanceRaw]) -> Self {
+    pub fn upload(
+        device: &wgpu::Device,
+        mesh: &BuiltMesh,
+        instances: &[InstanceRaw],
+        cull: &InstanceCull,
+    ) -> Self {
         let vertices = mesh.to_interleaved();
         let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vertices"),
@@ -36,6 +53,7 @@ impl GpuMesh {
         let local_bounds = Bounds::around(&mesh.positions);
         Self::with_buffers(
             device,
+            cull,
             vertex_buf,
             index_buf,
             mesh.indices.len(),
@@ -47,9 +65,15 @@ impl GpuMesh {
     }
 
     /// Same vertex/index buffers as `src`; a new instance buffer.
-    pub fn share_vertices(device: &wgpu::Device, src: &Self, instances: &[InstanceRaw]) -> Self {
+    pub fn share_vertices(
+        device: &wgpu::Device,
+        src: &Self,
+        instances: &[InstanceRaw],
+        cull: &InstanceCull,
+    ) -> Self {
         Self::with_buffers(
             device,
+            cull,
             src.vertex_buf.clone(),
             src.index_buf.clone(),
             src.index_count,
@@ -62,6 +86,7 @@ impl GpuMesh {
 
     fn with_buffers(
         device: &wgpu::Device,
+        cull: &InstanceCull,
         vertex_buf: wgpu::Buffer,
         index_buf: wgpu::Buffer,
         index_count: usize,
@@ -70,11 +95,17 @@ impl GpuMesh {
         local_bounds: Option<Bounds>,
         instances: &[InstanceRaw],
     ) -> Self {
-        let instance_buf = instance_buffer(device, instances);
+        let instance_buf = instance_buffer(device, instances, "instances");
+        let compact_buf = instance_buffer(device, instances, "instances-compact");
+        let indirect_buf = indirect_buffer(device, opaque_index_count, index_count);
+        let cull_bind = cull.mesh_bind(device, &instance_buf, &compact_buf, &indirect_buf);
         Self {
             vertex_buf,
             index_buf,
             instance_buf,
+            compact_buf,
+            indirect_buf,
+            cull_bind,
             index_count,
             opaque_index_count,
             vertex_count,
@@ -84,6 +115,10 @@ impl GpuMesh {
             bounds: spread_over(local_bounds, instances),
             xform_rev: 0,
         }
+    }
+
+    pub fn local_sphere(&self) -> Option<Bounds> {
+        self.local_bounds
     }
 
     /// Draw nothing without touching the (non-empty) instance buffer.
@@ -97,15 +132,19 @@ impl GpuMesh {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         instances: &[InstanceRaw],
+        cull: &InstanceCull,
     ) {
         if instances.len() > self.instance_capacity {
-            self.instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("instances"),
-                contents: bytemuck::cast_slice(instances),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            });
+            self.instance_buf = instance_buffer(device, instances, "instances");
+            self.compact_buf = instance_buffer(device, instances, "instances-compact");
+            self.cull_bind = cull.mesh_bind(
+                device,
+                &self.instance_buf,
+                &self.compact_buf,
+                &self.indirect_buf,
+            );
             self.instance_capacity = instances.len();
-        } else {
+        } else if !instances.is_empty() {
             queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
         }
         self.instance_count = instances.len();
@@ -113,24 +152,43 @@ impl GpuMesh {
     }
 }
 
-fn instance_buffer(device: &wgpu::Device, instances: &[InstanceRaw]) -> wgpu::Buffer {
+fn instance_buffer(device: &wgpu::Device, instances: &[InstanceRaw], label: &str) -> wgpu::Buffer {
     // wgpu rejects a zero-sized buffer. A prototype with nothing placed still
     // needs its vertex mesh uploaded, so keep a dummy slot and draw zero instances.
     if instances.is_empty() {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("instances"),
+            label: Some(label),
             contents: bytemuck::bytes_of(&InstanceRaw {
                 model: Mat4::IDENTITY.to_cols_array_2d(),
             }),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            usage: INSTANCE_USAGES,
         })
     } else {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("instances"),
+            label: Some(label),
             contents: bytemuck::cast_slice(instances),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            usage: INSTANCE_USAGES,
         })
     }
+}
+
+fn indirect_buffer(
+    device: &wgpu::Device,
+    opaque_index_count: usize,
+    index_count: usize,
+) -> wgpu::Buffer {
+    let opaque =
+        u32::try_from(opaque_index_count).expect("opaque index count exceeds GPU u32 range");
+    let total = u32::try_from(index_count).expect("index count exceeds GPU u32 range");
+    let empty = [
+        DrawIndexedArgs::empty_range(opaque, 0),
+        DrawIndexedArgs::empty_range(total - opaque, opaque),
+    ];
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("instances-indirect"),
+        contents: bytemuck::bytes_of(&empty),
+        usage: INDIRECT_USAGES,
+    })
 }
 
 /// The sphere covering `local` placed at each instance.

@@ -548,6 +548,18 @@ fn a_scatter_layer_reuses_its_mesh_when_the_placements_change() {
 }
 
 #[test]
+fn instance_submit_defaults_to_cpu_and_switches_explicitly() {
+    use crate::world::{InstanceSubmit, World};
+
+    let mut world = World::new();
+    assert_eq!(world.instance_submit(), InstanceSubmit::CpuIndexed);
+    world.set_instance_submit(InstanceSubmit::GpuIndirect);
+    assert_eq!(world.instance_submit(), InstanceSubmit::GpuIndirect);
+    world.set_instance_submit(InstanceSubmit::CpuIndexed);
+    assert_eq!(world.instance_submit(), InstanceSubmit::CpuIndexed);
+}
+
+#[test]
 fn moving_or_scattering_an_entity_bumps_xform_rev() {
     use crate::world::World;
 

@@ -64,7 +64,8 @@ pub use texture::{
 pub use ui::{egui, UiFrame, UiPanel};
 pub use water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use world::{
-    AnimatedEntity, EntityId, Frame, Haze, HitchSpan, Light, ShadowSettings, Sky, World,
+    AnimatedEntity, EntityId, Frame, Haze, HitchSpan, InstanceSubmit, Light, ShadowSettings, Sky,
+    World,
 };
 
 /// Entry point matching the planned `Engine::run` shape.

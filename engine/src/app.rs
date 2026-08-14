@@ -294,7 +294,6 @@ impl ApplicationHandler for App {
                             );
                         }
                     }
-
                     self.frame_index += 1;
                     if let Some(path) = self.screenshot_path.clone() {
                         if self.frame_index >= self.screenshot_frame {

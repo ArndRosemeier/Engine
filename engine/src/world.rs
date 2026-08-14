@@ -50,6 +50,34 @@ impl Default for Light {
     }
 }
 
+/// How instanced meshes reach the GPU.
+///
+/// Both paths are always compiled. The selected one is the only one that runs;
+/// there is no silent fallback from GPU to CPU.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InstanceSubmit {
+    /// Entity-sphere cull, then `draw_indexed` of every instance.
+    #[default]
+    CpuIndexed,
+    /// Prototype-batched per-instance GPU compact, then `draw_indexed_indirect`.
+    GpuIndirect,
+}
+
+impl InstanceSubmit {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CpuIndexed => "cpu_indexed",
+            Self::GpuIndirect => "gpu_indirect",
+        }
+    }
+}
+
+impl fmt::Display for InstanceSubmit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Nearby mesh cascades plus optional height-field raymarch.
 ///
 /// Shadows are on by default once a sun is set. Pass `None` to [`World::set_shadows`]
@@ -188,9 +216,9 @@ pub struct Entity {
     pub(crate) xform_rev: u64,
     /// Another instanced entity whose GPU mesh this one shares.
     ///
-    /// Scatter bins are many placements of one pine, not many pines. Cloning the
-    /// CPU mesh and re-uploading it per bin is a hitch; this keeps one prototype
-    /// mesh and gives each bin its own instance buffer.
+    /// Scatter bins are many placements of one pine, not many pines. CPU submit
+    /// gives each bin an instance buffer; GPU submit coalesces compatible bins
+    /// into one prototype batch.
     pub(crate) instance_of: Option<EntityId>,
     /// Mesh casters only. Terrain and water never cast, even when this is set.
     pub(crate) casts_shadow: bool,
@@ -216,6 +244,11 @@ impl Entity {
 
     pub fn casts_shadow(&self) -> bool {
         self.casts_shadow
+    }
+
+    /// Whether the instance list is the draw list, including when that list is empty.
+    pub fn instanced(&self) -> bool {
+        self.instanced
     }
 
     fn bump_xform(&mut self) {
@@ -291,6 +324,8 @@ pub struct World {
     sky: Option<Sky>,
     /// Nearby mesh CSM + height raymarch. `None` disables shadows.
     shadows: Option<ShadowSettings>,
+    /// Instanced mesh submit path. Default stays CPU so Engine demos match today.
+    instance_submit: InstanceSubmit,
     /// Resident contact grids, pushed by the chunk streamer when they change.
     shadow_contact: ContactSnapshot,
     shadow_contact_epoch: u64,
@@ -333,6 +368,7 @@ impl Default for World {
             haze: None,
             sky: None,
             shadows: Some(ShadowSettings::default()),
+            instance_submit: InstanceSubmit::CpuIndexed,
             shadow_contact: ContactSnapshot::default(),
             shadow_contact_epoch: 0,
             hitch_spans: Vec::new(),
@@ -858,6 +894,15 @@ impl World {
 
     pub fn shadows(&self) -> Option<ShadowSettings> {
         self.shadows
+    }
+
+    /// Choose the instanced submit path. Both are first-class; neither falls back.
+    pub fn set_instance_submit(&mut self, submit: InstanceSubmit) {
+        self.instance_submit = submit;
+    }
+
+    pub fn instance_submit(&self) -> InstanceSubmit {
+        self.instance_submit
     }
 
     pub(crate) fn note_shadow_contact(&mut self, snap: ContactSnapshot, epoch: u64) {
