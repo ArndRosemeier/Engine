@@ -19,6 +19,7 @@ image = { workspace = true }
 noise = { workspace = true }
 pollster = { workspace = true }
 rayon = { workspace = true }
+rodio = { workspace = true }
 thiserror = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }

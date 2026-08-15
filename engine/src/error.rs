@@ -18,6 +18,9 @@ pub enum EngineError {
     #[error("model error: {0}")]
     Model(String),
 
+    #[error("audio: {0}")]
+    Audio(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

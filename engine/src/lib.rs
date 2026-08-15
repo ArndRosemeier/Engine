@@ -4,6 +4,7 @@
 
 pub mod advanced;
 pub mod anim;
+pub mod audio;
 pub mod camera;
 pub mod chunk_stream;
 pub mod collision;
@@ -36,6 +37,7 @@ pub(crate) mod ui_backend;
 pub(crate) mod volume;
 
 pub use anim::{AnimatedModel, AnimationClip, Animator};
+pub use audio::{Audio, ClipId, Play, VoiceId};
 pub use camera::Camera;
 pub use chunk_stream::{ChunkBuilder, ChunkPayload, ChunkStream};
 pub use collision::{

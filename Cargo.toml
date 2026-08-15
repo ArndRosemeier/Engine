@@ -33,6 +33,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 noise = "0.9"
 pollster = "0.4"
 rayon = "1.10"
+rodio = "0.21"
 thiserror = "2"
 wgpu = "25"
 winit = "0.30"
