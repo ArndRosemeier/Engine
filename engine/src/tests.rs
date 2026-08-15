@@ -466,6 +466,36 @@ fn rebasing_moves_anchored_entities_but_not_their_global_anchor() {
 }
 
 #[test]
+fn anchored_entities_keep_their_mesh_albedo() {
+    use crate::place::GlobalPlace;
+    use crate::space::GlobalPosition;
+    use crate::world::World;
+
+    let mut mesh = Mesh::box_at(Vec3::ZERO, Vec3::ONE, rgb(255, 255, 255)).unwrap();
+    mesh.set_albedo_rgba(
+        2,
+        2,
+        vec![
+            120, 70, 30, 255, 160, 100, 45, 255, 90, 45, 20, 255, 190, 130, 65, 255,
+        ],
+    )
+    .unwrap();
+
+    let mut world = World::new();
+    let id = world
+        .spawn_anchored(
+            mesh,
+            GlobalPlace::at(GlobalPosition::at(1_000_000.0, 4.0, -2_000_000.0)),
+        )
+        .unwrap();
+
+    assert!(
+        world.entity(id).unwrap().albedo.is_some(),
+        "anchored spawn dropped the mesh albedo and would render white"
+    );
+}
+
+#[test]
 fn repeated_rebases_keep_two_anchors_the_same_distance_apart() {
     use crate::place::GlobalPlace;
     use crate::space::{GlobalPosition, GlobalXZ, RenderOrigin};

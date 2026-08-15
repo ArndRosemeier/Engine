@@ -1,6 +1,6 @@
 use crate::anim::{AnimatedModel, Animator};
 use crate::camera::Camera;
-use crate::collision::{ActorBody, CollisionWorld};
+use crate::collision::{ActorBody, ActorMove, CollisionWorld};
 use crate::color::Color;
 use crate::contact::ContactSnapshot;
 use crate::error::{EngineError, EngineResult};
@@ -492,6 +492,21 @@ impl World {
     /// Only colliders in [`Self::living_in`] participate.
     pub fn move_actor(&self, body: &ActorBody, from: GlobalXZ, dx: f64, dz: f64) -> GlobalXZ {
         self.collision.move_in(self.live_space, body, from, dx, dz)
+    }
+
+    /// Sweep a vertical actor capsule through finite walls, floors, and ceilings.
+    ///
+    /// `from` is the actor's feet. The caller owns gravity and velocity.
+    pub fn move_actor_3d(
+        &self,
+        body: &ActorBody,
+        from: GlobalPosition,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+    ) -> ActorMove {
+        self.collision
+            .move_3d_in(self.live_space, body, from, dx, dy, dz)
     }
 
     /// Intern a disconnected space. Does not change where new entities spawn;
@@ -1049,7 +1064,9 @@ impl World {
     /// Spawn a mesh anchored in absolute world metres (survives rebasing).
     pub fn spawn_anchored(&mut self, mesh: Mesh, place: GlobalPlace) -> EngineResult<EntityId> {
         let local = place.to_place(self.render_origin)?;
+        let albedo = mesh.albedo().cloned();
         let id = self.spawn_built(mesh.build(), local.to_matrix());
+        self.attach_albedo(id, albedo)?;
         self.anchored_entities.insert(id, place);
         Ok(id)
     }

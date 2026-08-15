@@ -39,7 +39,7 @@ pub use anim::{AnimatedModel, AnimationClip, Animator};
 pub use camera::Camera;
 pub use chunk_stream::{ChunkBuilder, ChunkPayload, ChunkStream};
 pub use collision::{
-    ActorBody, ColliderId, ColliderLayer, ColliderShape, CollisionWorld, StaticCollider,
+    ActorBody, ActorMove, ColliderId, ColliderLayer, ColliderShape, CollisionWorld, StaticCollider,
 };
 pub use color::{rgb, rgba, Color};
 pub use contact::{ContactGrid, ContactSnapshot};
