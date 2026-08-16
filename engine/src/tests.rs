@@ -191,6 +191,26 @@ fn place_stretch_scales_axes_independently() {
 }
 
 #[test]
+fn place_pitch_lays_an_opening_on_the_floor() {
+    let up = Place::new(0.0, 0.0, 0.0)
+        .with_pitch_deg(-90.0)
+        .to_matrix()
+        .transform_vector3(Vec3::Z);
+    assert!(
+        up.y > 0.9,
+        "pitch −90 must face Mesh::opening +Z at +Y, got {up}"
+    );
+    let down = Place::new(0.0, 0.0, 0.0)
+        .with_pitch_deg(90.0)
+        .to_matrix()
+        .transform_vector3(Vec3::Z);
+    assert!(
+        down.y < -0.9,
+        "pitch +90 must face Mesh::opening +Z at −Y, got {down}"
+    );
+}
+
+#[test]
 fn frame_first_flag_exists() {
     let f = Frame {
         dt: 0.016,
@@ -575,6 +595,21 @@ fn a_scatter_layer_reuses_its_mesh_when_the_placements_change() {
     world.set_instances(id, &[]).unwrap();
     let e = world.entity(id).unwrap();
     assert!(e.instanced && e.instances.is_empty());
+}
+
+#[test]
+fn an_instance_slot_can_reserve_gpu_capacity_without_drawing() {
+    use crate::world::World;
+
+    let mut world = World::new();
+    let id = world.spawn_instanced(unit_quad());
+    world.reserve_instances(id, 1_024).expect("reserve");
+    let entity = world.entity(id).expect("instanced entity");
+    assert_eq!(entity.instance_reserve, 1_024);
+    assert!(
+        entity.instances.is_empty(),
+        "reserved capacity must not create visible instances"
+    );
 }
 
 #[test]
@@ -1021,4 +1056,78 @@ fn link_rejects_a_self_door() {
     let door = world.spawn(Mesh::opening(1.0, 2.0).unwrap());
     let err = world.link(door, door).unwrap_err();
     assert!(matches!(err, EngineError::InvalidValue(_)));
+}
+
+#[test]
+fn falling_through_a_hatch_switches_space() {
+    let mut world = crate::World::default();
+    let dungeon = world.space("dungeon").unwrap();
+    let outside = world
+        .place(
+            Mesh::opening(2.0, 2.0).unwrap(),
+            Place::new(0.0, 10.0, 0.0).with_pitch_deg(-90.0),
+        )
+        .unwrap();
+    let inside = world
+        .place_in(
+            dungeon,
+            Mesh::opening(2.0, 2.0).unwrap(),
+            Place::new(0.0, 4.0, 0.0).with_pitch_deg(90.0),
+        )
+        .unwrap();
+    world.link(outside, inside).unwrap();
+
+    let mut pos = Vec3::new(0.0, 11.0, 0.0);
+    let mut yaw = 0.0_f32;
+    assert!(world.travel(&mut pos, &mut yaw).is_none());
+    pos.y = 9.0;
+    let entered = world.travel(&mut pos, &mut yaw);
+    assert_eq!(entered, Some(dungeon));
+    assert_eq!(world.living_in(), dungeon);
+    assert!(
+        pos.y < 4.0,
+        "falling in should come out below the mouth, pos={pos}"
+    );
+    assert!(
+        yaw.abs() < 5.0,
+        "hatch travel must not spin yaw, got {yaw}"
+    );
+
+    pos.y = 3.0;
+    assert!(world.travel(&mut pos, &mut yaw).is_none());
+    pos.y = 5.0;
+    let left = world.travel(&mut pos, &mut yaw);
+    assert_eq!(left, Some(crate::SpaceId::DEFAULT));
+    assert!(
+        pos.y > 10.0,
+        "climbing out should come out above the world hatch, pos={pos}"
+    );
+    assert!(yaw.abs() < 5.0, "climb-out must not spin yaw, got {yaw}");
+}
+
+#[test]
+fn looking_down_a_hatch_sees_the_destination() {
+    let mut world = crate::World::default();
+    let dungeon = world.space("dungeon").unwrap();
+    let outside = world
+        .place(
+            Mesh::opening(2.0, 2.0).unwrap(),
+            Place::new(0.0, 10.0, 0.0).with_pitch_deg(-90.0),
+        )
+        .unwrap();
+    let inside = world
+        .place_in(
+            dungeon,
+            Mesh::opening(2.0, 2.0).unwrap(),
+            Place::new(0.0, 4.0, 0.0).with_pitch_deg(90.0),
+        )
+        .unwrap();
+    world.link(outside, inside).unwrap();
+
+    let visible = world
+        .visible_portal(Vec3::new(0.0, 12.0, 0.0), -Vec3::Y)
+        .expect("looking down at a hatch must see the other space");
+    assert_eq!(visible.src, outside);
+    assert_eq!(visible.dst, inside);
+    assert_eq!(visible.dest_space, dungeon);
 }

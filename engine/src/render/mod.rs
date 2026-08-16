@@ -171,6 +171,7 @@ struct BatchBuildSource {
     id: EntityId,
     xform_rev: u64,
     instance_count: usize,
+    instance_reserve: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,6 +180,7 @@ struct BatchSourceState {
     prototype: EntityId,
     xform_rev: u64,
     instance_count: usize,
+    instance_reserve: usize,
     material: Option<SurfaceMaterialRef>,
     albedo: Option<TextureId>,
     casts_shadow: bool,
@@ -703,6 +705,7 @@ impl Renderer {
                 prototype,
                 xform_rev: entity.xform_rev,
                 instance_count: entity.instances.len(),
+                instance_reserve: entity.instance_reserve,
                 material: entity.material,
                 albedo: entity.albedo,
                 casts_shadow: entity.casts_shadow,
@@ -728,6 +731,7 @@ impl Renderer {
                     id: source.id,
                     xform_rev: source.xform_rev,
                     instance_count: source.instance_count,
+                    instance_reserve: source.instance_reserve,
                 });
         }
 
@@ -743,7 +747,9 @@ impl Renderer {
                         .iter()
                         .zip(&build.sources)
                         .all(|(slot, source)| {
-                            slot.id == source.id && source.instance_count <= slot.capacity
+                            slot.id == source.id
+                                && source.instance_count <= slot.capacity
+                                && source.instance_reserve <= slot.capacity
                         });
                 if layout_fits {
                     for (slot, source) in batch.slots.iter_mut().zip(&build.sources) {
@@ -801,7 +807,8 @@ impl Renderer {
                         .map(|matrix| InstanceRaw::from_matrix(entity.transform * *matrix)),
                 );
                 let bounds = prototype_gpu.bounds_for_instances(&self.instance_scratch[start..]);
-                let capacity = batch_slot_capacity(source.instance_count);
+                let capacity =
+                    batch_slot_capacity(source.instance_count.max(source.instance_reserve));
                 self.instance_scratch
                     .resize(start + capacity, inactive_instance());
                 slots.push(BatchSlot {

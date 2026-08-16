@@ -2,15 +2,20 @@ use crate::error::{EngineError, EngineResult};
 use crate::space::{GlobalPosition, RenderOrigin};
 use glam::{Mat4, Vec3};
 
-/// Friendly transform: position + yaw (degrees) + scale.
+/// Friendly transform: position + yaw/pitch (degrees) + scale.
 ///
 /// [`Self::scale`] is uniform. [`Self::stretch`] is the per-axis factor, default
 /// `Vec3::ONE`, so a foundation skirt can be one unit cube instanced at many
 /// footprint × height sizes without a unique mesh per house.
+///
+/// Pitch is around local X after yaw. Zero keeps every existing yaw-only
+/// caller upright; −90° lays a [`crate::mesh::Mesh::opening`] on the floor
+/// facing +Y.
 #[derive(Clone, Copy, Debug)]
 pub struct Place {
     pub position: Vec3,
     pub yaw_degrees: f32,
+    pub pitch_degrees: f32,
     pub scale: f32,
     pub stretch: Vec3,
 }
@@ -20,6 +25,7 @@ impl Default for Place {
         Self {
             position: Vec3::ZERO,
             yaw_degrees: 0.0,
+            pitch_degrees: 0.0,
             scale: 1.0,
             stretch: Vec3::ONE,
         }
@@ -63,6 +69,19 @@ impl Place {
         self
     }
 
+    pub fn pitch_deg(mut self, degrees: f32) -> EngineResult<Self> {
+        if !degrees.is_finite() {
+            return Err(EngineError::InvalidValue("pitch must be finite".into()));
+        }
+        self.pitch_degrees = degrees;
+        Ok(self)
+    }
+
+    pub fn with_pitch_deg(mut self, degrees: f32) -> Self {
+        self.pitch_degrees = degrees;
+        self
+    }
+
     pub fn with_scale(mut self, scale: f32) -> Self {
         self.scale = scale;
         self
@@ -86,7 +105,8 @@ impl Place {
 
     pub fn to_matrix(self) -> Mat4 {
         let t = Mat4::from_translation(self.position);
-        let r = Mat4::from_rotation_y(self.yaw_degrees.to_radians());
+        let r = Mat4::from_rotation_y(self.yaw_degrees.to_radians())
+            * Mat4::from_rotation_x(self.pitch_degrees.to_radians());
         let s = Mat4::from_scale(self.stretch * self.scale);
         t * r * s
     }
@@ -101,6 +121,7 @@ impl Place {
 pub struct GlobalPlace {
     pub position: GlobalPosition,
     pub yaw_degrees: f32,
+    pub pitch_degrees: f32,
     pub scale: f32,
     pub stretch: Vec3,
 }
@@ -110,6 +131,7 @@ impl GlobalPlace {
         Self {
             position,
             yaw_degrees: 0.0,
+            pitch_degrees: 0.0,
             scale: 1.0,
             stretch: Vec3::ONE,
         }
@@ -117,6 +139,11 @@ impl GlobalPlace {
 
     pub fn with_yaw_deg(mut self, degrees: f32) -> Self {
         self.yaw_degrees = degrees;
+        self
+    }
+
+    pub fn with_pitch_deg(mut self, degrees: f32) -> Self {
+        self.pitch_degrees = degrees;
         self
     }
 
@@ -135,6 +162,9 @@ impl GlobalPlace {
         if !self.yaw_degrees.is_finite() {
             return Err(EngineError::InvalidValue("yaw must be finite".into()));
         }
+        if !self.pitch_degrees.is_finite() {
+            return Err(EngineError::InvalidValue("pitch must be finite".into()));
+        }
         if !self.scale.is_finite() || self.scale <= 0.0 {
             return Err(EngineError::InvalidValue(
                 "scale must be finite and > 0".into(),
@@ -149,6 +179,7 @@ impl GlobalPlace {
         Ok(Place {
             position: self.position.to_render(origin)?.vec3(),
             yaw_degrees: self.yaw_degrees,
+            pitch_degrees: self.pitch_degrees,
             scale: self.scale,
             stretch: self.stretch,
         })

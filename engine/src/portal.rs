@@ -183,7 +183,19 @@ pub fn threshold_camera(
 }
 
 /// Yaw (degrees, 0 = +Z) after walking through `src` into `dst`.
+///
+/// Doorways keep walking forward. Floor hatches cross vertically, so the
+/// compass heading is left alone — applying the door 180° here spins the walker.
 pub fn teleport_yaw(yaw_degrees: f32, src: Mat4, dst: Mat4) -> f32 {
+    let src_normal = src.transform_vector3(Vec3::Z);
+    let dst_normal = dst.transform_vector3(Vec3::Z);
+    if src_normal.length_squared() > 0.0
+        && dst_normal.length_squared() > 0.0
+        && src_normal.normalize().y.abs() > 0.7
+        && dst_normal.normalize().y.abs() > 0.7
+    {
+        return yaw_degrees;
+    }
     let t = portal_matrix(src, dst);
     let facing = t.transform_vector3(Camera::facing_xz(yaw_degrees));
     facing.x.atan2(facing.z).to_degrees()
@@ -290,6 +302,50 @@ mod tests {
             facing.z > 0.8,
             "forward should still be +Z, yaw={yaw} facing={facing}"
         );
+    }
+
+    fn hatch(position: Vec3, pitch_degrees: f32) -> Mat4 {
+        crate::place::Place::new(position.x, position.y, position.z)
+            .with_pitch_deg(pitch_degrees)
+            .to_matrix()
+    }
+
+    #[test]
+    fn falling_through_a_hatch_maps_below_the_mouth() {
+        let src = hatch(Vec3::new(0.0, 10.0, 0.0), -90.0);
+        let dst = hatch(Vec3::new(0.0, 4.0, 0.0), 90.0);
+        let t = portal_matrix(src, dst);
+        let crossed = Vec3::new(0.0, 9.0, 0.0);
+        let mapped = t.transform_point3(crossed);
+        assert!(
+            mapped.y < 4.0,
+            "a point that has fallen through the world hatch maps below the mouth, got {mapped}"
+        );
+        let yaw = teleport_yaw(0.0, src, dst);
+        assert!(
+            yaw.abs() < 5.0,
+            "hatch travel must keep +Z facing, yaw={yaw}"
+        );
+    }
+
+    #[test]
+    fn hatch_crossing_hits_the_floor_rectangle() {
+        let plane = PortalPlane::from_transform(hatch(Vec3::new(0.0, 10.0, 0.0), -90.0), 1.0, 1.0);
+        assert!(segment_crosses_opening(
+            Vec3::new(0.0, 11.0, 0.0),
+            Vec3::new(0.0, 9.0, 0.0),
+            plane
+        ));
+        assert!(!segment_crosses_opening(
+            Vec3::new(3.0, 11.0, 0.0),
+            Vec3::new(3.0, 9.0, 0.0),
+            plane
+        ));
+        assert!(!segment_crosses_opening(
+            Vec3::new(0.0, 9.0, 0.0),
+            Vec3::new(0.0, 11.0, 0.0),
+            plane
+        ));
     }
 
     #[test]

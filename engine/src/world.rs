@@ -207,6 +207,9 @@ pub struct Entity {
     pub(crate) transform: Mat4,
     /// Per-instance transforms for GPU instancing.
     pub(crate) instances: Vec<Mat4>,
+    /// Minimum GPU slot capacity requested by the owner. This reserves space
+    /// without drawing placeholder instances.
+    pub(crate) instance_reserve: usize,
     /// Whether `instances` is authoritative, even when it is empty.
     ///
     /// An instanced entity with nothing to place draws nothing; a plain entity
@@ -901,6 +904,7 @@ impl World {
                 mesh: BuiltMesh::default(),
                 transform: Mat4::IDENTITY,
                 instances: Vec::new(),
+                instance_reserve: 0,
                 instanced: true,
                 material,
                 albedo,
@@ -924,6 +928,7 @@ impl World {
                 mesh,
                 transform,
                 instances: Vec::new(),
+                instance_reserve: 0,
                 instanced: false,
                 material: None,
                 albedo: None,
@@ -943,6 +948,7 @@ impl World {
         mesh: BuiltMesh,
         instances: Vec<Mat4>,
     ) -> EntityId {
+        let instance_reserve = instances.len();
         let id = EntityId(self.next_id);
         self.next_id += 1;
         self.entities.insert(
@@ -951,6 +957,7 @@ impl World {
                 mesh,
                 transform: Mat4::IDENTITY,
                 instances,
+                instance_reserve,
                 instanced: true,
                 material: None,
                 albedo: None,
@@ -1585,6 +1592,36 @@ impl World {
         e.instances.clear();
         e.instances.extend(places.iter().map(|p| p.to_matrix()));
         e.bump_xform();
+        self.bump_render_epoch();
+        Ok(())
+    }
+
+    /// Reserve room in an instanced entity's GPU batch slot without drawing
+    /// placeholder instances.
+    ///
+    /// Streaming systems should reserve their known per-cell maximum before
+    /// filling a reusable entity. Later instance-count changes within this
+    /// capacity remain partial writes instead of rebuilding the whole batch.
+    pub fn reserve_instances(&mut self, id: EntityId, minimum_capacity: usize) -> EngineResult<()> {
+        if minimum_capacity as u64 > self.limits.max_instances_per_spawn {
+            return Err(EngineError::ResourceLimit(format!(
+                "reserve_instances requested {minimum_capacity} instances (limit {})",
+                self.limits.max_instances_per_spawn
+            )));
+        }
+        let entity = self
+            .entities
+            .get_mut(&id)
+            .ok_or(EngineError::UnknownEntity)?;
+        if !entity.instanced {
+            return Err(EngineError::InvalidValue(format!(
+                "entity {id} was not spawned instanced; it cannot reserve instances"
+            )));
+        }
+        if minimum_capacity <= entity.instance_reserve {
+            return Ok(());
+        }
+        entity.instance_reserve = minimum_capacity;
         self.bump_render_epoch();
         Ok(())
     }
