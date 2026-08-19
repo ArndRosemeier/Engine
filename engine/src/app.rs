@@ -200,7 +200,8 @@ impl ApplicationHandler for App {
                 // A locked pointer means the game owns the mouse, so egui's
                 // hover state must not swallow look and movement input.
                 let mut input = self.input.clone();
-                if !self.pointer_locked
+                if !self.world.bind_listen()
+                    && !self.pointer_locked
                     && (ui_backend.wants_keyboard_input() || ui_backend.wants_pointer_input())
                 {
                     input = Input::new();
@@ -212,6 +213,7 @@ impl ApplicationHandler for App {
                 let update_t = Instant::now();
                 let (modal_was_open, full_output) = {
                     let (ui_result, full_output) = ui_backend.run_ui(&window, |ui| {
+                        ui.set_bind_listen(world.bind_listen());
                         let frame = Frame {
                             dt,
                             time,
@@ -234,12 +236,16 @@ impl ApplicationHandler for App {
                 // Escape gives the mouse back before it closes the window: a
                 // player whose cursor is pinned reaches for Escape to get it
                 // out, not to quit.
-                if ui_backend.take_escape_pressed() && !modal_was_open {
-                    if self.world.pointer_lock() {
-                        self.world.set_pointer_lock(false);
-                    } else {
-                        event_loop.exit();
-                        return;
+                if ui_backend.take_escape_pressed() {
+                    if self.world.bind_listen() {
+                        self.world.set_bind_listen(false);
+                    } else if !modal_was_open {
+                        if self.world.pointer_lock() {
+                            self.world.set_pointer_lock(false);
+                        } else {
+                            event_loop.exit();
+                            return;
+                        }
                     }
                 }
 

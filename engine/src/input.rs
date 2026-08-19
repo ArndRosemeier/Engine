@@ -8,13 +8,42 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 /// Keys the engine tracks for gameplay (not Escape — that still quits).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
-    W,
     A,
-    S,
+    B,
+    C,
     D,
-    Q,
     E,
     F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+    Digit0,
+    Digit1,
+    Digit2,
+    Digit3,
+    Digit4,
+    Digit5,
+    Digit6,
+    Digit7,
+    Digit8,
+    Digit9,
     Tab,
     Space,
     Shift,
@@ -28,13 +57,42 @@ pub enum Key {
 impl Key {
     fn from_code(code: KeyCode) -> Option<Self> {
         Some(match code {
-            KeyCode::KeyW => Self::W,
             KeyCode::KeyA => Self::A,
-            KeyCode::KeyS => Self::S,
+            KeyCode::KeyB => Self::B,
+            KeyCode::KeyC => Self::C,
             KeyCode::KeyD => Self::D,
-            KeyCode::KeyQ => Self::Q,
             KeyCode::KeyE => Self::E,
             KeyCode::KeyF => Self::F,
+            KeyCode::KeyG => Self::G,
+            KeyCode::KeyH => Self::H,
+            KeyCode::KeyI => Self::I,
+            KeyCode::KeyJ => Self::J,
+            KeyCode::KeyK => Self::K,
+            KeyCode::KeyL => Self::L,
+            KeyCode::KeyM => Self::M,
+            KeyCode::KeyN => Self::N,
+            KeyCode::KeyO => Self::O,
+            KeyCode::KeyP => Self::P,
+            KeyCode::KeyQ => Self::Q,
+            KeyCode::KeyR => Self::R,
+            KeyCode::KeyS => Self::S,
+            KeyCode::KeyT => Self::T,
+            KeyCode::KeyU => Self::U,
+            KeyCode::KeyV => Self::V,
+            KeyCode::KeyW => Self::W,
+            KeyCode::KeyX => Self::X,
+            KeyCode::KeyY => Self::Y,
+            KeyCode::KeyZ => Self::Z,
+            KeyCode::Digit0 | KeyCode::Numpad0 => Self::Digit0,
+            KeyCode::Digit1 | KeyCode::Numpad1 => Self::Digit1,
+            KeyCode::Digit2 | KeyCode::Numpad2 => Self::Digit2,
+            KeyCode::Digit3 | KeyCode::Numpad3 => Self::Digit3,
+            KeyCode::Digit4 | KeyCode::Numpad4 => Self::Digit4,
+            KeyCode::Digit5 | KeyCode::Numpad5 => Self::Digit5,
+            KeyCode::Digit6 | KeyCode::Numpad6 => Self::Digit6,
+            KeyCode::Digit7 | KeyCode::Numpad7 => Self::Digit7,
+            KeyCode::Digit8 | KeyCode::Numpad8 => Self::Digit8,
+            KeyCode::Digit9 | KeyCode::Numpad9 => Self::Digit9,
             KeyCode::Tab => Self::Tab,
             KeyCode::Space => Self::Space,
             KeyCode::ShiftLeft | KeyCode::ShiftRight => Self::Shift,
@@ -45,6 +103,112 @@ impl Key {
             KeyCode::ArrowRight => Self::Right,
             _ => return None,
         })
+    }
+
+    /// Stable bind name stored in settings (`"1"`, `"R"`, `"Tab"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::A => "A",
+            Self::B => "B",
+            Self::C => "C",
+            Self::D => "D",
+            Self::E => "E",
+            Self::F => "F",
+            Self::G => "G",
+            Self::H => "H",
+            Self::I => "I",
+            Self::J => "J",
+            Self::K => "K",
+            Self::L => "L",
+            Self::M => "M",
+            Self::N => "N",
+            Self::O => "O",
+            Self::P => "P",
+            Self::Q => "Q",
+            Self::R => "R",
+            Self::S => "S",
+            Self::T => "T",
+            Self::U => "U",
+            Self::V => "V",
+            Self::W => "W",
+            Self::X => "X",
+            Self::Y => "Y",
+            Self::Z => "Z",
+            Self::Digit0 => "0",
+            Self::Digit1 => "1",
+            Self::Digit2 => "2",
+            Self::Digit3 => "3",
+            Self::Digit4 => "4",
+            Self::Digit5 => "5",
+            Self::Digit6 => "6",
+            Self::Digit7 => "7",
+            Self::Digit8 => "8",
+            Self::Digit9 => "9",
+            Self::Tab => "Tab",
+            Self::Space => "Space",
+            Self::Shift => "Shift",
+            Self::Ctrl => "Ctrl",
+            Self::Up => "Up",
+            Self::Down => "Down",
+            Self::Left => "Left",
+            Self::Right => "Right",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "A" | "a" => Self::A,
+            "B" | "b" => Self::B,
+            "C" | "c" => Self::C,
+            "D" | "d" => Self::D,
+            "E" | "e" => Self::E,
+            "F" | "f" => Self::F,
+            "G" | "g" => Self::G,
+            "H" | "h" => Self::H,
+            "I" | "i" => Self::I,
+            "J" | "j" => Self::J,
+            "K" | "k" => Self::K,
+            "L" | "l" => Self::L,
+            "M" | "m" => Self::M,
+            "N" | "n" => Self::N,
+            "O" | "o" => Self::O,
+            "P" | "p" => Self::P,
+            "Q" | "q" => Self::Q,
+            "R" | "r" => Self::R,
+            "S" | "s" => Self::S,
+            "T" | "t" => Self::T,
+            "U" | "u" => Self::U,
+            "V" | "v" => Self::V,
+            "W" | "w" => Self::W,
+            "X" | "x" => Self::X,
+            "Y" | "y" => Self::Y,
+            "Z" | "z" => Self::Z,
+            "0" => Self::Digit0,
+            "1" => Self::Digit1,
+            "2" => Self::Digit2,
+            "3" => Self::Digit3,
+            "4" => Self::Digit4,
+            "5" => Self::Digit5,
+            "6" => Self::Digit6,
+            "7" => Self::Digit7,
+            "8" => Self::Digit8,
+            "9" => Self::Digit9,
+            "Tab" | "tab" => Self::Tab,
+            "Space" | "space" => Self::Space,
+            "Shift" | "shift" => Self::Shift,
+            "Ctrl" | "ctrl" | "Control" => Self::Ctrl,
+            "Up" | "up" => Self::Up,
+            "Down" | "down" => Self::Down,
+            "Left" | "left" => Self::Left,
+            "Right" | "right" => Self::Right,
+            _ => return None,
+        })
+    }
+}
+
+impl std::fmt::Display for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -75,6 +239,7 @@ pub struct Input {
     mouse_down: HashSet<MouseButton>,
     mouse_clicked: HashSet<MouseButton>,
     mouse_delta: Vec2,
+    last_key_down: Option<Key>,
 }
 
 impl Input {
@@ -90,6 +255,9 @@ impl Input {
             return;
         };
         if pressed {
+            if !self.down.contains(&key) {
+                self.last_key_down = Some(key);
+            }
             self.down.insert(key);
             self.pressed.insert(key);
         } else {
@@ -119,6 +287,7 @@ impl Input {
         self.pressed.clear();
         self.mouse_clicked.clear();
         self.mouse_delta = Vec2::ZERO;
+        self.last_key_down = None;
     }
 
     pub fn mouse_down(&self, button: MouseButton) -> bool {
@@ -137,6 +306,11 @@ impl Input {
     /// True on the frame a key goes down, for toggles like fly mode.
     pub fn pressed(&self, key: Key) -> bool {
         self.pressed.contains(&key)
+    }
+
+    /// Last physical key-down this frame (repeats ignored). For Settings bind-listen.
+    pub fn last_key_down(&self) -> Option<Key> {
+        self.last_key_down
     }
 
     /// Raw pointer motion since the last frame (x right, y down).

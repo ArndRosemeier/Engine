@@ -335,6 +335,8 @@ pub struct World {
     pub(crate) default_water_material: Option<WaterMaterialId>,
     /// Whether the game wants the pointer pinned for mouse-look.
     pointer_lock: bool,
+    /// Settings bind-listen: Esc cancels listen only (no close / unlock / quit).
+    bind_listen: bool,
     /// Seconds since start, for animated materials.
     time: f32,
     /// How far the camera helpers put their far plane.
@@ -400,6 +402,7 @@ impl Default for World {
             default_terrain_material: None,
             default_water_material: None,
             pointer_lock: false,
+            bind_listen: false,
             time: 0.0,
             view_distance: Camera::default().far,
             haze: None,
@@ -1173,6 +1176,15 @@ impl World {
 
     pub fn pointer_lock(&self) -> bool {
         self.pointer_lock
+    }
+
+    /// While true, Escape cancels bind-listen only: no modal close, unlock, or quit.
+    pub fn set_bind_listen(&mut self, listening: bool) {
+        self.bind_listen = listening;
+    }
+
+    pub fn bind_listen(&self) -> bool {
+        self.bind_listen
     }
 
     /// Capture `path` as a PNG after this frame has been drawn.

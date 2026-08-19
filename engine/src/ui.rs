@@ -13,12 +13,14 @@ pub struct UiFrame {
     ctx: Context,
     textures: Rc<RefCell<HashMap<String, TextureHandle>>>,
     modal_open: Rc<Cell<bool>>,
+    bind_listen: Rc<Cell<bool>>,
 }
 
 impl std::fmt::Debug for UiFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UiFrame")
             .field("modal_open", &self.modal_open.get())
+            .field("bind_listen", &self.bind_listen.get())
             .finish_non_exhaustive()
     }
 }
@@ -35,6 +37,7 @@ impl UiFrame {
             ctx,
             textures,
             modal_open: Rc::new(Cell::new(false)),
+            bind_listen: Rc::new(Cell::new(false)),
         }
     }
 
@@ -46,6 +49,15 @@ impl UiFrame {
     /// True if a [`Self::modal`] was shown this frame.
     pub fn modal_was_open(&self) -> bool {
         self.modal_open.get()
+    }
+
+    /// While true, Escape does not close [`Self::modal`].
+    pub fn set_bind_listen(&self, listening: bool) {
+        self.bind_listen.set(listening);
+    }
+
+    pub fn bind_listen(&self) -> bool {
+        self.bind_listen.get()
     }
 
     /// Centered modal overlay. Builds content with [`UiPanel`].
@@ -77,7 +89,10 @@ impl UiFrame {
         });
 
         if response.should_close() {
-            *open = false;
+            let escape = self.ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if !(self.bind_listen.get() && escape) {
+                *open = false;
+            }
         }
     }
 }
