@@ -345,8 +345,13 @@ impl Renderer {
         let pipelines = create_pipelines(&device, &queue, format, &shadow);
         let terrain = create_terrain_pipelines(&device, format, &pipelines.bind_layout);
         let water = create_water_pipelines(&device, format, &pipelines.bind_layout);
-        let skinned =
-            create_skinned_pipelines(&device, format, &pipelines.bind_layout, joint_layout);
+        let skinned = create_skinned_pipelines(
+            &device,
+            format,
+            &pipelines.bind_layout,
+            joint_layout,
+            &pipelines.albedo_layout,
+        );
         let sky = create_sky_pipelines(&device, format);
         let portal = PortalGpu::new(
             &device,
@@ -556,7 +561,16 @@ impl Renderer {
                             .model
                             .meshes
                             .iter()
-                            .map(|m| GpuSkinnedMesh::upload(&self.device, m))
+                            .map(|m| {
+                                GpuSkinnedMesh::upload(
+                                    &self.device,
+                                    &self.queue,
+                                    &self.pipelines.albedo_layout,
+                                    &self.pipelines.albedo_sampler,
+                                    &self.pipelines.white_albedo,
+                                    m,
+                                )
+                            })
                             .collect();
                         self.gpu_skinned_meshes.insert(key, uploaded.clone());
                         self.gpu_stats.skinned_model_uploads += 1;
@@ -1328,6 +1342,7 @@ impl Renderer {
             pass.set_bind_group(1, &gpu.joint_bind, &[]);
             pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
             for mesh in &gpu.meshes {
+                pass.set_bind_group(2, &mesh.albedo_bind, &[]);
                 pass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
                 pass.set_index_buffer(mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);

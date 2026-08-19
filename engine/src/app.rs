@@ -28,6 +28,7 @@ struct App {
     first_update_done: bool,
     screenshot_path: Option<PathBuf>,
     screenshot_frame: u32,
+    screenshot_wait: bool,
     fps: f32,
     fps_accum_s: f32,
     fps_frames: u32,
@@ -43,6 +44,9 @@ impl App {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(3);
+        let screenshot_wait = std::env::var("ENGINE_SCREENSHOT_WAIT")
+            .ok()
+            .is_some_and(|s| s == "1");
         Self {
             title,
             window: None,
@@ -57,6 +61,7 @@ impl App {
             first_update_done: false,
             screenshot_path,
             screenshot_frame,
+            screenshot_wait,
             fps: 0.0,
             fps_accum_s: 0.0,
             fps_frames: 0,
@@ -295,12 +300,26 @@ impl ApplicationHandler for App {
                         }
                     }
                     self.frame_index += 1;
-                    if let Some(path) = self.screenshot_path.clone() {
-                        if self.frame_index >= self.screenshot_frame {
-                            renderer.capture_png(&self.world, &path);
-                            eprintln!("wrote screenshot {}", path.display());
-                            event_loop.exit();
-                            return;
+                    let queued = self.world.take_screenshot_queue();
+                    for path in queued {
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        renderer.capture_png(&self.world, &path);
+                        eprintln!("wrote screenshot {}", path.display());
+                    }
+                    if self.world.take_exit_requested() {
+                        event_loop.exit();
+                        return;
+                    }
+                    if !self.screenshot_wait {
+                        if let Some(path) = self.screenshot_path.clone() {
+                            if self.frame_index >= self.screenshot_frame {
+                                renderer.capture_png(&self.world, &path);
+                                eprintln!("wrote screenshot {}", path.display());
+                                event_loop.exit();
+                                return;
+                            }
                         }
                     }
                 } else {

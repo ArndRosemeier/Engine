@@ -2,6 +2,8 @@
 
 use crate::error::{EngineError, EngineResult};
 use crate::limits::EngineLimits;
+use crate::mesh::AlbedoMap;
+use crate::model::image_to_albedo;
 use glam::{Mat4, Quat, Vec3, Vec4};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -25,11 +27,14 @@ pub struct SkinMesh {
     pub positions: Vec<Vec3>,
     pub normals: Vec<Vec3>,
     pub colors: Vec<Vec4>,
+    pub uvs: Vec<[f32; 2]>,
     pub joints: Vec<[u16; 4]>,
     pub weights: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
     /// From glTF material `doubleSided`.
     pub double_sided: bool,
+    /// Per-primitive `baseColorTexture`, if the glTF has one.
+    pub albedo: Option<AlbedoMap>,
 }
 
 #[derive(Clone, Debug)]
@@ -88,7 +93,7 @@ impl AnimatedModel {
             )));
         }
 
-        let (document, buffers, _images) =
+        let (document, buffers, images) =
             gltf::import(&path).map_err(|e| EngineError::Model(e.to_string()))?;
 
         let total_buf: u64 = buffers.iter().map(|b| b.0.len() as u64).sum();
@@ -99,7 +104,7 @@ impl AnimatedModel {
             )));
         }
 
-        load_animated_document(&document, &buffers, limits)
+        load_animated_document(&document, &buffers, &images, limits)
     }
 
     pub fn clip_names(&self) -> impl Iterator<Item = &str> {
@@ -123,11 +128,6 @@ pub struct Animator {
 
 impl Animator {
     pub fn new(model: Arc<AnimatedModel>) -> EngineResult<Self> {
-        if model.clips.is_empty() {
-            return Err(EngineError::Model(
-                "animated model has no animation clips".into(),
-            ));
-        }
         Ok(Self {
             model,
             clip_index: 0,
@@ -150,11 +150,17 @@ impl Animator {
     }
 
     pub fn clip_name(&self) -> &str {
-        &self.model.clips[self.clip_index].name
+        self.model
+            .clips
+            .get(self.clip_index)
+            .map(|c| c.name.as_str())
+            .unwrap_or("")
     }
 
     pub fn tick(&mut self, dt: f32) {
-        let clip = &self.model.clips[self.clip_index];
+        let Some(clip) = self.model.clips.get(self.clip_index) else {
+            return;
+        };
         if clip.duration <= 0.0 {
             return;
         }
@@ -202,23 +208,24 @@ pub fn write_joint_matrices(
 ) {
     let skeleton = &model.skeleton;
     let n = skeleton.joint_names.len();
-    let clip = &model.clips[clip_index];
     locals.clear();
     locals.extend_from_slice(&model.bind_local);
 
-    for (ji, channels) in clip.channels.iter().enumerate() {
-        if ji >= n {
-            break;
-        }
-        let (t, r, s) = &mut locals[ji];
-        if let Some(track) = &channels.translation {
-            *t = sample_vec3(track, time);
-        }
-        if let Some(track) = &channels.rotation {
-            *r = sample_quat(track, time);
-        }
-        if let Some(track) = &channels.scale {
-            *s = sample_vec3(track, time);
+    if let Some(clip) = model.clips.get(clip_index) {
+        for (ji, channels) in clip.channels.iter().enumerate() {
+            if ji >= n {
+                break;
+            }
+            let (t, r, s) = &mut locals[ji];
+            if let Some(track) = &channels.translation {
+                *t = sample_vec3(track, time);
+            }
+            if let Some(track) = &channels.rotation {
+                *r = sample_quat(track, time);
+            }
+            if let Some(track) = &channels.scale {
+                *s = sample_vec3(track, time);
+            }
         }
     }
 
@@ -369,6 +376,7 @@ fn node_local_trs(node: &gltf::Node<'_>) -> (Vec3, Quat, Vec3) {
 fn load_animated_document(
     document: &gltf::Document,
     buffers: &[gltf::buffer::Data],
+    images: &[gltf::image::Data],
     limits: &EngineLimits,
 ) -> EngineResult<AnimatedModel> {
     let skin = document
@@ -653,15 +661,56 @@ fn load_animated_document(
                 })
                 .collect();
             let out_col: Vec<Vec4> = colors.into_iter().map(Vec4::from).collect();
+            let tex_set = primitive
+                .material()
+                .pbr_metallic_roughness()
+                .base_color_texture()
+                .map(|info| info.tex_coord())
+                .unwrap_or(0);
+            let uvs: Vec<[f32; 2]> = if let Some(iter) = reader.read_tex_coords(tex_set) {
+                match iter {
+                    gltf::mesh::util::ReadTexCoords::U8(i) => i
+                        .map(|t| [t[0] as f32 / 255.0, t[1] as f32 / 255.0])
+                        .collect(),
+                    gltf::mesh::util::ReadTexCoords::U16(i) => i
+                        .map(|t| [t[0] as f32 / 65535.0, t[1] as f32 / 65535.0])
+                        .collect(),
+                    gltf::mesh::util::ReadTexCoords::F32(i) => i.collect(),
+                }
+            } else {
+                vec![[0.0, 0.0]; out_pos.len()]
+            };
+            if uvs.len() != out_pos.len() {
+                return Err(EngineError::Model(
+                    "TEXCOORD length mismatch with POSITION".into(),
+                ));
+            }
+            let albedo = if let Some(info) = primitive
+                .material()
+                .pbr_metallic_roughness()
+                .base_color_texture()
+            {
+                let index = info.texture().source().index();
+                let Some(image) = images.get(index) else {
+                    return Err(EngineError::Model(format!(
+                        "glTF baseColorTexture index {index} is missing"
+                    )));
+                };
+                Some(image_to_albedo(image)?)
+            } else {
+                None
+            };
 
             meshes.push(SkinMesh {
                 positions: out_pos,
                 normals: out_nrm,
                 colors: out_col,
+                uvs,
                 joints,
                 weights,
                 indices,
                 double_sided: primitive.material().double_sided(),
+                albedo,
             });
         }
     }
@@ -822,12 +871,6 @@ fn load_animated_document(
         });
     }
 
-    if clips.is_empty() {
-        return Err(EngineError::Model(
-            "skinned glTF has skins but no animation clips".into(),
-        ));
-    }
-
     Ok(AnimatedModel {
         skeleton,
         meshes,
@@ -868,6 +911,13 @@ mod tests {
         assert!(
             has_tinted,
             "expected material baseColorFactor applied to vertices"
+        );
+        assert!(
+            model
+                .meshes
+                .iter()
+                .all(|m| m.uvs.len() == m.positions.len()),
+            "skinned mesh UV length must match POSITION"
         );
     }
 }

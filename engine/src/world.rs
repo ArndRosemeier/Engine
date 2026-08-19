@@ -354,6 +354,12 @@ pub struct World {
     /// when [`Self::set_hitch_log`] has a path.
     hitch_spans: Vec<HitchSpan>,
     hitch_log: Option<PathBuf>,
+    /// PNG paths the game asked to capture after the next drawn frame.
+    screenshot_queue: Vec<PathBuf>,
+    /// Close the window after this frame (and any queued shots) finish.
+    exit_requested: bool,
+    /// Set by the game when the scene is ready for a waiting screenshot harness.
+    ready: bool,
     /// Static obstacles actors slide against. Independent of render entities.
     collision: CollisionWorld,
     space_by_name: HashMap<String, SpaceId>,
@@ -404,6 +410,9 @@ impl Default for World {
             shadow_contact_epoch: 0,
             hitch_spans: Vec::new(),
             hitch_log: None,
+            screenshot_queue: Vec::new(),
+            exit_requested: false,
+            ready: false,
             collision: CollisionWorld::new(),
             space_by_name: HashMap::new(),
             next_space_id: 1,
@@ -1164,6 +1173,35 @@ impl World {
 
     pub fn pointer_lock(&self) -> bool {
         self.pointer_lock
+    }
+
+    /// Capture `path` as a PNG after this frame has been drawn.
+    pub fn queue_screenshot(&mut self, path: impl AsRef<Path>) {
+        self.screenshot_queue.push(path.as_ref().to_path_buf());
+    }
+
+    /// Tell a waiting screenshot harness that the scene is ready.
+    pub fn mark_ready(&mut self) {
+        self.ready = true;
+    }
+
+    pub fn ready(&self) -> bool {
+        self.ready
+    }
+
+    /// Close the window after this frame, once any queued shots have been written.
+    pub fn request_exit(&mut self) {
+        self.exit_requested = true;
+    }
+
+    pub(crate) fn take_screenshot_queue(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.screenshot_queue)
+    }
+
+    pub(crate) fn take_exit_requested(&mut self) -> bool {
+        let wanted = self.exit_requested;
+        self.exit_requested = false;
+        wanted
     }
 
     /// First-person camera at an anchored eye position, expressed globally.

@@ -368,12 +368,13 @@ struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
-    @location(3) joints: vec4<u32>,
-    @location(4) weights: vec4<f32>,
-    @location(5) m0: vec4<f32>,
-    @location(6) m1: vec4<f32>,
-    @location(7) m2: vec4<f32>,
-    @location(8) m3: vec4<f32>,
+    @location(3) uv: vec2<f32>,
+    @location(4) joints: vec4<u32>,
+    @location(5) weights: vec4<f32>,
+    @location(6) m0: vec4<f32>,
+    @location(7) m1: vec4<f32>,
+    @location(8) m2: vec4<f32>,
+    @location(9) m3: vec4<f32>,
 };
 
 @vertex
@@ -749,10 +750,10 @@ impl ShadowGpu {
             array_stride: std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &wgpu::vertex_attr_array![
-                5 => Float32x4,
                 6 => Float32x4,
                 7 => Float32x4,
                 8 => Float32x4,
+                9 => Float32x4,
             ],
         };
         let skinned_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

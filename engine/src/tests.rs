@@ -1088,10 +1088,7 @@ fn falling_through_a_hatch_switches_space() {
         pos.y < 4.0,
         "falling in should come out below the mouth, pos={pos}"
     );
-    assert!(
-        yaw.abs() < 5.0,
-        "hatch travel must not spin yaw, got {yaw}"
-    );
+    assert!(yaw.abs() < 5.0, "hatch travel must not spin yaw, got {yaw}");
 
     pos.y = 3.0;
     assert!(world.travel(&mut pos, &mut yaw).is_none());

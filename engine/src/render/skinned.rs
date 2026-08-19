@@ -2,6 +2,7 @@
 
 use crate::anim::{SkinMesh, MAX_JOINTS};
 use crate::mesh::InstanceRaw;
+use crate::render::terrain_pipeline::upload_texture;
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 use wgpu::util::DeviceExt;
@@ -12,6 +13,7 @@ pub struct SkinnedVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 4],
+    pub uv: [f32; 2],
     pub joints: [u16; 4],
     pub weights: [f32; 4],
 }
@@ -24,8 +26,9 @@ impl SkinnedVertex {
             0 => Float32x3,
             1 => Float32x3,
             2 => Float32x4,
-            3 => Uint16x4,
-            4 => Float32x4,
+            3 => Float32x2,
+            4 => Uint16x4,
+            5 => Float32x4,
         ],
     };
 }
@@ -56,17 +59,20 @@ struct Joints {
 };
 
 @group(1) @binding(0) var<uniform> bones: Joints;
+@group(2) @binding(0) var albedo_tex: texture_2d<f32>;
+@group(2) @binding(1) var albedo_sampler: sampler;
 
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
-    @location(3) joints: vec4<u32>,
-    @location(4) weights: vec4<f32>,
-    @location(5) m0: vec4<f32>,
-    @location(6) m1: vec4<f32>,
-    @location(7) m2: vec4<f32>,
-    @location(8) m3: vec4<f32>,
+    @location(3) uv: vec2<f32>,
+    @location(4) joints: vec4<u32>,
+    @location(5) weights: vec4<f32>,
+    @location(6) m0: vec4<f32>,
+    @location(7) m1: vec4<f32>,
+    @location(8) m2: vec4<f32>,
+    @location(9) m3: vec4<f32>,
 };
 
 struct VsOut {
@@ -74,6 +80,7 @@ struct VsOut {
     @location(0) world_n: vec3<f32>,
     @location(1) color: vec4<f32>,
     @location(2) world_p: vec3<f32>,
+    @location(3) uv: vec2<f32>,
 };
 
 @vertex
@@ -98,6 +105,7 @@ fn vs_main(v: VsIn) -> VsOut {
     out.world_n = normalize((model * skinned_n).xyz);
     out.color = v.color;
     out.world_p = world.xyz;
+    out.uv = v.uv;
     return out;
 }
 
@@ -111,8 +119,10 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let ndl = max(dot(n, l), 0.0);
     let wrap = ndl * 0.5 + 0.5;
     let vis = sun_visibility(in.world_p, n, u.eye);
-    let lit = in.color.rgb * (u.ambient + wrap * wrap * u.light_color * vis);
-    return vec4<f32>(haze(lit, in.world_p), 1.0);
+    let texel = textureSample(albedo_tex, albedo_sampler, in.uv);
+    let base = in.color * texel;
+    let lit = base.rgb * (u.ambient + wrap * wrap * u.light_color * vis);
+    return vec4<f32>(haze(lit, in.world_p), base.a);
 }
 "#;
 
@@ -142,6 +152,7 @@ pub fn create_skinned_pipelines(
     format: wgpu::TextureFormat,
     scene_bind_layout: &wgpu::BindGroupLayout,
     joint_bind_layout: wgpu::BindGroupLayout,
+    albedo_layout: &wgpu::BindGroupLayout,
 ) -> SkinnedPipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("skinned-shader"),
@@ -152,19 +163,19 @@ pub fn create_skinned_pipelines(
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("skinned-pipeline-layout"),
-        bind_group_layouts: &[scene_bind_layout, &joint_bind_layout],
+        bind_group_layouts: &[scene_bind_layout, &joint_bind_layout, albedo_layout],
         push_constant_ranges: &[],
     });
 
-    // Instance matrix at locations 5-8 (after joints/weights).
+    // Instance matrix at locations 6-9 (after uv / joints / weights).
     let instance_layout = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &wgpu::vertex_attr_array![
-            5 => Float32x4,
             6 => Float32x4,
             7 => Float32x4,
             8 => Float32x4,
+            9 => Float32x4,
         ],
     };
 
@@ -217,16 +228,27 @@ pub struct GpuSkinnedMesh {
     pub vertex_buf: wgpu::Buffer,
     pub index_buf: wgpu::Buffer,
     pub index_count: u32,
+    pub albedo_bind: wgpu::BindGroup,
+    /// Keeps the uploaded albedo texture alive for `albedo_bind`.
+    _albedo_tex: Option<super::terrain_pipeline::GpuTexture>,
 }
 
 impl GpuSkinnedMesh {
-    pub fn upload(device: &wgpu::Device, mesh: &SkinMesh) -> Self {
+    pub fn upload(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        albedo_layout: &wgpu::BindGroupLayout,
+        albedo_sampler: &wgpu::Sampler,
+        white_albedo: &wgpu::BindGroup,
+        mesh: &SkinMesh,
+    ) -> Self {
         let mut vertices = Vec::with_capacity(mesh.positions.len());
         for i in 0..mesh.positions.len() {
             vertices.push(SkinnedVertex {
                 position: mesh.positions[i].into(),
                 normal: mesh.normals[i].into(),
                 color: mesh.colors[i].into(),
+                uv: mesh.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
                 joints: mesh.joints[i],
                 weights: mesh.weights[i],
             });
@@ -241,10 +263,32 @@ impl GpuSkinnedMesh {
             contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
+        let (albedo_bind, _albedo_tex) = if let Some(map) = &mesh.albedo {
+            let gpu = upload_texture(device, queue, map.width, map.height, &map.rgba);
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("skinned-albedo"),
+                layout: albedo_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&gpu.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(albedo_sampler),
+                    },
+                ],
+            });
+            (bind, Some(gpu))
+        } else {
+            (white_albedo.clone(), None)
+        };
         Self {
             vertex_buf,
             index_buf,
             index_count: mesh.indices.len() as u32,
+            albedo_bind,
+            _albedo_tex,
         }
     }
 }

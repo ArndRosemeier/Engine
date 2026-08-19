@@ -293,7 +293,7 @@ fn first_base_color_albedo(
     Ok(None)
 }
 
-fn image_to_albedo(image: &gltf::image::Data) -> EngineResult<AlbedoMap> {
+pub(crate) fn image_to_albedo(image: &gltf::image::Data) -> EngineResult<AlbedoMap> {
     let rgba = match image.format {
         gltf::image::Format::R8G8B8A8 => image.pixels.clone(),
         gltf::image::Format::R8G8B8 => {

@@ -201,6 +201,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+#[derive(Clone)]
 pub struct GpuTexture {
     pub view: wgpu::TextureView,
     #[allow(dead_code)]
