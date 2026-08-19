@@ -265,6 +265,8 @@ pub struct Renderer {
     joint_locals: Vec<(glam::Vec3, glam::Quat, glam::Vec3)>,
     joint_global: Vec<glam::Mat4>,
     joint_out: Vec<glam::Mat4>,
+    /// Last frame after overlay passes (egui). For capture_png.
+    last_color: Option<wgpu::Texture>,
 }
 
 impl Renderer {
@@ -329,7 +331,7 @@ impl Renderer {
         .unwrap_or(wgpu::PresentMode::Fifo);
 
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -428,6 +430,7 @@ impl Renderer {
             joint_locals: Vec::new(),
             joint_global: Vec::new(),
             joint_out: Vec::new(),
+            last_color: None,
         }
     }
 
@@ -449,6 +452,7 @@ impl Renderer {
             self.config.width,
             self.config.height,
         );
+        self.last_color = None;
     }
 
     pub fn take_gpu_stats(&mut self) -> GpuFrameStats {
@@ -904,6 +908,7 @@ impl Renderer {
                 .timestamp(&mut encoder, 2);
         }
         after(&self.device, &self.queue, &mut encoder, &view);
+        self.store_composited(&mut encoder, &frame.texture);
         if profile_gpu {
             let profiler = self.gpu_profiler.as_ref().expect("active GPU profiler");
             profiler.timestamp(&mut encoder, 3);
@@ -934,26 +939,10 @@ impl Renderer {
     }
 
     /// Render the current world to a PNG (for demo QA / automation).
-    pub fn capture_png(&mut self, world: &World, path: impl AsRef<std::path::Path>) {
+    pub fn capture_png(&mut self, _world: &World, path: impl AsRef<std::path::Path>) {
         let width = self.config.width.max(1);
         let height = self.config.height.max(1);
         let format = self.config.format;
-
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("capture"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let bpp = 4u32;
         let unpadded = width * bpp;
@@ -972,10 +961,13 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("capture-encoder"),
             });
-        self.encode_world(&mut encoder, &view, world);
+        let src = self
+            .last_color
+            .as_ref()
+            .expect("capture_png must run after render_with so HUD is in the shot");
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &texture,
+                texture: src,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -1029,6 +1021,52 @@ impl Renderer {
 
         image::save_buffer(path.as_ref(), &rgba, width, height, image::ColorType::Rgba8)
             .unwrap_or_else(|e| panic!("failed to save screenshot: {e}"));
+    }
+
+    fn store_composited(&mut self, encoder: &mut wgpu::CommandEncoder, src: &wgpu::Texture) {
+        let width = self.config.width.max(1);
+        let height = self.config.height.max(1);
+        let format = self.config.format;
+        let stale = self.last_color.as_ref().is_none_or(|t| {
+            let s = t.size();
+            s.width != width || s.height != height || t.format() != format
+        });
+        if stale {
+            self.last_color = Some(self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("last-color"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            }));
+        }
+        let dst = self.last_color.as_ref().expect("last-color");
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: src,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: dst,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     fn write_scene_uniforms(
