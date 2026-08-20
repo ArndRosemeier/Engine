@@ -176,6 +176,44 @@ fn gltf_demo_asset_loads() {
 }
 
 #[test]
+fn glb_bin_space_fourcc_is_unknown_chunk_type() {
+    let dir = std::env::temp_dir().join(format!("engine-glb-bin-space-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("bin_space.glb");
+    std::fs::write(&path, crate::model::test_glb_with_bin_space_fourcc()).unwrap();
+    let err = Model::load_with(&path, &dir, &EngineLimits::default()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.to_ascii_lowercase().contains("unknown chunk type"),
+        "expected gltf crate unknown chunk type, got {msg}"
+    );
+}
+
+#[test]
+fn blend_rgb_without_real_alpha_is_load_error() {
+    let dir = std::env::temp_dir().join(format!("engine-static-blend-rgb-{}", std::process::id()));
+    crate::model::write_minimal_static_gltf(&dir, "BLEND", true);
+    let err = Model::load_with(dir.join("model.gltf"), &dir, &EngineLimits::default()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("BLEND") && msg.contains("alphaMode"),
+        "expected BLEND hole-body gate, got {msg}"
+    );
+}
+
+#[test]
+fn mask_rgb_without_real_alpha_is_load_error() {
+    let dir = std::env::temp_dir().join(format!("engine-static-mask-rgb-{}", std::process::id()));
+    crate::model::write_minimal_static_gltf(&dir, "MASK", true);
+    let err = Model::load_with(dir.join("model.gltf"), &dir, &EngineLimits::default()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("MASK") && msg.contains("alphaMode"),
+        "expected MASK hole-body gate, got {msg}"
+    );
+}
+
+#[test]
 fn place_builds_matrix() {
     let p = Place::new(1.0, 2.0, 3.0).with_yaw_deg(90.0).with_scale(2.0);
     let m = p.to_matrix();

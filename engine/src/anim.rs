@@ -3,10 +3,7 @@
 use crate::error::{EngineError, EngineResult};
 use crate::limits::EngineLimits;
 use crate::mesh::AlbedoMap;
-use crate::model::{
-    alpha_mode_needs_opaque_fallback, image_to_albedo, promote_blend_without_alpha,
-    validate_glb_path,
-};
+use crate::model::{image_to_albedo, reject_alpha_mode_without_real_alpha};
 use glam::{Mat4, Quat, Vec3, Vec4};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -96,7 +93,6 @@ impl AnimatedModel {
             )));
         }
 
-        validate_glb_path(&path)?;
         let (document, buffers, images) =
             gltf::import(&path).map_err(|e| EngineError::Model(e.to_string()))?;
 
@@ -664,7 +660,7 @@ fn load_animated_document(
                     }
                 })
                 .collect();
-            let mut out_col: Vec<Vec4> = colors.into_iter().map(Vec4::from).collect();
+            let out_col: Vec<Vec4> = colors.into_iter().map(Vec4::from).collect();
             let tex_set = primitive
                 .material()
                 .pbr_metallic_roughness()
@@ -689,7 +685,7 @@ fn load_animated_document(
                     "TEXCOORD length mismatch with POSITION".into(),
                 ));
             }
-            let mut albedo = if let Some(info) = primitive
+            let albedo = if let Some(info) = primitive
                 .material()
                 .pbr_metallic_roughness()
                 .base_color_texture()
@@ -704,10 +700,7 @@ fn load_animated_document(
             } else {
                 None
             };
-            if alpha_mode_needs_opaque_fallback(primitive.material().alpha_mode(), albedo.as_ref())
-            {
-                promote_blend_without_alpha(&mut out_col, albedo.as_mut());
-            }
+            reject_alpha_mode_without_real_alpha(primitive.material().alpha_mode(), &albedo)?;
 
             meshes.push(SkinMesh {
                 positions: out_pos,
@@ -929,36 +922,45 @@ mod tests {
         );
     }
 
-    fn bad_fourcc_glb_bytes() -> Vec<u8> {
-        // Valid GLB header + one chunk whose type is `BIN ` (space), not `BIN\0`.
-        let chunk_data = [0u8; 4];
-        let total_len = 12 + 8 + chunk_data.len();
-        let mut bytes = Vec::with_capacity(total_len);
-        bytes.extend_from_slice(b"glTF");
-        bytes.extend_from_slice(&2u32.to_le_bytes());
-        bytes.extend_from_slice(&(total_len as u32).to_le_bytes());
-        bytes.extend_from_slice(&(chunk_data.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(b"BIN ");
-        bytes.extend_from_slice(&chunk_data);
-        bytes
+    #[test]
+    fn bin_space_fourcc_is_unknown_chunk_type() {
+        let dir =
+            std::env::temp_dir().join(format!("engine-anim-bin-space-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bin_space.glb");
+        std::fs::write(&path, crate::model::test_glb_with_bin_space_fourcc()).unwrap();
+        let err = AnimatedModel::load_with(&path, &dir, &EngineLimits::default()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.to_ascii_lowercase().contains("unknown chunk type"),
+            "expected gltf crate unknown chunk type, got {msg}"
+        );
     }
 
     #[test]
-    fn unknown_glb_chunk_type_hard_fails_with_fourcc() {
-        let dir = std::env::temp_dir().join("engine-slice-a-glb-fourcc");
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("bad_fourcc.glb");
-        std::fs::write(&path, bad_fourcc_glb_bytes()).expect("write glb");
-        let err = AnimatedModel::load_with(&path, &dir, &EngineLimits::default())
-            .expect_err("unknown GLB chunk must hard-fail");
+    fn blend_rgb_without_real_alpha_is_load_error() {
+        let dir =
+            std::env::temp_dir().join(format!("engine-anim-blend-rgb-{}", std::process::id()));
+        crate::model::write_minimal_skinned_gltf(&dir, "BLEND", true);
+        let err = AnimatedModel::load_with(dir.join("model.gltf"), &dir, &EngineLimits::default())
+            .unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("BIN "),
-            "error must include readable fourcc BIN<space>, got: {msg}"
+            msg.contains("BLEND") && msg.contains("alphaMode"),
+            "expected BLEND hole-body gate, got {msg}"
         );
+    }
+
+    #[test]
+    fn mask_rgb_without_real_alpha_is_load_error() {
+        let dir = std::env::temp_dir().join(format!("engine-anim-mask-rgb-{}", std::process::id()));
+        crate::model::write_minimal_skinned_gltf(&dir, "MASK", true);
+        let err = AnimatedModel::load_with(dir.join("model.gltf"), &dir, &EngineLimits::default())
+            .unwrap_err();
+        let msg = err.to_string();
         assert!(
-            matches!(err, EngineError::Model(_)),
-            "expected EngineError::Model, got {err:?}"
+            msg.contains("MASK") && msg.contains("alphaMode"),
+            "expected MASK hole-body gate, got {msg}"
         );
     }
 }
