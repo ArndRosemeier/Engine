@@ -1312,6 +1312,15 @@ impl World {
         e.animator.play(clip_name)
     }
 
+    /// Play once (`looping = false`) and hold the last frame when the clip ends.
+    pub fn play_animation_once(&mut self, id: EntityId, clip_name: &str) -> EngineResult<()> {
+        let e = self
+            .animated
+            .get_mut(&id)
+            .ok_or(EngineError::UnknownEntity)?;
+        e.animator.play_once(clip_name)
+    }
+
     pub fn set_animation_speed(&mut self, id: EntityId, speed: f32) -> EngineResult<()> {
         if !speed.is_finite() {
             return Err(EngineError::InvalidValue(format!(

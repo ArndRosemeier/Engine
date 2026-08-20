@@ -138,6 +138,15 @@ impl Animator {
     }
 
     pub fn play(&mut self, clip_name: &str) -> EngineResult<()> {
+        self.play_clip(clip_name, true)
+    }
+
+    /// Play a clip once and hold the last frame when it ends.
+    pub fn play_once(&mut self, clip_name: &str) -> EngineResult<()> {
+        self.play_clip(clip_name, false)
+    }
+
+    fn play_clip(&mut self, clip_name: &str, looping: bool) -> EngineResult<()> {
         let idx = self
             .model
             .clips
@@ -146,6 +155,7 @@ impl Animator {
             .ok_or_else(|| EngineError::Model(format!("unknown animation clip '{clip_name}'")))?;
         self.clip_index = idx;
         self.time = 0.0;
+        self.looping = looping;
         Ok(())
     }
 
@@ -919,6 +929,37 @@ mod tests {
                 .iter()
                 .all(|m| m.uvs.len() == m.positions.len()),
             "skinned mesh UV length must match POSITION"
+        );
+    }
+
+    #[test]
+    fn play_once_holds_last_frame() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = root.join("../examples/animated_animal/assets/deer.gltf");
+        if !path.exists() {
+            return;
+        }
+        let model = AnimatedModel::load_with(&path, root.join(".."), &EngineLimits::default())
+            .expect("load deer");
+        let mut animator = Animator::new(std::sync::Arc::new(model)).expect("animator");
+        animator.play_once("Idle").expect("play once");
+        assert!(!animator.looping, "play_once must set looping=false");
+        let duration = animator.model.clips[animator.clip_index].duration;
+        animator.tick(duration + 1.0);
+        assert!(
+            (animator.time - duration).abs() < 1e-5,
+            "play-once must hold last frame, time={} duration={}",
+            animator.time,
+            duration
+        );
+        animator.play("Idle").expect("loop play");
+        assert!(animator.looping, "play must restore looping=true");
+        animator.tick(duration + 0.05);
+        assert!(
+            animator.time < duration,
+            "looping play must wrap, time={} duration={}",
+            animator.time,
+            duration
         );
     }
 
