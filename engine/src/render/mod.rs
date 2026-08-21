@@ -624,12 +624,9 @@ impl Renderer {
 
         self.instance_scratch.clear();
         if entity.instanced {
-            self.instance_scratch.extend(
-                entity
-                    .instances
-                    .iter()
-                    .map(|m| InstanceRaw::from_matrix(entity.transform * *m)),
-            );
+            self.instance_scratch.extend(entity.instances.iter().map(|inst| {
+                InstanceRaw::from_matrix_tint(entity.transform * inst.transform, inst.tint)
+            }));
         } else {
             self.instance_scratch
                 .push(InstanceRaw::from_matrix(entity.transform));
@@ -780,12 +777,12 @@ impl Renderer {
                             panic!("instance batch source {} disappeared", source.id)
                         });
                         self.instance_scratch.clear();
-                        self.instance_scratch.extend(
-                            entity
-                                .instances
-                                .iter()
-                                .map(|matrix| InstanceRaw::from_matrix(entity.transform * *matrix)),
-                        );
+                        self.instance_scratch.extend(entity.instances.iter().map(|inst| {
+                            InstanceRaw::from_matrix_tint(
+                                entity.transform * inst.transform,
+                                inst.tint,
+                            )
+                        }));
                         slot.bounds = batch.gpu.bounds_for_instances(&self.instance_scratch);
                         self.instance_scratch
                             .resize(slot.capacity, inactive_instance());
@@ -818,12 +815,9 @@ impl Renderer {
                     .entity(source.id)
                     .unwrap_or_else(|_| panic!("instance batch source {} disappeared", source.id));
                 let start = self.instance_scratch.len();
-                self.instance_scratch.extend(
-                    entity
-                        .instances
-                        .iter()
-                        .map(|matrix| InstanceRaw::from_matrix(entity.transform * *matrix)),
-                );
+                self.instance_scratch.extend(entity.instances.iter().map(|inst| {
+                    InstanceRaw::from_matrix_tint(entity.transform * inst.transform, inst.tint)
+                }));
                 let bounds = prototype_gpu.bounds_for_instances(&self.instance_scratch[start..]);
                 let capacity =
                     batch_slot_capacity(source.instance_count.max(source.instance_reserve));

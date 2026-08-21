@@ -7,7 +7,7 @@ use crate::error::{EngineError, EngineResult};
 use crate::input::Input;
 use crate::limits::EngineLimits;
 use crate::mesh::{AlbedoMap, BuiltMesh, Mesh};
-use crate::place::{GlobalPlace, Place};
+use crate::place::{GlobalPlace, MeshInstance, Place};
 use crate::portal::{
     opening_extents, segment_crosses_opening, teleport_yaw, PortalLink, PortalPlane, PortalView,
     SpaceId,
@@ -205,8 +205,8 @@ pub enum SurfaceMaterialRef {
 pub struct Entity {
     pub(crate) mesh: BuiltMesh,
     pub(crate) transform: Mat4,
-    /// Per-instance transforms for GPU instancing.
-    pub(crate) instances: Vec<Mat4>,
+    /// Per-instance transforms (+ tint) for GPU instancing.
+    pub(crate) instances: Vec<MeshInstance>,
     /// Minimum GPU slot capacity requested by the owner. This reserves space
     /// without drawing placeholder instances.
     pub(crate) instance_reserve: usize,
@@ -867,7 +867,7 @@ impl World {
                 self.limits.max_instances_per_spawn
             )));
         }
-        let instances: Vec<Mat4> = places.into_iter().map(Place::to_matrix).collect();
+        let instances: Vec<MeshInstance> = places.into_iter().map(Place::to_instance).collect();
         let albedo = mesh.albedo().cloned();
         let id = self.spawn_built_instanced(mesh.build(), instances);
         self.attach_albedo(id, albedo)?;
@@ -958,7 +958,7 @@ impl World {
     pub(crate) fn spawn_built_instanced(
         &mut self,
         mesh: BuiltMesh,
-        instances: Vec<Mat4>,
+        instances: Vec<MeshInstance>,
     ) -> EntityId {
         let instance_reserve = instances.len();
         let id = EntityId(self.next_id);
@@ -1649,7 +1649,7 @@ impl World {
             )));
         }
         e.instances.clear();
-        e.instances.extend(places.iter().map(|p| p.to_matrix()));
+        e.instances.extend(places.iter().copied().map(Place::to_instance));
         e.bump_xform();
         self.bump_render_epoch();
         Ok(())

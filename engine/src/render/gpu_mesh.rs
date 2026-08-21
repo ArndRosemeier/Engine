@@ -188,9 +188,7 @@ fn instance_buffer(device: &wgpu::Device, instances: &[InstanceRaw], label: &str
     if instances.is_empty() {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
-            contents: bytemuck::bytes_of(&InstanceRaw {
-                model: Mat4::IDENTITY.to_cols_array_2d(),
-            }),
+            contents: bytemuck::bytes_of(&InstanceRaw::from_matrix(Mat4::IDENTITY)),
             usage: INSTANCE_USAGES,
         })
     } else {

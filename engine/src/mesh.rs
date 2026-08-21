@@ -638,12 +638,19 @@ impl Vertex {
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct InstanceRaw {
     pub model: [[f32; 4]; 4],
+    /// Linear RGBA multiply (white = authored look).
+    pub tint: [f32; 4],
 }
 
 impl InstanceRaw {
     pub fn from_matrix(m: glam::Mat4) -> Self {
+        Self::from_matrix_tint(m, crate::color::Color::WHITE)
+    }
+
+    pub fn from_matrix_tint(m: glam::Mat4, tint: crate::color::Color) -> Self {
         Self {
             model: m.to_cols_array_2d(),
+            tint: [tint.r, tint.g, tint.b, tint.a],
         }
     }
 
@@ -655,6 +662,7 @@ impl InstanceRaw {
             5 => Float32x4,
             6 => Float32x4,
             7 => Float32x4,
+            8 => Float32x4,
         ],
     };
 }

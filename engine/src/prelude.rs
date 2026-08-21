@@ -15,7 +15,7 @@ pub use crate::landscape::Landscape;
 pub use crate::limits::EngineLimits;
 pub use crate::mesh::{Mesh, PointId, Shape};
 pub use crate::model::{scatter_places, Model};
-pub use crate::place::{GlobalPlace, Place};
+pub use crate::place::{GlobalPlace, MeshInstance, Place};
 pub use crate::portal::{PortalLink, SpaceId};
 pub use crate::proc::{scatter_on_xz, Noise};
 pub use crate::proc_terrain::{demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain};

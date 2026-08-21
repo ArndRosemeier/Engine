@@ -114,6 +114,7 @@ struct VsIn {
     @location(5) m1: vec4<f32>,
     @location(6) m2: vec4<f32>,
     @location(7) m3: vec4<f32>,
+    @location(8) tint: vec4<f32>,
 };
 
 struct VsOut {
@@ -132,7 +133,7 @@ fn vs_main(v: VsIn) -> VsOut {
     out.clip = u.view_proj * world;
     // Assume uniform scale for normals (friendly default).
     out.world_n = normalize((model * vec4<f32>(v.normal, 0.0)).xyz);
-    out.color = v.color;
+    out.color = v.color * v.tint;
     out.world_p = world.xyz;
     out.uv = v.uv;
     return out;

@@ -65,9 +65,14 @@ struct DrawArgs {
     first_instance: u32,
 };
 
+struct Instance {
+    model: mat4x4<f32>,
+    tint: vec4<f32>,
+};
+
 @group(0) @binding(0) var<uniform> params: CullParams;
-@group(1) @binding(0) var<storage, read> src: array<mat4x4<f32>>;
-@group(1) @binding(1) var<storage, read_write> dst: array<mat4x4<f32>>;
+@group(1) @binding(0) var<storage, read> src: array<Instance>;
+@group(1) @binding(1) var<storage, read_write> dst: array<Instance>;
 @group(1) @binding(2) var<storage, read_write> draws: array<DrawArgs>;
 
 fn intersects_sphere(centre: vec3<f32>, radius: f32) -> bool {
@@ -86,7 +91,8 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
     if i >= params.instance_count {
         return;
     }
-    let model = src[i];
+    let inst = src[i];
+    let model = inst.model;
     let scale = max(
         length(model[0].xyz),
         max(length(model[1].xyz), length(model[2].xyz)),
@@ -97,7 +103,7 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let slot = atomicAdd(&draws[0].instance_count, 1u);
-    dst[slot] = model;
+    dst[slot] = inst;
     if params.draw_slots > 1u {
         atomicAdd(&draws[1].instance_count, 1u);
     }

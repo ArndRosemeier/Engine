@@ -636,6 +636,45 @@ fn a_scatter_layer_reuses_its_mesh_when_the_placements_change() {
 }
 
 #[test]
+fn set_instances_keeps_per_instance_tint() {
+    use crate::world::World;
+
+    let mut world = World::new();
+    let id = world.spawn_instanced(unit_quad());
+    let warm = Color {
+        r: 1.0,
+        g: 0.82,
+        b: 0.62,
+        a: 1.0,
+    };
+    let cool = Color {
+        r: 0.72,
+        g: 0.78,
+        b: 0.92,
+        a: 1.0,
+    };
+    world
+        .set_instances(
+            id,
+            &[
+                Place::new(0.0, 0.0, 0.0).with_tint(warm),
+                Place::new(2.0, 0.0, 0.0).with_tint(cool),
+            ],
+        )
+        .unwrap();
+    let e = world.entity(id).unwrap();
+    assert_eq!(e.instances.len(), 2);
+    assert!((e.instances[0].tint.r - warm.r).abs() < 1e-5);
+    assert!((e.instances[0].tint.b - warm.b).abs() < 1e-5);
+    assert!((e.instances[1].tint.r - cool.r).abs() < 1e-5);
+    assert!((e.instances[1].tint.b - cool.b).abs() < 1e-5);
+    assert!(
+        (e.instances[0].tint.r - e.instances[1].tint.r).abs() > 0.2,
+        "tints must stay distinct on the entity"
+    );
+}
+
+#[test]
 fn an_instance_slot_can_reserve_gpu_capacity_without_drawing() {
     use crate::world::World;
 

@@ -36,6 +36,9 @@ pub(crate) mod render;
 pub(crate) mod ui_backend;
 pub(crate) mod volume;
 
+#[cfg(test)]
+mod tint_proof;
+
 pub use anim::{AnimatedModel, AnimationClip, Animator};
 pub use audio::{Audio, ClipId, Play, VoiceId};
 pub use camera::Camera;
@@ -51,7 +54,7 @@ pub use landscape::Landscape;
 pub use limits::EngineLimits;
 pub use mesh::{Mesh, PointId, Shape};
 pub use model::{scatter_places, Model};
-pub use place::{GlobalPlace, Place};
+pub use place::{GlobalPlace, MeshInstance, Place};
 pub use portal::{PortalLink, PortalView, SpaceId};
 pub use proc_terrain::{demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain};
 pub use space::{

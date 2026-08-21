@@ -383,6 +383,7 @@ pub fn scatter_places(
             pitch_degrees: 0.0,
             scale,
             stretch: Vec3::ONE,
+            tint: crate::color::Color::WHITE,
         })
         .collect()
 }
