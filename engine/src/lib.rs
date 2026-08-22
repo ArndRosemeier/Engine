@@ -93,4 +93,6 @@ impl Engine {
 }
 
 #[cfg(test)]
+mod probe_teleport;
+#[cfg(test)]
 mod tests;
