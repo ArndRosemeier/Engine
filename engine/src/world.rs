@@ -9,9 +9,8 @@ use crate::limits::EngineLimits;
 use crate::mesh::{AlbedoMap, BuiltMesh, Mesh};
 use crate::place::{GlobalPlace, MeshInstance, Place};
 use crate::portal::{
-    opening_extents, segment_crosses_opening, teleport_yaw, Portal, PortalId, PortalLink,
-    PortalPlane, PortalView, VisiblePortal,
-    SpaceId,
+    opening_extents, segment_crosses_opening, teleport_yaw, Portal, PortalId, PortalPlane,
+    PortalSettings, VisiblePortal, SpaceId,
 };
 use crate::proc_terrain::{HeightField, ProcTerrain};
 use crate::space::{ChunkId, GlobalPosition, GlobalXZ, RenderOrigin};
@@ -665,57 +664,14 @@ impl World {
     }
 
     /// Two openings become the same portal. Both meshes should face their own
-    /// space (`+Z` local). Walking through teleports; looking through shows
-    /// the other side as if the world continued.
-    pub fn link(&mut self, a: EntityId, b: EntityId) -> EngineResult<()> {
-        self.create_portal(a, b).map(|_| ())
-    }
-
-    /// Create a portal pair and return its id.
-    pub fn create_portal(&mut self, a: EntityId, b: EntityId) -> EngineResult<PortalId> {
-        self.create_portal_with_view(a, b, PortalView::Transformed)
-    }
-
-    /// Link two openings with a stable destination view at the threshold.
-    ///
-    /// `eye_offset_y` is measured above the opening centre. `setback` places
-    /// the virtual eye just behind the destination plane.
-    pub fn link_threshold_view(
+    /// space (`+Z` local). Looking through shows the other space; walking
+    /// through teleports when [`PortalSettings::teleport`] is true.
+    pub fn create_portal(
         &mut self,
         a: EntityId,
         b: EntityId,
-        eye_offset_y: f32,
-        setback: f32,
-    ) -> EngineResult<()> {
-        self.create_portal_with_view(
-            a,
-            b,
-            PortalView::Threshold {
-                eye_offset_y,
-                setback,
-            },
-        )
-        .map(|_| ())
-    }
-
-    /// Create a portal with an explicit view mode.
-    pub fn create_portal_with_view(
-        &mut self,
-        a: EntityId,
-        b: EntityId,
-        view: PortalView,
+        settings: PortalSettings,
     ) -> EngineResult<PortalId> {
-        if let PortalView::Threshold {
-            eye_offset_y,
-            setback,
-        } = view
-        {
-            if !eye_offset_y.is_finite() || !setback.is_finite() || setback <= 0.0 {
-                return Err(EngineError::InvalidValue(format!(
-                    "portal threshold view needs finite eye offset and positive setback, got ({eye_offset_y}, {setback})"
-                )));
-            }
-        }
         self.validate_portal_sides(a, b)?;
         let id = PortalId::from_raw(self.next_portal_id);
         self.next_portal_id = self
@@ -725,11 +681,22 @@ impl World {
         self.portals.push(Portal {
             id,
             sides: [a, b],
-            view,
+            teleport: settings.teleport,
             enabled: true,
         });
         self.bump_render_epoch();
         Ok(id)
+    }
+
+    /// Toggle whether [`Self::travel`] crosses this portal.
+    pub fn set_portal_teleport(&mut self, id: PortalId, teleport: bool) -> EngineResult<()> {
+        let portal = self
+            .portals
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| EngineError::InvalidValue(format!("unknown portal {id:?}")))?;
+        portal.teleport = teleport;
+        Ok(())
     }
 
     /// Remove a portal by id. The opening entities stay in the world.
@@ -787,32 +754,14 @@ impl World {
         }
         if self.is_linked_opening(a) || self.is_linked_opening(b) {
             return Err(EngineError::InvalidValue(
-                "opening is already linked".into(),
+                "opening is already part of a portal".into(),
             ));
         }
-        Ok(())
-    }
-
-    /// Drop a previously linked pair. The opening entities stay; walking
-    /// through them no longer teleports until they are linked again.
-    pub fn unlink(&mut self, a: EntityId, b: EntityId) -> EngineResult<()> {
-        let before = self.portals.len();
-        self.portals.retain(|p| !((p.sides[0] == a && p.sides[1] == b) || (p.sides[0] == b && p.sides[1] == a)));
-        if self.portals.len() == before {
-            return Err(EngineError::InvalidValue(
-                "those openings are not linked".into(),
-            ));
-        }
-        self.bump_render_epoch();
         Ok(())
     }
 
     pub fn portals(&self) -> &[Portal] {
         &self.portals
-    }
-
-    pub fn portal_links(&self) -> Vec<PortalLink> {
-        self.portals.iter().copied().map(PortalLink::from_portal).collect()
     }
 
     /// All openings in `live` the camera is facing, nearest first.
@@ -865,7 +814,6 @@ impl World {
                         dst_center: dst_plane.center,
                         dst_normal: dst_plane.normal,
                         dest_space: dst_e.space,
-                        view: portal.view,
                     },
                 ));
             }
@@ -930,7 +878,7 @@ impl World {
         };
         let links: Vec<Portal> = self.portals.clone();
         for portal in links {
-            if !portal.enabled {
+            if !portal.enabled || !portal.teleport {
                 continue;
             }
             let a_space = self.entities.get(&portal.sides[0]).map(|e| e.space);

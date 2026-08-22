@@ -55,7 +55,7 @@ pub use limits::EngineLimits;
 pub use mesh::{Mesh, PointId, Shape};
 pub use model::{scatter_places, Model};
 pub use place::{GlobalPlace, MeshInstance, Place};
-pub use portal::{Portal, PortalId, PortalLink, PortalView, SpaceId};
+pub use portal::{Portal, PortalId, PortalSettings, SpaceId};
 pub use proc_terrain::{demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain};
 pub use space::{
     ChunkCoord, ChunkId, ChunkLayer, ChunkLevel, ChunkSpan, GlobalPosition, GlobalXZ, RenderOrigin,

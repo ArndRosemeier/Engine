@@ -49,17 +49,27 @@ pub struct VisiblePortal {
     pub dst_center: Vec3,
     pub dst_normal: Vec3,
     pub dest_space: SpaceId,
-    pub view: PortalView,
 }
 
-/// How the destination camera is positioned while looking through a portal.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub enum PortalView {
-    /// Preserve the viewer's full offset from the source opening.
-    #[default]
-    Transformed,
-    /// Fix the camera at the destination threshold while preserving look direction.
-    Threshold { eye_offset_y: f32, setback: f32 },
+/// Behaviour configured when creating a portal pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortalSettings {
+    /// When true, [`crate::world::World::travel`] crosses this opening and moves
+    /// the walker into the linked space. When false, the portal is view-only.
+    pub teleport: bool,
+}
+
+impl Default for PortalSettings {
+    fn default() -> Self {
+        Self::TELEPORTING
+    }
+}
+
+impl PortalSettings {
+    /// Look through the opening and walk through to the other space.
+    pub const TELEPORTING: Self = Self { teleport: true };
+    /// Recursive view only; the walker does not cross.
+    pub const VIEW_ONLY: Self = Self { teleport: false };
 }
 
 /// Identifier for a linked portal pair.
@@ -77,12 +87,12 @@ impl PortalId {
     }
 }
 
-/// A portal pair: two openings, one transform, view + teleport behaviour.
+/// A portal pair: two openings, one transform, optional teleport.
 #[derive(Clone, Copy, Debug)]
 pub struct Portal {
     pub(crate) id: PortalId,
     pub sides: [EntityId; 2],
-    pub view: PortalView,
+    pub(crate) teleport: bool,
     pub enabled: bool,
 }
 
@@ -99,8 +109,9 @@ impl Portal {
         self.sides[1]
     }
 
-    pub fn view(self) -> PortalView {
-        self.view
+    /// Whether [`crate::world::World::travel`] crosses this portal.
+    pub fn teleports(self) -> bool {
+        self.teleport
     }
 
     pub fn is_enabled(self) -> bool {
@@ -116,40 +127,6 @@ impl Portal {
     ) -> impl Iterator<Item = (EntityId, EntityId)> {
         let a_to_b = (self.enabled && a_space == live).then_some((self.sides[0], self.sides[1]));
         let b_to_a = (self.enabled && b_space == live).then_some((self.sides[1], self.sides[0]));
-        [a_to_b, b_to_a].into_iter().flatten()
-    }
-}
-
-/// Two openings that are the same doorway, dungeon mouth, or teleport.
-///
-/// Prefer [`Portal`] via [`crate::world::World::create_portal`].
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PortalLink {
-    pub a: EntityId,
-    pub b: EntityId,
-    pub(crate) view: PortalView,
-}
-
-impl PortalLink {
-    pub fn from_portal(portal: Portal) -> Self {
-        Self {
-            a: portal.sides[0],
-            b: portal.sides[1],
-            view: portal.view,
-        }
-    }
-
-    /// Each opening that lives in `live`, paired with where it leads.
-    ///
-    /// A same-space pair (Portal A ↔ B in one room) yields both directions.
-    pub fn directions(
-        self,
-        a_space: SpaceId,
-        b_space: SpaceId,
-        live: SpaceId,
-    ) -> impl Iterator<Item = (EntityId, EntityId)> {
-        let a_to_b = (a_space == live).then_some((self.a, self.b));
-        let b_to_a = (b_space == live).then_some((self.b, self.a));
         [a_to_b, b_to_a].into_iter().flatten()
     }
 }
@@ -330,29 +307,12 @@ fn transformed_portal_view(
 
 /// Virtual camera for drawing through `visible`, stable when pressed against the frame.
 pub fn portal_view_camera(camera: &Camera, visible: &VisiblePortal, src_plane: PortalPlane) -> Camera {
-    match visible.view {
-        PortalView::Threshold {
-            eye_offset_y,
-            setback,
-        } => threshold_camera(
-            camera,
-            visible.src_transform,
-            visible.dst_transform,
-            visible.dst_center,
-            visible.dst_normal,
-            eye_offset_y,
-            setback,
-        ),
-        PortalView::Transformed => transformed_portal_view(camera, visible, src_plane),
-    }
+    transformed_portal_view(camera, visible, src_plane)
 }
 
 /// True when oblique clipping should be skipped for this portal view.
-pub fn portal_view_is_close(camera: &Camera, visible: &VisiblePortal, src_plane: PortalPlane) -> bool {
-    match visible.view {
-        PortalView::Threshold { .. } => true,
-        PortalView::Transformed => src_plane.signed_distance(camera.eye) < PORTAL_CLOSE_VIEW_DIST,
-    }
+pub fn portal_view_is_close(camera: &Camera, _visible: &VisiblePortal, src_plane: PortalPlane) -> bool {
+    src_plane.signed_distance(camera.eye) < PORTAL_CLOSE_VIEW_DIST
 }
 
 /// Oblique near-plane clip for recursive portal draws.
@@ -614,7 +574,6 @@ mod tests {
             dst_center: dst_plane.center,
             dst_normal: dst_plane.normal,
             dest_space: SpaceId::DEFAULT,
-            view: PortalView::Transformed,
         };
         let cam_close = Camera::look_at(Vec3::new(0.0, 1.6, -1.28), Vec3::new(0.0, 1.6, -3.0));
         let cam_mid = Camera::look_at(Vec3::new(0.0, 1.6, -1.40), Vec3::new(0.0, 1.6, -3.0));

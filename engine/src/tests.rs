@@ -1046,7 +1046,7 @@ fn portals_doorway_stays_visible_inches_from_plane() {
             Place::new(0.0, 1.1, -4.0),
         )
         .unwrap();
-    world.link(door_out, door_in).unwrap();
+    world.create_portal(door_out, door_in, crate::PortalSettings::TELEPORTING).unwrap();
     let look = Camera::direction(180.0, 0.0);
     let plane = world.portal_plane(door_in).unwrap();
     for z in [-3.96_f32, -3.92, -3.88] {
@@ -1077,7 +1077,9 @@ fn walking_through_a_door_switches_space() {
             Place::new(0.0, 1.1, -3.0),
         )
         .unwrap();
-    world.link(outside, inside).unwrap();
+    world
+        .create_portal(outside, inside, crate::PortalSettings::TELEPORTING)
+        .unwrap();
 
     let mut pos = Vec3::new(0.0, 1.6, -6.0);
     let mut yaw = 0.0_f32;
@@ -1088,6 +1090,39 @@ fn walking_through_a_door_switches_space() {
     assert_eq!(world.living_in(), house);
     assert!(pos.z > -3.0, "should stand inside the room, pos={pos}");
     assert!(yaw.abs() < 5.0, "forward should still be +Z, yaw={yaw}");
+}
+
+#[test]
+fn view_only_portal_does_not_teleport() {
+    let mut world = crate::World::default();
+    let house = world.space("house").unwrap();
+    let outside = world
+        .place(
+            Mesh::opening(1.2, 2.2).unwrap(),
+            Place::new(0.0, 1.1, -1.2).with_yaw_deg(180.0),
+        )
+        .unwrap();
+    let inside = world
+        .place_in(
+            house,
+            Mesh::opening(1.2, 2.2).unwrap(),
+            Place::new(0.0, 1.1, -3.0),
+        )
+        .unwrap();
+    world
+        .create_portal(outside, inside, crate::PortalSettings::VIEW_ONLY)
+        .unwrap();
+
+    let mut pos = Vec3::new(0.0, 1.6, -6.0);
+    let mut yaw = 0.0_f32;
+    assert!(world.travel(&mut pos, &mut yaw).is_none());
+    pos.z = 0.0;
+    assert!(world.travel(&mut pos, &mut yaw).is_none());
+    assert_eq!(world.living_in(), crate::SpaceId::DEFAULT);
+    assert!(
+        !world.portals().is_empty() && !world.portals()[0].teleports(),
+        "portal should still render but not teleport"
+    );
 }
 
 #[test]
@@ -1102,7 +1137,7 @@ fn same_space_portals_work_in_both_directions() {
             Place::new(0.0, 1.1, 4.0).with_yaw_deg(180.0),
         )
         .unwrap();
-    world.link(a, b).unwrap();
+    world.create_portal(a, b, crate::PortalSettings::TELEPORTING).unwrap();
 
     let mut pos = Vec3::new(0.0, 1.6, 0.0);
     let mut yaw = 180.0_f32;
@@ -1131,7 +1166,7 @@ fn same_space_portals_work_in_both_directions() {
 }
 
 #[test]
-fn unlink_stops_crossing() {
+fn destroy_portal_stops_crossing() {
     let mut world = crate::World::default();
     let house = world.space("house").unwrap();
     let outside = world
@@ -1147,8 +1182,10 @@ fn unlink_stops_crossing() {
             Place::new(0.0, 1.1, -3.0),
         )
         .unwrap();
-    world.link(outside, inside).unwrap();
-    world.unlink(outside, inside).unwrap();
+    let id = world
+        .create_portal(outside, inside, crate::PortalSettings::TELEPORTING)
+        .unwrap();
+    world.destroy_portal(id).unwrap();
     assert!(world.portals().is_empty());
 
     let mut pos = Vec3::new(0.0, 1.6, -6.0);
@@ -1160,10 +1197,12 @@ fn unlink_stops_crossing() {
 }
 
 #[test]
-fn link_rejects_a_self_door() {
+fn create_portal_rejects_a_self_door() {
     let mut world = crate::World::default();
     let door = world.spawn(Mesh::opening(1.0, 2.0).unwrap());
-    let err = world.link(door, door).unwrap_err();
+    let err = world
+        .create_portal(door, door, crate::PortalSettings::TELEPORTING)
+        .unwrap_err();
     assert!(matches!(err, EngineError::InvalidValue(_)));
 }
 
@@ -1184,7 +1223,9 @@ fn falling_through_a_hatch_switches_space() {
             Place::new(0.0, 4.0, 0.0).with_pitch_deg(90.0),
         )
         .unwrap();
-    world.link(outside, inside).unwrap();
+    world
+        .create_portal(outside, inside, crate::PortalSettings::TELEPORTING)
+        .unwrap();
 
     let mut pos = Vec3::new(0.0, 11.0, 0.0);
     let mut yaw = 0.0_f32;
@@ -1228,7 +1269,9 @@ fn looking_down_a_hatch_sees_the_destination() {
             Place::new(0.0, 4.0, 0.0).with_pitch_deg(90.0),
         )
         .unwrap();
-    world.link(outside, inside).unwrap();
+    world
+        .create_portal(outside, inside, crate::PortalSettings::TELEPORTING)
+        .unwrap();
 
     let visible = world
         .visible_portal(Vec3::new(0.0, 12.0, 0.0), -Vec3::Y)
