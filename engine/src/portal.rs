@@ -10,6 +10,16 @@ use crate::mesh::BuiltMesh;
 use crate::world::EntityId;
 use glam::{Mat4, Vec3, Vec4};
 
+/// Below this distance to the source opening, a transformed portal view blends
+/// from a stable threshold camera into the fully teleported eye.
+pub const PORTAL_CLOSE_VIEW_DIST: f32 = 0.35;
+/// Push the walker past the close-render band after a cross-space teleport so
+/// the first frame outside the doorway is stable.
+pub const PORTAL_TELEPORT_SETBACK: f32 = 0.42;
+/// Eye still grazes the plane within this band; keep drawing the portal.
+pub const PORTAL_VISIBILITY_PLANE_EPS: f32 = 0.04;
+const PORTAL_THRESHOLD_SETBACK: f32 = 0.12;
+
 /// A named pocket of the world. Entities in different spaces never draw
 /// together, so a house interior can sit on top of the yard in coordinates.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -52,7 +62,67 @@ pub enum PortalView {
     Threshold { eye_offset_y: f32, setback: f32 },
 }
 
+/// Identifier for a linked portal pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PortalId(u32);
+
+impl PortalId {
+    pub(crate) fn from_raw(id: u32) -> Self {
+        Self(id)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+/// A portal pair: two openings, one transform, view + teleport behaviour.
+#[derive(Clone, Copy, Debug)]
+pub struct Portal {
+    pub(crate) id: PortalId,
+    pub sides: [EntityId; 2],
+    pub view: PortalView,
+    pub enabled: bool,
+}
+
+impl Portal {
+    pub fn id(self) -> PortalId {
+        self.id
+    }
+
+    pub fn a(self) -> EntityId {
+        self.sides[0]
+    }
+
+    pub fn b(self) -> EntityId {
+        self.sides[1]
+    }
+
+    pub fn view(self) -> PortalView {
+        self.view
+    }
+
+    pub fn is_enabled(self) -> bool {
+        self.enabled
+    }
+
+    /// Each opening that lives in `live`, paired with where it leads.
+    pub fn directions(
+        self,
+        a_space: SpaceId,
+        b_space: SpaceId,
+        live: SpaceId,
+    ) -> impl Iterator<Item = (EntityId, EntityId)> {
+        let a_to_b = (self.enabled && a_space == live).then_some((self.sides[0], self.sides[1]));
+        let b_to_a = (self.enabled && b_space == live).then_some((self.sides[1], self.sides[0]));
+        [a_to_b, b_to_a].into_iter().flatten()
+    }
+}
+
 /// Two openings that are the same doorway, dungeon mouth, or teleport.
+///
+/// Prefer [`Portal`] via [`crate::world::World::create_portal`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PortalLink {
     pub a: EntityId,
@@ -61,6 +131,14 @@ pub struct PortalLink {
 }
 
 impl PortalLink {
+    pub fn from_portal(portal: Portal) -> Self {
+        Self {
+            a: portal.sides[0],
+            b: portal.sides[1],
+            view: portal.view,
+        }
+    }
+
     /// Each opening that lives in `live`, paired with where it leads.
     ///
     /// A same-space pair (Portal A ↔ B in one room) yields both directions.
@@ -180,6 +258,120 @@ pub fn threshold_camera(
         near: transformed.near,
         far: transformed.far,
     }
+}
+
+/// Minimum distance from the source opening used for portal *rendering* when the
+/// real eye is pressed against the frame. Stops stencil/depth failing in the
+/// last few centimetres before the plane.
+pub fn portal_render_camera(camera: &Camera, src_plane: PortalPlane) -> Camera {
+    let dist = src_plane.signed_distance(camera.eye);
+    let min_dist = camera.near + 0.02;
+    let target_dist = PORTAL_THRESHOLD_SETBACK.max(min_dist);
+    if dist >= target_dist {
+        return camera.clone();
+    }
+    let push = target_dist - dist.max(0.0);
+    let offset = src_plane.normal * push;
+    Camera {
+        eye: camera.eye + offset,
+        target: camera.target + offset,
+        ..camera.clone()
+    }
+}
+
+fn smoothstep01(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn blend_cameras(a: Camera, b: Camera, t: f32) -> Camera {
+    let up = a.up.lerp(b.up, t);
+    if up.length_squared() <= 0.0 {
+        panic!("portal camera blend collapsed the up axis");
+    }
+    Camera {
+        eye: a.eye.lerp(b.eye, t),
+        target: a.target.lerp(b.target, t),
+        up: up.normalize(),
+        fov_y_degrees: a.fov_y_degrees + (b.fov_y_degrees - a.fov_y_degrees) * t,
+        near: a.near + (b.near - a.near) * t,
+        far: a.far + (b.far - a.far) * t,
+    }
+}
+
+fn transformed_portal_view(
+    camera: &Camera,
+    visible: &VisiblePortal,
+    src_plane: PortalPlane,
+) -> Camera {
+    let camera = portal_render_camera(camera, src_plane);
+    let dist = src_plane.signed_distance(camera.eye);
+    let tele = teleport_camera(&camera, visible.src_transform, visible.dst_transform);
+    if dist >= PORTAL_CLOSE_VIEW_DIST {
+        return tele;
+    }
+    let eye_offset_y = camera.eye.y - visible.dst_center.y;
+    let thresh = threshold_camera(
+        &camera,
+        visible.src_transform,
+        visible.dst_transform,
+        visible.dst_center,
+        visible.dst_normal,
+        eye_offset_y,
+        PORTAL_THRESHOLD_SETBACK,
+    );
+    if dist <= PORTAL_THRESHOLD_SETBACK {
+        return thresh;
+    }
+    let span = PORTAL_CLOSE_VIEW_DIST - PORTAL_THRESHOLD_SETBACK;
+    let t = smoothstep01((dist - PORTAL_THRESHOLD_SETBACK) / span);
+    blend_cameras(thresh, tele, t)
+}
+
+/// Virtual camera for drawing through `visible`, stable when pressed against the frame.
+pub fn portal_view_camera(camera: &Camera, visible: &VisiblePortal, src_plane: PortalPlane) -> Camera {
+    match visible.view {
+        PortalView::Threshold {
+            eye_offset_y,
+            setback,
+        } => threshold_camera(
+            camera,
+            visible.src_transform,
+            visible.dst_transform,
+            visible.dst_center,
+            visible.dst_normal,
+            eye_offset_y,
+            setback,
+        ),
+        PortalView::Transformed => transformed_portal_view(camera, visible, src_plane),
+    }
+}
+
+/// True when oblique clipping should be skipped for this portal view.
+pub fn portal_view_is_close(camera: &Camera, visible: &VisiblePortal, src_plane: PortalPlane) -> bool {
+    match visible.view {
+        PortalView::Threshold { .. } => true,
+        PortalView::Transformed => src_plane.signed_distance(camera.eye) < PORTAL_CLOSE_VIEW_DIST,
+    }
+}
+
+/// Oblique near-plane clip for recursive portal draws.
+///
+/// When the viewer is pressed against the frame we already use a threshold
+/// camera; adding oblique clipping there clips away the floor and walls that
+/// should fill the opening (blue clear-color gaps at doorways).
+pub fn portal_destination_clip(
+    camera: &Camera,
+    visible: &VisiblePortal,
+    src_plane: PortalPlane,
+) -> Option<(Vec3, Vec3)> {
+    if portal_view_is_close(camera, visible, src_plane) {
+        return None;
+    }
+    Some((
+        visible.dst_center + visible.dst_normal * 0.02,
+        visible.dst_normal,
+    ))
 }
 
 /// Yaw (degrees, 0 = +Z) after walking through `src` into `dst`.
@@ -378,6 +570,104 @@ mod tests {
         assert!(
             look.z < -0.8,
             "virtual camera should look through dest along −Z, look={look}"
+        );
+    }
+
+    #[test]
+    fn close_transformed_portal_uses_threshold_view() {
+        let src = door(Vec3::new(0.0, 1.0, -1.2), 180.0);
+        let dst = door(Vec3::new(0.0, 1.0, -3.0), 0.0);
+        let src_plane = PortalPlane::from_transform(src, 0.6, 1.0);
+        let dst_plane = PortalPlane::from_transform(dst, 0.6, 1.0);
+        let cam = Camera::look_at(Vec3::new(0.0, 1.6, -1.28), Vec3::new(0.0, 1.6, -3.0));
+        assert!(
+            src_plane.signed_distance(cam.eye) < PORTAL_THRESHOLD_SETBACK,
+            "test eye should be in the pure threshold band"
+        );
+        let virt = threshold_camera(
+            &cam,
+            src,
+            dst,
+            dst_plane.center,
+            dst_plane.normal,
+            cam.eye.y - dst_plane.center.y,
+            PORTAL_THRESHOLD_SETBACK,
+        );
+        let teleported = teleport_camera(&cam, src, dst);
+        assert!(
+            virt.eye.distance(teleported.eye) > 0.01,
+            "close view should not use the fully teleported eye"
+        );
+    }
+
+    #[test]
+    fn transformed_portal_view_blends_at_the_doorway() {
+        let src = door(Vec3::new(0.0, 1.0, -1.2), 180.0);
+        let dst = door(Vec3::new(0.0, 1.0, -3.0), 0.0);
+        let src_plane = PortalPlane::from_transform(src, 0.6, 1.0);
+        let dst_plane = PortalPlane::from_transform(dst, 0.6, 1.0);
+        let visible = VisiblePortal {
+            src: EntityId::test(1),
+            dst: EntityId::test(2),
+            src_transform: src,
+            dst_transform: dst,
+            dst_center: dst_plane.center,
+            dst_normal: dst_plane.normal,
+            dest_space: SpaceId::DEFAULT,
+            view: PortalView::Transformed,
+        };
+        let cam_close = Camera::look_at(Vec3::new(0.0, 1.6, -1.28), Vec3::new(0.0, 1.6, -3.0));
+        let cam_mid = Camera::look_at(Vec3::new(0.0, 1.6, -1.40), Vec3::new(0.0, 1.6, -3.0));
+        let cam_far = Camera::look_at(Vec3::new(0.0, 1.6, -1.56), Vec3::new(0.0, 1.6, -3.0));
+        let close = portal_view_camera(&cam_close, &visible, src_plane);
+        let mid = portal_view_camera(&cam_mid, &visible, src_plane);
+        let far = portal_view_camera(&cam_far, &visible, src_plane);
+        let tele = teleport_camera(&cam_far, src, dst);
+        assert!(
+            mid.eye.distance(close.eye) > 0.01 && mid.eye.distance(far.eye) > 0.01,
+            "blend band should sit between threshold and teleported eyes"
+        );
+        assert!(
+            far.eye.distance(tele.eye) < 1e-4,
+            "far doorway view should match the teleported camera"
+        );
+    }
+
+    #[test]
+    fn teleport_setback_clears_close_render_band() {
+        assert!(
+            PORTAL_TELEPORT_SETBACK > PORTAL_CLOSE_VIEW_DIST,
+            "post-teleport pose must leave the doorway close band"
+        );
+    }
+
+    #[test]
+    fn inside_house_threshold_view_sees_yard_floor() {
+        let door_out = door(Vec3::new(0.0, 1.1, -3.0), 180.0);
+        let door_in = door(Vec3::new(0.0, 1.1, -4.0), 0.0);
+        let src_plane = PortalPlane::from_transform(door_in, 0.6, 1.1);
+        let dst_plane = PortalPlane::from_transform(door_out, 0.6, 1.1);
+        let cam = Camera::first_person(Vec3::new(0.0, 1.6, -3.85), 180.0, 0.0);
+        assert!(
+            src_plane.signed_distance(cam.eye) < PORTAL_CLOSE_VIEW_DIST,
+            "doorway pose should use the close threshold path"
+        );
+        let virt = threshold_camera(
+            &cam,
+            door_in,
+            door_out,
+            dst_plane.center,
+            dst_plane.normal,
+            cam.eye.y - dst_plane.center.y,
+            PORTAL_THRESHOLD_SETBACK,
+        );
+        let vp = virt.view_projection(16.0 / 9.0);
+        let yard_floor = Vec3::new(0.0, 0.0, -6.0);
+        assert!(
+            clip_contains(vp, yard_floor),
+            "threshold view from inside should see the yard, eye={:?} look={:?}",
+            virt.eye,
+            virt.target - virt.eye
         );
     }
 

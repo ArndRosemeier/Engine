@@ -229,6 +229,7 @@ impl GpuTerrainMaterial {
 
 pub struct TerrainPipelines {
     pub opaque: wgpu::RenderPipeline,
+    pub opaque_portal: wgpu::RenderPipeline,
     pub mat_bind_layout: wgpu::BindGroupLayout,
     pub sampler: wgpu::Sampler,
 }
@@ -278,42 +279,47 @@ pub fn create_terrain_pipelines(
         push_constant_ranges: &[],
     });
 
-    let opaque = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("terrain-opaque"),
-        layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: &[Vertex::LAYOUT, InstanceRaw::LAYOUT],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: super::DEPTH_FORMAT,
-            depth_write_enabled: true,
-            depth_compare: super::DEPTH_COMPARE,
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    });
+    let make = |label: &str, depth_stencil: wgpu::DepthStencilState| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::LAYOUT, InstanceRaw::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(depth_stencil),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        })
+    };
+
+    let opaque = make(
+        "terrain-opaque",
+        super::stencil::scene_depth_stencil_unmasked(),
+    );
+    let opaque_portal = make(
+        "terrain-opaque-portal",
+        super::stencil::scene_depth_stencil_masked(),
+    );
 
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("terrain-sampler"),
@@ -328,6 +334,7 @@ pub fn create_terrain_pipelines(
 
     TerrainPipelines {
         opaque,
+        opaque_portal,
         mat_bind_layout,
         sampler,
     }

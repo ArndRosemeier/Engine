@@ -1,4 +1,8 @@
-//! Same-room pair, like Portal: look through A, walk out of B.
+//! Same-room portal pair with recursive views (Portal-style hall of mirrors).
+//!
+//! One [`engine::Portal`] links two openings on opposite walls. Look through
+//! either frame to see the room through the other — including portal-in-portal
+//! recursion when they face each other.
 //!
 //! Controls: W/S walk · A/D turn · Shift sprint · Esc quit
 use engine::prelude::*;
@@ -25,6 +29,8 @@ fn main() {
         if frame.first {
             world.set_clear_color(rgb(36, 40, 48));
             world.set_sun((0.35, 1.0, 0.45), 0.32);
+            // Deep enough to see the infinite hallway when portals face each other.
+            world.set_portal_recursion(5);
 
             let concrete = rgb(168, 170, 176);
             let floor = rgb(92, 96, 104);
@@ -36,7 +42,6 @@ fn main() {
             world.spawn(box_at((0.0, 3.2, 0.0), (16.0, 0.1, 20.0), concrete));
             world.spawn(box_at((-8.0, 1.6, 0.0), (0.2, 3.2, 20.0), concrete));
             world.spawn(box_at((8.0, 1.6, 0.0), (0.2, 3.2, 20.0), concrete));
-            // End walls with a hole for each opening.
             world.spawn(box_at((-4.4, 1.6, -10.0), (7.2, 3.2, 0.2), concrete));
             world.spawn(box_at((4.4, 1.6, -10.0), (7.2, 3.2, 0.2), concrete));
             world.spawn(box_at((0.0, 2.72, -10.0), (1.6, 0.96, 0.2), concrete));
@@ -44,6 +49,7 @@ fn main() {
             world.spawn(box_at((4.4, 1.6, 10.0), (7.2, 3.2, 0.2), concrete));
             world.spawn(box_at((0.0, 2.72, 10.0), (1.6, 0.96, 0.2), concrete));
 
+            // Landmarks visible through recursive portal views.
             world.spawn(box_at((-3.2, 0.45, -3.0), (1.2, 0.9, 1.2), orange));
             world.spawn(box_at((3.2, 0.9, 3.0), (0.7, 1.8, 0.7), blue));
             world.spawn(box_at((0.0, 0.02, 0.0), (2.0, 0.04, 2.0), accent));
@@ -65,7 +71,7 @@ fn main() {
                     Place::new(b_at.x, b_at.y, b_at.z).with_yaw_deg(180.0),
                 )
                 .unwrap();
-            world.link(a, b).unwrap();
+            world.create_portal(a, b).unwrap();
         }
 
         yaw += frame.input.axis(Key::D, Key::A) * 90.0 * frame.dt;

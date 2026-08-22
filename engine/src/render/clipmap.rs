@@ -276,7 +276,9 @@ struct RingGpu {
 
 pub struct ClipmapRenderer {
     land_pipeline: wgpu::RenderPipeline,
+    land_pipeline_portal: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
+    water_pipeline_portal: wgpu::RenderPipeline,
     frame_buf: wgpu::Buffer,
     terrain_buf: wgpu::Buffer,
     vertex_buf: wgpu::Buffer,
@@ -357,87 +359,97 @@ impl ClipmapRenderer {
             shader_location: 0,
         }];
 
-        let land_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("clipmap-land"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<ClipVertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &vertex_attrs,
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_land"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: super::DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: super::DEPTH_COMPARE,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        let make_land = |label: &str, depth_stencil: wgpu::DepthStencilState| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<ClipVertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &vertex_attrs,
+                    }],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_land"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(depth_stencil),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
 
-        let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("clipmap-water"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_water"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<ClipVertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &vertex_attrs,
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_water"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: super::DEPTH_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: super::DEPTH_COMPARE,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        let land_pipeline = make_land(
+            "clipmap-land",
+            super::stencil::scene_depth_stencil_unmasked(),
+        );
+        let land_pipeline_portal = make_land(
+            "clipmap-land-portal",
+            super::stencil::scene_depth_stencil_masked(),
+        );
+
+        let make_water = |label: &str, depth_stencil: wgpu::DepthStencilState| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_water"),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<ClipVertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &vertex_attrs,
+                    }],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_water"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(depth_stencil),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+
+        let water_pipeline = make_water(
+            "clipmap-water",
+            super::stencil::scene_depth_stencil_unmasked_write(false),
+        );
+        let water_pipeline_portal = make_water(
+            "clipmap-water-portal",
+            super::stencil::scene_depth_stencil_masked_write(false),
+        );
 
         let frame_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("clipmap-frame"),
@@ -467,7 +479,9 @@ impl ClipmapRenderer {
 
         Self {
             land_pipeline,
+            land_pipeline_portal,
             water_pipeline,
+            water_pipeline_portal,
             frame_buf,
             terrain_buf,
             vertex_buf,
@@ -546,12 +560,17 @@ impl ClipmapRenderer {
         }
     }
 
-    pub fn draw_land<'a>(
-        &'a self,
-        pass: &mut wgpu::RenderPass<'a>,
-        shadow_bind: &'a wgpu::BindGroup,
+    pub fn draw_land(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        shadow_bind: &wgpu::BindGroup,
+        portal_mask: bool,
     ) {
-        pass.set_pipeline(&self.land_pipeline);
+        pass.set_pipeline(if portal_mask {
+            &self.land_pipeline_portal
+        } else {
+            &self.land_pipeline
+        });
         pass.set_bind_group(1, shadow_bind, &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
@@ -563,12 +582,17 @@ impl ClipmapRenderer {
         }
     }
 
-    pub fn draw_water<'a>(
-        &'a self,
-        pass: &mut wgpu::RenderPass<'a>,
-        shadow_bind: &'a wgpu::BindGroup,
+    pub fn draw_water(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        shadow_bind: &wgpu::BindGroup,
+        portal_mask: bool,
     ) {
-        pass.set_pipeline(&self.water_pipeline);
+        pass.set_pipeline(if portal_mask {
+            &self.water_pipeline_portal
+        } else {
+            &self.water_pipeline
+        });
         pass.set_bind_group(1, shadow_bind, &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);

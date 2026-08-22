@@ -8,13 +8,15 @@ mod portal;
 mod shadow;
 mod skinned;
 mod sky_pipeline;
+mod stencil;
 mod terrain_pipeline;
 mod water_pipeline;
 
 use crate::camera::Camera;
 use crate::mesh::InstanceRaw;
 use crate::portal::{
-    oblique_view_projection, teleport_camera, threshold_camera, PortalView, SpaceId,
+    oblique_view_projection, portal_destination_clip, portal_render_camera, portal_view_camera,
+    SpaceId,
 };
 use crate::texture::{MaterialId, TextureId, WaterMaterialId};
 use crate::world::{Entity, EntityId, InstanceSubmit, ShadowSettings, SurfaceMaterialRef, World};
@@ -191,11 +193,10 @@ struct BatchSourceState {
 
 pub(crate) const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::Greater;
 pub(crate) const DEPTH_CLEAR: f32 = 0.0;
-pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+pub(crate) use stencil::DEPTH_FORMAT;
 
 enum SceneUniformTarget {
     Main,
-    Portal,
 }
 
 pub struct Renderer {
@@ -290,16 +291,19 @@ impl Renderer {
             .expect("no suitable GPU adapter");
 
         let gpu_profile_interval = GpuProfiler::requested_interval();
-        let required_features = if gpu_profile_interval.is_some() {
+        let portal_depth = wgpu::Features::DEPTH32FLOAT_STENCIL8;
+        if !adapter.features().contains(portal_depth) {
+            panic!("GPU adapter does not support DEPTH32FLOAT_STENCIL8 (required for portals)");
+        }
+        let mut required_features = portal_depth;
+        if gpu_profile_interval.is_some() {
             let timestamp_features =
                 wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
             if !adapter.features().contains(timestamp_features) {
                 panic!("ENGINE_GPU_PROFILE_EVERY requested unsupported GPU timestamp queries");
             }
-            timestamp_features
-        } else {
-            wgpu::Features::empty()
-        };
+            required_features |= timestamp_features;
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("engine-device"),
@@ -355,14 +359,7 @@ impl Renderer {
             &pipelines.albedo_layout,
         );
         let sky = create_sky_pipelines(&device, format);
-        let portal = PortalGpu::new(
-            &device,
-            format,
-            config.width,
-            config.height,
-            &pipelines.bind_layout,
-            &shadow,
-        );
+        let portal = PortalGpu::new(&device, format, &pipelines.bind_layout);
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
         let instance_cull = InstanceCull::new(&device);
         let gpu_profiler = gpu_profile_interval
@@ -446,12 +443,7 @@ impl Renderer {
             create_depth(&self.device, self.config.width, self.config.height);
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
-        self.portal.resize(
-            &self.device,
-            self.config.format,
-            self.config.width,
-            self.config.height,
-        );
+        self.portal.resize();
         self.last_color = None;
     }
 
@@ -1069,7 +1061,10 @@ impl Renderer {
         camera: &Camera,
         clip_plane: Option<(glam::Vec3, glam::Vec3)>,
         target: SceneUniformTarget,
+        slot: usize,
     ) {
+        let _ = target;
+        let slot = slot.min(pipeline::SCENE_UNIFORM_SLOTS - 1);
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         let vp = match clip_plane {
             Some((point, normal)) => oblique_view_projection(camera, aspect, point, normal),
@@ -1097,19 +1092,16 @@ impl Renderer {
         };
         // Destination and live views share one encoder. Queue writes land
         // before that encoder runs, so they cannot share a uniform buffer.
-        let uniform_buf = match target {
-            SceneUniformTarget::Main => &self.pipelines.uniform_buf,
-            SceneUniformTarget::Portal => &self.portal.scene_uniform_buf,
-        };
+        let (uniform_buf, _) = self.pipelines.scene_uniforms.get(slot);
         self.queue
             .write_buffer(uniform_buf, 0, bytemuck::bytes_of(&uniforms));
-        if matches!(target, SceneUniformTarget::Main) {
-            if let Some(sky) = world.sky() {
-                let sky_u =
-                    SkyUniforms::from_scene(&sky, camera, &world.light, aspect, world.time());
-                self.queue
-                    .write_buffer(&self.sky.uniform_buf, 0, bytemuck::bytes_of(&sky_u));
-            }
+        if let Some(sky) = world.sky() {
+            let sky_u = SkyUniforms::from_scene(&sky, camera, &world.light, aspect, world.time());
+            self.queue.write_buffer(
+                &self.sky.uniform_bufs[slot],
+                0,
+                bytemuck::bytes_of(&sky_u),
+            );
         }
     }
 
@@ -1118,98 +1110,42 @@ impl Renderer {
         self.gpu_stats.shadow_atlas = self.shadow.atlas_wrote();
     }
 
+    fn main_scene_camera(world: &World) -> Camera {
+        let camera = &world.camera;
+        let look = camera.target - camera.eye;
+        if look.length_squared() <= 0.0 {
+            return camera.clone();
+        }
+        let live = world.living_in();
+        world
+            .visible_portals(camera.eye, look, live)
+            .into_iter()
+            .find_map(|visible| {
+                world
+                    .portal_plane(visible.src)
+                    .ok()
+                    .map(|plane| portal_render_camera(camera, plane))
+            })
+            .unwrap_or_else(|| camera.clone())
+    }
+
     fn encode_world(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         color: &wgpu::TextureView,
         world: &World,
     ) {
-        self.write_scene_uniforms(world, &world.camera, None, SceneUniformTarget::Main);
+        let scene_camera = Self::main_scene_camera(world);
+        self.write_scene_uniforms(world, &scene_camera, None, SceneUniformTarget::Main, 0);
         self.write_shadows(world);
         self.begin_instance_cull_frame(world);
         self.encode_shadow_pass(encoder, world);
-        let blit = self.encode_portal_view(encoder, world);
-        self.write_scene_uniforms(world, &world.camera, None, SceneUniformTarget::Main);
+
         let live = world.living_in();
-        let depth = self.depth_view.clone();
-        self.encode_pass(
-            encoder,
-            color,
-            &depth,
-            world,
-            live,
-            world.space_draws_environment(live),
-            blit,
-            false,
-        );
-    }
-
-    fn encode_portal_view(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        world: &World,
-    ) -> Option<EntityId> {
-        let look = world.camera.target - world.camera.eye;
-        if look.length_squared() <= 0.0 {
-            return None;
-        }
-        let visible = world.visible_portal(world.camera.eye, look)?;
-        let virt = match visible.view {
-            PortalView::Transformed => {
-                teleport_camera(&world.camera, visible.src_transform, visible.dst_transform)
-            }
-            PortalView::Threshold {
-                eye_offset_y,
-                setback,
-            } => threshold_camera(
-                &world.camera,
-                visible.src_transform,
-                visible.dst_transform,
-                visible.dst_center,
-                visible.dst_normal,
-                eye_offset_y,
-                setback,
-            ),
-        };
-        let clip_point = visible.dst_center + visible.dst_normal * 0.02;
-        self.write_scene_uniforms(
-            world,
-            &virt,
-            Some((clip_point, visible.dst_normal)),
-            SceneUniformTarget::Portal,
-        );
-        let color = self.portal.color_view.clone();
-        let depth = self.portal.depth_view.clone();
-        self.encode_pass(
-            encoder,
-            &color,
-            &depth,
-            world,
-            visible.dest_space,
-            world.space_draws_environment(visible.dest_space),
-            None,
-            true,
-        );
-        Some(visible.src)
-    }
-
-    fn encode_pass(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        view: &wgpu::TextureView,
-        depth_view: &wgpu::TextureView,
-        world: &World,
-        space: SpaceId,
-        draw_environment: bool,
-        blit_portal: Option<EntityId>,
-        force_direct: bool,
-    ) {
-        self.collect_draws(world, space);
-        if !force_direct {
-            self.prepare_terrain_bundle(world);
-        }
+        self.collect_draws(world, live, true);
+        self.prepare_terrain_bundle(world);
         let submit = world.instance_submit();
-        let main_cull = if !force_direct && submit == InstanceSubmit::GpuIndirect {
+        let main_cull = if submit == InstanceSubmit::GpuIndirect {
             let frustum = self.frustum;
             let selection = self.select_main_culls(&frustum);
             self.dispatch_instance_cull(encoder, &frustum, &selection.ids, CullView::Main);
@@ -1222,10 +1158,11 @@ impl Renderer {
         };
 
         let clear = world.clear_color.to_vec3();
+        let depth = self.depth_view.clone();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("main-pass"),
+            label: Some("world-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
+                view: color,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -1238,35 +1175,241 @@ impl Renderer {
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth_view,
+                view: &depth,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(DEPTH_CLEAR),
                     store: wgpu::StoreOp::Store,
                 }),
-                stencil_ops: None,
+                stencil_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(0),
+                    store: wgpu::StoreOp::Store,
+                }),
             }),
             occlusion_query_set: None,
             timestamp_writes: None,
         });
 
-        if draw_environment && world.sky().is_some() {
-            pass.set_pipeline(&self.sky.pipeline);
-            pass.set_bind_group(0, &self.sky.bind_group, &[]);
-            pass.draw(0..3, 0..1);
+        self.render_portal_level(
+            &mut pass,
+            world,
+            &scene_camera,
+            live,
+            0,
+            None,
+            world.space_draws_environment(live),
+            &main_cull,
+            true,
+        );
+    }
+
+    fn render_portal_level<'a>(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'a>,
+        world: &World,
+        camera: &Camera,
+        space: SpaceId,
+        level: u8,
+        clip_plane: Option<(glam::Vec3, glam::Vec3)>,
+        draw_environment: bool,
+        main_cull: &MainCullSelection,
+        use_cull: bool,
+    ) {
+        let look = camera.target - camera.eye;
+        if look.length_squared() <= 0.0 {
+            return;
+        }
+        let portals = world.visible_portals(camera.eye, look, space);
+        let scene_camera = portals
+            .first()
+            .and_then(|visible| world.portal_plane(visible.src).ok())
+            .map(|plane| portal_render_camera(camera, plane))
+            .unwrap_or_else(|| camera.clone());
+        self.write_scene_uniforms(
+            world,
+            &scene_camera,
+            clip_plane,
+            SceneUniformTarget::Main,
+            usize::from(level),
+        );
+        pass.set_stencil_reference(u32::from(level));
+        let uniform_slot = usize::from(level);
+
+        self.draw_space_scene(
+            pass,
+            world,
+            space,
+            draw_environment,
+            main_cull,
+            use_cull,
+            level > 0,
+            level,
+            uniform_slot,
+        );
+
+        if level >= world.portal_recursion() {
+            return;
         }
 
-        // GPU procgen terrain (depth-writing land), then entity meshes.
+        if portals.is_empty() {
+            return;
+        }
+
+        for visible in portals {
+            if !self.portal_in_frustum(world, visible.src, camera.eye) {
+                continue;
+            }
+            let src_plane = world
+                .portal_plane(visible.src)
+                .expect("visible portal has a plane");
+            let render_cam = portal_render_camera(camera, src_plane);
+            self.write_scene_uniforms(
+                world,
+                &render_cam,
+                clip_plane,
+                SceneUniformTarget::Main,
+                uniform_slot,
+            );
+            self.draw_portal_stencil_incr(pass, world, visible.src, level, uniform_slot);
+            pass.set_pipeline(&self.portal.depth_clear);
+            pass.set_stencil_reference(u32::from(level + 1));
+            pass.draw(0..3, 0..1);
+
+            let virt = portal_view_camera(&render_cam, &visible, src_plane);
+            let dest_clip = portal_destination_clip(&render_cam, &visible, src_plane);
+            let dest_env = world.space_draws_environment(visible.dest_space);
+            // Cull destination draws with the virtual camera's normal frustum.
+            // Oblique clipping is applied when the pass actually draws; using it
+            // here over-tightens culling and drops the whole yard at doorways.
+            self.write_scene_uniforms(
+                world,
+                &virt,
+                None,
+                SceneUniformTarget::Main,
+                usize::from(level + 1),
+            );
+            self.collect_draws(world, visible.dest_space, false);
+            self.render_portal_level(
+                pass,
+                world,
+                &virt,
+                visible.dest_space,
+                level + 1,
+                dest_clip,
+                dest_env,
+                main_cull,
+                false,
+            );
+            self.write_scene_uniforms(
+                world,
+                camera,
+                clip_plane,
+                SceneUniformTarget::Main,
+                usize::from(level),
+            );
+            self.collect_draws(world, space, true);
+            self.draw_portal_stencil_decr(pass, world, visible.src, level + 1, uniform_slot);
+        }
+    }
+
+    fn portal_in_frustum(&self, world: &World, id: EntityId, eye: glam::Vec3) -> bool {
+        let plane = world
+            .portal_plane(id)
+            .expect("portal surface has a plane");
+        if plane.signed_distance(eye) < crate::portal::PORTAL_CLOSE_VIEW_DIST {
+            return true;
+        }
+        let radius = (plane.half_width * plane.half_width + plane.half_height * plane.half_height)
+            .sqrt();
+        self.frustum.intersects(Bounds {
+            centre: plane.center,
+            radius,
+        })
+    }
+
+    fn draw_portal_stencil_incr<'a>(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'a>,
+        _world: &World,
+        id: EntityId,
+        level: u8,
+        uniform_slot: usize,
+    ) {
+        pass.set_pipeline(&self.portal.stencil_incr);
+        pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
+        pass.set_stencil_reference(u32::from(level));
+        self.draw_portal_mesh(pass, id);
+    }
+
+    fn draw_portal_stencil_decr<'a>(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'a>,
+        _world: &World,
+        id: EntityId,
+        level: u8,
+        uniform_slot: usize,
+    ) {
+        pass.set_pipeline(&self.portal.stencil_decr);
+        pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
+        pass.set_stencil_reference(u32::from(level));
+        self.draw_portal_mesh(pass, id);
+    }
+
+    fn draw_portal_mesh(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'_>,
+        id: EntityId,
+    ) {
+        let gpu = self.gpu_meshes.get(&id).expect("portal mesh is synced");
+        submit_mesh_draw(
+            pass,
+            gpu,
+            MeshSubmit::Direct,
+            0..gpu.index_count as u32,
+            OPAQUE_INDIRECT_OFFSET,
+            &mut self.gpu_stats.indirect_draws,
+        );
+    }
+
+    fn draw_space_scene(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'_>,
+        world: &World,
+        space: SpaceId,
+        draw_environment: bool,
+        main_cull: &MainCullSelection,
+        use_cull: bool,
+        portal_mask: bool,
+        level: u8,
+        uniform_slot: usize,
+    ) {
+        pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
+
+        if draw_environment && world.sky().is_some() {
+            pass.set_pipeline(if portal_mask {
+                &self.sky.pipeline_portal
+            } else {
+                &self.sky.pipeline
+            });
+            pass.set_bind_group(0, self.sky.bind_group(usize::from(level)), &[]);
+            pass.draw(0..3, 0..1);
+            pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
+        }
+
         if draw_environment {
             if let Some(clip) = self.clipmap.as_ref() {
-                clip.draw_land(&mut pass, &self.shadow.resource_bind);
+                clip.draw_land(pass, &self.shadow.resource_bind, portal_mask);
             }
         }
 
-        pass.set_bind_group(0, self.scene_bind(force_direct), &[]);
-
-        // Opaque untextured, then terrain-textured, then skinned / transparent.
-        pass.set_pipeline(&self.pipelines.opaque);
+        pass.set_pipeline(if portal_mask {
+            &self.pipelines.opaque_portal
+        } else {
+            &self.pipelines.opaque
+        });
         for &id in &self.draw_opaque {
+            if !entity_in_space(world, id, space) {
+                continue;
+            }
             let entity = world.entity(id).expect("draw list is live");
             let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
             let albedo = entity
@@ -1275,15 +1418,22 @@ impl Renderer {
                 .unwrap_or(&self.pipelines.white_albedo);
             pass.set_bind_group(1, albedo, &[]);
             submit_mesh_draw(
-                &mut pass,
+                pass,
                 gpu,
-                mesh_submit(&main_cull.compacted, id),
+                if use_cull {
+                    mesh_submit(&main_cull.compacted, id)
+                } else {
+                    MeshSubmit::Direct
+                },
                 0..gpu.opaque_index_count as u32,
                 OPAQUE_INDIRECT_OFFSET,
                 &mut self.gpu_stats.indirect_draws,
             );
         }
         for &prototype in &self.batch_opaque {
+            if !entity_in_space(world, prototype, space) {
+                continue;
+            }
             let entity = world
                 .entity(prototype)
                 .expect("batch draw prototype is live");
@@ -1298,24 +1448,35 @@ impl Renderer {
                 .unwrap_or(&self.pipelines.white_albedo);
             pass.set_bind_group(1, albedo, &[]);
             submit_mesh_draw(
-                &mut pass,
+                pass,
                 gpu,
-                mesh_submit(&main_cull.compacted, prototype),
+                if use_cull {
+                    mesh_submit(&main_cull.compacted, prototype)
+                } else {
+                    MeshSubmit::Direct
+                },
                 0..gpu.opaque_index_count as u32,
                 OPAQUE_INDIRECT_OFFSET,
                 &mut self.gpu_stats.indirect_draws,
             );
         }
 
-        if !force_direct {
+        if use_cull {
             if let Some(bundle) = self.terrain_bundle.as_ref() {
                 pass.execute_bundles(std::iter::once(bundle));
             }
         }
-        pass.set_bind_group(0, self.scene_bind(force_direct), &[]);
-        pass.set_pipeline(&self.terrain.opaque);
-        if force_direct {
+        pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
+        pass.set_pipeline(if portal_mask {
+            &self.terrain.opaque_portal
+        } else {
+            &self.terrain.opaque
+        });
+        if !use_cull {
             for &id in &self.draw_terrain {
+                if !entity_in_space(world, id, space) {
+                    continue;
+                }
                 let entity = world.entity(id).expect("draw list is live");
                 let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
                 let Some(SurfaceMaterialRef::Terrain(mid)) = entity.material else {
@@ -1327,7 +1488,7 @@ impl Renderer {
                     .unwrap_or_else(|| panic!("terrain entity {id} material is not synced"));
                 pass.set_bind_group(1, &mat.bind_group, &[]);
                 submit_mesh_draw(
-                    &mut pass,
+                    pass,
                     gpu,
                     MeshSubmit::Direct,
                     0..gpu.opaque_index_count as u32,
@@ -1337,6 +1498,9 @@ impl Renderer {
             }
         }
         for &prototype in &self.batch_terrain {
+            if !entity_in_space(world, prototype, space) {
+                continue;
+            }
             let entity = world
                 .entity(prototype)
                 .expect("batch draw prototype is live");
@@ -1354,16 +1518,24 @@ impl Renderer {
                 .unwrap_or_else(|| panic!("terrain batch {prototype} material is not synced"));
             pass.set_bind_group(1, &mat.bind_group, &[]);
             submit_mesh_draw(
-                &mut pass,
+                pass,
                 gpu,
-                mesh_submit(&main_cull.compacted, prototype),
+                if use_cull {
+                    mesh_submit(&main_cull.compacted, prototype)
+                } else {
+                    MeshSubmit::Direct
+                },
                 0..gpu.opaque_index_count as u32,
                 OPAQUE_INDIRECT_OFFSET,
                 &mut self.gpu_stats.indirect_draws,
             );
         }
 
-        pass.set_pipeline(&self.skinned.opaque);
+        pass.set_pipeline(if portal_mask {
+            &self.skinned.opaque_portal
+        } else {
+            &self.skinned.opaque
+        });
         for (id, anim) in world.animated_entities() {
             if anim.space() != space {
                 continue;
@@ -1380,26 +1552,17 @@ impl Renderer {
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
         }
-        // Restore scene bind group for subsequent passes.
-        pass.set_bind_group(0, self.scene_bind(force_direct), &[]);
+        pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
 
-        if let Some(src) = blit_portal {
-            let gpu = self.gpu_meshes.get(&src).expect("portal mesh is synced");
-            pass.set_pipeline(&self.portal.pipeline);
-            pass.set_bind_group(1, &self.portal.bind_group, &[]);
-            submit_mesh_draw(
-                &mut pass,
-                gpu,
-                MeshSubmit::Direct,
-                0..gpu.index_count as u32,
-                OPAQUE_INDIRECT_OFFSET,
-                &mut self.gpu_stats.indirect_draws,
-            );
-            pass.set_bind_group(0, self.scene_bind(force_direct), &[]);
-        }
-
-        pass.set_pipeline(&self.pipelines.transparent);
+        pass.set_pipeline(if portal_mask {
+            &self.pipelines.transparent_portal
+        } else {
+            &self.pipelines.transparent
+        });
         for &id in &self.draw_transparent {
+            if !entity_in_space(world, id, space) {
+                continue;
+            }
             let entity = world.entity(id).expect("draw list is live");
             let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
             let albedo = entity
@@ -1408,15 +1571,22 @@ impl Renderer {
                 .unwrap_or(&self.pipelines.white_albedo);
             pass.set_bind_group(1, albedo, &[]);
             submit_mesh_draw(
-                &mut pass,
+                pass,
                 gpu,
-                mesh_submit(&main_cull.compacted, id),
+                if use_cull {
+                    mesh_submit(&main_cull.compacted, id)
+                } else {
+                    MeshSubmit::Direct
+                },
                 gpu.opaque_index_count as u32..gpu.index_count as u32,
                 TRANSLUCENT_INDIRECT_OFFSET,
                 &mut self.gpu_stats.indirect_draws,
             );
         }
         for &prototype in &self.batch_transparent {
+            if !entity_in_space(world, prototype, space) {
+                continue;
+            }
             let entity = world
                 .entity(prototype)
                 .expect("batch draw prototype is live");
@@ -1431,19 +1601,28 @@ impl Renderer {
                 .unwrap_or(&self.pipelines.white_albedo);
             pass.set_bind_group(1, albedo, &[]);
             submit_mesh_draw(
-                &mut pass,
+                pass,
                 gpu,
-                mesh_submit(&main_cull.compacted, prototype),
+                if use_cull {
+                    mesh_submit(&main_cull.compacted, prototype)
+                } else {
+                    MeshSubmit::Direct
+                },
                 gpu.opaque_index_count as u32..gpu.index_count as u32,
                 TRANSLUCENT_INDIRECT_OFFSET,
                 &mut self.gpu_stats.indirect_draws,
             );
         }
 
-        // Water sheets last, so everything standing in them is already in the
-        // colour buffer to blend against.
-        pass.set_pipeline(&self.water.blend);
+        pass.set_pipeline(if portal_mask {
+            &self.water.blend_portal
+        } else {
+            &self.water.blend
+        });
         for &id in &self.draw_water {
+            if !entity_in_space(world, id, space) {
+                continue;
+            }
             let entity = world.entity(id).expect("draw list is live");
             let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
             let Some(SurfaceMaterialRef::Water(mid)) = entity.material else {
@@ -1454,15 +1633,22 @@ impl Renderer {
             };
             pass.set_bind_group(1, &mat.bind_group, &[]);
             submit_mesh_draw(
-                &mut pass,
+                pass,
                 gpu,
-                mesh_submit(&main_cull.compacted, id),
+                if use_cull {
+                    mesh_submit(&main_cull.compacted, id)
+                } else {
+                    MeshSubmit::Direct
+                },
                 gpu.opaque_index_count as u32..gpu.index_count as u32,
                 TRANSLUCENT_INDIRECT_OFFSET,
                 &mut self.gpu_stats.indirect_draws,
             );
         }
         for &prototype in &self.batch_water {
+            if !entity_in_space(world, prototype, space) {
+                continue;
+            }
             let entity = world
                 .entity(prototype)
                 .expect("batch draw prototype is live");
@@ -1480,19 +1666,22 @@ impl Renderer {
                 .unwrap_or_else(|| panic!("water batch {prototype} material is not synced"));
             pass.set_bind_group(1, &mat.bind_group, &[]);
             submit_mesh_draw(
-                &mut pass,
+                pass,
                 gpu,
-                mesh_submit(&main_cull.compacted, prototype),
+                if use_cull {
+                    mesh_submit(&main_cull.compacted, prototype)
+                } else {
+                    MeshSubmit::Direct
+                },
                 gpu.opaque_index_count as u32..gpu.index_count as u32,
                 TRANSLUCENT_INDIRECT_OFFSET,
                 &mut self.gpu_stats.indirect_draws,
             );
         }
 
-        // Translucent clipmap water after meshes so the walker can occlude shorelines.
         if draw_environment {
             if let Some(clip) = self.clipmap.as_ref() {
-                clip.draw_water(&mut pass, &self.shadow.resource_bind);
+                clip.draw_water(pass, &self.shadow.resource_bind, portal_mask);
             }
         }
     }
@@ -1519,7 +1708,7 @@ impl Renderer {
                     label: Some("visible-shadow-casters"),
                     color_formats: &[],
                     depth_stencil: Some(wgpu::RenderBundleDepthStencil {
-                        format: DEPTH_FORMAT,
+                        format: wgpu::TextureFormat::Depth32Float,
                         depth_read_only: false,
                         stencil_read_only: true,
                     }),
@@ -1859,7 +2048,7 @@ impl Renderer {
                     sample_count: 1,
                     multiview: None,
                 });
-        bundle.set_bind_group(0, &self.pipelines.bind_group, &[]);
+        bundle.set_bind_group(0, self.pipelines.scene_bind_group(0), &[]);
         bundle.set_pipeline(&self.terrain.opaque);
         for &id in &self.draw_terrain {
             let entity = world
@@ -1891,7 +2080,7 @@ impl Renderer {
         }));
     }
 
-    fn collect_draws(&mut self, world: &World, space: SpaceId) {
+    fn collect_draws(&mut self, world: &World, space: SpaceId, frustum_cull: bool) {
         if self.draw_source_epoch != world.render_epoch() {
             self.rebuild_draw_sources(world);
             self.draw_source_epoch = world.render_epoch();
@@ -1907,12 +2096,16 @@ impl Renderer {
         self.batch_water.clear();
 
         let frustum = self.frustum;
+        let visible = |gpu: &GpuMesh| {
+            gpu.instance_count > 0
+                && (!frustum_cull || gpu.bounds.is_some_and(|b| frustum.intersects(b)))
+        };
         for &id in &self.source_opaque {
             if !entity_in_space(world, id, space) {
                 continue;
             }
             let gpu = self.gpu_meshes.get(&id).expect("opaque source is synced");
-            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+            if visible(gpu) {
                 self.draw_opaque.push(id);
             }
         }
@@ -1921,7 +2114,7 @@ impl Renderer {
                 continue;
             }
             let gpu = self.gpu_meshes.get(&id).expect("terrain source is synced");
-            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+            if visible(gpu) {
                 self.draw_terrain.push(id);
             }
         }
@@ -1933,7 +2126,7 @@ impl Renderer {
                 .gpu_meshes
                 .get(&id)
                 .expect("transparent source is synced");
-            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+            if visible(gpu) {
                 self.draw_transparent.push(id);
             }
         }
@@ -1942,7 +2135,7 @@ impl Renderer {
                 continue;
             }
             let gpu = self.gpu_meshes.get(&id).expect("water source is synced");
-            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+            if visible(gpu) {
                 self.draw_water.push(id);
             }
         }
@@ -1955,7 +2148,7 @@ impl Renderer {
                 .get(&prototype)
                 .expect("opaque batch source is synced")
                 .gpu;
-            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+            if visible(gpu) {
                 self.batch_opaque.push(prototype);
             }
         }
@@ -1968,7 +2161,7 @@ impl Renderer {
                 .get(&prototype)
                 .expect("terrain batch source is synced")
                 .gpu;
-            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+            if visible(gpu) {
                 self.batch_terrain.push(prototype);
             }
         }
@@ -1981,7 +2174,7 @@ impl Renderer {
                 .get(&prototype)
                 .expect("transparent batch source is synced")
                 .gpu;
-            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+            if visible(gpu) {
                 self.batch_transparent.push(prototype);
             }
         }
@@ -1994,7 +2187,7 @@ impl Renderer {
                 .get(&prototype)
                 .expect("water batch source is synced")
                 .gpu;
-            if gpu.instance_count > 0 && gpu.bounds.is_some_and(|b| frustum.intersects(b)) {
+            if visible(gpu) {
                 self.batch_water.push(prototype);
             }
         }
@@ -2264,16 +2457,6 @@ fn submit_mesh_draw(
         MeshSubmit::Direct => {
             pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
             pass.draw_indexed(indices, 0, 0..gpu.instance_count as u32);
-        }
-    }
-}
-
-impl Renderer {
-    fn scene_bind(&self, portal_dest: bool) -> &wgpu::BindGroup {
-        if portal_dest {
-            &self.portal.scene_bind_group
-        } else {
-            &self.pipelines.bind_group
         }
     }
 }

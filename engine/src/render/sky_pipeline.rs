@@ -68,8 +68,15 @@ impl SkyUniforms {
 
 pub struct SkyPipelines {
     pub pipeline: wgpu::RenderPipeline,
-    pub bind_group: wgpu::BindGroup,
-    pub uniform_buf: wgpu::Buffer,
+    pub pipeline_portal: wgpu::RenderPipeline,
+    pub uniform_bufs: [wgpu::Buffer; super::pipeline::SCENE_UNIFORM_SLOTS],
+    pub bind_groups: [wgpu::BindGroup; super::pipeline::SCENE_UNIFORM_SLOTS],
+}
+
+impl SkyPipelines {
+    pub fn bind_group(&self, level: usize) -> &wgpu::BindGroup {
+        &self.bind_groups[level.min(super::pipeline::SCENE_UNIFORM_SLOTS - 1)]
+    }
 }
 
 const SHADER: &str = r#"
@@ -219,28 +226,24 @@ pub fn create_sky_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) 
         source: wgpu::ShaderSource::Wgsl(SHADER.into()),
     });
 
-    let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("sky-uniforms"),
-        contents: bytemuck::bytes_of(&SkyUniforms {
-            right: [1.0, 0.0, 0.0],
-            tan_half_fov: 0.5,
-            up: [0.0, 1.0, 0.0],
-            aspect: 1.0,
-            forward: [0.0, 0.0, 1.0],
-            time: 0.0,
-            zenith: [0.2, 0.4, 0.8],
-            curve: 0.2,
-            horizon: [0.7, 0.75, 0.8],
-            sun_cos: 0.999,
-            ground: [0.4, 0.42, 0.44],
-            sun_bloom: 0.97,
-            sun_dir: [0.4, 0.8, 0.3],
-            _pad: 0.0,
-            sun_color: [1.0, 0.95, 0.85],
-            _pad2: 0.0,
-        }),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
+    let empty = SkyUniforms {
+        right: [1.0, 0.0, 0.0],
+        tan_half_fov: 0.5,
+        up: [0.0, 1.0, 0.0],
+        aspect: 1.0,
+        forward: [0.0, 0.0, 1.0],
+        time: 0.0,
+        zenith: [0.2, 0.4, 0.8],
+        curve: 0.2,
+        horizon: [0.7, 0.75, 0.8],
+        sun_cos: 0.999,
+        ground: [0.4, 0.42, 0.44],
+        sun_bloom: 0.97,
+        sun_dir: [0.4, 0.8, 0.3],
+        _pad: 0.0,
+        sun_color: [1.0, 0.95, 0.85],
+        _pad2: 0.0,
+    };
 
     let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("sky-bind-layout"),
@@ -256,13 +259,22 @@ pub fn create_sky_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) 
         }],
     });
 
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("sky-bind"),
-        layout: &bind_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: uniform_buf.as_entire_binding(),
-        }],
+    let uniform_bufs = std::array::from_fn(|slot| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("sky-uniforms-{slot}")),
+            contents: bytemuck::bytes_of(&empty),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        })
+    });
+    let bind_groups = std::array::from_fn(|slot| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&format!("sky-bind-{slot}")),
+            layout: &bind_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_bufs[slot].as_entire_binding(),
+            }],
+        })
     });
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -271,47 +283,49 @@ pub fn create_sky_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) 
         push_constant_ranges: &[],
     });
 
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("sky-pipeline"),
-        layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: &[],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: super::DEPTH_FORMAT,
-            depth_write_enabled: false,
-            // First in the pass: paint every pixel, then ground covers it.
-            depth_compare: wgpu::CompareFunction::Always,
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    });
+    let make = |label: &str, depth_stencil: wgpu::DepthStencilState| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(depth_stencil),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        })
+    };
+
+    let pipeline = make("sky-pipeline", super::stencil::sky_depth_stencil_unmasked());
+    let pipeline_portal = make(
+        "sky-pipeline-portal",
+        super::stencil::sky_depth_stencil_masked(),
+    );
 
     SkyPipelines {
         pipeline,
-        bind_group,
-        uniform_buf,
+        pipeline_portal,
+        uniform_bufs,
+        bind_groups,
     }
 }

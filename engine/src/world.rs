@@ -9,7 +9,8 @@ use crate::limits::EngineLimits;
 use crate::mesh::{AlbedoMap, BuiltMesh, Mesh};
 use crate::place::{GlobalPlace, MeshInstance, Place};
 use crate::portal::{
-    opening_extents, segment_crosses_opening, teleport_yaw, PortalLink, PortalPlane, PortalView,
+    opening_extents, segment_crosses_opening, teleport_yaw, Portal, PortalId, PortalLink,
+    PortalPlane, PortalView, VisiblePortal,
     SpaceId,
 };
 use crate::proc_terrain::{HeightField, ProcTerrain};
@@ -29,6 +30,13 @@ use std::sync::Arc;
 /// Opaque handle to a spawned entity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EntityId(u64);
+
+#[cfg(test)]
+impl EntityId {
+    pub(crate) fn test(id: u64) -> Self {
+        Self(id)
+    }
+}
 
 impl fmt::Display for EntityId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -370,8 +378,13 @@ pub struct World {
     live_space: SpaceId,
     /// Named spaces that also draw sky and clipmap. [`SpaceId::DEFAULT`] always does.
     environment_spaces: HashSet<SpaceId>,
-    portals: Vec<PortalLink>,
+    portals: Vec<Portal>,
+    next_portal_id: u32,
+    /// Max portal-in-portal recursion depth for rendering.
+    portal_recursion: u8,
     travel_prev: Option<(SpaceId, Vec3)>,
+    /// Destination opening ignored for one frame after crossing (prevents ping-pong).
+    travel_gate: Option<EntityId>,
 }
 
 impl Default for World {
@@ -423,7 +436,10 @@ impl Default for World {
             live_space: SpaceId::DEFAULT,
             environment_spaces: HashSet::new(),
             portals: Vec::new(),
+            next_portal_id: 1,
+            portal_recursion: 3,
             travel_prev: None,
+            travel_gate: None,
         }
     }
 }
@@ -648,11 +664,16 @@ impl World {
         Err(EngineError::UnknownEntity)
     }
 
-    /// Two openings become the same hole. Both meshes should face their own
+    /// Two openings become the same portal. Both meshes should face their own
     /// space (`+Z` local). Walking through teleports; looking through shows
     /// the other side as if the world continued.
     pub fn link(&mut self, a: EntityId, b: EntityId) -> EngineResult<()> {
-        self.link_with_view(a, b, PortalView::Transformed)
+        self.create_portal(a, b).map(|_| ())
+    }
+
+    /// Create a portal pair and return its id.
+    pub fn create_portal(&mut self, a: EntityId, b: EntityId) -> EngineResult<PortalId> {
+        self.create_portal_with_view(a, b, PortalView::Transformed)
     }
 
     /// Link two openings with a stable destination view at the threshold.
@@ -666,12 +687,7 @@ impl World {
         eye_offset_y: f32,
         setback: f32,
     ) -> EngineResult<()> {
-        if !eye_offset_y.is_finite() || !setback.is_finite() || setback <= 0.0 {
-            return Err(EngineError::InvalidValue(format!(
-                "portal threshold view needs finite eye offset and positive setback, got ({eye_offset_y}, {setback})"
-            )));
-        }
-        self.link_with_view(
+        self.create_portal_with_view(
             a,
             b,
             PortalView::Threshold {
@@ -679,9 +695,79 @@ impl World {
                 setback,
             },
         )
+        .map(|_| ())
     }
 
-    fn link_with_view(&mut self, a: EntityId, b: EntityId, view: PortalView) -> EngineResult<()> {
+    /// Create a portal with an explicit view mode.
+    pub fn create_portal_with_view(
+        &mut self,
+        a: EntityId,
+        b: EntityId,
+        view: PortalView,
+    ) -> EngineResult<PortalId> {
+        if let PortalView::Threshold {
+            eye_offset_y,
+            setback,
+        } = view
+        {
+            if !eye_offset_y.is_finite() || !setback.is_finite() || setback <= 0.0 {
+                return Err(EngineError::InvalidValue(format!(
+                    "portal threshold view needs finite eye offset and positive setback, got ({eye_offset_y}, {setback})"
+                )));
+            }
+        }
+        self.validate_portal_sides(a, b)?;
+        let id = PortalId::from_raw(self.next_portal_id);
+        self.next_portal_id = self
+            .next_portal_id
+            .checked_add(1)
+            .expect("portal id overflow");
+        self.portals.push(Portal {
+            id,
+            sides: [a, b],
+            view,
+            enabled: true,
+        });
+        self.bump_render_epoch();
+        Ok(id)
+    }
+
+    /// Remove a portal by id. The opening entities stay in the world.
+    pub fn destroy_portal(&mut self, id: PortalId) -> EngineResult<()> {
+        let before = self.portals.len();
+        self.portals.retain(|p| p.id != id);
+        if self.portals.len() == before {
+            return Err(EngineError::InvalidValue(format!(
+                "unknown portal {id:?}"
+            )));
+        }
+        self.bump_render_epoch();
+        Ok(())
+    }
+
+    pub fn set_portal_enabled(&mut self, id: PortalId, enabled: bool) -> EngineResult<()> {
+        let portal = self
+            .portals
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| EngineError::InvalidValue(format!("unknown portal {id:?}")))?;
+        portal.enabled = enabled;
+        self.bump_render_epoch();
+        Ok(())
+    }
+
+    pub fn portal_recursion(&self) -> u8 {
+        self.portal_recursion
+    }
+
+    pub fn set_portal_recursion(&mut self, depth: u8) {
+        if depth == 0 {
+            panic!("portal recursion depth must be at least 1");
+        }
+        self.portal_recursion = depth;
+    }
+
+    fn validate_portal_sides(&self, a: EntityId, b: EntityId) -> EngineResult<()> {
         if a == b {
             return Err(EngineError::InvalidValue(
                 "a portal cannot link an opening to itself".into(),
@@ -699,13 +785,11 @@ impl World {
                 "entity {b} has no XY extent to use as an opening"
             )));
         }
-        if self.is_portal_surface(a) || self.is_portal_surface(b) {
+        if self.is_linked_opening(a) || self.is_linked_opening(b) {
             return Err(EngineError::InvalidValue(
                 "opening is already linked".into(),
             ));
         }
-        self.portals.push(PortalLink { a, b, view });
-        self.bump_render_epoch();
         Ok(())
     }
 
@@ -713,8 +797,7 @@ impl World {
     /// through them no longer teleports until they are linked again.
     pub fn unlink(&mut self, a: EntityId, b: EntityId) -> EngineResult<()> {
         let before = self.portals.len();
-        self.portals
-            .retain(|p| !((p.a == a && p.b == b) || (p.a == b && p.b == a)));
+        self.portals.retain(|p| !((p.sides[0] == a && p.sides[1] == b) || (p.sides[0] == b && p.sides[1] == a)));
         if self.portals.len() == before {
             return Err(EngineError::InvalidValue(
                 "those openings are not linked".into(),
@@ -724,35 +807,45 @@ impl World {
         Ok(())
     }
 
-    pub fn portals(&self) -> &[PortalLink] {
+    pub fn portals(&self) -> &[Portal] {
         &self.portals
     }
 
-    /// Closest opening in the live space that the camera is facing.
-    pub(crate) fn visible_portal(
+    pub fn portal_links(&self) -> Vec<PortalLink> {
+        self.portals.iter().copied().map(PortalLink::from_portal).collect()
+    }
+
+    /// All openings in `live` the camera is facing, nearest first.
+    pub(crate) fn visible_portals(
         &self,
         eye: Vec3,
         look: Vec3,
-    ) -> Option<crate::portal::VisiblePortal> {
+        live: SpaceId,
+    ) -> Vec<VisiblePortal> {
         let look = {
             if look.length_squared() <= 0.0 {
-                panic!("visible_portal look direction is zero");
+                panic!("visible_portals look direction is zero");
             }
             look.normalize()
         };
-        let mut best: Option<(f32, crate::portal::VisiblePortal)> = None;
-        for link in &self.portals {
-            let (Some(a), Some(b)) = (self.entities.get(&link.a), self.entities.get(&link.b))
-            else {
+        let mut found = Vec::new();
+        for portal in &self.portals {
+            if !portal.enabled {
+                continue;
+            }
+            let (Some(a), Some(b)) = (
+                self.entities.get(&portal.sides[0]),
+                self.entities.get(&portal.sides[1]),
+            ) else {
                 continue;
             };
-            for (src, dst) in link.directions(a.space, b.space, self.live_space) {
-                let src_e = if src == link.a { a } else { b };
-                let dst_e = if dst == link.a { a } else { b };
+            for (src, dst) in portal.directions(a.space, b.space, live) {
+                let src_e = if src == portal.sides[0] { a } else { b };
+                let dst_e = if dst == portal.sides[0] { a } else { b };
                 let Ok(src_plane) = self.portal_plane(src) else {
                     continue;
                 };
-                if src_plane.signed_distance(eye) <= 0.05 {
+                if src_plane.signed_distance(eye) <= -crate::portal::PORTAL_VISIBILITY_PLANE_EPS {
                     continue;
                 }
                 if look.dot(-src_plane.normal) <= 0.0 {
@@ -762,26 +855,47 @@ impl World {
                 let Ok(dst_plane) = self.portal_plane(dst) else {
                     continue;
                 };
-                let candidate = crate::portal::VisiblePortal {
-                    src,
-                    dst,
-                    src_transform: src_e.transform,
-                    dst_transform: dst_e.transform,
-                    dst_center: dst_plane.center,
-                    dst_normal: dst_plane.normal,
-                    dest_space: dst_e.space,
-                    view: link.view,
-                };
-                if best.as_ref().is_none_or(|(best_dist, _)| dist < *best_dist) {
-                    best = Some((dist, candidate));
-                }
+                found.push((
+                    dist,
+                    VisiblePortal {
+                        src,
+                        dst,
+                        src_transform: src_e.transform,
+                        dst_transform: dst_e.transform,
+                        dst_center: dst_plane.center,
+                        dst_normal: dst_plane.normal,
+                        dest_space: dst_e.space,
+                        view: portal.view,
+                    },
+                ));
             }
         }
-        best.map(|(_, p)| p)
+        found.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        found.into_iter().map(|(_, p)| p).collect()
+    }
+
+    /// Closest opening in the live space that the camera is facing.
+    #[allow(dead_code)]
+    pub(crate) fn visible_portal(
+        &self,
+        eye: Vec3,
+        look: Vec3,
+    ) -> Option<VisiblePortal> {
+        self.visible_portals(eye, look, self.live_space)
+            .into_iter()
+            .next()
     }
 
     pub fn is_portal_surface(&self, id: EntityId) -> bool {
-        self.portals.iter().any(|p| p.a == id || p.b == id)
+        self.portals
+            .iter()
+            .any(|p| p.enabled && (p.sides[0] == id || p.sides[1] == id))
+    }
+
+    pub(crate) fn is_linked_opening(&self, id: EntityId) -> bool {
+        self.portals
+            .iter()
+            .any(|p| p.sides[0] == id || p.sides[1] == id)
     }
 
     pub(crate) fn portal_plane(&self, id: EntityId) -> EngineResult<PortalPlane> {
@@ -814,14 +928,20 @@ impl World {
                 return None;
             }
         };
-        let links: Vec<PortalLink> = self.portals.clone();
-        for link in links {
-            let a_space = self.entities.get(&link.a).map(|e| e.space);
-            let b_space = self.entities.get(&link.b).map(|e| e.space);
+        let links: Vec<Portal> = self.portals.clone();
+        for portal in links {
+            if !portal.enabled {
+                continue;
+            }
+            let a_space = self.entities.get(&portal.sides[0]).map(|e| e.space);
+            let b_space = self.entities.get(&portal.sides[1]).map(|e| e.space);
             let (Some(a_space), Some(b_space)) = (a_space, b_space) else {
                 continue;
             };
-            for (src, dst) in link.directions(a_space, b_space, live) {
+            for (src, dst) in portal.directions(a_space, b_space, live) {
+                if self.travel_gate == Some(dst) {
+                    continue;
+                }
                 let src_plane = self
                     .portal_plane(src)
                     .expect("linked opening still has a plane");
@@ -835,12 +955,20 @@ impl World {
                 let t_src = src_plane.transform;
                 let t_dst = dst_e.transform;
                 *position = crate::portal::portal_matrix(t_src, t_dst).transform_point3(*position);
+                if dst_e.space != live {
+                    let dst_plane = self
+                        .portal_plane(dst)
+                        .expect("linked opening still has a plane");
+                    *position += dst_plane.normal * crate::portal::PORTAL_TELEPORT_SETBACK;
+                }
                 *yaw_degrees = teleport_yaw(*yaw_degrees, t_src, t_dst);
                 self.live_space = dst_e.space;
                 self.travel_prev = Some((self.live_space, *position));
+                self.travel_gate = Some(dst);
                 return Some(self.live_space);
             }
         }
+        self.travel_gate = None;
         self.travel_prev = Some((live, *position));
         None
     }
@@ -1019,8 +1147,12 @@ impl World {
         self.chunk_entities.retain(|_, eid| *eid != id);
         self.anchored_entities.remove(&id);
         self.anchored_chunks.retain(|_, c| c.entity != id);
-        let linked = self.portals.iter().any(|p| p.a == id || p.b == id);
-        self.portals.retain(|p| p.a != id && p.b != id);
+        let linked = self
+            .portals
+            .iter()
+            .any(|p| p.sides[0] == id || p.sides[1] == id);
+        self.portals
+            .retain(|p| p.sides[0] != id && p.sides[1] != id);
         if removed_static || linked {
             self.bump_render_epoch();
         }

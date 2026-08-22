@@ -185,6 +185,7 @@ impl GpuWaterMaterial {
 
 pub struct WaterPipelines {
     pub blend: wgpu::RenderPipeline,
+    pub blend_portal: wgpu::RenderPipeline,
     pub mat_bind_layout: wgpu::BindGroupLayout,
 }
 
@@ -220,46 +221,52 @@ pub fn create_water_pipelines(
         push_constant_ranges: &[],
     });
 
-    let blend = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("water-blend"),
-        layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: &[Vertex::LAYOUT, InstanceRaw::LAYOUT],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            front_face: wgpu::FrontFace::Ccw,
-            // Readable from below, e.g. standing in a river.
-            cull_mode: None,
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: super::DEPTH_FORMAT,
-            depth_write_enabled: false,
-            depth_compare: super::DEPTH_COMPARE,
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    });
+    let make = |label: &str, depth_stencil: wgpu::DepthStencilState| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::LAYOUT, InstanceRaw::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                // Readable from below, e.g. standing in a river.
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(depth_stencil),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        })
+    };
+
+    let blend = make(
+        "water-blend",
+        super::stencil::scene_depth_stencil_unmasked_write(false),
+    );
+    let blend_portal = make(
+        "water-blend-portal",
+        super::stencil::scene_depth_stencil_masked_write(false),
+    );
 
     WaterPipelines {
         blend,
+        blend_portal,
         mat_bind_layout,
     }
 }

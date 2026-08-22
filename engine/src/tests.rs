@@ -1029,6 +1029,38 @@ fn spaces_keep_spawns_apart() {
 }
 
 #[test]
+fn portals_doorway_stays_visible_inches_from_plane() {
+    use crate::camera::Camera;
+    let mut world = crate::World::default();
+    let house = world.space("house").unwrap();
+    let door_out = world
+        .place(
+            Mesh::opening(1.2, 2.2).unwrap(),
+            Place::new(0.0, 1.1, -3.0).with_yaw_deg(180.0),
+        )
+        .unwrap();
+    let door_in = world
+        .place_in(
+            house,
+            Mesh::opening(1.2, 2.2).unwrap(),
+            Place::new(0.0, 1.1, -4.0),
+        )
+        .unwrap();
+    world.link(door_out, door_in).unwrap();
+    let look = Camera::direction(180.0, 0.0);
+    let plane = world.portal_plane(door_in).unwrap();
+    for z in [-3.96_f32, -3.92, -3.88] {
+        let eye = Vec3::new(0.0, 1.6, z);
+        let dist = plane.signed_distance(eye);
+        let portals = world.visible_portals(eye, look, house);
+        assert!(
+            !portals.is_empty(),
+            "portal should stay visible at z={z}, dist={dist}"
+        );
+    }
+}
+
+#[test]
 fn walking_through_a_door_switches_space() {
     let mut world = crate::World::default();
     let house = world.space("house").unwrap();

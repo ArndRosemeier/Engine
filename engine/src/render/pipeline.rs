@@ -166,11 +166,26 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+pub const SCENE_UNIFORM_SLOTS: usize = 8;
+
+pub struct SceneUniformSlots {
+    pub buffers: [wgpu::Buffer; SCENE_UNIFORM_SLOTS],
+    pub bind_groups: [wgpu::BindGroup; SCENE_UNIFORM_SLOTS],
+}
+
+impl SceneUniformSlots {
+    pub fn get(&self, level: usize) -> (&wgpu::Buffer, &wgpu::BindGroup) {
+        let level = level.min(SCENE_UNIFORM_SLOTS - 1);
+        (&self.buffers[level], &self.bind_groups[level])
+    }
+}
+
 pub struct Pipelines {
     pub opaque: wgpu::RenderPipeline,
     pub transparent: wgpu::RenderPipeline,
-    pub uniform_buf: wgpu::Buffer,
-    pub bind_group: wgpu::BindGroup,
+    pub opaque_portal: wgpu::RenderPipeline,
+    pub transparent_portal: wgpu::RenderPipeline,
+    pub scene_uniforms: SceneUniformSlots,
     pub bind_layout: wgpu::BindGroupLayout,
     pub albedo_layout: wgpu::BindGroupLayout,
     pub albedo_sampler: wgpu::Sampler,
@@ -178,6 +193,12 @@ pub struct Pipelines {
     #[allow(dead_code)]
     pub white_texture: wgpu::Texture,
     pub white_albedo: wgpu::BindGroup,
+}
+
+impl Pipelines {
+    pub fn scene_bind_group(&self, level: usize) -> &wgpu::BindGroup {
+        &self.scene_uniforms.bind_groups[level.min(SCENE_UNIFORM_SLOTS - 1)]
+    }
 }
 
 pub fn create_pipelines(
@@ -191,23 +212,29 @@ pub fn create_pipelines(
         source: wgpu::ShaderSource::Wgsl(format!("{}{SHADER}", scene_shader_prefix()).into()),
     });
 
-    let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("uniforms"),
-        contents: bytemuck::bytes_of(&Uniforms::empty()),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
-
     let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("uniform-layout"),
         entries: &super::shadow::ShadowGpu::scene_layout_entries(),
     });
 
-    let scene_entries = shadow.scene_bind_entries(uniform_buf.as_entire_binding());
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("uniform-bind"),
-        layout: &bind_layout,
-        entries: &scene_entries,
-    });
+    let scene_uniforms = {
+        let buffers = std::array::from_fn(|slot| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("uniforms-{slot}")),
+                contents: bytemuck::bytes_of(&Uniforms::empty()),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            })
+        });
+        let bind_groups = std::array::from_fn(|slot| {
+            let entries = shadow.scene_bind_entries(buffers[slot].as_entire_binding());
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("uniform-bind-{slot}")),
+                layout: &bind_layout,
+                entries: &entries,
+            })
+        });
+        SceneUniformSlots { buffers, bind_groups }
+    };
 
     let albedo_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("mesh-albedo-layout"),
@@ -295,64 +322,79 @@ pub fn create_pipelines(
         push_constant_ranges: &[],
     });
 
-    let make =
-        |label: &str, blend: wgpu::BlendState, depth_write: bool, cull: Option<wgpu::Face>| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[Vertex::LAYOUT, InstanceRaw::LAYOUT],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: Some(blend),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: cull,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: super::DEPTH_FORMAT,
-                    depth_write_enabled: depth_write,
-                    depth_compare: super::DEPTH_COMPARE,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-                cache: None,
-            })
-        };
+    let make = |label: &str,
+                blend: wgpu::BlendState,
+                depth_write: bool,
+                cull: Option<wgpu::Face>,
+                depth_stencil: wgpu::DepthStencilState| {
+        let _ = depth_write;
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::LAYOUT, InstanceRaw::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(blend),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: cull,
+                ..Default::default()
+            },
+            depth_stencil: Some(depth_stencil),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        })
+    };
 
     let opaque = make(
         "opaque-pipeline",
         wgpu::BlendState::REPLACE,
         true,
         Some(wgpu::Face::Back),
+        super::stencil::scene_depth_stencil_unmasked_write(true),
     );
     let transparent = make(
         "transparent-pipeline",
         wgpu::BlendState::ALPHA_BLENDING,
         false,
         None, // water/glass readable from both sides
+        super::stencil::scene_depth_stencil_unmasked_write(false),
+    );
+    let opaque_portal = make(
+        "opaque-portal-pipeline",
+        wgpu::BlendState::REPLACE,
+        true,
+        Some(wgpu::Face::Back),
+        super::stencil::scene_depth_stencil_masked_write(true),
+    );
+    let transparent_portal = make(
+        "transparent-portal-pipeline",
+        wgpu::BlendState::ALPHA_BLENDING,
+        false,
+        None,
+        super::stencil::scene_depth_stencil_masked_write(false),
     );
 
     Pipelines {
         opaque,
         transparent,
-        uniform_buf,
-        bind_group,
+        opaque_portal,
+        transparent_portal,
+        scene_uniforms,
         bind_layout,
         albedo_layout,
         albedo_sampler,
