@@ -1046,7 +1046,9 @@ fn portals_doorway_stays_visible_inches_from_plane() {
             Place::new(0.0, 1.1, -4.0),
         )
         .unwrap();
-    world.create_portal(door_out, door_in, crate::PortalSettings::TELEPORTING).unwrap();
+    world
+        .create_portal(door_out, door_in, crate::PortalSettings::TELEPORTING)
+        .unwrap();
     let look = Camera::direction(180.0, 0.0);
     let plane = world.portal_plane(door_in).unwrap();
     for z in [-3.96_f32, -3.92, -3.88] {
@@ -1137,7 +1139,9 @@ fn same_space_portals_work_in_both_directions() {
             Place::new(0.0, 1.1, 4.0).with_yaw_deg(180.0),
         )
         .unwrap();
-    world.create_portal(a, b, crate::PortalSettings::TELEPORTING).unwrap();
+    world
+        .create_portal(a, b, crate::PortalSettings::TELEPORTING)
+        .unwrap();
 
     let mut pos = Vec3::new(0.0, 1.6, 0.0);
     let mut yaw = 180.0_f32;

@@ -33,7 +33,7 @@ struct FrameUniform {
     eye: [f32; 3],
     /// Metres at which the torch contribution reaches zero.
     torch_radius_m: f32,
-    _pad2: f32,
+    torch_curve: f32,
     /// Viewer-carried point light (rgb + unused); radius 0 switches it off.
     torch_color: [f32; 4],
 }
@@ -62,7 +62,7 @@ struct FrameUniform {
     _pad: f32,
     eye: vec3<f32>,
     torch_radius_m: f32,
-    _pad2: f32,
+    torch_curve: f32,
     torch_color: vec4<f32>,
 };
 
@@ -84,11 +84,10 @@ fn torch_light(world_p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let to_p = world_p - frame.eye;
     let d = length(to_p);
     let reach = max(frame.torch_radius_m, 0.5);
-    let fall = clamp(1.0 - d / reach, 0.0, 1.0);
-    let near = 1.0 / (1.0 + 0.35 * d * d);
+    let fall = pow(clamp(1.0 - d / reach, 0.0, 1.0), max(frame.torch_curve, 0.05));
     let ndl = max(dot(n, -to_p / max(d, 1e-4)), 0.0);
     let wrap = ndl * 0.7 + 0.3;
-    return frame.torch_color.rgb * (fall * fall * near * wrap);
+    return frame.torch_color.rgb * (2.2 * fall * wrap);
 }
 
 struct VsIn {
@@ -544,6 +543,7 @@ impl ClipmapRenderer {
         eye: Vec3,
         torch_color: Vec3,
         torch_radius_m: f32,
+        torch_curve: f32,
         proc: &ProcTerrain,
     ) {
         let frame = FrameUniform {
@@ -554,7 +554,7 @@ impl ClipmapRenderer {
             _pad: 0.0,
             eye: [eye.x, eye.y, eye.z],
             torch_radius_m,
-            _pad2: 0.0,
+            torch_curve,
             torch_color: [torch_color.x, torch_color.y, torch_color.z, 0.0],
         };
         if self.last_frame.as_ref().map(bytemuck::bytes_of) != Some(bytemuck::bytes_of(&frame)) {

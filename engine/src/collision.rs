@@ -829,13 +829,27 @@ mod tests {
             .insert(1, finite_box(2.0, 0.0, 0.25, 4.0, 2.7, 5.4))
             .expect("upper wall");
         let body = ActorBody::player();
-        let through = world.move_in(SpaceId::DEFAULT, &body, GlobalXZ::at(0.0, 0.0), 4.0, 0.0, 0.0);
+        let through = world.move_in(
+            SpaceId::DEFAULT,
+            &body,
+            GlobalXZ::at(0.0, 0.0),
+            4.0,
+            0.0,
+            0.0,
+        );
         assert!(
             (through.x - 4.0).abs() < 1e-6,
             "ground walker should pass under an upper-storey wall, got x={}",
             through.x
         );
-        let blocked = world.move_in(SpaceId::DEFAULT, &body, GlobalXZ::at(0.0, 0.0), 4.0, 0.0, 3.0);
+        let blocked = world.move_in(
+            SpaceId::DEFAULT,
+            &body,
+            GlobalXZ::at(0.0, 0.0),
+            4.0,
+            0.0,
+            3.0,
+        );
         assert!(
             blocked.x < 1.5,
             "loft walker should hit the upper-storey wall, got x={}",

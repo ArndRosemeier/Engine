@@ -395,9 +395,83 @@ fn tileable(n: &Noise, u: f32, v: f32, freq: f32) -> f32 {
     0.5 * (a + b)
 }
 
+/// Generate an eight-cell atlas for generated limestone cave meshes.
+/// Cells cover dry rock, warm/cool strata, damp rock, calcite, algae, iron
+/// stain, and dark talus. The atlas is deterministic for a stable seed.
+pub fn generate_cave_albedo(size: u32, seed: u32) -> (u32, u32, Vec<u8>) {
+    let tile = size.max(32);
+    let width = tile * 4;
+    let height = tile * 2;
+    let n0 = Noise::new(seed ^ 0xCAFE_51A7);
+    let n1 = Noise::new(seed.wrapping_mul(0x9E37_79B9) ^ 0x51A7_3D21);
+    let n2 = Noise::new(seed.wrapping_add(0xA5A5_A5A5));
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    for y in 0..height {
+        for x in 0..width {
+            let kind = (y / tile) * 4 + x / tile;
+            let u = (x % tile) as f32 / tile as f32;
+            let v = (y % tile) as f32 / tile as f32;
+            let grain = 0.5 + 0.5 * tileable(&n0, u, v, 18.0);
+            let strata =
+                (0.5 + 0.5 * (v * 11.0 + 1.8 * tileable(&n1, u, v, 3.0)).sin()).clamp(0.0, 1.0);
+            let vein = smoothstep(0.68, 0.9, 0.5 + 0.5 * tileable(&n2, u, v, 7.0));
+            let (mut r, mut g, mut b) = match kind {
+                0 => (128.0, 116.0, 98.0),
+                1 => (154.0, 132.0, 103.0),
+                2 => (101.0, 113.0, 119.0),
+                3 => (67.0, 81.0, 78.0),
+                4 => (205.0, 198.0, 177.0),
+                5 => (62.0, 112.0, 91.0),
+                6 => (126.0, 73.0, 48.0),
+                _ => (55.0, 50.0, 45.0),
+            };
+            let value = 0.78 + 0.28 * grain + 0.10 * strata;
+            r *= value;
+            g *= value;
+            b *= value;
+            if kind == 4 {
+                r += 28.0 * vein;
+                g += 26.0 * vein;
+                b += 22.0 * vein;
+            }
+            if kind == 6 {
+                r += 22.0 * vein;
+                g += 7.0 * vein;
+            }
+            if kind == 5 {
+                g += 20.0 * vein;
+            }
+            let i = ((y * width + x) * 4) as usize;
+            rgba[i..i + 4].copy_from_slice(&[
+                r.clamp(0.0, 255.0) as u8,
+                g.clamp(0.0, 255.0) as u8,
+                b.clamp(0.0, 255.0) as u8,
+                255,
+            ]);
+        }
+    }
+    (width, height, rgba)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cave_albedo_has_eight_deterministic_material_cells() {
+        let (w, h, first) = generate_cave_albedo(32, 7);
+        let (w2, h2, second) = generate_cave_albedo(32, 7);
+        assert_eq!((w, h), (128, 64));
+        assert_eq!((w, h, first.clone()), (w2, h2, second));
+        let mut cells = Vec::new();
+        for cy in 0..2 {
+            for cx in 0..4 {
+                let i = (((cy * 32 + 16) * w + cx * 32 + 16) * 4) as usize;
+                cells.push([first[i], first[i + 1], first[i + 2]]);
+            }
+        }
+        assert!(cells.windows(2).any(|pair| pair[0] != pair[1]));
+    }
 
     #[test]
     fn albedo_size_and_opaque() {

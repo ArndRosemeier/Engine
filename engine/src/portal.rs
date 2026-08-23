@@ -306,12 +306,20 @@ fn transformed_portal_view(
 }
 
 /// Virtual camera for drawing through `visible`, stable when pressed against the frame.
-pub fn portal_view_camera(camera: &Camera, visible: &VisiblePortal, src_plane: PortalPlane) -> Camera {
+pub fn portal_view_camera(
+    camera: &Camera,
+    visible: &VisiblePortal,
+    src_plane: PortalPlane,
+) -> Camera {
     transformed_portal_view(camera, visible, src_plane)
 }
 
 /// True when oblique clipping should be skipped for this portal view.
-pub fn portal_view_is_close(camera: &Camera, _visible: &VisiblePortal, src_plane: PortalPlane) -> bool {
+pub fn portal_view_is_close(
+    camera: &Camera,
+    _visible: &VisiblePortal,
+    src_plane: PortalPlane,
+) -> bool {
     src_plane.signed_distance(camera.eye) < PORTAL_CLOSE_VIEW_DIST
 }
 

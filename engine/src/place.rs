@@ -289,7 +289,10 @@ mod tests {
         let raw = InstanceRaw::from_matrix_tint(Mat4::IDENTITY, red);
         let bytes = bytes_of(&raw);
         // mat4 = 64 bytes, then linear RGBA.
-        assert_eq!(&bytes[64..80], bytemuck::bytes_of(&[1.0_f32, 0.25, 0.125, 1.0]));
+        assert_eq!(
+            &bytes[64..80],
+            bytemuck::bytes_of(&[1.0_f32, 0.25, 0.125, 1.0])
+        );
         let white = InstanceRaw::from_matrix(Mat4::IDENTITY);
         assert_ne!(&bytes[64..80], &bytemuck::bytes_of(&white)[64..80]);
     }

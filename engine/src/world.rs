@@ -10,7 +10,7 @@ use crate::mesh::{AlbedoMap, BuiltMesh, Mesh};
 use crate::place::{GlobalPlace, MeshInstance, Place};
 use crate::portal::{
     opening_extents, segment_crosses_opening, teleport_yaw, Portal, PortalId, PortalPlane,
-    PortalSettings, VisiblePortal, SpaceId,
+    PortalSettings, SpaceId, VisiblePortal,
 };
 use crate::proc_terrain::{HeightField, ProcTerrain};
 use crate::space::{ChunkId, GlobalPosition, GlobalXZ, RenderOrigin};
@@ -71,6 +71,9 @@ pub struct TorchLight {
     pub color: Color,
     /// Metres at which the torch contribution has faded to nothing.
     pub radius_m: f32,
+    /// Exponent of the smooth distance falloff. Lower values keep more light
+    /// at range; higher values concentrate the torch near the player.
+    pub curve: f32,
 }
 
 impl TorchLight {
@@ -79,6 +82,7 @@ impl TorchLight {
         Self {
             color: Color::rgb(255, 214, 156),
             radius_m: 18.0,
+            curve: 2.0,
         }
     }
 
@@ -86,7 +90,8 @@ impl TorchLight {
     pub fn headlamp() -> Self {
         Self {
             color: Color::rgb(228, 236, 255),
-            radius_m: 26.0,
+            radius_m: 50.0,
+            curve: 1.35,
         }
     }
 }
@@ -554,13 +559,7 @@ impl World {
     /// Slide `from` by `(dx, dz)` using `body`. Collision-off bodies translate.
     /// Only colliders in [`Self::living_in`] that overlap the actor vertically
     /// participate.
-    pub fn move_actor(
-        &self,
-        body: &ActorBody,
-        feet: GlobalPosition,
-        dx: f64,
-        dz: f64,
-    ) -> GlobalXZ {
+    pub fn move_actor(&self, body: &ActorBody, feet: GlobalPosition, dx: f64, dz: f64) -> GlobalXZ {
         self.collision
             .move_in(self.live_space, body, feet.horizontal(), dx, dz, feet.y)
     }
@@ -745,9 +744,7 @@ impl World {
         let before = self.portals.len();
         self.portals.retain(|p| p.id != id);
         if self.portals.len() == before {
-            return Err(EngineError::InvalidValue(format!(
-                "unknown portal {id:?}"
-            )));
+            return Err(EngineError::InvalidValue(format!("unknown portal {id:?}")));
         }
         self.bump_render_epoch();
         Ok(())
@@ -865,11 +862,7 @@ impl World {
 
     /// Closest opening in the live space that the camera is facing.
     #[allow(dead_code)]
-    pub(crate) fn visible_portal(
-        &self,
-        eye: Vec3,
-        look: Vec3,
-    ) -> Option<VisiblePortal> {
+    pub(crate) fn visible_portal(&self, eye: Vec3, look: Vec3) -> Option<VisiblePortal> {
         self.visible_portals(eye, look, self.live_space)
             .into_iter()
             .next()
@@ -1782,7 +1775,8 @@ impl World {
             )));
         }
         e.instances.clear();
-        e.instances.extend(places.iter().copied().map(Place::to_instance));
+        e.instances
+            .extend(places.iter().copied().map(Place::to_instance));
         e.bump_xform();
         self.bump_render_epoch();
         Ok(())

@@ -71,7 +71,9 @@ fn main() {
                     Place::new(b_at.x, b_at.y, b_at.z).with_yaw_deg(180.0),
                 )
                 .unwrap();
-            world.create_portal(a, b, PortalSettings::TELEPORTING).unwrap();
+            world
+                .create_portal(a, b, PortalSettings::TELEPORTING)
+                .unwrap();
         }
 
         yaw += frame.input.axis(Key::D, Key::A) * 90.0 * frame.dt;

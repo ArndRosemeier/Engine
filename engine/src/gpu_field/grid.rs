@@ -37,8 +37,7 @@ impl FieldGrid {
     }
 
     pub fn corner_world(&self, ix: u32, iy: u32, iz: u32) -> Vec3 {
-        self.bounds.min
-            + Vec3::new(ix as f32, iy as f32, iz as f32) * self.bounds.voxel_size
+        self.bounds.min + Vec3::new(ix as f32, iy as f32, iz as f32) * self.bounds.voxel_size
     }
 
     pub fn cell_origin(&self, ix: u32, iy: u32, iz: u32) -> Vec3 {

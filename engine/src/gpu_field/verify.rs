@@ -104,8 +104,7 @@ mod tests {
         if !gpu_tests_enabled() {
             return;
         }
-        let (_grid, _density, gpu_tris, cpu_tris) =
-            run_demo_pipeline().expect("demo pipeline");
+        let (_grid, _density, gpu_tris, cpu_tris) = run_demo_pipeline().expect("demo pipeline");
 
         let ratio = gpu_tris as f32 / cpu_tris as f32;
         assert!(
@@ -152,10 +151,20 @@ mod tests {
         let painted = field.paint(&ctx).expect("paint");
 
         let full = ctx
-            .extract_mesh_lod(&painted.grid, &painted.density, Color::rgb(160, 150, 140), 1)
+            .extract_mesh_lod(
+                &painted.grid,
+                &painted.density,
+                Color::rgb(160, 150, 140),
+                1,
+            )
             .expect("stride-1 extract");
         let coarse = ctx
-            .extract_mesh_lod(&painted.grid, &painted.density, Color::rgb(160, 150, 140), 4)
+            .extract_mesh_lod(
+                &painted.grid,
+                &painted.density,
+                Color::rgb(160, 150, 140),
+                4,
+            )
             .expect("stride-4 extract");
 
         assert!(

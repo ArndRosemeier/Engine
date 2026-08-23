@@ -100,7 +100,9 @@ fn main() {
                 .unwrap();
 
             world.in_space(SpaceId::DEFAULT).unwrap();
-            world.create_portal(door_out, door_in, PortalSettings::TELEPORTING).unwrap();
+            world
+                .create_portal(door_out, door_in, PortalSettings::TELEPORTING)
+                .unwrap();
             world.live_in(SpaceId::DEFAULT).unwrap();
             house
         } else {

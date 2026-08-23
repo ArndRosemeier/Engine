@@ -510,10 +510,8 @@ impl Renderer {
                 let vp = world.camera.view_projection(aspect);
                 let light_dir = world.light.direction.normalize_or_zero();
                 let torch_color = world.torch().map(|t| t.color.to_vec3()).unwrap_or_default();
-                let torch_radius_m = world
-                    .torch()
-                    .map(|t| t.radius_m.max(0.0))
-                    .unwrap_or(0.0);
+                let torch_radius_m = world.torch().map(|t| t.radius_m.max(0.0)).unwrap_or(0.0);
+                let torch_curve = world.torch().map(|t| t.curve.max(0.05)).unwrap_or(2.0);
                 clip.prepare(
                     &self.queue,
                     vp,
@@ -523,6 +521,7 @@ impl Renderer {
                     world.camera.eye,
                     torch_color,
                     torch_radius_m,
+                    torch_curve,
                     proc,
                 );
             }
@@ -650,9 +649,10 @@ impl Renderer {
 
         self.instance_scratch.clear();
         if entity.instanced {
-            self.instance_scratch.extend(entity.instances.iter().map(|inst| {
-                InstanceRaw::from_matrix_tint(entity.transform * inst.transform, inst.tint)
-            }));
+            self.instance_scratch
+                .extend(entity.instances.iter().map(|inst| {
+                    InstanceRaw::from_matrix_tint(entity.transform * inst.transform, inst.tint)
+                }));
         } else {
             self.instance_scratch
                 .push(InstanceRaw::from_matrix(entity.transform));
@@ -803,12 +803,13 @@ impl Renderer {
                             panic!("instance batch source {} disappeared", source.id)
                         });
                         self.instance_scratch.clear();
-                        self.instance_scratch.extend(entity.instances.iter().map(|inst| {
-                            InstanceRaw::from_matrix_tint(
-                                entity.transform * inst.transform,
-                                inst.tint,
-                            )
-                        }));
+                        self.instance_scratch
+                            .extend(entity.instances.iter().map(|inst| {
+                                InstanceRaw::from_matrix_tint(
+                                    entity.transform * inst.transform,
+                                    inst.tint,
+                                )
+                            }));
                         slot.bounds = batch.gpu.bounds_for_instances(&self.instance_scratch);
                         self.instance_scratch
                             .resize(slot.capacity, inactive_instance());
@@ -841,9 +842,10 @@ impl Renderer {
                     .entity(source.id)
                     .unwrap_or_else(|_| panic!("instance batch source {} disappeared", source.id));
                 let start = self.instance_scratch.len();
-                self.instance_scratch.extend(entity.instances.iter().map(|inst| {
-                    InstanceRaw::from_matrix_tint(entity.transform * inst.transform, inst.tint)
-                }));
+                self.instance_scratch
+                    .extend(entity.instances.iter().map(|inst| {
+                        InstanceRaw::from_matrix_tint(entity.transform * inst.transform, inst.tint)
+                    }));
                 let bounds = prototype_gpu.bounds_for_instances(&self.instance_scratch[start..]);
                 let capacity =
                     batch_slot_capacity(source.instance_count.max(source.instance_reserve));
@@ -1124,7 +1126,7 @@ impl Renderer {
             haze_height_m: haze.map(|h| h.height_m.max(1.0)).unwrap_or(1.0),
             haze_base_y: haze.map(|h| h.base_y).unwrap_or(0.0),
             torch_radius_m: torch.map(|t| t.radius_m.max(0.0)).unwrap_or(0.0),
-            _pad2: 0.0,
+            torch_curve: torch.map(|t| t.curve.max(0.05)).unwrap_or(2.0),
             torch_color: torch
                 .map(|t| {
                     let c = t.color.to_vec3();
@@ -1139,11 +1141,8 @@ impl Renderer {
             .write_buffer(uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         if let Some(sky) = world.sky() {
             let sky_u = SkyUniforms::from_scene(&sky, camera, &world.light, aspect, world.time());
-            self.queue.write_buffer(
-                &self.sky.uniform_bufs[slot],
-                0,
-                bytemuck::bytes_of(&sky_u),
-            );
+            self.queue
+                .write_buffer(&self.sky.uniform_bufs[slot], 0, bytemuck::bytes_of(&sky_u));
         }
     }
 
@@ -1374,14 +1373,12 @@ impl Renderer {
     }
 
     fn portal_in_frustum(&self, world: &World, id: EntityId, eye: glam::Vec3) -> bool {
-        let plane = world
-            .portal_plane(id)
-            .expect("portal surface has a plane");
+        let plane = world.portal_plane(id).expect("portal surface has a plane");
         if plane.signed_distance(eye) < crate::portal::PORTAL_CLOSE_VIEW_DIST {
             return true;
         }
-        let radius = (plane.half_width * plane.half_width + plane.half_height * plane.half_height)
-            .sqrt();
+        let radius =
+            (plane.half_width * plane.half_width + plane.half_height * plane.half_height).sqrt();
         self.frustum.intersects(Bounds {
             centre: plane.center,
             radius,
@@ -1416,11 +1413,7 @@ impl Renderer {
         self.draw_portal_mesh(pass, id);
     }
 
-    fn draw_portal_mesh(
-        &mut self,
-        pass: &mut wgpu::RenderPass<'_>,
-        id: EntityId,
-    ) {
+    fn draw_portal_mesh(&mut self, pass: &mut wgpu::RenderPass<'_>, id: EntityId) {
         let gpu = self.gpu_meshes.get(&id).expect("portal mesh is synced");
         submit_mesh_draw(
             pass,

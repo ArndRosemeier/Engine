@@ -130,6 +130,9 @@ mod mesh_append_tests {
         let setup_err = other
             .add_triangle(a, a, bad)
             .expect_err("add_triangle must reject out-of-range id");
-        assert!(matches!(setup_err, crate::error::EngineError::InvalidMesh(_)));
+        assert!(matches!(
+            setup_err,
+            crate::error::EngineError::InvalidMesh(_)
+        ));
     }
 }

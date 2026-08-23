@@ -9,10 +9,10 @@ use glam::UVec3;
 
 use wgpu::util::DeviceExt;
 
+use crate::color::Color;
 use crate::error::{EngineError, EngineResult};
 use crate::marching_cubes::{EDGE_TABLE, TRI_TABLE};
 use crate::mesh::BuiltMesh;
-use crate::color::Color;
 
 use super::custom::CustomFieldKernel;
 use super::grid::FieldGrid;
@@ -305,11 +305,13 @@ impl FieldGpuContext {
         });
         let paint_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("field-paint-pipeline"),
-            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("field-paint-pipeline-layout"),
-                bind_group_layouts: &[&paint_layout],
-                push_constant_ranges: &[],
-            })),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("field-paint-pipeline-layout"),
+                    bind_group_layouts: &[&paint_layout],
+                    push_constant_ranges: &[],
+                }),
+            ),
             module: &paint_shader,
             entry_point: Some("paint"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -339,11 +341,13 @@ impl FieldGpuContext {
         });
         let extract_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("field-extract-pipeline"),
-            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("field-extract-pipeline-layout"),
-                bind_group_layouts: &[&extract_layout],
-                push_constant_ranges: &[],
-            })),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("field-extract-pipeline-layout"),
+                    bind_group_layouts: &[&extract_layout],
+                    push_constant_ranges: &[],
+                }),
+            ),
             module: &extract_shader,
             entry_point: Some("extract"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -400,11 +404,7 @@ impl FieldGpuContext {
         &self.queue
     }
 
-    pub fn paint_density(
-        &self,
-        grid: &FieldGrid,
-        kernel: &FieldKernel,
-    ) -> EngineResult<Vec<f32>> {
+    pub fn paint_density(&self, grid: &FieldGrid, kernel: &FieldKernel) -> EngineResult<Vec<f32>> {
         match kernel {
             FieldKernel::DemoSphereVoid {
                 sphere_center,
@@ -422,11 +422,12 @@ impl FieldGpuContext {
         );
         let mut padded = vec![0u8; MAX_FIELD_UNIFORM_BYTES as usize];
         padded[..data.len()].copy_from_slice(data);
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: &padded,
-            usage: wgpu::BufferUsages::UNIFORM,
-        })
+        self.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: &padded,
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
     }
 
     fn paint_demo_sphere(
@@ -437,30 +438,10 @@ impl FieldGpuContext {
     ) -> EngineResult<Vec<f32>> {
         let corner_count = grid.corner_count();
         let params = PaintParams {
-            bounds_min: [
-                grid.bounds.min.x,
-                grid.bounds.min.y,
-                grid.bounds.min.z,
-                0.0,
-            ],
-            bounds_max: [
-                grid.bounds.max.x,
-                grid.bounds.max.y,
-                grid.bounds.max.z,
-                0.0,
-            ],
-            corner_dims: [
-                grid.corners[0],
-                grid.corners[1],
-                grid.corners[2],
-                0,
-            ],
-            sphere_center: [
-                sphere_center.x,
-                sphere_center.y,
-                sphere_center.z,
-                0.0,
-            ],
+            bounds_min: [grid.bounds.min.x, grid.bounds.min.y, grid.bounds.min.z, 0.0],
+            bounds_max: [grid.bounds.max.x, grid.bounds.max.y, grid.bounds.max.z, 0.0],
+            corner_dims: [grid.corners[0], grid.corners[1], grid.corners[2], 0],
+            sphere_center: [sphere_center.x, sphere_center.y, sphere_center.z, 0.0],
             sphere_radius,
             voxel_size: grid.bounds.voxel_size,
             _pad: [0.0; 2],
@@ -470,11 +451,7 @@ impl FieldGpuContext {
         self.dispatch_paint(grid, &self.paint_pipeline, &params_buf, corner_count)
     }
 
-    fn paint_custom(
-        &self,
-        grid: &FieldGrid,
-        custom: &CustomFieldKernel,
-    ) -> EngineResult<Vec<f32>> {
+    fn paint_custom(&self, grid: &FieldGrid, custom: &CustomFieldKernel) -> EngineResult<Vec<f32>> {
         let pipeline = self.custom_pipeline(custom)?;
         let corner_count = grid.corner_count();
         let mut uniform = vec![0u8; custom.uniform_size as usize];
@@ -484,29 +461,26 @@ impl FieldGpuContext {
         self.dispatch_paint(grid, &pipeline, &params_buf, corner_count)
     }
 
-    fn custom_pipeline(
-        &self,
-        custom: &CustomFieldKernel,
-    ) -> EngineResult<wgpu::ComputePipeline> {
+    fn custom_pipeline(&self, custom: &CustomFieldKernel) -> EngineResult<wgpu::ComputePipeline> {
         let mut cache = self.custom_pipelines.borrow_mut();
         if let Some(pipeline) = cache.get(custom.shader_key) {
             return Ok(pipeline.clone());
         }
-        *self
-            .last_error
-            .lock()
-            .expect("gpu_field error handler") = None;
-        self.device
-            .push_error_scope(wgpu::ErrorFilter::Validation);
-        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(custom.shader_key),
-            source: wgpu::ShaderSource::Wgsl(custom.wgsl.into()),
-        });
-        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("field-custom-paint-layout"),
-            bind_group_layouts: &[&self.paint_layout],
-            push_constant_ranges: &[],
-        });
+        *self.last_error.lock().expect("gpu_field error handler") = None;
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(custom.shader_key),
+                source: wgpu::ShaderSource::Wgsl(custom.wgsl.into()),
+            });
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("field-custom-paint-layout"),
+                bind_group_layouts: &[&self.paint_layout],
+                push_constant_ranges: &[],
+            });
         let pipeline = self
             .device
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -517,15 +491,19 @@ impl FieldGpuContext {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 cache: None,
             });
-        let scope_err: Option<wgpu::Error> =
-            pollster::block_on(self.device.pop_error_scope());
+        let scope_err: Option<wgpu::Error> = pollster::block_on(self.device.pop_error_scope());
         if let Some(err) = scope_err {
             return Err(EngineError::InvalidValue(format!(
                 "gpu_field custom pipeline '{}' failed to compile: {err}",
                 custom.shader_key
             )));
         }
-        if let Some(err) = self.last_error.lock().expect("gpu_field error handler").take() {
+        if let Some(err) = self
+            .last_error
+            .lock()
+            .expect("gpu_field error handler")
+            .take()
+        {
             return Err(EngineError::InvalidValue(format!(
                 "gpu_field custom pipeline '{}': {err}",
                 custom.shader_key
@@ -542,10 +520,7 @@ impl FieldGpuContext {
         params_buf: &wgpu::Buffer,
         corner_count: usize,
     ) -> EngineResult<Vec<f32>> {
-        *self
-            .last_error
-            .lock()
-            .expect("gpu_field error handler") = None;
+        *self.last_error.lock().expect("gpu_field error handler") = None;
         let density_bytes = (corner_count * std::mem::size_of::<f32>()) as u64;
         let density_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("field-density"),
@@ -574,8 +549,7 @@ impl FieldGpuContext {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("field-paint-encoder"),
             });
-        self.device
-            .push_error_scope(wgpu::ErrorFilter::Validation);
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("field-paint"),
@@ -598,7 +572,12 @@ impl FieldGpuContext {
             )));
         }
         let density = read_buffer_f32(&self.device, &self.queue, &density_buf, corner_count)?;
-        if let Some(err) = self.last_error.lock().expect("gpu_field error handler").take() {
+        if let Some(err) = self
+            .last_error
+            .lock()
+            .expect("gpu_field error handler")
+            .take()
+        {
             return Err(EngineError::InvalidValue(format!(
                 "gpu_field paint dispatch: {err}"
             )));
@@ -606,7 +585,12 @@ impl FieldGpuContext {
         Ok(density)
     }
 
-    pub fn extract_mesh(&self, grid: &FieldGrid, density: &[f32], color: Color) -> EngineResult<BuiltMesh> {
+    pub fn extract_mesh(
+        &self,
+        grid: &FieldGrid,
+        density: &[f32],
+        color: Color,
+    ) -> EngineResult<BuiltMesh> {
         self.extract_mesh_lod(grid, density, color, 1)
     }
 
@@ -643,14 +627,15 @@ impl FieldGpuContext {
             lod_cells[1].max(1),
             lod_cells[2].max(1),
         ];
-        let cell_count =
-            lod_cells[0] as usize * lod_cells[1] as usize * lod_cells[2] as usize;
+        let cell_count = lod_cells[0] as usize * lod_cells[1] as usize * lod_cells[2] as usize;
 
-        let density_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("field-density-read"),
-            contents: bytemuck::cast_slice(density),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+        let density_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("field-density-read"),
+                contents: bytemuck::cast_slice(density),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
 
         let tri_counts_bytes = (cell_count * std::mem::size_of::<u32>()) as u64;
         let tri_counts_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -679,21 +664,11 @@ impl FieldGpuContext {
         });
 
         let params = ExtractParams {
-            bounds_min: [
-                grid.bounds.min.x,
-                grid.bounds.min.y,
-                grid.bounds.min.z,
-                0.0,
-            ],
+            bounds_min: [grid.bounds.min.x, grid.bounds.min.y, grid.bounds.min.z, 0.0],
             voxel_size: grid.bounds.voxel_size,
             _pad_after_voxel: [0.0; 3],
             _pad_to_corner: [0.0; 4],
-            corner_dims: [
-                grid.corners[0],
-                grid.corners[1],
-                grid.corners[2],
-                0,
-            ],
+            corner_dims: [grid.corners[0], grid.corners[1], grid.corners[2], 0],
             lod_stride: [stride, 0, 0, 0],
         };
         let params_buf =
@@ -789,7 +764,12 @@ fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn read_buffer_bytes(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer, size: u64) -> EngineResult<Vec<u8>> {
+fn read_buffer_bytes(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    src: &wgpu::Buffer,
+    size: u64,
+) -> EngineResult<Vec<u8>> {
     let limits = device.limits();
     assert!(
         size <= limits.max_buffer_size,
@@ -873,7 +853,8 @@ fn pack_extracted_mesh_lod(
                     ));
                 }
                 let pos = glam::Vec3::new(vert_floats[f], vert_floats[f + 1], vert_floats[f + 2]);
-                let nrm = glam::Vec3::new(vert_floats[f + 3], vert_floats[f + 4], vert_floats[f + 5]);
+                let nrm =
+                    glam::Vec3::new(vert_floats[f + 3], vert_floats[f + 4], vert_floats[f + 5]);
                 let idx = mesh.positions.len() as u32;
                 mesh.positions.push(pos);
                 mesh.normals.push(nrm);
