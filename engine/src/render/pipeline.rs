@@ -288,7 +288,53 @@ fn vs_main(v: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // Most world props use the default material. Keep them on the cheap,
+    // conventional path; authored wood/dirt/grass/sand/snow/cave profiles
+    // continue through the full procedural material evaluation below.
+    if in.surface3.w < 0.001 {
+        let n = normalize(in.world_n);
+        let l = normalize(u.light_dir);
+        let ndl = max(dot(n, l), 0.0);
+        let wrap = ndl * 0.65 + 0.35;
+        let base = in.color * textureSample(albedo_tex, albedo_sampler, in.uv);
+        let vis = sun_visibility(in.world_p, n, u.eye);
+        let lit = base.rgb * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis)
+            + base.rgb * torch_light(in.world_p, n);
+        return vec4<f32>(haze(lit, in.world_p), base.a);
+    }
+
     let seed = in.surface2.y;
+    let leaf_tex = textureSample(albedo_tex, albedo_sampler, in.uv);
+    // Foliage cards stay on the opaque path. The silhouette is an analytic,
+    // camera-independent lobe pattern: no hashed coverage, derivatives, alpha
+    // blending, or per-frame threshold can make its edge appear/disappear.
+    if in.surface3.w > 5.5 && in.surface3.w < 6.5 {
+        let leaf_uv = in.uv * vec2<f32>(2.0, 3.0);
+        let cell = floor(leaf_uv);
+        let local = fract(leaf_uv) - vec2<f32>(0.5);
+        let row_offset = select(0.0, 0.13, (cell.y % 2.0) > 0.5);
+        let leaf_local = local - vec2<f32>(row_offset, 0.0);
+        let lobe = length(leaf_local * vec2<f32>(1.0, 1.35));
+        let rib = abs(leaf_local.x) * 1.8 + abs(leaf_local.y) * 0.12;
+        if lobe > 0.43 || rib > 0.84 {
+            discard;
+        }
+        let vein = exp(-abs(leaf_local.x) * 28.0) * 0.14
+            + abs(sin(leaf_local.y * 16.0)) * 0.025;
+        let base_leaf = in.color * leaf_tex;
+        let leaf_tone = vec3<f32>(0.72, 0.92, 0.42)
+            + vec3<f32>(0.12, 0.10, 0.06) * select(0.0, 1.0, (cell.x + cell.y) % 2.0 > 0.5);
+        let leaf_base = base_leaf.rgb * leaf_tone + base_leaf.rgb * vein;
+        let n = normalize(in.world_n);
+        let l = normalize(u.light_dir);
+        let ndl = max(dot(n, l), 0.0);
+        let wrap = ndl * 0.55 + 0.45;
+        let vis = sun_visibility(in.world_p, n, u.eye);
+        let transmission = max(dot(-n, l), 0.0) * 0.16;
+        let light = u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis + transmission;
+        return vec4<f32>(haze(leaf_base * light, in.world_p), 1.0);
+    }
+
     // Default-material meshes have no authored orientation and carry a zero
     // vector. Never normalize that sentinel: NaNs here contaminate every
     // procedural sample and turn otherwise valid houses/props into black.

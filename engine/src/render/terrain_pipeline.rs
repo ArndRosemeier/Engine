@@ -109,9 +109,15 @@ fn vs_main(v: VsIn) -> VsOut {
 /// One tiling texture repeats visibly within a few metres. Adding a far
 /// coarser sample of the same image both fills in large-scale shape and, used
 /// as a brightness modulator, breaks the grid the eye would otherwise lock on.
-fn sample_albedo(tex: texture_2d<f32>, uv: vec2<f32>) -> vec3<f32> {
+fn sample_albedo(tex: texture_2d<f32>, uv: vec2<f32>, detail: f32) -> vec3<f32> {
     let base = textureSample(tex, tex_sampler, uv).rgb;
+    if detail <= 0.01 {
+        return base;
+    }
     let fine = textureSample(tex, tex_sampler, uv * 3.7 + vec2<f32>(0.17, 0.31)).rgb;
+    if detail <= 0.45 {
+        return mix(base, fine, 0.22 * detail);
+    }
     let wide = textureSample(tex, tex_sampler, uv * 0.137 + vec2<f32>(0.61, 0.44)).rgb;
     let c = base * 0.64 + fine * 0.24 + wide * 0.12;
     let macro_luma = dot(wide, vec3<f32>(0.299, 0.587, 0.114));
@@ -141,26 +147,28 @@ fn terrain_value(p: vec2<f32>) -> f32 {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.world_n);
+    let view_distance = distance(in.world_p, u.eye);
+    let terrain_detail = 1.0 - smoothstep(180.0, 900.0, view_distance);
     // Add the wrapped render origin so tiling follows world space, not the
     // camera-local frame: rebasing must not slide the ground texture.
     let world_xz = in.world_p.xz + vec2<f32>(tp.world_offset_x, tp.world_offset_z);
     let uv = world_xz / tp.metres_per_tile;
     // Grass tiles are olive-noise; a little extra chroma stops the sward
     // reading as dirt from a few hundred metres.
-    let grass_lush = saturate_rgb(sample_albedo(grass_tex, uv), 1.18);
-    let grass_dry = saturate_rgb(sample_albedo(grass_dry_tex, uv * 1.07), 1.06);
-    let grass_moor = sample_albedo(grass_moor_tex, uv * 0.92);
+    let grass_lush = saturate_rgb(sample_albedo(grass_tex, uv, terrain_detail), 1.18);
+    let grass_dry = saturate_rgb(sample_albedo(grass_dry_tex, uv * 1.07, terrain_detail), 1.06);
+    let grass_moor = sample_albedo(grass_moor_tex, uv * 0.92, terrain_detail);
     // Vertex UV carries soil weights from the cover field: x = dry sward,
     // y = peat/duff. Remainder is lush. Empty UVs (Engine demos) stay lush.
     let dry_w = clamp(in.splat.x, 0.0, 1.0);
     let moor_w = clamp(in.splat.y, 0.0, 1.0);
     let lush_w = max(1.0 - dry_w - moor_w, 0.0);
     let grass = grass_lush * lush_w + grass_dry * dry_w + grass_moor * moor_w;
-    let mud = sample_albedo(mud_tex, uv * 1.08);
-    let tundra = sample_albedo(tundra_tex, uv * 0.94);
-    let scree = sample_albedo(scree_tex, uv * 0.78);
-    let sand = sample_albedo(sand_tex, uv * 1.15);
-    let rock = sample_albedo(rock_tex, uv * 0.85);
+    let mud = sample_albedo(mud_tex, uv * 1.08, terrain_detail);
+    let tundra = sample_albedo(tundra_tex, uv * 0.94, terrain_detail);
+    let scree = sample_albedo(scree_tex, uv * 0.78, terrain_detail);
+    let sand = sample_albedo(sand_tex, uv * 1.15, terrain_detail);
+    let rock = sample_albedo(rock_tex, uv * 0.85, terrain_detail);
 
     let slope = 1.0 - clamp(n.y, 0.0, 1.0);
     // Wobble the slope threshold with the ground itself, so the rock line is a
@@ -196,10 +204,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let uv_dx = dpdx(uv);
     let uv_dy = dpdy(uv);
     let footprint = max(length(uv_dx), length(uv_dy));
-    let fine_lod = 1.0 - smoothstep(0.012, 0.075, footprint);
+    let fine_lod = terrain_detail * (1.0 - smoothstep(0.012, 0.075, footprint));
     let medium = terrain_value(uv * 5.0) * 2.0 - 1.0;
     let fine = terrain_value(uv * 31.0) * 2.0 - 1.0;
-    let detail = medium * 0.035 + fine * 0.018 * fine_lod;
+    let detail = medium * 0.035 * terrain_detail + fine * 0.018 * fine_lod;
     albedo *= 1.0 + detail;
     // River / lake bed. Alpha says so outright: a caller that wants a dark
     // forest floor and a caller that wants a streambed cannot be told apart by
@@ -217,7 +225,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let wrap = ndl * 0.65 + 0.35;
     // Shade is sky, not mud. A north slope of grass or snow has to stay the
     // colour it is, just dimmer.
-    let vis = sun_visibility(in.world_p, n, u.eye);
+    var vis = 1.0;
+    if view_distance < 260.0 {
+        vis = sun_visibility(in.world_p, n, u.eye);
+    }
     let hemi = mix(vec3<f32>(0.42, 0.40, 0.38), vec3<f32>(0.72, 0.80, 0.96), n.y * 0.5 + 0.5);
     let ground_light = u.ambient * hemi + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis;
     var lit = albedo * ground_light;

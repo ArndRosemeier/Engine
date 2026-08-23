@@ -780,6 +780,18 @@ fn placing_instances_on_a_plain_entity_is_an_error() {
 }
 
 #[test]
+fn default_mesh_material_is_the_valid_renderer_default() {
+    assert_eq!(
+        crate::mesh::Mesh::new().surface_material(),
+        crate::mesh::SurfaceMaterial::DEFAULT
+    );
+    assert_eq!(
+        crate::mesh::SurfaceMaterial::default(),
+        crate::mesh::SurfaceMaterial::DEFAULT
+    );
+}
+
+#[test]
 fn a_translucent_chunk_layer_becomes_water_and_an_opaque_one_ground() {
     use crate::color::rgba;
     use crate::space::{ChunkCoord, ChunkId, ChunkLayer, GlobalXZ};

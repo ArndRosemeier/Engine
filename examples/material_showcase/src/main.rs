@@ -14,6 +14,43 @@ fn block(
     mesh
 }
 
+fn leaf_cluster(at: (f32, f32, f32), scale: f32, seed: f32) -> Mesh {
+    let mut mesh = Mesh::new();
+    let (x, y, z) = at;
+    // Three crossed cards keep the cluster inexpensive. The shader applies a
+    // fixed analytic leaf mask; the cards remain opaque so overlapping foliage
+    // does not depend on transparent draw order.
+    let cards = [
+        ([x - scale, y, z], [x + scale, y + scale * 2.0, z]),
+        ([x, y, z - scale], [x, y + scale * 2.0, z + scale]),
+        (
+            [x - scale * 0.7, y + scale * 0.45, z - scale * 0.7],
+            [x + scale * 0.7, y + scale * 1.8, z + scale * 0.7],
+        ),
+    ];
+    for (a, b) in cards {
+        let ids = [
+            mesh.add_point(a).expect("leaf card point"),
+            mesh.add_point([b[0], a[1], b[2]]).expect("leaf card point"),
+            mesh.add_point(b).expect("leaf card point"),
+            mesh.add_point([a[0], b[1], a[2]]).expect("leaf card point"),
+        ];
+        for (id, uv) in ids
+            .into_iter()
+            .zip([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+        {
+            mesh.set_point_uv(id, uv).expect("leaf card uv");
+            mesh.set_point_color(id, Color::rgb(255, 255, 255))
+                .expect("leaf card alpha");
+        }
+        mesh.add_face(&ids).expect("leaf card face");
+        mesh.add_face(&[ids[3], ids[2], ids[1], ids[0]])
+            .expect("leaf card backface");
+    }
+    mesh.set_surface_material(SurfaceMaterial::FOLIAGE.with_seed(seed));
+    mesh
+}
+
 fn main() {
     Engine::run("material_showcase", move |world, frame| {
         if frame.first {
@@ -125,6 +162,9 @@ fn main() {
                     .with_orientation([0.0, 0.0, 1.0])
                     .with_seed(607.0),
             ));
+            world.spawn(leaf_cluster((-5.0, 1.0, 11.0), 2.2, 1401.0));
+            world.spawn(leaf_cluster((1.0, 1.0, 11.0), 2.2, 1511.0));
+            world.spawn(leaf_cluster((7.0, 1.0, 11.0), 2.2, 1621.0));
             world.spawn(block(
                 (5.0, 1.0, 7.0),
                 (2.8, 2.8, 2.8),

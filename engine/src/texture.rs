@@ -2,6 +2,10 @@
 //!
 //! GPU upload happens in the renderer on sync. Terrain albedos are sampled in
 //! world XZ; mesh UVs, when present, are soil splat weights (dry, moor).
+//!
+//! Terrain materials are deliberately separate from [`crate::mesh::SurfaceMaterial`]:
+//! use `TerrainMaterialDesc` for streamed heightfields and `SurfaceMaterial` for
+//! ordinary meshes, cave meshes, props, and authored material profiles.
 
 use crate::color::Color;
 use crate::error::{EngineError, EngineResult};
@@ -19,7 +23,10 @@ impl fmt::Display for TextureId {
     }
 }
 
-/// Opaque terrain-material handle (lush / dry / moor / sand / rock blend).
+/// Opaque terrain-material handle.
+///
+/// A terrain material owns the complete eight-layer albedo set: lush grass,
+/// dry grass, moor, mud, tundra, scree, sand, and rock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MaterialId(pub(crate) u64);
 
@@ -37,21 +44,30 @@ pub(crate) struct CpuTexture {
 }
 
 /// Description for a world-XZ terrain material.
+///
+/// All eight texture handles are required because the terrain shader can blend
+/// between them continuously. The usual setup is to create each with
+/// [`crate::world::World::create_terrain_albedo`] and construct this value with
+/// `..TerrainMaterialDesc::default()` for the tuning fields. A missing texture
+/// handle is rejected loudly by [`crate::world::World::create_terrain_material`].
 #[derive(Clone, Debug)]
 pub struct TerrainMaterialDesc {
-    /// Rank lowland sward.
+    /// Lush lowland sward.
     pub grass: TextureId,
     /// Straw / steppe. Vertex UV.x blends this over [`Self::grass`].
     pub grass_dry: TextureId,
     /// Peat and duff. Vertex UV.y blends this over [`Self::grass`].
     pub grass_moor: TextureId,
+    /// Peat and duff; vertex UV.y blends this over lush/dry grass.
     /// Wet clods and dark organic soil for banks and basins.
     pub mud: TextureId,
     /// Low mat vegetation and lichen for cold high ground.
     pub tundra: TextureId,
     /// Angular fragments and fines on exposed slopes.
     pub scree: TextureId,
+    /// Warm, dry lowland substrate.
     pub sand: TextureId,
+    /// Exposed bedrock and cliff faces.
     pub rock: TextureId,
     /// World metres covered by one texture tile.
     pub metres_per_tile: f32,
@@ -72,6 +88,36 @@ pub struct TerrainMaterialDesc {
     /// Slope (`1 - n.y`) where snow starts to shed / is gone.
     pub snow_slope_start: f32,
     pub snow_slope_end: f32,
+}
+
+impl TerrainMaterialDesc {
+    /// Build a terrain descriptor from the complete generated albedo set.
+    ///
+    /// This constructor avoids a fragile eight-field literal. Use the builder
+    /// fields on the returned value only for visual tuning; texture handles are
+    /// kept explicit so accidentally missing terrain layers fail at setup time.
+    pub fn from_albedos(
+        grass: TextureId,
+        grass_dry: TextureId,
+        grass_moor: TextureId,
+        mud: TextureId,
+        tundra: TextureId,
+        scree: TextureId,
+        sand: TextureId,
+        rock: TextureId,
+    ) -> Self {
+        Self {
+            grass,
+            grass_dry,
+            grass_moor,
+            mud,
+            tundra,
+            scree,
+            sand,
+            rock,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for TerrainMaterialDesc {
@@ -206,6 +252,11 @@ pub fn save_rgba8_png(path: impl AsRef<Path>, w: u32, h: u32, rgba: &[u8]) -> En
 }
 
 /// Kind of built-in tileable albedo.
+///
+/// Generated albedos are deterministic for a `(kind, size, seed)` tuple and are
+/// tileable in both axes. They are intentionally colour/albedo only; terrain
+/// slope, elevation, moisture, and snow response are controlled by
+/// `TerrainMaterialDesc` and the terrain shader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerrainAlbedo {
     Grass,

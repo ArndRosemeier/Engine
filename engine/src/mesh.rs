@@ -33,7 +33,7 @@ pub struct AlbedoMap {
 /// The shared renderer uses these values for every surface type: authored
 /// props, terrain-like meshes, and procedural cave geometry all get the same
 /// roughness/metallic/emission/detail vocabulary without a cave-only shader.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceMaterial {
     pub roughness: f32,
     pub metallic: f32,
@@ -55,6 +55,12 @@ pub struct SurfaceMaterial {
     pub coverage_strength: f32,
     pub overlay_roughness: f32,
     pub overlay_metallic: f32,
+}
+
+impl Default for SurfaceMaterial {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 impl SurfaceMaterial {
@@ -84,6 +90,10 @@ impl SurfaceMaterial {
     }
 
     /// Return the same material with a local directional basis axis.
+    ///
+    /// The vector is normalized by the shader. Use a zero vector only when the
+    /// material is intentionally isotropic; the renderer supplies a safe Y-axis
+    /// fallback for that case.
     pub const fn with_orientation(self, orientation: [f32; 3]) -> Self {
         Self {
             orientation,
@@ -217,6 +227,28 @@ impl SurfaceMaterial {
         coverage_softness: 0.15,
         coverage_strength: 0.0,
         overlay_roughness: 0.9,
+        overlay_metallic: 0.0,
+    };
+
+    /// Cluster-aware leaf-card profile. The shader breaks crossed cards into
+    /// irregular lobes, veins, and small gaps; it is intended for foliage
+    /// prototypes rather than terrain or solid tree trunks.
+    pub const FOLIAGE: Self = Self {
+        roughness: 0.92,
+        metallic: 0.0,
+        emission: 0.0,
+        detail_scale: 4.0,
+        strata_strength: 0.34,
+        seed: 181.0,
+        warp_strength: 0.26,
+        noise_gain: 0.5,
+        orientation: [0.0, 1.0, 0.0],
+        profile: 6.0,
+        coverage_direction: [0.0, 1.0, 0.0],
+        coverage_level: 0.35,
+        coverage_softness: 0.15,
+        coverage_strength: 0.0,
+        overlay_roughness: 0.94,
         overlay_metallic: 0.0,
     };
 

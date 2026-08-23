@@ -39,3 +39,28 @@ cargo run -p infinite_walker   # WASD move, Q/E turn, Shift sprint
 cargo run -p ui_modal          # egui modal + RGBA image overlay
 cargo run -p animated_animal   # skinned glTF deer (Idle/Walk/Gallop)
 ```
+
+
+## Materials
+
+There are two separate material APIs:
+
+- `SurfaceMaterial` is attached to ordinary meshes, props, cave meshes, and
+  authored profiles. Start with `SurfaceMaterial::STONE`, `WOOD`, `DIRT`,
+  `GRASS`, `SAND`, or `SNOW`, then use `with_seed`, `with_orientation`, and
+  `with_coverage` only when the asset needs variation. `Mesh::new()` already
+  carries the valid `SurfaceMaterial::DEFAULT`.
+- `TerrainMaterialDesc` is for streamed world-XZ terrain. Create the eight
+  generated albedos with `World::create_terrain_albedo`, pass them to
+  `TerrainMaterialDesc::from_albedos`, tune the returned descriptor, then call
+  `World::create_terrain_material` and `set_default_terrain_material`.
+
+Terrain material texture handles are intentionally all required. A missing or
+unknown handle is an error at material creation, rather than a silent fallback.
+Terrain UVs are world-space and remain continuous across floating-origin
+rebases; mesh UVs on terrain are only the existing dry/moor cover weights.
+
+For directional materials, `with_orientation([x, y, z])` supplies the local
+axis (wood grain is the typical use). Leave the default Y axis for isotropic
+materials. A zero vector is reserved for an intentionally unspecified axis and
+is handled safely by the renderer.
