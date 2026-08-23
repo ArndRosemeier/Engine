@@ -90,6 +90,7 @@ fn load_gltf_document(
         uvs: Vec::new(),
         indices: Vec::new(),
         opaque_index_count: 0,
+        surface: Default::default(),
     };
 
     for mesh in document.meshes() {
@@ -200,6 +201,7 @@ fn load_gltf_document(
                 uvs,
                 opaque_index_count: indices.len(),
                 indices,
+                surface: Default::default(),
             };
             combined.append_translated(&part, Vec3::ZERO);
 

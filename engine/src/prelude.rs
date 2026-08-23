@@ -13,7 +13,7 @@ pub use crate::error::{EngineError, EngineResult};
 pub use crate::input::{Input, Key, MouseButton};
 pub use crate::landscape::Landscape;
 pub use crate::limits::EngineLimits;
-pub use crate::mesh::{Mesh, PointId, Shape};
+pub use crate::mesh::{Mesh, PointId, Shape, SurfaceMaterial};
 pub use crate::model::{scatter_places, Model};
 pub use crate::place::{GlobalPlace, MeshInstance, Place};
 pub use crate::portal::{Portal, PortalId, PortalSettings, SpaceId};
@@ -27,8 +27,8 @@ pub use crate::surface::{SurfaceSample, SurfaceSource, WaterSurface, WATER_CLEAR
 pub use crate::surface_terrain::{SurfaceMeshStyle, SurfaceStream, SurfaceTerrain};
 pub use crate::terrain::{HeightTerrain, TerrainRules, TerrainSample, TerrainStream};
 pub use crate::texture::{
-    generate_terrain_albedo, load_rgba8_png, MaterialId, TerrainAlbedo, TerrainMaterialDesc,
-    TextureId,
+    generate_cave_albedo, generate_terrain_albedo, load_rgba8_png, MaterialId, TerrainAlbedo,
+    TerrainMaterialDesc, TextureId,
 };
 pub use crate::ui::{UiFrame, UiPanel};
 pub use crate::water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};

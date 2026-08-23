@@ -28,6 +28,299 @@ pub struct AlbedoMap {
     pub rgba: Vec<u8>,
 }
 
+/// Compact material controls carried by generated mesh vertices.
+///
+/// The shared renderer uses these values for every surface type: authored
+/// props, terrain-like meshes, and procedural cave geometry all get the same
+/// roughness/metallic/emission/detail vocabulary without a cave-only shader.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SurfaceMaterial {
+    pub roughness: f32,
+    pub metallic: f32,
+    pub emission: f32,
+    pub detail_scale: f32,
+    pub strata_strength: f32,
+    pub seed: f32,
+    pub warp_strength: f32,
+    pub noise_gain: f32,
+    /// Local material orientation. Directional materials use this as their
+    /// primary axis; isotropic materials may ignore it.
+    pub orientation: [f32; 3],
+    /// Profile discriminator for shader layers; zero means the generic stone path.
+    pub profile: f32,
+    /// Direction for a deposited overlay such as snow, moss, or dust.
+    pub coverage_direction: [f32; 3],
+    pub coverage_level: f32,
+    pub coverage_softness: f32,
+    pub coverage_strength: f32,
+    pub overlay_roughness: f32,
+    pub overlay_metallic: f32,
+}
+
+impl SurfaceMaterial {
+    /// Configure a generic directional deposit such as snow, moss, or dust.
+    pub const fn with_coverage(
+        self,
+        direction: [f32; 3],
+        level: f32,
+        softness: f32,
+        strength: f32,
+    ) -> Self {
+        Self {
+            coverage_direction: direction,
+            coverage_level: level,
+            coverage_softness: softness,
+            coverage_strength: strength,
+            ..self
+        }
+    }
+
+    pub const fn with_overlay_response(self, roughness: f32, metallic: f32) -> Self {
+        Self {
+            overlay_roughness: roughness,
+            overlay_metallic: metallic,
+            ..self
+        }
+    }
+
+    /// Return the same material with a local directional basis axis.
+    pub const fn with_orientation(self, orientation: [f32; 3]) -> Self {
+        Self {
+            orientation,
+            ..self
+        }
+    }
+
+    /// Return the same material with a deterministic per-object noise phase.
+    pub const fn with_seed(self, seed: f32) -> Self {
+        Self { seed, ..self }
+    }
+
+    /// Return a deterministic variation without changing the material family.
+    pub const fn with_variation(self, seed: f32, detail_scale: f32) -> Self {
+        Self {
+            seed,
+            detail_scale,
+            ..self
+        }
+    }
+
+    pub const DEFAULT: Self = Self {
+        roughness: 0.82,
+        metallic: 0.0,
+        emission: 0.0,
+        detail_scale: 3.5,
+        strata_strength: 0.0,
+        seed: 0.0,
+        warp_strength: 0.18,
+        noise_gain: 0.5,
+        orientation: [0.0, 1.0, 0.0],
+        profile: 0.0,
+        coverage_direction: [0.0, 1.0, 0.0],
+        coverage_level: 0.35,
+        coverage_softness: 0.15,
+        coverage_strength: 0.0,
+        overlay_roughness: 0.9,
+        overlay_metallic: 0.0,
+    };
+
+    pub const STONE: Self = Self {
+        roughness: 0.88,
+        metallic: 0.0,
+        emission: 0.0,
+        detail_scale: 4.0,
+        strata_strength: 0.35,
+        seed: 17.0,
+        warp_strength: 0.28,
+        noise_gain: 0.52,
+        orientation: [1.0, 0.0, 0.0],
+        profile: 0.0,
+        coverage_direction: [0.0, 1.0, 0.0],
+        coverage_level: 0.35,
+        coverage_softness: 0.15,
+        coverage_strength: 0.0,
+        overlay_roughness: 0.9,
+        overlay_metallic: 0.0,
+    };
+
+    pub const WET_STONE: Self = Self {
+        roughness: 0.28,
+        metallic: 0.0,
+        emission: 0.0,
+        detail_scale: 5.5,
+        strata_strength: 0.28,
+        seed: 31.0,
+        warp_strength: 0.32,
+        noise_gain: 0.48,
+        orientation: [0.0, 1.0, 0.0],
+        profile: 0.0,
+        coverage_direction: [0.0, 1.0, 0.0],
+        coverage_level: 0.35,
+        coverage_softness: 0.15,
+        coverage_strength: 0.0,
+        overlay_roughness: 0.9,
+        overlay_metallic: 0.0,
+    };
+
+    pub const CALCITE: Self = Self {
+        roughness: 0.42,
+        metallic: 0.0,
+        emission: 0.08,
+        detail_scale: 7.0,
+        strata_strength: 0.18,
+        seed: 47.0,
+        warp_strength: 0.22,
+        noise_gain: 0.5,
+        orientation: [0.0, 1.0, 0.0],
+        profile: 0.0,
+        coverage_direction: [0.0, 1.0, 0.0],
+        coverage_level: 0.35,
+        coverage_softness: 0.15,
+        coverage_strength: 0.0,
+        overlay_roughness: 0.9,
+        overlay_metallic: 0.0,
+    };
+
+    pub const METAL: Self = Self {
+        roughness: 0.2,
+        metallic: 0.88,
+        emission: 0.0,
+        detail_scale: 9.0,
+        strata_strength: 0.0,
+        seed: 61.0,
+        warp_strength: 0.12,
+        noise_gain: 0.44,
+        orientation: [1.0, 0.0, 0.0],
+        profile: 0.0,
+        coverage_direction: [0.0, 1.0, 0.0],
+        coverage_level: 0.35,
+        coverage_softness: 0.15,
+        coverage_strength: 0.0,
+        overlay_roughness: 0.9,
+        overlay_metallic: 0.0,
+    };
+
+    /// Mottled soil profile with clumps, organic pockets, and fine grit.
+    pub const DIRT: Self = Self {
+        roughness: 0.96,
+        metallic: 0.0,
+        emission: 0.0,
+        detail_scale: 1.3,
+        strata_strength: 0.72,
+        seed: 131.0,
+        warp_strength: 0.31,
+        noise_gain: 0.54,
+        orientation: [0.0, 1.0, 0.0],
+        profile: 3.0,
+        coverage_direction: [0.0, 1.0, 0.0],
+        coverage_level: 0.35,
+        coverage_softness: 0.15,
+        coverage_strength: 0.0,
+        overlay_roughness: 0.9,
+        overlay_metallic: 0.0,
+    };
+
+    /// Grass-surface profile. This shades a surface; foliage geometry remains
+    /// a separate system so coverage does not become a fragment-only hack.
+    pub const GRASS: Self = Self {
+        roughness: 0.88,
+        metallic: 0.0,
+        emission: 0.0,
+        detail_scale: 2.0,
+        strata_strength: 0.66,
+        seed: 173.0,
+        warp_strength: 0.28,
+        noise_gain: 0.52,
+        orientation: [0.0, 1.0, 0.0],
+        profile: 4.0,
+        coverage_direction: [0.0, 1.0, 0.0],
+        coverage_level: 0.35,
+        coverage_softness: 0.15,
+        coverage_strength: 0.0,
+        overlay_roughness: 0.9,
+        overlay_metallic: 0.0,
+    };
+
+    /// Snow surface with directional accumulation and cool granular breakup.
+    pub const SNOW: Self = Self {
+        roughness: 0.88,
+        metallic: 0.0,
+        emission: 0.0,
+        detail_scale: 4.8,
+        strata_strength: 0.42,
+        seed: 211.0,
+        warp_strength: 0.27,
+        noise_gain: 0.52,
+        orientation: [0.0, 1.0, 0.0],
+        profile: 5.0,
+        coverage_direction: [0.0, 1.0, 0.0],
+        coverage_level: 0.28,
+        coverage_softness: 0.22,
+        coverage_strength: 1.0,
+        overlay_roughness: 0.92,
+        overlay_metallic: 0.0,
+    };
+
+    /// Layered dune-ripple profile. `orientation` is the surface normal.
+    pub const SAND: Self = Self {
+        roughness: 0.9,
+        metallic: 0.0,
+        emission: 0.0,
+        detail_scale: 1.0,
+        strata_strength: 0.58,
+        seed: 89.0,
+        warp_strength: 0.24,
+        noise_gain: 0.5,
+        orientation: [0.0, 1.0, 0.0],
+        profile: 2.0,
+        coverage_direction: [0.0, 1.0, 0.0],
+        coverage_level: 0.35,
+        coverage_softness: 0.15,
+        coverage_strength: 0.0,
+        overlay_roughness: 0.9,
+        overlay_metallic: 0.0,
+    };
+
+    /// Directional wood grain profile. `orientation` is the grain axis.
+    pub const WOOD: Self = Self {
+        roughness: 0.62,
+        metallic: 0.0,
+        emission: 0.0,
+        detail_scale: 2.2,
+        strata_strength: 0.72,
+        seed: 113.0,
+        warp_strength: 0.34,
+        noise_gain: 0.56,
+        orientation: [1.0, 0.0, 0.0],
+        profile: 1.0,
+        coverage_direction: [0.0, 1.0, 0.0],
+        coverage_level: 0.35,
+        coverage_softness: 0.15,
+        coverage_strength: 0.0,
+        overlay_roughness: 0.9,
+        overlay_metallic: 0.0,
+    };
+
+    pub const GLOWING: Self = Self {
+        roughness: 0.45,
+        metallic: 0.0,
+        emission: 0.7,
+        detail_scale: 6.0,
+        strata_strength: 0.0,
+        seed: 79.0,
+        warp_strength: 0.25,
+        noise_gain: 0.5,
+        orientation: [0.0, 1.0, 0.0],
+        profile: 0.0,
+        coverage_direction: [0.0, 1.0, 0.0],
+        coverage_level: 0.35,
+        coverage_softness: 0.15,
+        coverage_strength: 0.0,
+        overlay_roughness: 0.9,
+        overlay_metallic: 0.0,
+    };
+}
+
 /// A CPU-side triangle mesh built from human-friendly points and faces.
 ///
 /// Faces may be triangles or quads. Call [`Mesh::build`] (or let the world do it
@@ -41,6 +334,7 @@ pub struct Mesh {
     uvs: Vec<[f32; 2]>,
     faces: Vec<Vec<PointId>>,
     albedo: Option<AlbedoMap>,
+    surface: SurfaceMaterial,
 }
 
 /// Friendly alias — same type as [`Mesh`].
@@ -159,6 +453,48 @@ impl Mesh {
         self.albedo.as_ref()
     }
 
+    /// Apply deterministic UV projection for the eight-cell cave material atlas.
+    /// The selected atlas cell follows authored vertex tint for formations and
+    /// uses broad spatial patches for the generated shell.
+    pub fn project_cave_uvs(&mut self, metres_per_tile: f32) {
+        let scale = metres_per_tile.max(0.25);
+        for (i, p) in self.points.iter().enumerate() {
+            let c = self.colors[i];
+            let warm = c.x > c.z * 1.35 && c.x > c.y * 1.25;
+            let green = c.y > c.x * 1.35 && c.y > c.z * 1.25;
+            let pale = c.x > 0.72 && c.y > 0.68 && c.z > 0.58;
+            let dark = c.x < 0.40 && c.y < 0.40 && c.z < 0.40;
+            let cell: u32 = if green {
+                5
+            } else if dark {
+                7
+            } else if pale {
+                4
+            } else if warm {
+                6
+            } else {
+                let patch_x = (p.x / scale).floor() as i32;
+                let patch_z = (p.z / scale).floor() as i32;
+                ((patch_x.wrapping_mul(73) ^ patch_z.wrapping_mul(151)) as u32) % 4
+            };
+            let u = (p.x / scale).rem_euclid(1.0) * 0.92 + 0.04;
+            let v = (p.z / scale).rem_euclid(1.0) * 0.92 + 0.04;
+            self.uvs[i] = [
+                (cell % 4) as f32 * 0.25 + u * 0.25,
+                (cell / 4) as f32 * 0.5 + v * 0.5,
+            ];
+        }
+    }
+
+    /// Apply one reusable material descriptor to this mesh.
+    pub fn set_surface_material(&mut self, material: SurfaceMaterial) {
+        self.surface = material;
+    }
+
+    pub fn surface_material(&self) -> SurfaceMaterial {
+        self.surface
+    }
+
     /// Paint every point one colour.
     ///
     /// Vertex colour still tints a sampled albedo (`color * texture`). Untextured
@@ -275,7 +611,8 @@ impl Mesh {
     /// so the renderer can draw transparent triangles in a second pass.
     pub fn build(&self) -> BuiltMesh {
         self.build_flat()
-    }    /// Like [`Self::build`], but averages face normals at shared authoring points
+    }
+    /// Like [`Self::build`], but averages face normals at shared authoring points
     /// so heightfields / ribbons shade as continuous surfaces instead of facets.
     ///
     /// GPU vertices are shared per authoring point (opaque and translucent
@@ -369,6 +706,7 @@ impl Mesh {
             uvs,
             indices,
             opaque_index_count,
+            surface: self.surface,
         }
     }
 
@@ -470,6 +808,7 @@ impl Mesh {
             uvs,
             indices,
             opaque_index_count,
+            surface: self.surface,
         }
     }
 
@@ -519,6 +858,7 @@ pub struct BuiltMesh {
     pub indices: Vec<u32>,
     /// Indices `[0..opaque_index_count)` are opaque; the rest use alpha blending.
     pub opaque_index_count: usize,
+    pub surface: SurfaceMaterial,
 }
 
 impl BuiltMesh {
@@ -544,6 +884,36 @@ impl BuiltMesh {
                 normal: (*n).into(),
                 color: self.colors[i].into(),
                 uv: self.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+                surface: [
+                    self.surface.roughness,
+                    self.surface.metallic,
+                    self.surface.emission,
+                    self.surface.detail_scale,
+                ],
+                surface2: [
+                    self.surface.strata_strength,
+                    self.surface.seed,
+                    self.surface.warp_strength,
+                    self.surface.noise_gain,
+                ],
+                surface3: [
+                    self.surface.orientation[0],
+                    self.surface.orientation[1],
+                    self.surface.orientation[2],
+                    self.surface.profile,
+                ],
+                surface4: [
+                    self.surface.coverage_direction[0],
+                    self.surface.coverage_direction[1],
+                    self.surface.coverage_direction[2],
+                    self.surface.coverage_level,
+                ],
+                surface5: [
+                    self.surface.coverage_softness,
+                    self.surface.coverage_strength,
+                    self.surface.overlay_roughness,
+                    self.surface.overlay_metallic,
+                ],
             })
             .collect()
     }
@@ -642,6 +1012,11 @@ pub(crate) struct Vertex {
     pub normal: [f32; 3],
     pub color: [f32; 4],
     pub uv: [f32; 2],
+    pub surface: [f32; 4],
+    pub surface2: [f32; 4],
+    pub surface3: [f32; 4],
+    pub surface4: [f32; 4],
+    pub surface5: [f32; 4],
 }
 
 impl Vertex {
@@ -653,6 +1028,11 @@ impl Vertex {
             1 => Float32x3,
             2 => Float32x4,
             3 => Float32x2,
+            4 => Float32x4,
+            5 => Float32x4,
+            11 => Float32x4,
+            12 => Float32x4,
+            13 => Float32x4,
         ],
     };
 }
@@ -681,11 +1061,11 @@ impl InstanceRaw {
         array_stride: std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &wgpu::vertex_attr_array![
-            4 => Float32x4,
-            5 => Float32x4,
             6 => Float32x4,
             7 => Float32x4,
             8 => Float32x4,
+            9 => Float32x4,
+            10 => Float32x4,
         ],
     };
 }

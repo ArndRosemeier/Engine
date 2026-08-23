@@ -21,7 +21,7 @@ pub struct Uniforms {
     pub haze_base_y: f32,
     /// Metres at which the torch contribution reaches zero.
     pub torch_radius_m: f32,
-    pub _pad2: f32,
+    pub torch_curve: f32,
     /// Viewer-carried point light (lantern / headlamp); rgb, alpha unused.
     /// Radius 0 switches it off.
     pub torch_color: [f32; 4],
@@ -42,7 +42,7 @@ impl Uniforms {
             haze_height_m: 1.0,
             haze_base_y: 0.0,
             torch_radius_m: 0.0,
-            _pad2: 0.0,
+            torch_curve: 2.0,
             torch_color: [0.0, 0.0, 0.0, 0.0],
         }
     }
@@ -67,7 +67,7 @@ struct Uniforms {
     haze_height_m: f32,
     haze_base_y: f32,
     torch_radius_m: f32,
-    _pad2: f32,
+    torch_curve: f32,
     torch_color: vec4<f32>,
 };
 
@@ -84,12 +84,11 @@ fn torch_light(world_p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let to_p = world_p - u.eye;
     let d = length(to_p);
     let reach = max(u.torch_radius_m, 0.5);
-    let fall = clamp(1.0 - d / reach, 0.0, 1.0);
-    let near = 1.0 / (1.0 + 0.35 * d * d);
+    let fall = pow(clamp(1.0 - d / reach, 0.0, 1.0), max(u.torch_curve, 0.05));
     // Surfaces facing away get only the wrap spill, never a hard black edge.
     let ndl = max(dot(n, -to_p / max(d, 1e-4)), 0.0);
     let wrap = ndl * 0.7 + 0.3;
-    return u.torch_color.rgb * (fall * fall * near * wrap);
+    return u.torch_color.rgb * (2.2 * fall * wrap);
 }
 
 // Fade a surface into the sky by how much air the view ray crossed.
@@ -138,11 +137,16 @@ struct VsIn {
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
     @location(3) uv: vec2<f32>,
-    @location(4) m0: vec4<f32>,
-    @location(5) m1: vec4<f32>,
-    @location(6) m2: vec4<f32>,
-    @location(7) m3: vec4<f32>,
-    @location(8) tint: vec4<f32>,
+    @location(6) m0: vec4<f32>,
+    @location(7) m1: vec4<f32>,
+    @location(8) m2: vec4<f32>,
+    @location(9) m3: vec4<f32>,
+    @location(10) tint: vec4<f32>,
+    @location(4) surface: vec4<f32>,
+    @location(5) surface2: vec4<f32>,
+    @location(11) surface3: vec4<f32>,
+    @location(12) surface4: vec4<f32>,
+    @location(13) surface5: vec4<f32>,
 };
 
 struct VsOut {
@@ -151,7 +155,117 @@ struct VsOut {
     @location(1) color: vec4<f32>,
     @location(2) world_p: vec3<f32>,
     @location(3) uv: vec2<f32>,
+    @location(4) surface: vec4<f32>,
+    @location(5) surface2: vec4<f32>,
+    @location(11) surface3: vec4<f32>,
+    @location(12) surface4: vec4<f32>,
+    @location(13) surface5: vec4<f32>,
 };
+
+fn hash31(p: vec3<f32>) -> f32 {
+    let q = fract(p * 0.1031);
+    let r = q + dot(q, q.yzx + 33.33);
+    return fract((r.x + r.y) * r.z);
+}
+
+fn value3(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let n000 = hash31(i + vec3<f32>(0.0, 0.0, 0.0));
+    let n100 = hash31(i + vec3<f32>(1.0, 0.0, 0.0));
+    let n010 = hash31(i + vec3<f32>(0.0, 1.0, 0.0));
+    let n110 = hash31(i + vec3<f32>(1.0, 1.0, 0.0));
+    let n001 = hash31(i + vec3<f32>(0.0, 0.0, 1.0));
+    let n101 = hash31(i + vec3<f32>(1.0, 0.0, 1.0));
+    let n011 = hash31(i + vec3<f32>(0.0, 1.0, 1.0));
+    let n111 = hash31(i + vec3<f32>(1.0, 1.0, 1.0));
+    return mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y),
+        mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z);
+}
+
+fn fbm3(p: vec3<f32>, gain: f32) -> f32 {
+    var q = p;
+    var amplitude = 0.5;
+    var total = 0.0;
+    for (var octave = 0; octave < 4; octave++) {
+        total += value3(q) * amplitude;
+        q = q * 2.03 + vec3<f32>(17.1, 9.4, 3.7);
+        amplitude *= gain;
+    }
+    return total / 0.5;
+}
+
+fn ridged3(p: vec3<f32>, gain: f32) -> f32 {
+    let ridge = 1.0 - abs(fbm3(p, gain) * 2.0 - 1.0);
+    return ridge * ridge;
+}
+
+// Signed, energy-weighted detail in the spirit of Musgrave fBm.
+fn musgrave3(p: vec3<f32>, gain: f32, lacunarity: f32) -> f32 {
+    var q = p;
+    var amplitude = 1.0;
+    var total = 0.0;
+    var weight = 0.0;
+    for (var octave = 0; octave < 5; octave++) {
+        total += (value3(q) * 2.0 - 1.0) * amplitude;
+        weight += amplitude;
+        amplitude *= gain;
+        q = q * lacunarity + vec3<f32>(7.1, 13.7, 3.9);
+    }
+    return total / max(weight, 0.001);
+}
+
+fn rotate2(p: vec2<f32>, angle: f32) -> vec2<f32> {
+    let c = cos(angle);
+    let s = sin(angle);
+    return vec2<f32>(c * p.x + s * p.y, -s * p.x + c * p.y);
+}
+
+fn sand_gradient(x: f32, offset: f32) -> f32 {
+    let repeated = abs(fract(x / 6.2831855 + offset - 0.25) - 0.5) * 2.0;
+    let peaked = clamp(repeated * repeated * (-1.0 + 2.0 * repeated), 0.0, 1.0);
+    let smoothed = repeated * repeated * (3.0 - 2.0 * repeated);
+    return mix(smoothed, peaked, 0.15);
+}
+
+fn sand_layer(p: vec2<f32>, seed: f32) -> f32 {
+    var q = rotate2(p, 3.1415927 / 18.0);
+    q.y += (fbm3(vec3<f32>(q * 18.0, seed), 0.5) - 0.5) * 0.05;
+    let first = sand_gradient(q.y * 80.0, 0.0);
+    q = rotate2(p, -3.1415927 / 20.0);
+    q.y += (fbm3(vec3<f32>(q * 12.0, seed + 7.0), 0.5) - 0.5) * 0.05;
+    let second = sand_gradient(q.y * 80.0, 0.5);
+    q = rotate2(p, 3.1415927 / 4.0);
+    let blend = dot(sin(q * 12.0 - cos(q.yx * 12.0)), vec2<f32>(0.25)) + 0.5;
+    return 1.0 - (1.0 - first * (1.0 - blend)) * (1.0 - second * blend);
+}
+
+
+fn dirt_profile(p: vec3<f32>, seed: f32, gain: f32) -> vec3<f32> {
+    let broad = fbm3(p * 0.24 + vec3<f32>(seed, 3.0, 11.0), gain);
+    let clumps = ridged3(p * 0.9 + vec3<f32>(5.0, seed, 17.0), gain);
+    let grit = musgrave3(p * 5.5 + vec3<f32>(seed * 0.7, 23.0, 2.0), 0.54, 2.35);
+    let organic = smoothstep(0.48, 0.73, broad + clumps * 0.22);
+    return vec3<f32>(organic, clumps, grit);
+}
+
+fn grass_profile(p: vec3<f32>, seed: f32, gain: f32) -> vec3<f32> {
+    let cell = floor(p.xz * 1.8);
+    let jitter = vec2<f32>(
+        hash31(vec3<f32>(cell, seed)),
+        hash31(vec3<f32>(cell + vec2<f32>(31.0, 17.0), seed + 7.0)));
+    let local = fract(p.xz * 1.8) - 0.5 - (jitter - vec2<f32>(0.5)) * 0.22;
+    let blade_axis = normalize(vec2<f32>(
+        hash31(vec3<f32>(cell + 11.0, seed + 13.0)),
+        hash31(vec3<f32>(cell + 23.0, seed + 29.0))) * 2.0 - 1.0);
+    let along = dot(local, blade_axis);
+    let across = abs(dot(local, vec2<f32>(-blade_axis.y, blade_axis.x)));
+    let blade = smoothstep(0.34, 0.0, across) * smoothstep(0.46, 0.0, abs(along));
+    let patch_noise = fbm3(p * 0.32 + vec3<f32>(seed, 41.0, 9.0), gain);
+    let fine = musgrave3(p * 6.0 + vec3<f32>(seed * 0.4, 7.0, 19.0), 0.52, 2.25);
+    return vec3<f32>(blade, patch_noise, fine);
+}
 
 @vertex
 fn vs_main(v: VsIn) -> VsOut {
@@ -164,16 +278,96 @@ fn vs_main(v: VsIn) -> VsOut {
     out.color = v.color * v.tint;
     out.world_p = world.xyz;
     out.uv = v.uv;
+    out.surface = v.surface;
+    out.surface2 = v.surface2;
+    out.surface3 = v.surface3;
+    out.surface4 = v.surface4;
+    out.surface5 = v.surface5;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let n = normalize(in.world_n);
+    let seed = in.surface2.y;
+    let axis = normalize(in.surface3.xyz);
+    let orientation_use = select(1.0, abs(axis.y) + abs(axis.x) * 0.5 + abs(axis.z) * 0.5, dot(axis, axis) > 0.001);
+    let oriented_p = in.world_p + axis * dot(in.world_p, axis) * (orientation_use - 1.0);
+    let warped = oriented_p * in.surface.w + vec3<f32>(seed * 1.37, seed * 0.71, seed * 2.11);
+    let warp = vec3<f32>(
+        fbm3(warped * 0.17 + vec3<f32>(11.0, 3.0, 7.0), in.surface2.w),
+        fbm3(warped * 0.17 + vec3<f32>(2.0, 17.0, 5.0), in.surface2.w),
+        fbm3(warped * 0.17 + vec3<f32>(7.0, 5.0, 19.0), in.surface2.w));
+    let sample_p = warped + (warp - vec3<f32>(0.5)) * in.surface2.z * 3.0;
+    let grain = fbm3(sample_p * 1.7, in.surface2.w);
+    let ridge = ridged3(sample_p * 0.65, in.surface2.w);
+    let strata = sin(in.world_p.y * 1.35 + ridge * 4.2 + seed);
+    let axis_coord = dot(in.world_p, axis);
+    let cross_coord = in.world_p - axis * axis_coord;
+    let wood_bands = 0.5 + 0.5 * sin(axis_coord * in.surface.w * 2.6
+        + fbm3(cross_coord * 0.75 + vec3<f32>(seed, 4.0, 9.0), in.surface2.w) * 3.8);
+    let wood_grain = pow(clamp(wood_bands, 0.0, 1.0), 1.7);
+    let sand_plane_a = select(in.world_p.yz, in.world_p.xy, abs(axis.z) > 0.5);
+    let sand_plane = select(sand_plane_a, in.world_p.xz, abs(axis.y) > 0.5);
+    let sand_base = sand_plane * in.surface.w * 0.22 + vec2<f32>(seed * 0.031, seed * 0.071);
+    let sand_a = sand_layer(sand_base, seed);
+    let sand_b = sand_layer(rotate2(sand_base, 0.19) * 1.27, seed + 19.0);
+    let sand_pattern = mix(sand_a, sand_b, smoothstep(0.18, 0.82,
+        fbm3(vec3<f32>(sand_base * 1.8, seed + 41.0), 0.5)));
+    let sand_grit = musgrave3(vec3<f32>(sand_plane * in.surface.w * 7.5, seed + 67.0), 0.52, 2.35);
+    let dirt = dirt_profile(oriented_p * 0.75, seed, in.surface2.w);
+    let grass = grass_profile(oriented_p * 0.62, seed, in.surface2.w);
+    let material_dx = dpdx(oriented_p * in.surface.w);
+    let material_dy = dpdy(oriented_p * in.surface.w);
+    let footprint = max(length(material_dx), length(material_dy));
+    let lod = log2(max(footprint, 0.0001));
+    let fine_visibility = 1.0 - smoothstep(-4.0, -0.35, lod);
+    let medium_visibility = 1.0 - smoothstep(-1.4, 1.8, lod);
+    let is_dirt = in.surface3.w > 2.5 && in.surface3.w < 3.5;
+    let is_grass = in.surface3.w > 3.5;
+    // A separate, much finer directional fiber field. Narrow valleys darken the
+    // wood and also perturb the normal, so grain remains readable at distance.
+    let wood_fine_signed = musgrave3(
+        axis * axis_coord * in.surface.w * 18.0
+            + cross_coord * vec3<f32>(7.0, 3.0, 11.0)
+            + vec3<f32>(seed * 2.3, seed * 0.37, seed * 1.71),
+        0.52,
+        2.5);
+    let wood_fine = smoothstep(-0.18, 0.42, wood_fine_signed);
+    let base_grain = select(grain, sand_pattern, in.surface3.w > 1.5);
+    var material_grain = select(base_grain, dirt.x * 0.62 + dirt.y * 0.38, is_dirt);
+    material_grain = select(material_grain,
+        grass.x * 0.52 + grass.y * 0.30 + grass.z * 0.18, is_grass);
+    material_grain = select(material_grain,
+        wood_grain * 0.72 + wood_fine * 0.28,
+        in.surface3.w > 0.5 && in.surface3.w < 1.5);
+    let base_strata = select(strata, sand_pattern - 0.5, in.surface3.w > 1.5);
+    var material_strata = select(base_strata, dirt.y - 0.5, is_dirt);
+    material_strata = select(material_strata, grass.y - 0.5, is_grass);
+    material_strata = select(material_strata, wood_grain - 0.5,
+        in.surface3.w > 0.5 && in.surface3.w < 1.5);
+    let base_detail = select(grain - 0.5, sand_grit, in.surface3.w > 1.5);
+    var fine_detail = select(base_detail, dirt.z, is_dirt);
+    fine_detail = select(fine_detail, grass.z - 0.5, is_grass);
+    fine_detail = select(fine_detail, wood_fine - 0.5,
+        in.surface3.w > 0.5 && in.surface3.w < 1.5);
+    fine_detail *= fine_visibility;
+    let detail = (in.surface.x * 0.13 + select(0.0, 0.045, in.surface3.w > 0.5)) * fine_detail;
+    let n = normalize(in.world_n + vec3<f32>(detail, detail * 0.35, -detail));
     let l = normalize(u.light_dir);
     let ndl = max(dot(n, l), 0.0);
     let texel = textureSample(albedo_tex, albedo_sampler, in.uv);
-    let base = in.color * texel;
+    let layer = 1.0 + (material_strata * in.surface2.x * medium_visibility + (ridge - 0.5) * 0.55) * 0.32;
+    let base_tone = select(1.0, 0.72 + material_grain * 0.55, in.surface3.w > 1.5);
+    var wood_tone = select(base_tone, 0.72 + material_grain * 0.45, is_dirt);
+    wood_tone = select(wood_tone, 0.74 + material_grain * 0.48, is_grass);
+    wood_tone = select(wood_tone, 0.56 + material_grain * 0.78,
+        in.surface3.w > 0.5 && in.surface3.w < 1.5);
+    let base_fine_color = select(0.92 + fine_detail * 0.18, 1.0, in.surface3.w > 1.5);
+    var fine_color = select(base_fine_color, 0.82 + fine_detail * 0.25, is_dirt);
+    fine_color = select(fine_color, 0.78 + fine_detail * 0.38, is_grass);
+    fine_color = select(fine_color, 0.82 + wood_fine * 0.34,
+        in.surface3.w > 0.5 && in.surface3.w < 1.5);
+    let base = in.color * texel * layer * wood_tone * fine_color;
     // Soft wrap lighting — enough contrast for smooth heightfields to read as
     // hills. Sky and sun share one budget, so raising ambient fills the shadows
     // instead of blowing out everything the sun already reaches.
@@ -181,6 +375,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let vis = sun_visibility(in.world_p, n, u.eye);
     var lit = base.rgb * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis);
     lit += base.rgb * torch_light(in.world_p, n);
+    let glint = smoothstep(0.92, 0.99, material_grain) * in.surface.z
+        + smoothstep(0.72, 0.98, wood_fine) * select(0.0, 0.025, in.surface3.w > 0.5);
+    lit += vec3<f32>(1.0, 0.86, 0.62) * glint * 0.08;
+    // Cave formations carry restrained mineral emission: pale calcite and
+    // green/blue bioluminescent polish remain readable beyond the headlamp's
+    // hot spot without turning the whole cave into a self-lit scene.
+    let calcite = smoothstep(0.62, 0.86, min(in.color.r, min(in.color.g, in.color.b)));
+    let bio = smoothstep(1.15, 1.75, in.color.g - in.color.r + in.color.b * 0.25);
+    lit += vec3<f32>(1.0, 0.78, 0.52) * calcite * 0.055;
+    lit += vec3<f32>(0.18, 0.95, 0.72) * bio * 0.12;
     // Soft fresnel rim for translucent surfaces (keep grazing alpha modest so
     // water stays see-through from typical third-person angles).
     var alpha = base.a;
@@ -191,7 +395,30 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     } else {
         alpha = 1.0;
     }
-    return vec4<f32>(haze(lit, in.world_p), alpha);
+    let coverage_dir = normalize(in.surface4.xyz);
+    let facing = dot(n, coverage_dir);
+    let directional = smoothstep(in.surface4.w - in.surface5.x,
+        in.surface4.w + in.surface5.x, facing);
+    // Normal-weighted triplanar breakup keeps deposits natural on arbitrary
+    // rocks and avoids privileging the XZ plane on walls or overhangs.
+    let tri_weights = abs(n) / max(dot(abs(n), vec3<f32>(1.0)), 0.001);
+    let tri_noise = fbm3(in.world_p.yzx * 0.55 + vec3<f32>(seed, 37.0, 11.0), 0.5) * tri_weights.x
+        + fbm3(in.world_p.zxy * 0.55 + vec3<f32>(seed + 17.0, 7.0, 19.0), 0.5) * tri_weights.y
+        + fbm3(in.world_p.xyz * 0.55 + vec3<f32>(seed + 31.0, 13.0, 5.0), 0.5) * tri_weights.z;
+    let breakup = smoothstep(0.30, 0.72, tri_noise);
+    let snow_fine = musgrave3(in.world_p * in.surface.w * 4.5 + vec3<f32>(seed, 61.0, 23.0), 0.52, 2.25);
+    let overlay = directional * breakup * in.surface5.y;
+    let overlay_mix = clamp(overlay, 0.0, 1.0);
+    let overlay_color = vec3<f32>(0.78 + snow_fine * 0.12, 0.84 + snow_fine * 0.10, 0.94 + snow_fine * 0.06);
+    let overlay_base = mix(base.rgb, overlay_color, overlay_mix);
+    let overlay_lit = overlay_base * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis);
+    let snow_bump = snow_fine * overlay_mix * select(0.0, 0.055, in.surface3.w > 4.5);
+    let snow_sparkle = snow_bump * smoothstep(0.55, 0.95, dot(n, normalize(u.light_dir)))
+        * vec3<f32>(0.32, 0.48, 0.72);
+    let overlay_specular = mix(0.0, 0.06 * (1.0 - in.surface5.z), overlay_mix)
+        + snow_bump * 0.22;
+    let emission = vec3<f32>(1.0, 0.78, 0.48) * in.surface.z;
+    return vec4<f32>(haze(mix(lit, overlay_lit, overlay_mix) + overlay_specular + snow_sparkle + emission, in.world_p), alpha);
 }
 "#;
 
@@ -262,7 +489,10 @@ pub fn create_pipelines(
                 entries: &entries,
             })
         });
-        SceneUniformSlots { buffers, bind_groups }
+        SceneUniformSlots {
+            buffers,
+            bind_groups,
+        }
     };
 
     let albedo_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

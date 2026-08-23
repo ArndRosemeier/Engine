@@ -11,6 +11,7 @@ members = [
     "examples/animated_animal",
     "examples/portals",
     "examples/portal_pair",
+    "examples/material_showcase",
 ]
 default-members = ["engine"]
 

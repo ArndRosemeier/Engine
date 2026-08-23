@@ -59,7 +59,7 @@ pub use gpu_field::{
 pub use input::{Input, Key, MouseButton};
 pub use landscape::Landscape;
 pub use limits::EngineLimits;
-pub use mesh::{BuiltMesh, Mesh, PointId, Shape};
+pub use mesh::{BuiltMesh, Mesh, PointId, Shape, SurfaceMaterial};
 pub use model::{scatter_places, Model};
 pub use place::{GlobalPlace, MeshInstance, Place};
 pub use portal::{Portal, PortalId, PortalSettings, SpaceId};
@@ -72,8 +72,8 @@ pub use surface::{SurfaceSample, SurfaceSource, WaterSurface, WATER_CLEARANCE};
 pub use surface_terrain::{SurfaceMeshStyle, SurfaceStream, SurfaceTerrain};
 pub use terrain::{HeightTerrain, TerrainRules, TerrainSample, TerrainStream};
 pub use texture::{
-    generate_terrain_albedo, load_rgba8_png, MaterialId, TerrainAlbedo, TerrainMaterialDesc,
-    TextureId,
+    generate_cave_albedo, generate_terrain_albedo, load_rgba8_png, MaterialId, TerrainAlbedo,
+    TerrainMaterialDesc, TextureId,
 };
 pub use ui::{egui, UiFrame, UiPanel};
 pub use water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
