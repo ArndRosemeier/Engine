@@ -64,20 +64,23 @@ struct TerrainParams {
 @group(1) @binding(0) var grass_tex: texture_2d<f32>;
 @group(1) @binding(1) var grass_dry_tex: texture_2d<f32>;
 @group(1) @binding(2) var grass_moor_tex: texture_2d<f32>;
-@group(1) @binding(3) var sand_tex: texture_2d<f32>;
-@group(1) @binding(4) var rock_tex: texture_2d<f32>;
-@group(1) @binding(5) var tex_sampler: sampler;
-@group(1) @binding(6) var<uniform> tp: TerrainParams;
+@group(1) @binding(3) var mud_tex: texture_2d<f32>;
+@group(1) @binding(4) var tundra_tex: texture_2d<f32>;
+@group(1) @binding(5) var scree_tex: texture_2d<f32>;
+@group(1) @binding(6) var sand_tex: texture_2d<f32>;
+@group(1) @binding(7) var rock_tex: texture_2d<f32>;
+@group(1) @binding(8) var tex_sampler: sampler;
+@group(1) @binding(9) var<uniform> tp: TerrainParams;
 
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
     @location(3) uv: vec2<f32>,
-    @location(4) m0: vec4<f32>,
-    @location(5) m1: vec4<f32>,
-    @location(6) m2: vec4<f32>,
-    @location(7) m3: vec4<f32>,
+    @location(6) m0: vec4<f32>,
+    @location(7) m1: vec4<f32>,
+    @location(8) m2: vec4<f32>,
+    @location(9) m3: vec4<f32>,
 };
 
 struct VsOut {
@@ -120,6 +123,21 @@ fn saturate_rgb(c: vec3<f32>, amount: f32) -> vec3<f32> {
     return mix(vec3<f32>(luma), c, amount);
 }
 
+fn terrain_hash(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
+}
+
+fn terrain_value(p: vec2<f32>) -> f32 {
+    let cell = floor(p);
+    let local = fract(p);
+    let smooth_local = local * local * (3.0 - 2.0 * local);
+    let a = terrain_hash(cell);
+    let b = terrain_hash(cell + vec2<f32>(1.0, 0.0));
+    let c = terrain_hash(cell + vec2<f32>(0.0, 1.0));
+    let d = terrain_hash(cell + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, smooth_local.x), mix(c, d, smooth_local.x), smooth_local.y);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.world_n);
@@ -138,6 +156,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let moor_w = clamp(in.splat.y, 0.0, 1.0);
     let lush_w = max(1.0 - dry_w - moor_w, 0.0);
     let grass = grass_lush * lush_w + grass_dry * dry_w + grass_moor * moor_w;
+    let mud = sample_albedo(mud_tex, uv * 1.08);
+    let tundra = sample_albedo(tundra_tex, uv * 0.94);
+    let scree = sample_albedo(scree_tex, uv * 0.78);
     let sand = sample_albedo(sand_tex, uv * 1.15);
     let rock = sample_albedo(rock_tex, uv * 0.85);
 
@@ -156,15 +177,37 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let rock_w = smoothstep(rock_lo, rock_hi, slope + edge);
     let sand_w = (1.0 - smoothstep(0.0, tp.sand_height_band, h)) * (1.0 - rock_w);
     let grass_w = max(1.0 - rock_w - sand_w, 0.0);
+    let moisture = clamp(1.0 - h / 42.0, 0.0, 1.0);
+    let mud_w = smoothstep(0.28, 0.92, moisture) * (1.0 - smoothstep(0.16, 0.42, slope)) * (1.0 - rock_w);
+    let cold = smoothstep(tp.snow_line_m * 0.28, tp.snow_line_m * 0.82, h);
+    let tundra_w = cold * (1.0 - rock_w) * (1.0 - sand_w) * (1.0 - mud_w * 0.65);
+    let scree_w = smoothstep(0.32, 0.78, slope) * (0.24 + 0.76 * cold) * (1.0 - sand_w);
+    let base_sum = max(grass_w + sand_w + rock_w + mud_w + tundra_w + scree_w, 0.0001);
+    let grass_n = grass_w / base_sum;
+    let sand_n = sand_w / base_sum;
+    let rock_n = rock_w / base_sum;
+    let mud_n = mud_w / base_sum;
+    let tundra_n = tundra_w / base_sum;
+    let scree_n = scree_w / base_sum;
 
-    var albedo = grass * grass_w + sand * sand_w + rock * rock_w;
+    var albedo = grass * grass_n + sand * sand_n + rock * rock_n + mud * mud_n + tundra * tundra_n + scree * scree_n;
+    // A derivative-gated procedural modulation adds readable close-range
+    // structure without letting high-frequency noise shimmer at distance.
+    let uv_dx = dpdx(uv);
+    let uv_dy = dpdy(uv);
+    let footprint = max(length(uv_dx), length(uv_dy));
+    let fine_lod = 1.0 - smoothstep(0.012, 0.075, footprint);
+    let medium = terrain_value(uv * 5.0) * 2.0 - 1.0;
+    let fine = terrain_value(uv * 31.0) * 2.0 - 1.0;
+    let detail = medium * 0.035 + fine * 0.018 * fine_lod;
+    albedo *= 1.0 + detail;
     // River / lake bed. Alpha says so outright: a caller that wants a dark
     // forest floor and a caller that wants a streambed cannot be told apart by
     // how brown their vertex colour is, and guessing gave the darker of the two
     // a bed it never asked for.
     let bed_w = clamp(1.0 - in.color.a, 0.0, 1.0);
-    let mud = sand * vec3<f32>(0.42, 0.34, 0.26) + rock * vec3<f32>(0.18, 0.14, 0.12);
-    albedo = mix(albedo, mud, bed_w);
+    let mud_bed = sand * vec3<f32>(0.42, 0.34, 0.26) + rock * vec3<f32>(0.18, 0.14, 0.12);
+    albedo = mix(albedo, mud_bed, bed_w);
     // Mild vertex-color tint (biome / slope authoring) — skip on beds, and
     // never on snow: multiplying grey rock into the cap is what made it ash.
     albedo = mix(albedo, albedo * in.color.rgb, tp.tint_strength * (1.0 - bed_w));
@@ -256,14 +299,17 @@ pub fn create_terrain_pipelines(
             tex_entry(2),
             tex_entry(3),
             tex_entry(4),
+            tex_entry(5),
+            tex_entry(6),
+            tex_entry(7),
             wgpu::BindGroupLayoutEntry {
-                binding: 5,
+                binding: 8,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
             wgpu::BindGroupLayoutEntry {
-                binding: 6,
+                binding: 9,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
@@ -409,12 +455,12 @@ pub fn build_terrain_material(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
-    // Lush, dry, moor, sand, rock albedo in that order.
-    layers: [&GpuTexture; 5],
+    // Lush, dry, moor, mud, tundra, scree, sand, rock albedo in that order.
+    layers: [&GpuTexture; 8],
     desc: &TerrainMaterialDesc,
     origin: RenderOrigin,
 ) -> GpuTerrainMaterial {
-    let [grass, grass_dry, grass_moor, sand, rock] = layers;
+    let [grass, grass_dry, grass_moor, mud, tundra, scree, sand, rock] = layers;
     let params = TerrainParams::from_desc(desc, origin);
     let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("terrain-params"),
@@ -439,18 +485,30 @@ pub fn build_terrain_material(
             },
             wgpu::BindGroupEntry {
                 binding: 3,
-                resource: wgpu::BindingResource::TextureView(&sand.view),
+                resource: wgpu::BindingResource::TextureView(&mud.view),
             },
             wgpu::BindGroupEntry {
                 binding: 4,
-                resource: wgpu::BindingResource::TextureView(&rock.view),
+                resource: wgpu::BindingResource::TextureView(&tundra.view),
             },
             wgpu::BindGroupEntry {
                 binding: 5,
-                resource: wgpu::BindingResource::Sampler(sampler),
+                resource: wgpu::BindingResource::TextureView(&scree.view),
             },
             wgpu::BindGroupEntry {
                 binding: 6,
+                resource: wgpu::BindingResource::TextureView(&sand.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(&rock.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
                 resource: params_buf.as_entire_binding(),
             },
         ],

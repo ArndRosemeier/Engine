@@ -289,8 +289,13 @@ fn vs_main(v: VsIn) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let seed = in.surface2.y;
-    let axis = normalize(in.surface3.xyz);
-    let orientation_use = select(1.0, abs(axis.y) + abs(axis.x) * 0.5 + abs(axis.z) * 0.5, dot(axis, axis) > 0.001);
+    // Default-material meshes have no authored orientation and carry a zero
+    // vector. Never normalize that sentinel: NaNs here contaminate every
+    // procedural sample and turn otherwise valid houses/props into black.
+    let orientation_raw = in.surface3.xyz;
+    let has_orientation = dot(orientation_raw, orientation_raw) > 0.001;
+    let axis = normalize(select(vec3<f32>(0.0, 1.0, 0.0), orientation_raw, has_orientation));
+    let orientation_use = select(1.0, abs(axis.y) + abs(axis.x) * 0.5 + abs(axis.z) * 0.5, has_orientation);
     let oriented_p = in.world_p + axis * dot(in.world_p, axis) * (orientation_use - 1.0);
     let warped = oriented_p * in.surface.w + vec3<f32>(seed * 1.37, seed * 0.71, seed * 2.11);
     let warp = vec3<f32>(

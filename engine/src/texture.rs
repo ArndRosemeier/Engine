@@ -45,6 +45,12 @@ pub struct TerrainMaterialDesc {
     pub grass_dry: TextureId,
     /// Peat and duff. Vertex UV.y blends this over [`Self::grass`].
     pub grass_moor: TextureId,
+    /// Wet clods and dark organic soil for banks and basins.
+    pub mud: TextureId,
+    /// Low mat vegetation and lichen for cold high ground.
+    pub tundra: TextureId,
+    /// Angular fragments and fines on exposed slopes.
+    pub scree: TextureId,
     pub sand: TextureId,
     pub rock: TextureId,
     /// World metres covered by one texture tile.
@@ -74,6 +80,9 @@ impl Default for TerrainMaterialDesc {
             grass: TextureId(0),
             grass_dry: TextureId(0),
             grass_moor: TextureId(0),
+            mud: TextureId(0),
+            tundra: TextureId(0),
+            scree: TextureId(0),
             sand: TextureId(0),
             rock: TextureId(0),
             metres_per_tile: 14.0,
@@ -204,6 +213,12 @@ pub enum TerrainAlbedo {
     GrassDry,
     /// Dark peat and leaf-mould: banks, wetlands, and the floor of a stand.
     GrassMoor,
+    /// Wet clods and organic mud for saturated low ground.
+    Mud,
+    /// Cold low vegetation, lichen, and exposed frost soil.
+    Tundra,
+    /// Angular debris and fines on exposed alpine slopes.
+    Scree,
     Sand,
     Rock,
 }
@@ -295,6 +310,49 @@ pub fn generate_terrain_albedo(kind: TerrainAlbedo, size: u32, seed: u32) -> (u3
                     let shade = 0.78 + 0.14 * fibre - 0.12 * wet;
                     (r * shade, g * shade, b * shade)
                 }
+                TerrainAlbedo::Mud => {
+                    let clods = unit(tileable(&n0, u, v, 7.0));
+                    let wet = unit(tileable(&n2, u, v, 2.4));
+                    let grit = unit(tileable(&n3, u, v, 64.0));
+                    let cracks = smoothstep(0.62, 0.94, unit(tileable(&n1, u, v, 13.0)));
+                    let dark = (0.16, 0.12, 0.08);
+                    let wet_soil = (0.25, 0.18, 0.11);
+                    let clay = (0.34, 0.25, 0.16);
+                    let mut c = mix3(dark, wet_soil, wet * 0.7 + clods * 0.2);
+                    c = mix3(c, clay, grit * 0.18);
+                    c = mix3(c, dark, cracks * 0.28);
+                    let shade = 0.88 + 0.12 * grit;
+                    (c.0 * shade, c.1 * shade, c.2 * shade)
+                }
+                TerrainAlbedo::Tundra => {
+                    let mat = unit(tileable(&n0, u, v, 4.5));
+                    let lichen = unit(tileable(&n1, u, v, 19.0));
+                    let frost = smoothstep(0.58, 0.92, unit(tileable(&n2, u, v, 3.0)));
+                    let grit = unit(tileable(&n3, u, v, 72.0));
+                    let moss = (0.25, 0.31, 0.18);
+                    let heath = (0.39, 0.34, 0.20);
+                    let soil = (0.28, 0.25, 0.19);
+                    let frost_tone = (0.58, 0.61, 0.57);
+                    let mut c = mix3(moss, heath, mat * 0.75);
+                    c = mix3(c, soil, (1.0 - lichen) * 0.48);
+                    c = mix3(c, frost_tone, frost * 0.20);
+                    let shade = 0.90 + 0.12 * grit;
+                    (c.0 * shade, c.1 * shade, c.2 * shade)
+                }
+                TerrainAlbedo::Scree => {
+                    let stones = unit(tileable(&n0, u, v, 9.0));
+                    let facets = unit(tileable(&n1, u, v, 26.0));
+                    let fines = unit(tileable(&n2, u, v, 70.0));
+                    let lichen = smoothstep(0.72, 0.96, unit(tileable(&n3, u, v, 11.0)));
+                    let base = (0.32, 0.31, 0.29);
+                    let pale = (0.50, 0.47, 0.41);
+                    let dark = (0.18, 0.18, 0.17);
+                    let moss = (0.24, 0.29, 0.18);
+                    let mut c = mix3(dark, pale, stones * 0.72 + facets * 0.16);
+                    c = mix3(c, base, fines * 0.34);
+                    c = mix3(c, moss, lichen * 0.18);
+                    (c.0, c.1, c.2)
+                }
                 TerrainAlbedo::Sand => {
                     // Beach: wind ripples, warm dry grains, cooler damp troughs.
                     let ripple = unit((tileable(&n0, u, v, 3.2) * 6.5).sin());
@@ -375,6 +433,9 @@ fn kind_seed(kind: TerrainAlbedo) -> u32 {
         TerrainAlbedo::Grass => 0x67A55,
         TerrainAlbedo::GrassDry => 0xD8A11,
         TerrainAlbedo::GrassMoor => 0x3EA7,
+        TerrainAlbedo::Mud => 0xBADC0,
+        TerrainAlbedo::Tundra => 0x7A2D2,
+        TerrainAlbedo::Scree => 0x5C0EE,
         TerrainAlbedo::Sand => 0x5A11D,
         TerrainAlbedo::Rock => 0x20C6,
     }
@@ -479,6 +540,9 @@ mod tests {
             TerrainAlbedo::Grass,
             TerrainAlbedo::GrassDry,
             TerrainAlbedo::GrassMoor,
+            TerrainAlbedo::Mud,
+            TerrainAlbedo::Tundra,
+            TerrainAlbedo::Scree,
             TerrainAlbedo::Sand,
             TerrainAlbedo::Rock,
         ] {
@@ -495,6 +559,16 @@ mod tests {
 
     #[test]
     fn albedo_is_tileable_edge_close() {
+        for kind in [
+            TerrainAlbedo::Mud,
+            TerrainAlbedo::Tundra,
+            TerrainAlbedo::Scree,
+        ] {
+            let (w, h, a) = generate_terrain_albedo(kind, 32, 7);
+            let (_, _, b) = generate_terrain_albedo(kind, 32, 7);
+            assert_eq!(a, b, "terrain albedo must be deterministic: {kind:?}");
+            assert_eq!(a.len(), (w * h * 4) as usize);
+        }
         let (w, h, rgba) = generate_terrain_albedo(TerrainAlbedo::Rock, 32, 7);
         let pix = |x: u32, y: u32| {
             let i = ((y * w + x) * 4) as usize;

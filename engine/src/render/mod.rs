@@ -2411,6 +2411,18 @@ impl Renderer {
                 .gpu_textures
                 .get(&mat.desc.grass_moor)
                 .expect("terrain moor texture missing on GPU");
+            let mud = self
+                .gpu_textures
+                .get(&mat.desc.mud)
+                .expect("terrain mud texture missing on GPU");
+            let tundra = self
+                .gpu_textures
+                .get(&mat.desc.tundra)
+                .expect("terrain tundra texture missing on GPU");
+            let scree = self
+                .gpu_textures
+                .get(&mat.desc.scree)
+                .expect("terrain scree texture missing on GPU");
             let sand = self
                 .gpu_textures
                 .get(&mat.desc.sand)
@@ -2423,7 +2435,7 @@ impl Renderer {
                 &self.device,
                 &self.terrain.mat_bind_layout,
                 &self.terrain.sampler,
-                [grass, grass_dry, grass_moor, sand, rock],
+                [grass, grass_dry, grass_moor, mud, tundra, scree, sand, rock],
                 &mat.desc,
                 world.render_origin(),
             );

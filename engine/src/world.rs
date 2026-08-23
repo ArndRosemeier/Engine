@@ -1681,6 +1681,9 @@ impl World {
             desc.grass,
             desc.grass_dry,
             desc.grass_moor,
+            desc.mud,
+            desc.tundra,
+            desc.scree,
             desc.sand,
             desc.rock,
         ] {
