@@ -308,7 +308,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Foliage cards stay on the opaque path. The silhouette is an analytic,
     // camera-independent lobe pattern: no hashed coverage, derivatives, alpha
     // blending, or per-frame threshold can make its edge appear/disappear.
-    if in.surface3.w > 5.5 && in.surface3.w < 6.5 {
+    if in.surface3.w > 5.5 && in.surface3.w < 7.5 {
         let leaf_uv = in.uv * vec2<f32>(2.0, 3.0);
         let cell = floor(leaf_uv);
         let local = fract(leaf_uv) - vec2<f32>(0.5);

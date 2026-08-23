@@ -252,6 +252,27 @@ impl SurfaceMaterial {
         overlay_metallic: 0.0,
     };
 
+    /// Needled foliage profile. Needle silhouettes are authored by the mesh;
+    /// the shader applies only stable shading and low-frequency variation.
+    pub const NEEDLED_FOLIAGE: Self = Self {
+        roughness: 0.94,
+        metallic: 0.0,
+        emission: 0.0,
+        detail_scale: 5.0,
+        strata_strength: 0.18,
+        seed: 271.0,
+        warp_strength: 0.14,
+        noise_gain: 0.42,
+        orientation: [0.0, 1.0, 0.0],
+        profile: 7.0,
+        coverage_direction: [0.0, 1.0, 0.0],
+        coverage_level: 0.3,
+        coverage_softness: 0.12,
+        coverage_strength: 0.0,
+        overlay_roughness: 0.96,
+        overlay_metallic: 0.0,
+    };
+
     /// Grass-surface profile. This shades a surface; foliage geometry remains
     /// a separate system so coverage does not become a fragment-only hack.
     pub const GRASS: Self = Self {

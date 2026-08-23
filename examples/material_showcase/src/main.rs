@@ -51,6 +51,58 @@ fn leaf_cluster(at: (f32, f32, f32), scale: f32, seed: f32) -> Mesh {
     mesh
 }
 
+fn needle_cluster(at: (f32, f32, f32), scale: f32, seed: f32) -> Mesh {
+    let mut mesh = Mesh::new();
+    let (x, y, z) = at;
+    // Fixed diamond needles: no procedural silhouette or alpha is involved.
+    let needles = [
+        (0.0, 0.1, 0.0, 0.18, 1.1, [1.0, 0.0, 0.0]),
+        (-0.42, 0.48, 0.12, 0.14, 0.88, [0.82, 0.0, 0.57]),
+        (0.4, 0.62, -0.08, 0.15, 0.96, [0.86, 0.0, -0.5]),
+        (-0.22, 0.88, -0.2, 0.12, 0.78, [0.55, 0.0, 0.84]),
+        (0.24, 1.12, 0.08, 0.13, 0.82, [-0.52, 0.0, 0.86]),
+        (-0.62, 0.84, 0.0, 0.10, 0.66, [0.95, 0.0, 0.2]),
+        (0.6, 0.94, 0.16, 0.11, 0.7, [-0.9, 0.0, 0.25]),
+        (-0.1, 1.48, -0.02, 0.10, 0.62, [0.35, 0.0, 0.94]),
+        (0.1, 0.36, -0.46, 0.14, 0.9, [0.72, 0.0, 0.7]),
+        (-0.3, 0.76, -0.4, 0.11, 0.7, [0.98, 0.0, -0.12]),
+        (0.34, 1.02, -0.34, 0.11, 0.72, [-0.82, 0.0, 0.57]),
+    ];
+    for (ox, oy, oz, width, height, axis) in needles {
+        let cx = x + ox * scale;
+        let cy = y + oy * scale;
+        let cz = z + oz * scale;
+        let w = width * scale;
+        let h = height * scale;
+        let tip = [cx + axis[0] * w, cy + h, cz + axis[2] * w];
+        let left = [cx - axis[2] * w, cy, cz + axis[0] * w];
+        let right = [cx + axis[2] * w, cy, cz - axis[0] * w];
+        let base = [cx, cy - h * 0.18, cz];
+        let ids = [
+            mesh.add_point(left).expect("needle point"),
+            mesh.add_point(base).expect("needle point"),
+            mesh.add_point(right).expect("needle point"),
+            mesh.add_point(tip).expect("needle point"),
+        ];
+        for (id, uv) in ids
+            .into_iter()
+            .zip([[0.0, 0.5], [0.5, 0.0], [1.0, 0.5], [0.5, 1.0]])
+        {
+            mesh.set_point_uv(id, uv).expect("needle uv");
+        }
+        mesh.add_face(&[ids[0], ids[1], ids[3]])
+            .expect("needle face");
+        mesh.add_face(&[ids[1], ids[2], ids[3]])
+            .expect("needle face");
+        mesh.add_face(&[ids[3], ids[1], ids[0]])
+            .expect("needle backface");
+        mesh.add_face(&[ids[3], ids[2], ids[1]])
+            .expect("needle backface");
+    }
+    mesh.set_surface_material(SurfaceMaterial::NEEDLED_FOLIAGE.with_seed(seed));
+    mesh
+}
+
 fn main() {
     Engine::run("material_showcase", move |world, frame| {
         if frame.first {
@@ -165,6 +217,9 @@ fn main() {
             world.spawn(leaf_cluster((-5.0, 1.0, 11.0), 2.2, 1401.0));
             world.spawn(leaf_cluster((1.0, 1.0, 11.0), 2.2, 1511.0));
             world.spawn(leaf_cluster((7.0, 1.0, 11.0), 2.2, 1621.0));
+            world.spawn(needle_cluster((-5.0, 1.0, 16.5), 2.3, 1703.0));
+            world.spawn(needle_cluster((1.0, 1.0, 16.5), 2.3, 1811.0));
+            world.spawn(needle_cluster((7.0, 1.0, 16.5), 2.3, 1933.0));
             world.spawn(block(
                 (5.0, 1.0, 7.0),
                 (2.8, 2.8, 2.8),
