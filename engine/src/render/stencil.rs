@@ -107,20 +107,29 @@ fn face_incr_on_pass() -> StencilFaceState {
     }
 }
 
-/// Mark the portal opening in stencil. Scene geometry in the doorway must not
-/// block this pass — floor boxes often share the opening footprint.
+/// Bias so a doorway opening wins over coplanar floor geometry (reversed-Z).
+const PORTAL_STENCIL_DEPTH_BIAS: i32 = 4;
+
+/// Mark the portal opening in stencil. Must respect scene depth so horizontal
+/// occluders (e.g. an upper-storey floor seen from above) do not show the
+/// linked view through solid geometry. A small depth bias plus the vertex
+/// nudge in the portal mesh shader keeps coplanar doorway floors working.
 pub(crate) fn stencil_incr_depth_stencil() -> DepthStencilState {
     DepthStencilState {
         format: DEPTH_FORMAT,
         depth_write_enabled: true,
-        depth_compare: CompareFunction::Always,
+        depth_compare: super::DEPTH_COMPARE,
         stencil: StencilState {
             front: face_incr_on_pass(),
             back: face_incr_on_pass(),
             read_mask: 0xff,
             write_mask: 0xff,
         },
-        bias: Default::default(),
+        bias: wgpu::DepthBiasState {
+            constant: PORTAL_STENCIL_DEPTH_BIAS,
+            slope_scale: 1.0,
+            clamp: 0.0,
+        },
     }
 }
 
@@ -162,5 +171,18 @@ pub(crate) fn depth_clear_depth_stencil() -> DepthStencilState {
             write_mask: 0x00,
         },
         bias: Default::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stencil_incr_respects_scene_depth() {
+        let state = stencil_incr_depth_stencil();
+        assert_eq!(state.depth_compare, super::super::DEPTH_COMPARE);
+        assert!(state.depth_write_enabled);
+        assert_ne!(state.bias.constant, 0);
     }
 }

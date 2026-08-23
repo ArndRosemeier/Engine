@@ -144,7 +144,7 @@ impl UiPanel<'_> {
                     .load_texture(id.to_string(), color, TextureOptions::NEAREST)
             });
 
-        let max_side = self.ui.available_width().min(512.0).max(64.0);
+        let max_side = self.ui.available_width().clamp(64.0, 512.0);
         let scale = max_side / width.max(height) as f32;
         let size = Vec2::new(width as f32 * scale, height as f32 * scale);
         self.ui.image((handle.id(), size));

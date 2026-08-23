@@ -123,6 +123,33 @@ struct MainCullSelection {
     compacted: HashSet<EntityId>,
 }
 
+/// Which space a portal level draws, how deep it recurses, and how the scene
+/// is viewed from there.
+struct PortalLevel {
+    space: SpaceId,
+    /// Portal recursion depth.
+    depth: u8,
+    view: PortalLevelView,
+}
+
+/// How a portal level's scene is viewed: clip plane, environment, culling.
+struct PortalLevelView {
+    clip_plane: Option<(glam::Vec3, glam::Vec3)>,
+    draw_environment: bool,
+    use_cull: bool,
+}
+
+/// Which pass of the scene is being drawn and with which uniform slot.
+#[derive(Clone, Copy)]
+struct ScenePass {
+    /// Drawing seen through a stencil-marked portal opening.
+    portal_mask: bool,
+    /// Portal recursion depth; also picks sky + scene uniform slots.
+    level: u8,
+    /// Scene uniform buffer slot matching `level`.
+    uniform_slot: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ShadowDraw {
     id: EntityId,
@@ -482,6 +509,11 @@ impl Renderer {
                 let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
                 let vp = world.camera.view_projection(aspect);
                 let light_dir = world.light.direction.normalize_or_zero();
+                let torch_color = world.torch().map(|t| t.color.to_vec3()).unwrap_or_default();
+                let torch_radius_m = world
+                    .torch()
+                    .map(|t| t.radius_m.max(0.0))
+                    .unwrap_or(0.0);
                 clip.prepare(
                     &self.queue,
                     vp,
@@ -489,6 +521,8 @@ impl Renderer {
                     world.light.ambient,
                     world.light.color,
                     world.camera.eye,
+                    torch_color,
+                    torch_radius_m,
                     proc,
                 );
             }
@@ -1074,6 +1108,7 @@ impl Renderer {
         let light_dir = world.light.direction.normalize_or_zero();
         let eye = camera.eye;
         let haze = world.haze();
+        let torch = world.torch();
         let uniforms = Uniforms {
             view_proj: vp.to_cols_array_2d(),
             light_dir: [light_dir.x, light_dir.y, light_dir.z],
@@ -1088,7 +1123,14 @@ impl Renderer {
             haze_density: haze.map(|h| h.density()).unwrap_or(0.0),
             haze_height_m: haze.map(|h| h.height_m.max(1.0)).unwrap_or(1.0),
             haze_base_y: haze.map(|h| h.base_y).unwrap_or(0.0),
-            _pad2: [0.0, 0.0],
+            torch_radius_m: torch.map(|t| t.radius_m.max(0.0)).unwrap_or(0.0),
+            _pad2: 0.0,
+            torch_color: torch
+                .map(|t| {
+                    let c = t.color.to_vec3();
+                    [c.x, c.y, c.z, 0.0]
+                })
+                .unwrap_or([0.0, 0.0, 0.0, 0.0]),
         };
         // Destination and live views share one encoder. Queue writes land
         // before that encoder runs, so they cannot share a uniform buffer.
@@ -1193,12 +1235,16 @@ impl Renderer {
             &mut pass,
             world,
             &scene_camera,
-            live,
-            0,
-            None,
-            world.space_draws_environment(live),
+            PortalLevel {
+                space: live,
+                depth: 0,
+                view: PortalLevelView {
+                    clip_plane: None,
+                    draw_environment: world.space_draws_environment(live),
+                    use_cull: true,
+                },
+            },
             &main_cull,
-            true,
         );
     }
 
@@ -1207,13 +1253,20 @@ impl Renderer {
         pass: &mut wgpu::RenderPass<'a>,
         world: &World,
         camera: &Camera,
-        space: SpaceId,
-        level: u8,
-        clip_plane: Option<(glam::Vec3, glam::Vec3)>,
-        draw_environment: bool,
+        level: PortalLevel,
         main_cull: &MainCullSelection,
-        use_cull: bool,
     ) {
+        let PortalLevel {
+            space,
+            depth,
+            view:
+                PortalLevelView {
+                    clip_plane,
+                    draw_environment,
+                    use_cull,
+                },
+        } = level;
+        let level = depth;
         let look = camera.target - camera.eye;
         if look.length_squared() <= 0.0 {
             return;
@@ -1238,12 +1291,17 @@ impl Renderer {
             pass,
             world,
             space,
-            draw_environment,
             main_cull,
-            use_cull,
-            level > 0,
-            level,
-            uniform_slot,
+            PortalLevelView {
+                clip_plane,
+                draw_environment,
+                use_cull,
+            },
+            ScenePass {
+                portal_mask: level > 0,
+                level,
+                uniform_slot,
+            },
         );
 
         if level >= world.portal_recursion() {
@@ -1292,12 +1350,16 @@ impl Renderer {
                 pass,
                 world,
                 &virt,
-                visible.dest_space,
-                level + 1,
-                dest_clip,
-                dest_env,
+                PortalLevel {
+                    space: visible.dest_space,
+                    depth: level + 1,
+                    view: PortalLevelView {
+                        clip_plane: dest_clip,
+                        draw_environment: dest_env,
+                        use_cull: false,
+                    },
+                },
                 main_cull,
-                false,
             );
             self.write_scene_uniforms(
                 world,
@@ -1375,13 +1437,20 @@ impl Renderer {
         pass: &mut wgpu::RenderPass<'_>,
         world: &World,
         space: SpaceId,
-        draw_environment: bool,
         main_cull: &MainCullSelection,
-        use_cull: bool,
-        portal_mask: bool,
-        level: u8,
-        uniform_slot: usize,
+        view: PortalLevelView,
+        scene: ScenePass,
     ) {
+        let ScenePass {
+            portal_mask,
+            level,
+            uniform_slot,
+        } = scene;
+        let PortalLevelView {
+            clip_plane: _,
+            draw_environment,
+            use_cull,
+        } = view;
         pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
 
         if draw_environment && world.sky().is_some() {

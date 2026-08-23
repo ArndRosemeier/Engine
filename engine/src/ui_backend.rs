@@ -10,6 +10,20 @@ use std::rc::Rc;
 use winit::event::WindowEvent;
 use winit::window::Window;
 
+/// Surface size in pixels, so egui can scale its tessellated output to the
+/// swapchain.
+pub struct UiViewport {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Everything a [`UiBackend::paint`] draws into.
+pub struct UiPaintTarget<'a> {
+    pub view: &'a wgpu::TextureView,
+    pub viewport: UiViewport,
+    pub encoder: &'a mut wgpu::CommandEncoder,
+}
+
 pub struct UiBackend {
     ctx: Context,
     state: EguiWinitState,
@@ -94,17 +108,23 @@ impl UiBackend {
         (out.expect("egui run always invokes closure"), full_output)
     }
 
+    /// Draw the tessellated UI over `view`.
+    ///
+    /// Everything a paint needs in one place: target, GPU handles, viewport,
+    /// and egui's frame output.
     pub fn paint(
         &mut self,
         window: &Window,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        view: &wgpu::TextureView,
-        width: u32,
-        height: u32,
+        target: UiPaintTarget<'_>,
         full_output: FullOutput,
     ) {
+        let UiPaintTarget {
+            view,
+            viewport,
+            encoder,
+        } = target;
         let pixels_per_point = full_output.pixels_per_point;
         self.state
             .handle_platform_output(window, full_output.platform_output);
@@ -117,7 +137,7 @@ impl UiBackend {
         }
 
         let screen = ScreenDescriptor {
-            size_in_pixels: [width.max(1), height.max(1)],
+            size_in_pixels: [viewport.width.max(1), viewport.height.max(1)],
             pixels_per_point,
         };
 

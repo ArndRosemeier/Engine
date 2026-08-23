@@ -12,6 +12,16 @@ const INDIRECT_USAGES: wgpu::BufferUsages = wgpu::BufferUsages::INDIRECT
     .union(wgpu::BufferUsages::STORAGE)
     .union(wgpu::BufferUsages::COPY_DST);
 
+/// Vertex/index buffers and counts one `GpuMesh` is built from.
+struct MeshGpuSource {
+    vertex_buf: wgpu::Buffer,
+    index_buf: wgpu::Buffer,
+    index_count: usize,
+    opaque_index_count: usize,
+    vertex_count: usize,
+    local_bounds: Option<Bounds>,
+}
+
 pub struct GpuMesh {
     pub vertex_buf: wgpu::Buffer,
     pub index_buf: wgpu::Buffer,
@@ -54,12 +64,14 @@ impl GpuMesh {
         Self::with_buffers(
             device,
             cull,
-            vertex_buf,
-            index_buf,
-            mesh.indices.len(),
-            mesh.opaque_index_count.min(mesh.indices.len()),
-            mesh.positions.len(),
-            local_bounds,
+            MeshGpuSource {
+                vertex_buf,
+                index_buf,
+                index_count: mesh.indices.len(),
+                opaque_index_count: mesh.opaque_index_count.min(mesh.indices.len()),
+                vertex_count: mesh.positions.len(),
+                local_bounds,
+            },
             instances,
         )
     }
@@ -74,12 +86,14 @@ impl GpuMesh {
         Self::with_buffers(
             device,
             cull,
-            src.vertex_buf.clone(),
-            src.index_buf.clone(),
-            src.index_count,
-            src.opaque_index_count,
-            src.vertex_count,
-            src.local_bounds,
+            MeshGpuSource {
+                vertex_buf: src.vertex_buf.clone(),
+                index_buf: src.index_buf.clone(),
+                index_count: src.index_count,
+                opaque_index_count: src.opaque_index_count,
+                vertex_count: src.vertex_count,
+                local_bounds: src.local_bounds,
+            },
             instances,
         )
     }
@@ -87,14 +101,17 @@ impl GpuMesh {
     fn with_buffers(
         device: &wgpu::Device,
         cull: &InstanceCull,
-        vertex_buf: wgpu::Buffer,
-        index_buf: wgpu::Buffer,
-        index_count: usize,
-        opaque_index_count: usize,
-        vertex_count: usize,
-        local_bounds: Option<Bounds>,
+        mesh: MeshGpuSource,
         instances: &[InstanceRaw],
     ) -> Self {
+        let MeshGpuSource {
+            vertex_buf,
+            index_buf,
+            index_count,
+            opaque_index_count,
+            vertex_count,
+            local_bounds,
+        } = mesh;
         let instance_buf = instance_buffer(device, instances, "instances");
         let compact_buf = instance_buffer(device, instances, "instances-compact");
         let indirect_buf = indirect_buffer(device, opaque_index_count, index_count);

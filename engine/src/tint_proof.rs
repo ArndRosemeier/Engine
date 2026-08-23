@@ -4,7 +4,7 @@
 //!   cargo test -p engine --lib tint_proof_png -- --nocapture
 
 #[cfg(test)]
-mod tint_proof {
+mod proof {
     use crate::color::Color;
     use crate::mesh::InstanceRaw;
     use bytemuck::bytes_of;
@@ -70,5 +70,66 @@ mod tint_proof {
             "tint proof PNGs -> {} (white={w:?} warm={a:?} cool={b:?})",
             dir.display()
         );
+    }
+}
+
+#[cfg(test)]
+mod mesh_append_tests {
+    use crate::color::Color;
+    use crate::mesh::Mesh;
+    use glam::Vec3;
+
+    #[test]
+    fn append_translated_merges_points_faces_and_colors() {
+        let mut base = Mesh::new();
+        let ba = base.add_point((0.0, 0.0, 0.0)).unwrap();
+        let bb = base.add_point((1.0, 0.0, 0.0)).unwrap();
+        let bc = base.add_point((0.0, 1.0, 0.0)).unwrap();
+        for id in [ba, bb, bc] {
+            base.set_point_color(id, Color::rgb(255, 0, 0)).unwrap();
+        }
+        base.add_triangle(ba, bb, bc).unwrap();
+
+        let mut other = Mesh::new();
+        let oa = other.add_point((0.0, 0.0, 0.0)).unwrap();
+        let ob = other.add_point((0.0, 0.0, 1.0)).unwrap();
+        let oc = other.add_point((1.0, 0.0, 1.0)).unwrap();
+        for id in [oa, ob, oc] {
+            other.set_point_color(id, Color::rgb(0, 255, 0)).unwrap();
+        }
+        other.add_triangle(oa, ob, oc).unwrap();
+
+        base.append_translated(&other, Vec3::new(10.0, 20.0, 30.0))
+            .unwrap();
+        assert_eq!(base.point_count(), 6);
+        assert_eq!(base.face_count(), 2);
+
+        // Translated point landed where expected.
+        let built = base.build();
+        let has_translated_origin = built
+            .positions
+            .iter()
+            .any(|p| (*p - Vec3::new(10.0, 20.0, 30.0)).length() < 1e-4);
+        assert!(has_translated_origin, "appended mesh must be translated");
+
+        // Both color sets survive.
+        assert!(built.colors.iter().any(|c| c.y > 0.5 && c.x < 0.5));
+        assert!(built.colors.iter().any(|c| c.x > 0.5 && c.y < 0.5));
+    }
+
+    #[test]
+    fn append_translated_rejects_out_of_bounds_face() {
+        let mut base = Mesh::new();
+        base.add_point((0.0, 0.0, 0.0)).unwrap();
+
+        let mut other = Mesh::new();
+        let a = other.add_point((0.0, 0.0, 0.0)).unwrap();
+        other.add_point((1.0, 0.0, 0.0)).unwrap();
+        // Corrupt face pointing past the point list must fail loudly.
+        let bad = crate::mesh::PointId::peek(u32::MAX);
+        let setup_err = other
+            .add_triangle(a, a, bad)
+            .expect_err("add_triangle must reject out-of-range id");
+        assert!(matches!(setup_err, crate::error::EngineError::InvalidMesh(_)));
     }
 }

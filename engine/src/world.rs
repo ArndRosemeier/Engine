@@ -61,6 +61,36 @@ impl Default for Light {
     }
 }
 
+/// A light carried by the viewer — a lantern, a torch, headlamp.
+///
+/// Shaded as a point light at the camera eye with a smooth inverse-square-ish
+/// falloff, so nearby surfaces brighten and the glow dies out over
+/// [`Self::radius_m`]. The engine holds one; games toggle it per scene.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TorchLight {
+    pub color: Color,
+    /// Metres at which the torch contribution has faded to nothing.
+    pub radius_m: f32,
+}
+
+impl TorchLight {
+    /// Warm handheld lantern: amber cast reaching a room-scale distance.
+    pub fn lantern() -> Self {
+        Self {
+            color: Color::rgb(255, 214, 156),
+            radius_m: 18.0,
+        }
+    }
+
+    /// Cool cave headlamp: whiter, tighter beam reach.
+    pub fn headlamp() -> Self {
+        Self {
+            color: Color::rgb(228, 236, 255),
+            radius_m: 26.0,
+        }
+    }
+}
+
 /// How instanced meshes reach the GPU.
 ///
 /// Both paths are always compiled. The selected one is the only one that runs;
@@ -352,6 +382,8 @@ pub struct World {
     haze: Option<Haze>,
     /// Procedural sky behind the scene, when the game wants one.
     sky: Option<Sky>,
+    /// Light carried by the viewer (lantern / headlamp), when lit.
+    torch: Option<TorchLight>,
     /// Nearby mesh CSM + height raymarch. `None` disables shadows.
     shadows: Option<ShadowSettings>,
     /// Instanced mesh submit path. Default stays CPU so Engine demos match today.
@@ -419,6 +451,7 @@ impl Default for World {
             view_distance: Camera::default().far,
             haze: None,
             sky: None,
+            torch: None,
             shadows: Some(ShadowSettings::default()),
             instance_submit: InstanceSubmit::CpuIndexed,
             shadow_contact: ContactSnapshot::default(),
@@ -519,9 +552,17 @@ impl World {
     }
 
     /// Slide `from` by `(dx, dz)` using `body`. Collision-off bodies translate.
-    /// Only colliders in [`Self::living_in`] participate.
-    pub fn move_actor(&self, body: &ActorBody, from: GlobalXZ, dx: f64, dz: f64) -> GlobalXZ {
-        self.collision.move_in(self.live_space, body, from, dx, dz)
+    /// Only colliders in [`Self::living_in`] that overlap the actor vertically
+    /// participate.
+    pub fn move_actor(
+        &self,
+        body: &ActorBody,
+        feet: GlobalPosition,
+        dx: f64,
+        dz: f64,
+    ) -> GlobalXZ {
+        self.collision
+            .move_in(self.live_space, body, feet.horizontal(), dx, dz, feet.y)
     }
 
     /// Sweep a vertical actor capsule through finite walls, floors, and ceilings.
@@ -1444,6 +1485,18 @@ impl World {
     pub fn set_sun(&mut self, direction: impl Into<Vec3>, ambient: f32) {
         self.light.direction = direction.into();
         self.light.ambient = ambient.clamp(0.0, 1.0);
+    }
+
+    /// Light the scene from the camera eye — a lantern or headlamp — or take
+    /// it out again with `None`.
+    ///
+    /// The torch follows the view every frame; there is no separate position.
+    pub fn set_torch(&mut self, torch: Option<TorchLight>) {
+        self.torch = torch;
+    }
+
+    pub fn torch(&self) -> Option<TorchLight> {
+        self.torch
     }
 
     /// Enable hybrid sun shadows, or pass `None` to turn them off.

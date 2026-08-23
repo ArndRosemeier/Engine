@@ -19,7 +19,12 @@ pub struct Uniforms {
     pub haze_height_m: f32,
     /// Altitude the air starts thinning from.
     pub haze_base_y: f32,
-    pub _pad2: [f32; 2],
+    /// Metres at which the torch contribution reaches zero.
+    pub torch_radius_m: f32,
+    pub _pad2: f32,
+    /// Viewer-carried point light (lantern / headlamp); rgb, alpha unused.
+    /// Radius 0 switches it off.
+    pub torch_color: [f32; 4],
 }
 
 impl Uniforms {
@@ -36,7 +41,9 @@ impl Uniforms {
             haze_density: 0.0,
             haze_height_m: 1.0,
             haze_base_y: 0.0,
-            _pad2: [0.0, 0.0],
+            torch_radius_m: 0.0,
+            _pad2: 0.0,
+            torch_color: [0.0, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -59,10 +66,31 @@ struct Uniforms {
     haze_density: f32,
     haze_height_m: f32,
     haze_base_y: f32,
-    _pad2: vec2<f32>,
+    torch_radius_m: f32,
+    _pad2: f32,
+    torch_color: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
+
+// Light from the viewer's own lantern. A point light at the eye with a
+// distance falloff that stays gentle near the holder and dies at `reach`:
+//   1 - (d/reach)^2  clamped — quadratic near, linear tail, zero past reach.
+// The 1/(1+d*d) term keeps a hand's-breadth wall from blowing out.
+fn torch_light(world_p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    if u.torch_radius_m <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+    let to_p = world_p - u.eye;
+    let d = length(to_p);
+    let reach = max(u.torch_radius_m, 0.5);
+    let fall = clamp(1.0 - d / reach, 0.0, 1.0);
+    let near = 1.0 / (1.0 + 0.35 * d * d);
+    // Surfaces facing away get only the wrap spill, never a hard black edge.
+    let ndl = max(dot(n, -to_p / max(d, 1e-4)), 0.0);
+    let wrap = ndl * 0.7 + 0.3;
+    return u.torch_color.rgb * (fall * fall * near * wrap);
+}
 
 // Fade a surface into the sky by how much air the view ray crossed.
 //
@@ -151,7 +179,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // instead of blowing out everything the sun already reaches.
     let wrap = ndl * 0.65 + 0.35;
     let vis = sun_visibility(in.world_p, n, u.eye);
-    let lit = base.rgb * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis);
+    var lit = base.rgb * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis);
+    lit += base.rgb * torch_light(in.world_p, n);
     // Soft fresnel rim for translucent surfaces (keep grazing alpha modest so
     // water stays see-through from typical third-person angles).
     var alpha = base.a;

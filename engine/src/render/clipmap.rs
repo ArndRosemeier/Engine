@@ -31,7 +31,11 @@ struct FrameUniform {
     light_color: [f32; 3],
     _pad: f32,
     eye: [f32; 3],
+    /// Metres at which the torch contribution reaches zero.
+    torch_radius_m: f32,
     _pad2: f32,
+    /// Viewer-carried point light (rgb + unused); radius 0 switches it off.
+    torch_color: [f32; 4],
 }
 
 const SHADER: &str = r#"
@@ -57,7 +61,9 @@ struct FrameUniform {
     light_color: vec3<f32>,
     _pad: f32,
     eye: vec3<f32>,
+    torch_radius_m: f32,
     _pad2: f32,
+    torch_color: vec4<f32>,
 };
 
 struct RingUniform {
@@ -69,6 +75,21 @@ struct RingUniform {
 @group(0) @binding(0) var<uniform> frame: FrameUniform;
 @group(0) @binding(1) var<uniform> terrain: TerrainParams;
 @group(0) @binding(2) var<uniform> ring: RingUniform;
+
+// Light from the viewer's own lantern — same shape as the scene pipelines.
+fn torch_light(world_p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    if frame.torch_radius_m <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+    let to_p = world_p - frame.eye;
+    let d = length(to_p);
+    let reach = max(frame.torch_radius_m, 0.5);
+    let fall = clamp(1.0 - d / reach, 0.0, 1.0);
+    let near = 1.0 / (1.0 + 0.35 * d * d);
+    let ndl = max(dot(n, -to_p / max(d, 1e-4)), 0.0);
+    let wrap = ndl * 0.7 + 0.3;
+    return frame.torch_color.rgb * (fall * fall * near * wrap);
+}
 
 struct VsIn {
     @location(0) local_xz: vec2<f32>,
@@ -217,7 +238,8 @@ fn fs_land(in: VsOut) -> @location(0) vec4<f32> {
     let ndl = max(dot(n, l), 0.0);
     let wrap = ndl * 0.5 + 0.5;
     let vis = sun_visibility(in.world_p, n, frame.eye);
-    let lit = in.color.rgb * (frame.ambient + wrap * wrap * vis * frame.light_color);
+    let lit = in.color.rgb * (frame.ambient + wrap * wrap * vis * frame.light_color)
+        + in.color.rgb * torch_light(in.world_p, n);
     return vec4(lit, 1.0);
 }
 
@@ -255,7 +277,8 @@ fn fs_water(in: WaterVsOut) -> @location(0) vec4<f32> {
     let ndl = max(dot(n, l), 0.0);
     let wrap = ndl * 0.5 + 0.5;
     let vis = sun_visibility(in.world_p, n, frame.eye);
-    let lit = in.color.rgb * (frame.ambient + wrap * wrap * vis * frame.light_color);
+    let lit = in.color.rgb * (frame.ambient + wrap * wrap * vis * frame.light_color)
+        + in.color.rgb * torch_light(in.world_p, n);
     var alpha = in.color.a;
     alpha = mix(alpha, min(alpha + 0.18, 0.55), fresnel * 0.65);
     return vec4(lit, alpha);
@@ -510,6 +533,7 @@ impl ClipmapRenderer {
         *self = Self::new(device, format, config.clone(), &self.shadow_layout.clone());
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
         queue: &wgpu::Queue,
@@ -518,6 +542,8 @@ impl ClipmapRenderer {
         ambient: f32,
         light_color: Vec3,
         eye: Vec3,
+        torch_color: Vec3,
+        torch_radius_m: f32,
         proc: &ProcTerrain,
     ) {
         let frame = FrameUniform {
@@ -527,7 +553,9 @@ impl ClipmapRenderer {
             light_color: [light_color.x, light_color.y, light_color.z],
             _pad: 0.0,
             eye: [eye.x, eye.y, eye.z],
+            torch_radius_m,
             _pad2: 0.0,
+            torch_color: [torch_color.x, torch_color.y, torch_color.z, 0.0],
         };
         if self.last_frame.as_ref().map(bytemuck::bytes_of) != Some(bytemuck::bytes_of(&frame)) {
             queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&frame));

@@ -75,6 +75,17 @@ impl Color {
         self
     }
 
+    /// Linear component-wise blend; `t = 0` is `self`, `t = 1` is `other`.
+    pub fn lerp(self, other: Self, t: f32) -> Self {
+        let mix = |a: f32, b: f32| a + (b - a) * t;
+        Self {
+            r: mix(self.r, other.r),
+            g: mix(self.g, other.g),
+            b: mix(self.b, other.b),
+            a: mix(self.a, other.a),
+        }
+    }
+
     pub fn is_transparent(self) -> bool {
         self.a < 0.999
     }

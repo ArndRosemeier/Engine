@@ -594,10 +594,7 @@ mod tests {
 
     #[test]
     fn teleport_setback_clears_close_render_band() {
-        assert!(
-            PORTAL_TELEPORT_SETBACK > PORTAL_CLOSE_VIEW_DIST,
-            "post-teleport pose must leave the doorway close band"
-        );
+        const { assert!(PORTAL_TELEPORT_SETBACK > PORTAL_CLOSE_VIEW_DIST) };
     }
 
     #[test]

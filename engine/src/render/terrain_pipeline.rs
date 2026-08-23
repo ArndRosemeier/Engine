@@ -196,6 +196,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let snow_light = u.ambient * 1.2 * snow_sky + wrap * (1.0 - u.ambient * 0.45) * u.light_color * vis;
     let snow_lit = vec3<f32>(0.93, 0.96, 0.99) * snow_light + sparkle * u.light_color * vis;
     lit = mix(lit, snow_lit, snow_w);
+    // A lantern at night should pool on the ground underfoot.
+    lit += albedo * torch_light(in.world_p, n);
 
     return vec4<f32>(haze(lit, in.world_p), 1.0);
 }

@@ -121,7 +121,8 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let vis = sun_visibility(in.world_p, n, u.eye);
     let texel = textureSample(albedo_tex, albedo_sampler, in.uv);
     let base = in.color * texel;
-    let lit = base.rgb * (u.ambient + wrap * wrap * u.light_color * vis);
+    let lit = base.rgb * (u.ambient + wrap * wrap * u.light_color * vis)
+        + base.rgb * torch_light(in.world_p, n);
     return vec4<f32>(haze(lit, in.world_p), base.a);
 }
 "#;

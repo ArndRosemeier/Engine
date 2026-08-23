@@ -414,7 +414,7 @@ pub(crate) fn test_glb_with_bin_space_fourcc() -> Vec<u8> {
     out.extend_from_slice(&(json_len as u32).to_le_bytes());
     out.extend_from_slice(b"JSON");
     out.extend_from_slice(json);
-    out.extend(std::iter::repeat(b' ').take(json_pad));
+    out.extend(std::iter::repeat_n(b' ', json_pad));
     out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
     out.extend_from_slice(b"BIN ");
     out.extend_from_slice(&bin);

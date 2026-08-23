@@ -238,7 +238,7 @@ impl CollisionWorld {
 
     /// Slide `from` by `(dx, dz)` against default-space colliders.
     pub fn move_xz(&self, body: &ActorBody, from: GlobalXZ, dx: f64, dz: f64) -> GlobalXZ {
-        self.move_in(SpaceId::DEFAULT, body, from, dx, dz)
+        self.move_in(SpaceId::DEFAULT, body, from, dx, dz, 0.0)
     }
 
     /// Sweep a vertical actor capsule through finite 3D colliders.
@@ -330,7 +330,8 @@ impl CollisionWorld {
     /// Slide `from` by `(dx, dz)` against colliders that live in `space`.
     ///
     /// Long steps are split so a sprint cannot tunnel through a thin wall.
-    /// Collision-off bodies are translated with no query.
+    /// Collision-off bodies are translated with no query. Only colliders whose
+    /// vertical span overlaps the actor at `feet_y` participate.
     pub fn move_in(
         &self,
         space: SpaceId,
@@ -338,17 +339,22 @@ impl CollisionWorld {
         from: GlobalXZ,
         dx: f64,
         dz: f64,
+        feet_y: f64,
     ) -> GlobalXZ {
         if !dx.is_finite() || !dz.is_finite() {
             panic!("actor move must be finite, got ({dx}, {dz})");
+        }
+        if !feet_y.is_finite() {
+            panic!("actor feet_y must be finite, got {feet_y}");
         }
         if !body.collides {
             return displace(from, dx, dz);
         }
         let radius = f64::from(body.radius);
+        let height = f64::from(body.height);
         let dist = (dx * dx + dz * dz).sqrt();
         if dist <= INSIDE_EPS {
-            return self.depenetrate(space, from, radius);
+            return self.depenetrate_at(space, from, radius, feet_y, height);
         }
         let step_m = radius;
         let steps = ((dist / step_m).ceil() as i32).max(1);
@@ -356,23 +362,7 @@ impl CollisionWorld {
         let mut pos = from;
         for _ in 0..steps {
             pos = displace(pos, dx * inv, dz * inv);
-            pos = self.depenetrate(space, pos, radius);
-        }
-        pos
-    }
-
-    fn depenetrate(&self, space: SpaceId, mut pos: GlobalXZ, radius: f64) -> GlobalXZ {
-        for _ in 0..DEPENETRATE_ITERS {
-            let mut pushed = false;
-            for collider in self.nearby(space, pos, radius) {
-                if let Some(mtv) = overlap_mtv(pos, radius, &collider) {
-                    pos = displace(pos, mtv.0, mtv.1);
-                    pushed = true;
-                }
-            }
-            if !pushed {
-                break;
-            }
+            pos = self.depenetrate_at(space, pos, radius, feet_y, height);
         }
         pos
     }
@@ -788,7 +778,7 @@ mod tests {
             "default-space walk should ignore a house wall, got x={}",
             through.x
         );
-        let blocked = world.move_in(house, &body, GlobalXZ::at(0.0, 0.0), 4.0, 0.0);
+        let blocked = world.move_in(house, &body, GlobalXZ::at(0.0, 0.0), 4.0, 0.0, 0.0);
         assert!(
             blocked.x < 1.5,
             "house walk should hit the wall, got x={}",
@@ -830,6 +820,27 @@ mod tests {
         assert!(!moved.grounded);
         assert!(moved.hit_ceiling);
         assert!((moved.position.y - 0.2).abs() < 1e-5, "{moved:?}");
+    }
+
+    #[test]
+    fn xz_move_respects_collider_y_span() {
+        let mut world = CollisionWorld::new();
+        world
+            .insert(1, finite_box(2.0, 0.0, 0.25, 4.0, 2.7, 5.4))
+            .expect("upper wall");
+        let body = ActorBody::player();
+        let through = world.move_in(SpaceId::DEFAULT, &body, GlobalXZ::at(0.0, 0.0), 4.0, 0.0, 0.0);
+        assert!(
+            (through.x - 4.0).abs() < 1e-6,
+            "ground walker should pass under an upper-storey wall, got x={}",
+            through.x
+        );
+        let blocked = world.move_in(SpaceId::DEFAULT, &body, GlobalXZ::at(0.0, 0.0), 4.0, 0.0, 3.0);
+        assert!(
+            blocked.x < 1.5,
+            "loft walker should hit the upper-storey wall, got x={}",
+            blocked.x
+        );
     }
 
     #[test]

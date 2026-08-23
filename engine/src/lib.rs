@@ -11,6 +11,7 @@ pub mod collision;
 pub mod color;
 pub mod contact;
 pub mod error;
+pub mod gpu_field;
 pub mod input;
 pub mod landscape;
 pub mod limits;
@@ -49,10 +50,16 @@ pub use collision::{
 pub use color::{rgb, rgba, Color};
 pub use contact::{ContactGrid, ContactSnapshot};
 pub use error::{EngineError, EngineResult};
+pub use gpu_field::{
+    demo_sphere_density, extract_mesh_cpu, gpu_tests_enabled, CustomFieldKernel, DensityMirror,
+    DensityReferenceFn, FieldBounds, FieldChunkKey, FieldChunkMesh, FieldGpuContext, FieldGrid,
+    FieldKernel, FieldMeshBounds, FieldParamsBlob, GpuField, PaintedField, ParamsMirror,
+    FIELD_CHUNK_SIZE, MAX_FIELD_UNIFORM_BYTES,
+};
 pub use input::{Input, Key, MouseButton};
 pub use landscape::Landscape;
 pub use limits::EngineLimits;
-pub use mesh::{Mesh, PointId, Shape};
+pub use mesh::{BuiltMesh, Mesh, PointId, Shape};
 pub use model::{scatter_places, Model};
 pub use place::{GlobalPlace, MeshInstance, Place};
 pub use portal::{Portal, PortalId, PortalSettings, SpaceId};
@@ -72,7 +79,7 @@ pub use ui::{egui, UiFrame, UiPanel};
 pub use water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use world::{
     AnimatedEntity, EntityId, Frame, Haze, HitchSpan, InstanceSubmit, Light, ShadowSettings, Sky,
-    World,
+    TorchLight, World,
 };
 
 /// Entry point matching the planned `Engine::run` shape.

@@ -2,7 +2,7 @@ use crate::input::Input;
 use crate::limits::EngineLimits;
 use crate::render::GpuFrameStats;
 use crate::render::Renderer;
-use crate::ui_backend::UiBackend;
+use crate::ui_backend::{UiBackend, UiPaintTarget, UiViewport};
 use crate::world::{Frame, HitchSpan, World};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -268,10 +268,14 @@ impl ApplicationHandler for App {
                             &window,
                             device,
                             queue,
-                            encoder,
-                            view,
-                            size.width,
-                            size.height,
+                            UiPaintTarget {
+                                view,
+                                viewport: UiViewport {
+                                    width: size.width,
+                                    height: size.height,
+                                },
+                                encoder,
+                            },
                             full_output,
                         );
                     }) {
@@ -288,18 +292,20 @@ impl ApplicationHandler for App {
                     let render_ms = elapsed_ms(render_t);
                     let gpu = renderer.take_gpu_stats();
                     let notes = self.world.take_hitch_spans();
-                    let work_ms = update_ms + anim_ms + sync_ms + render_ms;
-                    if work_ms >= self.hitch_ms {
+                    let phases = HitchPhases {
+                        update_ms,
+                        anim_ms,
+                        sync_ms,
+                        render_ms,
+                    };
+                    if phases.work_ms() >= self.hitch_ms {
                         if let Some(path) = self.world.hitch_log() {
                             emit_hitch(
                                 path,
                                 self.frame_index,
                                 fps,
                                 dt * 1000.0,
-                                update_ms,
-                                anim_ms,
-                                sync_ms,
-                                render_ms,
+                                phases,
                                 &notes,
                                 &gpu,
                             );
@@ -371,22 +377,34 @@ fn elapsed_ms(start: Instant) -> f32 {
     start.elapsed().as_secs_f32() * 1000.0
 }
 
+/// Per-phase frame timings the hitch log reports.
+struct HitchPhases {
+    update_ms: f32,
+    anim_ms: f32,
+    sync_ms: f32,
+    render_ms: f32,
+}
+
+impl HitchPhases {
+    fn work_ms(&self) -> f32 {
+        self.update_ms + self.anim_ms + self.sync_ms + self.render_ms
+    }
+}
+
 fn emit_hitch(
     path: &std::path::Path,
     frame_index: u32,
     fps: f32,
     wall_ms: f32,
-    update_ms: f32,
-    anim_ms: f32,
-    sync_ms: f32,
-    render_ms: f32,
+    phases: HitchPhases,
     notes: &[HitchSpan],
     gpu: &GpuFrameStats,
 ) {
     use std::io::Write;
-    let work_ms = update_ms + anim_ms + sync_ms + render_ms;
+    let work_ms = phases.work_ms();
     let mut text = format!(
-        "HITCH work={work_ms:.1}ms wall={wall_ms:.1}ms frame={frame_index} fps={fps:.0}  phases update={update_ms:.1} anim={anim_ms:.1} sync={sync_ms:.1} render={render_ms:.1}\n"
+        "HITCH work={work_ms:.1}ms wall={wall_ms:.1}ms frame={frame_index} fps={fps:.0}  phases update={:.1} anim={:.1} sync={:.1} render={:.1}\n",
+        phases.update_ms, phases.anim_ms, phases.sync_ms, phases.render_ms
     );
     let mut notes = notes.to_vec();
     notes.sort_by(|a, b| b.ms.total_cmp(&a.ms));
@@ -403,13 +421,13 @@ fn emit_hitch(
     text.push_str(&format!(
         "  {:<12} {:>5.1}ms  {}\n",
         "gpu_sync",
-        sync_ms,
+        phases.sync_ms,
         gpu.sync_line()
     ));
     text.push_str(&format!(
         "  {:<12} {:>5.1}ms  {}\n",
         "gpu_draw",
-        render_ms,
+        phases.render_ms,
         gpu.draw_line()
     ));
     let mut file = std::fs::OpenOptions::new()

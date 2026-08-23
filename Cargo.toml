@@ -4,6 +4,7 @@ members = [
     "engine",
     "examples/hello_mesh",
     "examples/procedural_caves",
+    "examples/gpu_field_demo",
     "examples/populate_world",
     "examples/infinite_walker",
     "examples/ui_modal",

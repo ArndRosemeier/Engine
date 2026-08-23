@@ -12,6 +12,12 @@ impl PointId {
     pub fn index(self) -> u32 {
         self.0
     }
+
+    /// Test-only constructor for out-of-range ids.
+    #[cfg(test)]
+    pub(crate) fn peek(id: u32) -> Self {
+        Self(id)
+    }
 }
 
 /// Baked RGBA8 albedo sampled in the fragment shader.
@@ -240,15 +246,36 @@ impl Mesh {
         Ok(())
     }
 
+    /// Merge every point and face of `other` into `self`, translating by
+    /// `translation`. Colors, UVs, faces and albedo carry over; point ids in
+    /// `other` do not remain valid for the merged result.
+    pub fn append_translated(&mut self, other: &Mesh, translation: Vec3) -> EngineResult<()> {
+        let mut ids = Vec::with_capacity(other.points.len());
+        for p in &other.points {
+            ids.push(self.add_point(*p + translation)?);
+        }
+        let n = self.points.len() - ids.len();
+        self.colors[n..].copy_from_slice(&other.colors);
+        self.uvs[n..].copy_from_slice(&other.uvs);
+        for face in &other.faces {
+            let mapped: Vec<PointId> = face.iter().map(|p| ids[p.0 as usize]).collect();
+            self.add_face(&mapped)?;
+        }
+        if let Some(albedo) = &other.albedo {
+            if self.albedo.is_none() {
+                self.albedo = Some(albedo.clone());
+            }
+        }
+        Ok(())
+    }
+
     /// Build GPU-ready geometry: triangulate faces with flat per-face normals.
     ///
     /// Opaque faces are packed first; [`BuiltMesh::opaque_index_count`] marks the split
     /// so the renderer can draw transparent triangles in a second pass.
     pub fn build(&self) -> BuiltMesh {
         self.build_flat()
-    }
-
-    /// Like [`Self::build`], but averages face normals at shared authoring points
+    }    /// Like [`Self::build`], but averages face normals at shared authoring points
     /// so heightfields / ribbons shade as continuous surfaces instead of facets.
     ///
     /// GPU vertices are shared per authoring point (opaque and translucent
@@ -359,16 +386,65 @@ impl Mesh {
         }
 
         let smooth_normals = self.averaged_vertex_normals();
+        // Authoring point -> GPU vertex; reset between opacity passes so each
+        // pass gets its own vertices (they may differ in alpha blending).
+        let mut remap = vec![u32::MAX; self.points.len()];
         let mut positions = Vec::new();
         let mut normals = Vec::new();
         let mut colors = Vec::new();
         let mut uvs = Vec::new();
         let mut indices = Vec::new();
-        let mut remap = vec![u32::MAX; self.points.len()];
 
-        self.emit_indexed_faces(
+        let emit = |faces: &[&[PointId]],
+                    remap: &mut [u32],
+                    positions: &mut Vec<Vec3>,
+                    normals: &mut Vec<Vec3>,
+                    colors: &mut Vec<Vec4>,
+                    uvs: &mut Vec<[f32; 2]>,
+                    indices: &mut Vec<u32>| {
+            remap.fill(u32::MAX);
+            for face in faces {
+                let tris: [[PointId; 3]; 2] = match face.len() {
+                    3 => [[face[0], face[1], face[2]], [face[0], face[0], face[0]]],
+                    4 => [[face[0], face[1], face[2]], [face[0], face[2], face[3]]],
+                    _ => unreachable!("add_face only allows 3 or 4 points"),
+                };
+                let tri_count = if face.len() == 3 { 1 } else { 2 };
+                for tri in tris.iter().take(tri_count) {
+                    let a = self.points[tri[0].0 as usize];
+                    let b = self.points[tri[1].0 as usize];
+                    let c = self.points[tri[2].0 as usize];
+                    let face_n = {
+                        let raw = (b - a).cross(c - a);
+                        if raw.length_squared() > 0.0 {
+                            raw.normalize()
+                        } else {
+                            Vec3::Y
+                        }
+                    };
+                    let mut gpu = [0u32; 3];
+                    for k in 0..3 {
+                        let pi = tri[k].0 as usize;
+                        if remap[pi] == u32::MAX {
+                            remap[pi] = positions.len() as u32;
+                            positions.push(self.points[pi]);
+                            let mut n = smooth_normals[pi];
+                            if n.length_squared() < 1e-10 {
+                                n = face_n;
+                            }
+                            normals.push(n);
+                            colors.push(self.colors[pi]);
+                            uvs.push(self.uvs[pi]);
+                        }
+                        gpu[k] = remap[pi];
+                    }
+                    indices.extend(gpu);
+                }
+            }
+        };
+
+        emit(
             &opaque_faces,
-            &smooth_normals,
             &mut remap,
             &mut positions,
             &mut normals,
@@ -377,9 +453,8 @@ impl Mesh {
             &mut indices,
         );
         let opaque_index_count = indices.len();
-        self.emit_indexed_faces(
+        emit(
             &xlucent_faces,
-            &smooth_normals,
             &mut remap,
             &mut positions,
             &mut normals,
@@ -395,58 +470,6 @@ impl Mesh {
             uvs,
             indices,
             opaque_index_count,
-        }
-    }
-
-    fn emit_indexed_faces(
-        &self,
-        faces: &[&[PointId]],
-        smooth_normals: &[Vec3],
-        remap: &mut [u32],
-        positions: &mut Vec<Vec3>,
-        normals: &mut Vec<Vec3>,
-        colors: &mut Vec<Vec4>,
-        uvs: &mut Vec<[f32; 2]>,
-        indices: &mut Vec<u32>,
-    ) {
-        remap.fill(u32::MAX);
-        for face in faces {
-            let tris: [[PointId; 3]; 2] = match face.len() {
-                3 => [[face[0], face[1], face[2]], [face[0], face[0], face[0]]],
-                4 => [[face[0], face[1], face[2]], [face[0], face[2], face[3]]],
-                _ => unreachable!("add_face only allows 3 or 4 points"),
-            };
-            let tri_count = if face.len() == 3 { 1 } else { 2 };
-            for tri in tris.iter().take(tri_count) {
-                let a = self.points[tri[0].0 as usize];
-                let b = self.points[tri[1].0 as usize];
-                let c = self.points[tri[2].0 as usize];
-                let face_n = {
-                    let raw = (b - a).cross(c - a);
-                    if raw.length_squared() > 0.0 {
-                        raw.normalize()
-                    } else {
-                        Vec3::Y
-                    }
-                };
-                let mut gpu = [0u32; 3];
-                for k in 0..3 {
-                    let pi = tri[k].0 as usize;
-                    if remap[pi] == u32::MAX {
-                        remap[pi] = positions.len() as u32;
-                        positions.push(self.points[pi]);
-                        let mut n = smooth_normals[pi];
-                        if n.length_squared() < 1e-10 {
-                            n = face_n;
-                        }
-                        normals.push(n);
-                        colors.push(self.colors[pi]);
-                        uvs.push(self.uvs[pi]);
-                    }
-                    gpu[k] = remap[pi];
-                }
-                indices.extend(gpu);
-            }
         }
     }
 

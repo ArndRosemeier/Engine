@@ -980,7 +980,7 @@ mod tests {
         let verts = 3;
         let step = 10.0;
         let mut heights = vec![0.0; verts * verts];
-        heights[1 * verts + 1] = 42.0;
+        heights[verts + 1] = 42.0;
         let grid = ContactGrid::new(GlobalXZ::ORIGIN, step, verts, heights).unwrap();
         let span = ChunkSpan::new(20.0).unwrap();
         let mut grids = HashMap::new();

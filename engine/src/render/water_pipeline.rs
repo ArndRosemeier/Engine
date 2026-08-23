@@ -137,7 +137,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Sky and sun share one budget, as on land, or water lit from both ends up
     // brighter than the sand beside it.
     let vis = sun_visibility(in.world_p, n, u.eye);
-    let diffuse = u.ambient + (0.35 + 0.65 * ndl) * (1.0 - u.ambient) * u.light_color * vis;
+    var diffuse = u.ambient + (0.35 + 0.65 * ndl) * (1.0 - u.ambient) * u.light_color * vis;
+    // The lantern reaches water too: wading a stream at night should show it.
+    diffuse += torch_light(in.world_p, n);
 
     // Sky reflection at grazing angles is what makes flat water read as water.
     // Capped well below a mirror: with no reflection buffer, a full fresnel

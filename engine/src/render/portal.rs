@@ -21,6 +21,10 @@ fn fs_main() {}
 "#;
 
 const MESH_VS: &str = r#"
+/// Pull the opening slightly along its local +Z so coplanar floors do not
+/// block stencil marking when depth testing is enabled.
+const STENCIL_NUDGE_M: f32 = 0.025;
+
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -39,7 +43,8 @@ struct VsOut {
 @vertex
 fn vs_main(v: VsIn) -> VsOut {
     let model = mat4x4<f32>(v.m0, v.m1, v.m2, v.m3);
-    let world = model * vec4<f32>(v.position, 1.0);
+    let outward = normalize(model[2].xyz);
+    let world = model * vec4<f32>(v.position, 1.0) + vec4<f32>(outward * STENCIL_NUDGE_M, 0.0);
     var out: VsOut;
     out.clip = u.view_proj * world;
     return out;
