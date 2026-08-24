@@ -40,7 +40,9 @@ pub(crate) mod volume;
 #[cfg(test)]
 mod tint_proof;
 
-pub use anim::{AnimatedModel, AnimationClip, Animator};
+pub use anim::{
+    AnimatedModel, AnimationAction, AnimationClip, AnimationProfile, Animator, Locomotion,
+};
 pub use audio::{Audio, ClipId, Play, VoiceId};
 pub use camera::Camera;
 pub use chunk_stream::{ChunkBuilder, ChunkPayload, ChunkStream};

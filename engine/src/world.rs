@@ -1,4 +1,4 @@
-use crate::anim::{AnimatedModel, Animator};
+use crate::anim::{AnimatedModel, AnimationAction, AnimationProfile, Animator, Locomotion};
 use crate::camera::Camera;
 use crate::collision::{ActorBody, ActorMove, CollisionWorld};
 use crate::color::Color;
@@ -1432,6 +1432,38 @@ impl World {
         Ok(id)
     }
 
+    pub fn configure_animation(
+        &mut self,
+        id: EntityId,
+        profile: AnimationProfile,
+    ) -> EngineResult<()> {
+        self.animated
+            .get_mut(&id)
+            .ok_or(EngineError::UnknownEntity)?
+            .animator
+            .configure_profile(profile)
+    }
+
+    pub fn set_locomotion(&mut self, id: EntityId, state: Locomotion) -> EngineResult<()> {
+        self.animated
+            .get_mut(&id)
+            .ok_or(EngineError::UnknownEntity)?
+            .animator
+            .set_locomotion(state)
+    }
+
+    pub fn play_animation_action(
+        &mut self,
+        id: EntityId,
+        action: AnimationAction,
+    ) -> EngineResult<()> {
+        self.animated
+            .get_mut(&id)
+            .ok_or(EngineError::UnknownEntity)?
+            .animator
+            .play_action(action)
+    }
+
     pub fn play_animation(&mut self, id: EntityId, clip_name: &str) -> EngineResult<()> {
         let e = self
             .animated
@@ -1459,7 +1491,7 @@ impl World {
             .animated
             .get_mut(&id)
             .ok_or(EngineError::UnknownEntity)?;
-        e.animator.speed = speed;
+        e.animator.set_speed(speed);
         Ok(())
     }
 

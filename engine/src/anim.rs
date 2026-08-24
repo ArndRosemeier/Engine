@@ -116,14 +116,80 @@ impl AnimatedModel {
     }
 }
 
-/// Playback state for one [`AnimatedModel`].
+/// Persistent movement intent reported by a consumer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Locomotion {
+    Idle,
+    Moving { speed_mps: f32 },
+}
+
+/// Semantic one-shot action clips. The model profile maps these to authored names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimationAction {
+    Attack,
+    Cast,
+    Hit,
+    Death,
+}
+
+/// Validated semantic animation mapping for one model.
+#[derive(Clone, Debug, Default)]
+pub struct AnimationProfile {
+    idle: Option<String>,
+    walk: Option<String>,
+    run: Option<String>,
+    attack: Option<String>,
+    cast: Option<String>,
+    hit: Option<String>,
+    death: Option<String>,
+}
+
+impl AnimationProfile {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn idle(mut self, clip: impl Into<String>) -> Self {
+        self.idle = Some(clip.into());
+        self
+    }
+    pub fn walk(mut self, clip: impl Into<String>) -> Self {
+        self.walk = Some(clip.into());
+        self
+    }
+    pub fn run(mut self, clip: impl Into<String>) -> Self {
+        self.run = Some(clip.into());
+        self
+    }
+    pub fn attack(mut self, clip: impl Into<String>) -> Self {
+        self.attack = Some(clip.into());
+        self
+    }
+    pub fn cast(mut self, clip: impl Into<String>) -> Self {
+        self.cast = Some(clip.into());
+        self
+    }
+    pub fn hit(mut self, clip: impl Into<String>) -> Self {
+        self.hit = Some(clip.into());
+        self
+    }
+    pub fn death(mut self, clip: impl Into<String>) -> Self {
+        self.death = Some(clip.into());
+        self
+    }
+}
+
+/// Playback state for one [`AnimatedModel`]. Consumers use semantic transitions;
+/// clip indices, clocks, looping, and action resumption remain engine-owned.
 #[derive(Clone, Debug)]
 pub struct Animator {
-    pub model: Arc<AnimatedModel>,
-    pub clip_index: usize,
-    pub time: f32,
-    pub speed: f32,
-    pub looping: bool,
+    model: Arc<AnimatedModel>,
+    clip_index: usize,
+    time: f32,
+    speed: f32,
+    looping: bool,
+    profile: Option<AnimationProfile>,
+    locomotion: Locomotion,
+    action_resume: Option<Locomotion>,
 }
 
 impl Animator {
@@ -134,11 +200,137 @@ impl Animator {
             time: 0.0,
             speed: 1.0,
             looping: true,
+            profile: None,
+            locomotion: Locomotion::Idle,
+            action_resume: None,
         })
     }
 
     pub fn play(&mut self, clip_name: &str) -> EngineResult<()> {
         self.play_clip(clip_name, true)
+    }
+
+    pub fn configure_profile(&mut self, profile: AnimationProfile) -> EngineResult<()> {
+        let idle = profile
+            .idle
+            .as_deref()
+            .ok_or_else(|| EngineError::Model("animation profile requires idle clip".into()))?;
+        self.require_clip(idle)?;
+        for clip in [
+            &profile.walk,
+            &profile.run,
+            &profile.attack,
+            &profile.cast,
+            &profile.hit,
+            &profile.death,
+        ] {
+            if let Some(name) = clip.as_deref() {
+                self.require_clip(name)?;
+            }
+        }
+        self.profile = Some(profile);
+        self.set_locomotion(Locomotion::Idle)
+    }
+
+    pub fn set_locomotion(&mut self, state: Locomotion) -> EngineResult<()> {
+        if let Locomotion::Moving { speed_mps } = state {
+            if !speed_mps.is_finite() || speed_mps < 0.0 {
+                return Err(EngineError::InvalidValue(format!(
+                    "locomotion speed must be finite and non-negative, got {speed_mps}"
+                )));
+            }
+        }
+        self.locomotion = state;
+        if !self.looping {
+            // Preserve the latest intent while a one-shot action finishes.
+            // Death has no resume state, so it remains terminal.
+            if self.action_resume.is_some() {
+                self.action_resume = Some(state);
+            }
+            return Ok(());
+        }
+        let clip = {
+            let profile = self
+                .profile
+                .as_ref()
+                .ok_or_else(|| EngineError::Model("animation profile is not configured".into()))?;
+            match state {
+                Locomotion::Idle => profile
+                    .idle
+                    .as_deref()
+                    .expect("validated idle clip")
+                    .to_owned(),
+                Locomotion::Moving { speed_mps } if speed_mps.is_finite() && speed_mps >= 1.5 => {
+                    profile
+                        .run
+                        .as_deref()
+                        .or(profile.walk.as_deref())
+                        .expect("validated locomotion clip")
+                        .to_owned()
+                }
+                Locomotion::Moving { speed_mps } if speed_mps.is_finite() && speed_mps >= 0.0 => {
+                    profile
+                        .walk
+                        .as_deref()
+                        .or(profile.run.as_deref())
+                        .expect("validated locomotion clip")
+                        .to_owned()
+                }
+                Locomotion::Moving { speed_mps } => {
+                    return Err(EngineError::InvalidValue(format!(
+                        "locomotion speed must be finite and non-negative, got {speed_mps}"
+                    )))
+                }
+            }
+        };
+        self.action_resume = None;
+        if self.clip_name() == clip {
+            return Ok(());
+        }
+        self.play_clip(&clip, true)
+    }
+
+    pub fn play_action(&mut self, action: AnimationAction) -> EngineResult<()> {
+        let profile = self
+            .profile
+            .as_ref()
+            .ok_or_else(|| EngineError::Model("animation profile is not configured".into()))?;
+        let clip = match action {
+            AnimationAction::Attack => profile.attack.as_deref(),
+            AnimationAction::Cast => profile.cast.as_deref(),
+            AnimationAction::Hit => profile.hit.as_deref(),
+            AnimationAction::Death => profile.death.as_deref(),
+        }
+        .ok_or_else(|| {
+            EngineError::Model(format!("animation action {action:?} is not configured"))
+        })?
+        .to_owned();
+        self.action_resume = (action != AnimationAction::Death).then_some(self.locomotion);
+        self.play_clip(&clip, false)
+    }
+
+    pub(crate) fn set_speed(&mut self, speed: f32) {
+        self.speed = speed;
+    }
+
+    pub(crate) fn model(&self) -> &Arc<AnimatedModel> {
+        &self.model
+    }
+    pub(crate) fn clip_index(&self) -> usize {
+        self.clip_index
+    }
+    pub fn time(&self) -> f32 {
+        self.time
+    }
+
+    fn require_clip(&self, name: &str) -> EngineResult<()> {
+        if self.model.find_clip(name).is_some() {
+            Ok(())
+        } else {
+            Err(EngineError::Model(format!(
+                "animation profile references unknown clip '{name}'"
+            )))
+        }
     }
 
     /// Play a clip once and hold the last frame when it ends.
@@ -159,6 +351,17 @@ impl Animator {
         Ok(())
     }
 
+    pub fn is_looping(&self) -> bool {
+        self.looping
+    }
+
+    pub fn clip_duration(&self) -> Option<f32> {
+        self.model
+            .clips
+            .get(self.clip_index)
+            .map(|clip| clip.duration)
+    }
+
     pub fn clip_name(&self) -> &str {
         self.model
             .clips
@@ -168,6 +371,7 @@ impl Animator {
     }
 
     pub fn tick(&mut self, dt: f32) {
+        let was_action = !self.looping;
         let Some(clip) = self.model.clips.get(self.clip_index) else {
             return;
         };
@@ -179,6 +383,13 @@ impl Animator {
             self.time = self.time.rem_euclid(clip.duration);
         } else {
             self.time = self.time.clamp(0.0, clip.duration);
+        }
+        if was_action && !self.looping && self.time >= clip.duration {
+            if let Some(state) = self.action_resume.take() {
+                self.looping = true;
+                self.set_locomotion(state)
+                    .expect("validated animation resume state");
+            }
         }
     }
 
@@ -930,6 +1141,58 @@ mod tests {
                 .all(|m| m.uvs.len() == m.positions.len()),
             "skinned mesh UV length must match POSITION"
         );
+    }
+
+    #[test]
+    fn semantic_action_resumes_latest_locomotion_intent() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = root.join("../examples/animated_animal/assets/deer.gltf");
+        if !path.exists() {
+            return;
+        }
+        let model = AnimatedModel::load_with(&path, root.join(".."), &EngineLimits::default())
+            .expect("load deer");
+        let mut animator = Animator::new(std::sync::Arc::new(model)).expect("animator");
+        animator
+            .configure_profile(
+                AnimationProfile::new()
+                    .idle("Idle")
+                    .walk("Walk")
+                    .attack("Walk"),
+            )
+            .expect("configure profile");
+        animator
+            .set_locomotion(Locomotion::Moving { speed_mps: 1.0 })
+            .expect("set moving");
+        animator
+            .play_action(AnimationAction::Attack)
+            .expect("attack");
+        animator
+            .set_locomotion(Locomotion::Idle)
+            .expect("queue idle");
+        let duration = animator.clip_duration().expect("action duration");
+        animator.tick(duration + 0.01);
+        assert_eq!(animator.clip_name(), "Idle");
+        assert!(animator.is_looping());
+    }
+
+    #[test]
+    fn invalid_locomotion_speed_is_rejected() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = root.join("../examples/animated_animal/assets/deer.gltf");
+        if !path.exists() {
+            return;
+        }
+        let model = AnimatedModel::load_with(&path, root.join(".."), &EngineLimits::default())
+            .expect("load deer");
+        let mut animator = Animator::new(std::sync::Arc::new(model)).expect("animator");
+        animator
+            .configure_profile(AnimationProfile::new().idle("Idle").walk("Walk"))
+            .expect("configure profile");
+        let err = animator
+            .set_locomotion(Locomotion::Moving { speed_mps: -1.0 })
+            .expect_err("negative speed must fail");
+        assert!(err.to_string().contains("non-negative"));
     }
 
     #[test]

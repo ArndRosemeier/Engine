@@ -565,16 +565,16 @@ impl Renderer {
             .retain(|id, _| world.contains_animated(*id));
         let live_models: HashSet<usize> = world
             .animated_entities()
-            .map(|(_, anim)| Arc::as_ptr(&anim.animator.model) as usize)
+            .map(|(_, anim)| Arc::as_ptr(anim.animator.model()) as usize)
             .collect();
         self.gpu_skinned_meshes
             .retain(|k, _| live_models.contains(k));
 
         for (id, anim) in world.animated_entities() {
             crate::anim::write_joint_matrices(
-                &anim.animator.model,
-                anim.animator.clip_index,
-                anim.animator.time,
+                anim.animator.model(),
+                anim.animator.clip_index(),
+                anim.animator.time(),
                 &mut self.joint_locals,
                 &mut self.joint_global,
                 &mut self.joint_out,
@@ -586,13 +586,13 @@ impl Renderer {
                     self.gpu_stats.skinned_pose_writes += 1;
                 }
                 None => {
-                    let key = Arc::as_ptr(&anim.animator.model) as usize;
+                    let key = Arc::as_ptr(anim.animator.model()) as usize;
                     let meshes = if let Some(shared) = self.gpu_skinned_meshes.get(&key) {
                         shared.clone()
                     } else {
                         let uploaded: Vec<GpuSkinnedMesh> = anim
                             .animator
-                            .model
+                            .model()
                             .meshes
                             .iter()
                             .map(|m| {
