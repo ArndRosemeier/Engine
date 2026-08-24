@@ -350,16 +350,21 @@ impl Renderer {
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
 
-        // Uncapped present for stress testing / real FPS (Immediate → Mailbox → …).
-        let present_mode = [
-            wgpu::PresentMode::Immediate,
-            wgpu::PresentMode::Mailbox,
-            wgpu::PresentMode::FifoRelaxed,
-            wgpu::PresentMode::Fifo,
-        ]
-        .into_iter()
-        .find(|m| caps.present_modes.contains(m))
-        .unwrap_or(wgpu::PresentMode::Fifo);
+        // FIFO is the synchronized default: it prevents startup tearing and
+        // keeps normal presentation stable across GPUs and window compositors.
+        // Uncapped modes remain available explicitly for rendering stress tests.
+        let present_mode = match std::env::var("ENGINE_PRESENT_MODE").as_deref() {
+            Ok("immediate") => wgpu::PresentMode::Immediate,
+            Ok("mailbox") => wgpu::PresentMode::Mailbox,
+            Ok("fifo-relaxed") => wgpu::PresentMode::FifoRelaxed,
+            Ok("fifo") | Err(_) => wgpu::PresentMode::Fifo,
+            Ok(value) => panic!(
+                "ENGINE_PRESENT_MODE must be one of: fifo, fifo-relaxed, mailbox, immediate; got {value:?}"
+            ),
+        };
+        if !caps.present_modes.contains(&present_mode) {
+            panic!("requested present mode {present_mode:?} is unsupported by this surface");
+        }
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
