@@ -32,14 +32,14 @@ pub struct SkyUniforms {
 
 impl SkyUniforms {
     pub fn from_scene(sky: &Sky, camera: &Camera, light: &Light, aspect: f32, time: f32) -> Self {
-        let forward = (camera.target - camera.eye).normalize_or_zero();
-        let mut right = forward.cross(camera.up);
+        let forward = (camera.target() - camera.eye()).normalize_or_zero();
+        let mut right = forward.cross(camera.up());
         if right.length_squared() < 1e-8 {
             right = glam::Vec3::X;
         }
         let right = right.normalize();
         let up = right.cross(forward).normalize();
-        let tan_half_fov = (camera.fov_y_degrees.to_radians() * 0.5).tan();
+        let tan_half_fov = (camera.fov_y_degrees().to_radians() * 0.5).tan();
         let sun_size = sky.sun_size_degrees.to_radians().max(0.001);
         let bloom = (sky.sun_size_degrees + sky.sun_bloom_degrees)
             .to_radians()

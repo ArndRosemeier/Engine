@@ -30,7 +30,7 @@ mod tests {
         let kernel = FieldKernel::demo_sphere_void(bounds);
         let grid = FieldGrid::from_bounds(bounds);
 
-        let mut field = GpuField::new(bounds.voxel_size);
+        let mut field = GpuField::new(bounds.voxel_size());
         field.set_session(bounds, kernel)?;
         let painted = field.paint(&ctx)?;
 
@@ -55,7 +55,7 @@ mod tests {
         let kernel = FieldKernel::demo_sphere_void(bounds);
         let grid = FieldGrid::from_bounds(bounds);
 
-        let mut field = GpuField::new(bounds.voxel_size);
+        let mut field = GpuField::new(bounds.voxel_size());
         field.set_session(bounds, kernel).expect("session");
         let painted = field.paint(&ctx).expect("paint");
 
@@ -85,7 +85,7 @@ mod tests {
         let bounds = demo_bounds();
         let kernel = FieldKernel::demo_sphere_void(bounds);
 
-        let mut field = GpuField::new(bounds.voxel_size);
+        let mut field = GpuField::new(bounds.voxel_size());
         field.set_session(bounds, kernel).expect("session");
         field.paint(&ctx).expect("paint");
         let mesh = field
@@ -122,7 +122,7 @@ mod tests {
         let bounds = demo_bounds();
         let kernel = FieldKernel::demo_sphere_void(bounds);
 
-        let mut field = GpuField::new(bounds.voxel_size);
+        let mut field = GpuField::new(bounds.voxel_size());
         field.set_session(bounds, kernel).expect("session");
         let painted = field.paint(&ctx).expect("paint");
 
@@ -146,7 +146,7 @@ mod tests {
         let bounds = demo_bounds();
         let kernel = FieldKernel::demo_sphere_void(bounds);
 
-        let mut field = GpuField::new(bounds.voxel_size);
+        let mut field = GpuField::new(bounds.voxel_size());
         field.set_session(bounds, kernel).expect("session");
         let painted = field.paint(&ctx).expect("paint");
 
@@ -174,7 +174,7 @@ mod tests {
             full.triangle_count()
         );
         // Coarse shell must stay within a voxel*stride of the fine shell.
-        let slack = bounds.voxel_size * 4.0 + 1e-3;
+        let slack = bounds.voxel_size() * 4.0 + 1e-3;
         for p in &coarse.positions {
             assert!(
                 bounds.contains(*p),
@@ -226,7 +226,7 @@ mod tests {
         let bounds = demo_bounds();
         let kernel = FieldKernel::demo_sphere_void(bounds);
 
-        let mut field = GpuField::new(bounds.voxel_size);
+        let mut field = GpuField::new(bounds.voxel_size());
         field.set_session(bounds, kernel).expect("session");
         let painted = field.paint(&ctx).expect("paint");
 

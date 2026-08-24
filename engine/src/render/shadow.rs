@@ -860,7 +860,7 @@ impl ShadowGpu {
     pub fn prepare(&mut self, queue: &wgpu::Queue, world: &World) -> [Mat4; CASCADE_COUNT] {
         self.atlas_wrote = false;
         let mut uniforms = ShadowUniforms::zeroed();
-        let light = world.light.direction.normalize_or_zero();
+        let light = world.light().direction.normalize_or_zero();
         uniforms.light_dir = [light.x, light.y, light.z];
         uniforms.map_texel = 1.0 / self.map_size as f32;
 
@@ -874,7 +874,7 @@ impl ShadowGpu {
         };
 
         uniforms.flags = FLAG_CSM;
-        let focus = world.camera.target;
+        let focus = world.camera().target();
         let ends = settings.cascade_end_m;
         uniforms.cascade_end = [ends[0], ends[1], ends[2], 0.0];
         let mats = [

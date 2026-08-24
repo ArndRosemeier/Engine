@@ -367,8 +367,8 @@ fn first_person_looks_along_yaw_and_pitch() {
     use crate::camera::{Camera, MAX_PITCH_DEGREES};
 
     let level = Camera::first_person(Vec3::new(3.0, 2.0, -1.0), 0.0, 0.0);
-    assert_eq!(level.eye, Vec3::new(3.0, 2.0, -1.0));
-    let forward = (level.target - level.eye).normalize();
+    assert_eq!(level.eye(), Vec3::new(3.0, 2.0, -1.0));
+    let forward = (level.target() - level.eye()).normalize();
     assert!(
         forward.dot(Vec3::Z) > 0.999,
         "yaw 0 must look down +Z, got {forward}"

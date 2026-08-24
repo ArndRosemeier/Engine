@@ -25,7 +25,7 @@ fn main() {
 
     Engine::run("animated_animal", move |world, frame| {
         if frame.first {
-            world.clear_color = engine::Color::rgb(140, 190, 230);
+            world.set_clear_color(engine::Color::rgb(140, 190, 230));
             world.spawn(
                 Shape::box_at((0.0, -0.05, 0.0), (20.0, 0.1, 20.0), rgb(90, 140, 70)).unwrap(),
             );

@@ -150,12 +150,14 @@ mod tests {
     use crate::camera::Camera;
 
     fn looking_down_negative_z() -> Frustum {
-        let camera = Camera {
-            eye: Vec3::ZERO,
-            target: Vec3::new(0.0, 0.0, -1.0),
-            far: 1_000.0,
-            ..Camera::default()
-        };
+        let camera = Camera::from_parts(
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::Y,
+            55.0,
+            0.1,
+            1_000.0,
+        );
         Frustum::from_view_projection(camera.view_projection(16.0 / 9.0))
     }
 

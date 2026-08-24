@@ -443,7 +443,7 @@ impl FieldGpuContext {
             corner_dims: [grid.corners[0], grid.corners[1], grid.corners[2], 0],
             sphere_center: [sphere_center.x, sphere_center.y, sphere_center.z, 0.0],
             sphere_radius,
-            voxel_size: grid.bounds.voxel_size,
+            voxel_size: grid.bounds.voxel_size(),
             _pad: [0.0; 2],
         };
         let params_buf =
@@ -665,7 +665,7 @@ impl FieldGpuContext {
 
         let params = ExtractParams {
             bounds_min: [grid.bounds.min.x, grid.bounds.min.y, grid.bounds.min.z, 0.0],
-            voxel_size: grid.bounds.voxel_size,
+            voxel_size: grid.bounds.voxel_size(),
             _pad_after_voxel: [0.0; 3],
             _pad_to_corner: [0.0; 4],
             corner_dims: [grid.corners[0], grid.corners[1], grid.corners[2], 0],

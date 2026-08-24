@@ -236,7 +236,7 @@ pub fn terrain(
 
 /// Carve a cylindrical tunnel along X through the volume.
 pub fn carve_tunnel_x(volume: &mut Volume, start: Vec3, length: f32, radius: f32) {
-    let step = volume.voxel_size;
+    let step = volume.voxel_size();
     let mut t = 0.0;
     while t <= length {
         let center = start + Vec3::new(t, 0.0, 0.0);

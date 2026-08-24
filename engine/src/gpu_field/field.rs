@@ -33,10 +33,14 @@ impl FieldParamsBlob {
 pub struct FieldBounds {
     pub min: Vec3,
     pub max: Vec3,
-    pub voxel_size: f32,
+    voxel_size: f32,
 }
 
 impl FieldBounds {
+    pub fn voxel_size(&self) -> f32 {
+        self.voxel_size
+    }
+
     pub fn try_new(min: Vec3, max: Vec3, voxel_size: f32) -> EngineResult<Self> {
         crate::place::ensure_finite3(min, "field bounds min")?;
         crate::place::ensure_finite3(max, "field bounds max")?;
@@ -166,10 +170,11 @@ impl GpuField {
 
     /// Record bounds and kernel for the next paint pass.
     pub fn set_session(&mut self, bounds: FieldBounds, kernel: FieldKernel) -> EngineResult<()> {
-        if bounds.voxel_size != self.voxel_size {
+        if bounds.voxel_size() != self.voxel_size {
             return Err(EngineError::InvalidValue(format!(
                 "field bounds voxel_size {} does not match session {}",
-                bounds.voxel_size, self.voxel_size
+                bounds.voxel_size(),
+                self.voxel_size
             )));
         }
         self.bounds = Some(bounds);

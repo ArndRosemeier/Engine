@@ -7,12 +7,12 @@ pub const MAX_PITCH_DEGREES: f32 = 89.0;
 /// Simple perspective camera. Y-up, angles in degrees where helpers use degrees.
 #[derive(Clone, Debug)]
 pub struct Camera {
-    pub eye: Vec3,
-    pub target: Vec3,
-    pub up: Vec3,
-    pub fov_y_degrees: f32,
-    pub near: f32,
-    pub far: f32,
+    eye: Vec3,
+    target: Vec3,
+    up: Vec3,
+    fov_y_degrees: f32,
+    near: f32,
+    far: f32,
 }
 
 impl Default for Camera {
@@ -29,6 +29,61 @@ impl Default for Camera {
 }
 
 impl Camera {
+    pub(crate) fn from_parts(
+        eye: Vec3,
+        target: Vec3,
+        up: Vec3,
+        fov_y_degrees: f32,
+        near: f32,
+        far: f32,
+    ) -> Self {
+        if !eye.is_finite() || !target.is_finite() || !up.is_finite() || up.length_squared() <= 0.0
+        {
+            panic!("camera parts must contain finite positions and a non-zero up vector");
+        }
+        if !(fov_y_degrees.is_finite() && fov_y_degrees > 0.0 && fov_y_degrees < 180.0) {
+            panic!("camera field of view must be finite and in (0, 180), got {fov_y_degrees}");
+        }
+        if !(near.is_finite() && near > 0.0 && far.is_finite() && far > near) {
+            panic!("camera clipping planes must be finite with 0 < near < far, got {near}, {far}");
+        }
+        Self {
+            eye,
+            target,
+            up: up.normalize(),
+            fov_y_degrees,
+            near,
+            far,
+        }
+    }
+
+    pub fn eye(&self) -> Vec3 {
+        self.eye
+    }
+    pub fn target(&self) -> Vec3 {
+        self.target
+    }
+    pub fn up(&self) -> Vec3 {
+        self.up
+    }
+    pub fn fov_y_degrees(&self) -> f32 {
+        self.fov_y_degrees
+    }
+    pub fn near(&self) -> f32 {
+        self.near
+    }
+    pub fn far(&self) -> f32 {
+        self.far
+    }
+
+    pub(crate) fn with_lens(mut self, fov_y_degrees: f32, near: f32, far: f32) -> Self {
+        let checked = Self::from_parts(self.eye, self.target, self.up, fov_y_degrees, near, far);
+        self.fov_y_degrees = checked.fov_y_degrees;
+        self.near = checked.near;
+        self.far = checked.far;
+        self
+    }
+
     pub fn look_at(eye: impl Into<Vec3>, target: impl Into<Vec3>) -> Self {
         Self {
             eye: eye.into(),

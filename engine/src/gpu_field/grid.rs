@@ -16,9 +16,9 @@ impl FieldGrid {
     pub fn from_bounds(bounds: FieldBounds) -> Self {
         let e = bounds.extent();
         let cells = [
-            (e.x / bounds.voxel_size).ceil().max(1.0) as u32,
-            (e.y / bounds.voxel_size).ceil().max(1.0) as u32,
-            (e.z / bounds.voxel_size).ceil().max(1.0) as u32,
+            (e.x / bounds.voxel_size()).ceil().max(1.0) as u32,
+            (e.y / bounds.voxel_size()).ceil().max(1.0) as u32,
+            (e.z / bounds.voxel_size()).ceil().max(1.0) as u32,
         ];
         let corners = [cells[0] + 1, cells[1] + 1, cells[2] + 1];
         Self {
@@ -37,7 +37,7 @@ impl FieldGrid {
     }
 
     pub fn corner_world(&self, ix: u32, iy: u32, iz: u32) -> Vec3 {
-        self.bounds.min + Vec3::new(ix as f32, iy as f32, iz as f32) * self.bounds.voxel_size
+        self.bounds.min + Vec3::new(ix as f32, iy as f32, iz as f32) * self.bounds.voxel_size()
     }
 
     pub fn cell_origin(&self, ix: u32, iy: u32, iz: u32) -> Vec3 {
@@ -54,7 +54,7 @@ impl FieldGrid {
 
     /// Trilinear sample of the corner grid at a world position.
     pub fn sample_density(&self, density: &[f32], world: Vec3) -> f32 {
-        let local = (world - self.bounds.min) / self.bounds.voxel_size;
+        let local = (world - self.bounds.min) / self.bounds.voxel_size();
         let max = Vec3::new(
             self.corners[0].saturating_sub(1) as f32,
             self.corners[1].saturating_sub(1) as f32,

@@ -91,9 +91,9 @@ impl PortalId {
 #[derive(Clone, Copy, Debug)]
 pub struct Portal {
     pub(crate) id: PortalId,
-    pub sides: [EntityId; 2],
+    pub(crate) sides: [EntityId; 2],
     pub(crate) teleport: bool,
-    pub enabled: bool,
+    pub(crate) enabled: bool,
 }
 
 impl Portal {
@@ -116,6 +116,10 @@ impl Portal {
 
     pub fn is_enabled(self) -> bool {
         self.enabled
+    }
+
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
     }
 
     /// Each opening that lives in `live`, paired with where it leads.
@@ -188,18 +192,18 @@ pub fn portal_matrix(src: Mat4, dst: Mat4) -> Mat4 {
 /// Camera on the far side of a portal, same look as standing at the linked pose.
 pub fn teleport_camera(camera: &Camera, src: Mat4, dst: Mat4) -> Camera {
     let t = portal_matrix(src, dst);
-    let up = t.transform_vector3(camera.up);
+    let up = t.transform_vector3(camera.up());
     if up.length_squared() <= 0.0 {
         panic!("portal transform collapsed the camera up axis");
     }
-    Camera {
-        eye: t.transform_point3(camera.eye),
-        target: t.transform_point3(camera.target),
-        up: up.normalize(),
-        fov_y_degrees: camera.fov_y_degrees,
-        near: camera.near,
-        far: camera.far,
-    }
+    Camera::from_parts(
+        t.transform_point3(camera.eye()),
+        t.transform_point3(camera.target()),
+        up,
+        camera.fov_y_degrees(),
+        camera.near(),
+        camera.far(),
+    )
 }
 
 /// Destination view from a stable eye position just behind the opening.
@@ -222,38 +226,41 @@ pub fn threshold_camera(
         );
     }
     let transformed = teleport_camera(camera, src, dst);
-    let look = transformed.target - transformed.eye;
+    let look = transformed.target() - transformed.eye();
     if look.length_squared() <= 0.0 {
         panic!("portal threshold view has zero look direction");
     }
     let eye = dst_center - dst_normal * setback + Vec3::Y * eye_offset_y;
-    Camera {
+    Camera::from_parts(
         eye,
-        target: eye + look.normalize(),
-        up: transformed.up,
-        fov_y_degrees: transformed.fov_y_degrees,
-        near: transformed.near,
-        far: transformed.far,
-    }
+        eye + look.normalize(),
+        transformed.up(),
+        transformed.fov_y_degrees(),
+        transformed.near(),
+        transformed.far(),
+    )
 }
 
 /// Minimum distance from the source opening used for portal *rendering* when the
 /// real eye is pressed against the frame. Stops stencil/depth failing in the
 /// last few centimetres before the plane.
 pub fn portal_render_camera(camera: &Camera, src_plane: PortalPlane) -> Camera {
-    let dist = src_plane.signed_distance(camera.eye);
-    let min_dist = camera.near + 0.02;
+    let dist = src_plane.signed_distance(camera.eye());
+    let min_dist = camera.near() + 0.02;
     let target_dist = PORTAL_THRESHOLD_SETBACK.max(min_dist);
     if dist >= target_dist {
         return camera.clone();
     }
     let push = target_dist - dist.max(0.0);
     let offset = src_plane.normal * push;
-    Camera {
-        eye: camera.eye + offset,
-        target: camera.target + offset,
-        ..camera.clone()
-    }
+    Camera::from_parts(
+        camera.eye() + offset,
+        camera.target() + offset,
+        camera.up(),
+        camera.fov_y_degrees(),
+        camera.near(),
+        camera.far(),
+    )
 }
 
 fn smoothstep01(t: f32) -> f32 {
@@ -262,18 +269,18 @@ fn smoothstep01(t: f32) -> f32 {
 }
 
 fn blend_cameras(a: Camera, b: Camera, t: f32) -> Camera {
-    let up = a.up.lerp(b.up, t);
+    let up = a.up().lerp(b.up(), t);
     if up.length_squared() <= 0.0 {
         panic!("portal camera blend collapsed the up axis");
     }
-    Camera {
-        eye: a.eye.lerp(b.eye, t),
-        target: a.target.lerp(b.target, t),
-        up: up.normalize(),
-        fov_y_degrees: a.fov_y_degrees + (b.fov_y_degrees - a.fov_y_degrees) * t,
-        near: a.near + (b.near - a.near) * t,
-        far: a.far + (b.far - a.far) * t,
-    }
+    Camera::from_parts(
+        a.eye().lerp(b.eye(), t),
+        a.target().lerp(b.target(), t),
+        up,
+        a.fov_y_degrees() + (b.fov_y_degrees() - a.fov_y_degrees()) * t,
+        a.near() + (b.near() - a.near()) * t,
+        a.far() + (b.far() - a.far()) * t,
+    )
 }
 
 fn transformed_portal_view(
@@ -282,12 +289,12 @@ fn transformed_portal_view(
     src_plane: PortalPlane,
 ) -> Camera {
     let camera = portal_render_camera(camera, src_plane);
-    let dist = src_plane.signed_distance(camera.eye);
+    let dist = src_plane.signed_distance(camera.eye());
     let tele = teleport_camera(&camera, visible.src_transform, visible.dst_transform);
     if dist >= PORTAL_CLOSE_VIEW_DIST {
         return tele;
     }
-    let eye_offset_y = camera.eye.y - visible.dst_center.y;
+    let eye_offset_y = camera.eye().y - visible.dst_center.y;
     let thresh = threshold_camera(
         &camera,
         visible.src_transform,
@@ -320,7 +327,7 @@ pub fn portal_view_is_close(
     _visible: &VisiblePortal,
     src_plane: PortalPlane,
 ) -> bool {
-    src_plane.signed_distance(camera.eye) < PORTAL_CLOSE_VIEW_DIST
+    src_plane.signed_distance(camera.eye()) < PORTAL_CLOSE_VIEW_DIST
 }
 
 /// Oblique near-plane clip for recursive portal draws.
@@ -534,7 +541,7 @@ mod tests {
         let dst = door(Vec3::new(20.0, 1.0, 0.0), 180.0);
         let cam = Camera::look_at(Vec3::new(0.0, 1.6, 3.0), Vec3::new(0.0, 1.6, 0.0));
         let virt = teleport_camera(&cam, src, dst);
-        let look = (virt.target - virt.eye).normalize();
+        let look = (virt.target() - virt.eye()).normalize();
         assert!(
             look.z < -0.8,
             "virtual camera should look through dest along −Z, look={look}"
@@ -549,7 +556,7 @@ mod tests {
         let dst_plane = PortalPlane::from_transform(dst, 0.6, 1.0);
         let cam = Camera::look_at(Vec3::new(0.0, 1.6, -1.28), Vec3::new(0.0, 1.6, -3.0));
         assert!(
-            src_plane.signed_distance(cam.eye) < PORTAL_THRESHOLD_SETBACK,
+            src_plane.signed_distance(cam.eye()) < PORTAL_THRESHOLD_SETBACK,
             "test eye should be in the pure threshold band"
         );
         let virt = threshold_camera(
@@ -558,12 +565,12 @@ mod tests {
             dst,
             dst_plane.center,
             dst_plane.normal,
-            cam.eye.y - dst_plane.center.y,
+            cam.eye().y - dst_plane.center.y,
             PORTAL_THRESHOLD_SETBACK,
         );
         let teleported = teleport_camera(&cam, src, dst);
         assert!(
-            virt.eye.distance(teleported.eye) > 0.01,
+            virt.eye().distance(teleported.eye()) > 0.01,
             "close view should not use the fully teleported eye"
         );
     }
@@ -591,11 +598,11 @@ mod tests {
         let far = portal_view_camera(&cam_far, &visible, src_plane);
         let tele = teleport_camera(&cam_far, src, dst);
         assert!(
-            mid.eye.distance(close.eye) > 0.01 && mid.eye.distance(far.eye) > 0.01,
+            mid.eye().distance(close.eye()) > 0.01 && mid.eye().distance(far.eye()) > 0.01,
             "blend band should sit between threshold and teleported eyes"
         );
         assert!(
-            far.eye.distance(tele.eye) < 1e-4,
+            far.eye().distance(tele.eye()) < 1e-4,
             "far doorway view should match the teleported camera"
         );
     }
@@ -613,7 +620,7 @@ mod tests {
         let dst_plane = PortalPlane::from_transform(door_out, 0.6, 1.1);
         let cam = Camera::first_person(Vec3::new(0.0, 1.6, -3.85), 180.0, 0.0);
         assert!(
-            src_plane.signed_distance(cam.eye) < PORTAL_CLOSE_VIEW_DIST,
+            src_plane.signed_distance(cam.eye()) < PORTAL_CLOSE_VIEW_DIST,
             "doorway pose should use the close threshold path"
         );
         let virt = threshold_camera(
@@ -622,7 +629,7 @@ mod tests {
             door_out,
             dst_plane.center,
             dst_plane.normal,
-            cam.eye.y - dst_plane.center.y,
+            cam.eye().y - dst_plane.center.y,
             PORTAL_THRESHOLD_SETBACK,
         );
         let vp = virt.view_projection(16.0 / 9.0);
@@ -630,8 +637,8 @@ mod tests {
         assert!(
             clip_contains(vp, yard_floor),
             "threshold view from inside should see the yard, eye={:?} look={:?}",
-            virt.eye,
-            virt.target - virt.eye
+            virt.eye(),
+            virt.target() - virt.eye()
         );
     }
 
@@ -644,12 +651,12 @@ mod tests {
         let virt = threshold_camera(&cam, src, dst, dst_plane.center, dst_plane.normal, 0.6, 0.5);
         let expected = dst_plane.center - dst_plane.normal * 0.5 + Vec3::Y * 0.6;
         assert!(
-            virt.eye.distance(expected) < 1e-4,
+            virt.eye().distance(expected) < 1e-4,
             "threshold eye drifted with source depth: {:?} != {:?}",
-            virt.eye,
+            virt.eye(),
             expected
         );
-        assert!((virt.eye.y - 1.6).abs() < 1e-4);
+        assert!((virt.eye().y - 1.6).abs() < 1e-4);
         let clip_point = dst_plane.center + dst_plane.normal * 0.02;
         let vp = oblique_view_projection(&virt, 16.0 / 9.0, clip_point, dst_plane.normal);
         let beyond_door = dst_plane.center + dst_plane.normal * 5.0 + Vec3::Y * 0.6;
@@ -713,9 +720,9 @@ mod tests {
         let room = Vec3::new(0.0, 1.0, 0.0);
         let behind = Vec3::new(0.0, 1.18, 12.0);
         assert!(
-            virt.eye.z > 10.0,
+            virt.eye().z > 10.0,
             "virtual camera sits behind door B, got {:?}",
-            virt.eye
+            virt.eye()
         );
         assert!(
             clip_contains(vp, room),

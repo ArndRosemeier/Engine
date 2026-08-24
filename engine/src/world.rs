@@ -341,9 +341,9 @@ impl AnimatedEntity {
 /// Scene state visible to user update callbacks.
 #[derive(Debug)]
 pub struct World {
-    pub camera: Camera,
-    pub light: Light,
-    pub clear_color: Color,
+    camera: Camera,
+    light: Light,
+    clear_color: Color,
     pub(crate) limits: EngineLimits,
     next_id: u64,
     entities: HashMap<EntityId, Entity>,
@@ -453,7 +453,7 @@ impl Default for World {
             pointer_lock: false,
             bind_listen: false,
             time: 0.0,
-            view_distance: Camera::default().far,
+            view_distance: Camera::default().far(),
             haze: None,
             sky: None,
             torch: None,
@@ -489,6 +489,29 @@ impl World {
     pub fn with_limits(mut self, limits: EngineLimits) -> Self {
         self.limits = limits;
         self
+    }
+
+    pub fn camera(&self) -> &Camera {
+        &self.camera
+    }
+
+    pub fn light(&self) -> &Light {
+        &self.light
+    }
+
+    pub fn clear_color(&self) -> Color {
+        self.clear_color
+    }
+
+    pub fn set_camera_lens(&mut self, fov_y_degrees: f32, near: f32) {
+        self.camera = self
+            .camera
+            .clone()
+            .with_lens(fov_y_degrees, near, self.view_distance);
+    }
+
+    pub fn set_sun_color(&mut self, color: Vec3) {
+        self.light.color = color;
     }
 
     pub fn limits(&self) -> &EngineLimits {
@@ -756,7 +779,7 @@ impl World {
             .iter_mut()
             .find(|p| p.id == id)
             .ok_or_else(|| EngineError::InvalidValue(format!("unknown portal {id:?}")))?;
-        portal.enabled = enabled;
+        portal.set_enabled(enabled);
         self.bump_render_epoch();
         Ok(())
     }
@@ -817,18 +840,18 @@ impl World {
         };
         let mut found = Vec::new();
         for portal in &self.portals {
-            if !portal.enabled {
+            if !portal.is_enabled() {
                 continue;
             }
             let (Some(a), Some(b)) = (
-                self.entities.get(&portal.sides[0]),
-                self.entities.get(&portal.sides[1]),
+                self.entities.get(&portal.a()),
+                self.entities.get(&portal.b()),
             ) else {
                 continue;
             };
             for (src, dst) in portal.directions(a.space, b.space, live) {
-                let src_e = if src == portal.sides[0] { a } else { b };
-                let dst_e = if dst == portal.sides[0] { a } else { b };
+                let src_e = if src == portal.a() { a } else { b };
+                let dst_e = if dst == portal.a() { a } else { b };
                 let Ok(src_plane) = self.portal_plane(src) else {
                     continue;
                 };
@@ -871,13 +894,11 @@ impl World {
     pub fn is_portal_surface(&self, id: EntityId) -> bool {
         self.portals
             .iter()
-            .any(|p| p.enabled && (p.sides[0] == id || p.sides[1] == id))
+            .any(|p| p.is_enabled() && (p.a() == id || p.b() == id))
     }
 
     pub(crate) fn is_linked_opening(&self, id: EntityId) -> bool {
-        self.portals
-            .iter()
-            .any(|p| p.sides[0] == id || p.sides[1] == id)
+        self.portals.iter().any(|p| p.a() == id || p.b() == id)
     }
 
     pub(crate) fn portal_plane(&self, id: EntityId) -> EngineResult<PortalPlane> {
@@ -912,11 +933,11 @@ impl World {
         };
         let links: Vec<Portal> = self.portals.clone();
         for portal in links {
-            if !portal.enabled || !portal.teleport {
+            if !portal.is_enabled() || !portal.teleport {
                 continue;
             }
-            let a_space = self.entities.get(&portal.sides[0]).map(|e| e.space);
-            let b_space = self.entities.get(&portal.sides[1]).map(|e| e.space);
+            let a_space = self.entities.get(&portal.a()).map(|e| e.space);
+            let b_space = self.entities.get(&portal.b()).map(|e| e.space);
             let (Some(a_space), Some(b_space)) = (a_space, b_space) else {
                 continue;
             };
@@ -1129,12 +1150,8 @@ impl World {
         self.chunk_entities.retain(|_, eid| *eid != id);
         self.anchored_entities.remove(&id);
         self.anchored_chunks.retain(|_, c| c.entity != id);
-        let linked = self
-            .portals
-            .iter()
-            .any(|p| p.sides[0] == id || p.sides[1] == id);
-        self.portals
-            .retain(|p| p.sides[0] != id && p.sides[1] != id);
+        let linked = self.portals.iter().any(|p| p.a() == id || p.b() == id);
+        self.portals.retain(|p| p.a() != id && p.b() != id);
         if removed_static || linked {
             self.bump_render_epoch();
         }
@@ -1351,12 +1368,9 @@ impl World {
     ) -> EngineResult<()> {
         let e = self.to_render(eye)?;
         let t = self.to_render(target)?;
-        let fov = self.camera.fov_y_degrees;
-        let near = self.camera.near;
-        self.camera = Camera::look_at(e, t);
-        self.camera.fov_y_degrees = fov;
-        self.camera.near = near;
-        self.camera.far = self.view_distance;
+        let fov = self.camera.fov_y_degrees();
+        let near = self.camera.near();
+        self.camera = Camera::look_at(e, t).with_lens(fov, near, self.view_distance);
         Ok(())
     }
 
@@ -1471,7 +1485,11 @@ impl World {
         pitch_degrees: f32,
     ) {
         self.camera = Camera::orbit(target, distance, yaw_degrees, pitch_degrees);
-        self.camera.far = self.view_distance;
+        self.camera = self.camera.clone().with_lens(
+            self.camera.fov_y_degrees(),
+            self.camera.near(),
+            self.view_distance,
+        );
     }
 
     /// Set sun direction (need not be normalized) and ambient 0..1.
@@ -1553,10 +1571,6 @@ impl World {
 
     pub fn entity(&self, id: EntityId) -> EngineResult<&Entity> {
         self.entities.get(&id).ok_or(EngineError::UnknownEntity)
-    }
-
-    pub fn entity_mut(&mut self, id: EntityId) -> EngineResult<&mut Entity> {
-        self.entities.get_mut(&id).ok_or(EngineError::UnknownEntity)
     }
 
     pub(crate) fn entities(&self) -> impl Iterator<Item = (EntityId, &Entity)> {
@@ -1855,7 +1869,11 @@ impl World {
         pitch_degrees: f32,
     ) {
         self.camera = Camera::first_person(eye, yaw_degrees, pitch_degrees);
-        self.camera.far = self.view_distance;
+        self.camera = self.camera.clone().with_lens(
+            self.camera.fov_y_degrees(),
+            self.camera.near(),
+            self.view_distance,
+        );
     }
 
     /// Third-person follow camera (yaw in degrees, 0 = +Z).
@@ -1867,23 +1885,30 @@ impl World {
         height: f32,
     ) {
         self.camera = Camera::follow(target, yaw_degrees, distance, height);
-        self.camera.far = self.view_distance;
+        self.camera = self.camera.clone().with_lens(
+            self.camera.fov_y_degrees(),
+            self.camera.near(),
+            self.view_distance,
+        );
     }
 
     /// How far the camera helpers may see, in metres.
     ///
     /// The helpers rebuild the camera every frame, so a game that reaches into
-    /// `world.camera.far` has it overwritten on the next one; this is the knob
+    /// `world.camera.far()` has it overwritten on the next one; this is the knob
     /// that survives. Depth is reversed, so a horizon-scale distance costs
     /// nothing in precision.
     pub fn set_view_distance(&mut self, metres: f32) -> EngineResult<()> {
-        if !(metres.is_finite() && metres > self.camera.near) {
+        if !(metres.is_finite() && metres > self.camera.near()) {
             return Err(EngineError::InvalidValue(format!(
                 "view distance must be finite and beyond the near plane, got {metres}"
             )));
         }
         self.view_distance = metres;
-        self.camera.far = metres;
+        self.camera =
+            self.camera
+                .clone()
+                .with_lens(self.camera.fov_y_degrees(), self.camera.near(), metres);
         Ok(())
     }
 

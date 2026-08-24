@@ -12,7 +12,7 @@ use super::grid::FieldGrid;
 pub fn extract_mesh_cpu(grid: &FieldGrid, density: &[f32], color: Color) -> BuiltMesh {
     let rgba = color.to_vec4();
     let mut mesh = BuiltMesh::default();
-    let voxel = grid.bounds.voxel_size;
+    let voxel = grid.bounds.voxel_size();
 
     for z in 0..grid.cells[2] {
         for y in 0..grid.cells[1] {

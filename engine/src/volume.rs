@@ -47,7 +47,7 @@ impl Chunk {
 /// Chunked scalar volume for caves, overhangs, and landscapes.
 #[derive(Clone, Debug)]
 pub struct Volume {
-    pub voxel_size: f32,
+    voxel_size: f32,
     chunks: HashMap<IVec3, Chunk>,
 }
 
@@ -58,6 +58,10 @@ impl Default for Volume {
 }
 
 impl Volume {
+    pub fn voxel_size(&self) -> f32 {
+        self.voxel_size
+    }
+
     pub fn new(voxel_size: f32) -> Self {
         Self::try_new(voxel_size).expect("voxel_size must be finite and > 0")
     }
@@ -472,13 +476,23 @@ fn built_to_editable_mesh(built: &BuiltMesh) -> Mesh {
 /// Streaming helper: generate/extract chunks around a focus point.
 #[derive(Debug)]
 pub struct ChunkStreamer {
-    pub radius_chunks: i32,
-    pub lod_near: f32,
-    pub lod_far: f32,
+    radius_chunks: i32,
+    lod_near: f32,
+    lod_far: f32,
     loaded: HashSet<IVec3>,
 }
 
 impl ChunkStreamer {
+    pub fn radius_chunks(&self) -> i32 {
+        self.radius_chunks
+    }
+    pub fn lod_near(&self) -> f32 {
+        self.lod_near
+    }
+    pub fn lod_far(&self) -> f32 {
+        self.lod_far
+    }
+
     pub fn new(radius_chunks: i32) -> Self {
         Self {
             radius_chunks,

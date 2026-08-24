@@ -507,8 +507,8 @@ impl Renderer {
             }
             if let Some(clip) = self.clipmap.as_mut() {
                 let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-                let vp = world.camera.view_projection(aspect);
-                let light_dir = world.light.direction.normalize_or_zero();
+                let vp = world.camera().view_projection(aspect);
+                let light_dir = world.light().direction.normalize_or_zero();
                 let torch_color = world.torch().map(|t| t.color.to_vec3()).unwrap_or_default();
                 let torch_radius_m = world.torch().map(|t| t.radius_m.max(0.0)).unwrap_or(0.0);
                 let torch_curve = world.torch().map(|t| t.curve.max(0.05)).unwrap_or(2.0);
@@ -516,9 +516,9 @@ impl Renderer {
                     &self.queue,
                     vp,
                     light_dir,
-                    world.light.ambient,
-                    world.light.color,
-                    world.camera.eye,
+                    world.light().ambient,
+                    world.light().color,
+                    world.camera().eye(),
                     torch_color,
                     torch_radius_m,
                     torch_curve,
@@ -1107,15 +1107,15 @@ impl Renderer {
             None => camera.view_projection(aspect),
         };
         self.frustum = Frustum::from_view_projection(vp);
-        let light_dir = world.light.direction.normalize_or_zero();
-        let eye = camera.eye;
+        let light_dir = world.light().direction.normalize_or_zero();
+        let eye = camera.eye();
         let haze = world.haze();
         let torch = world.torch();
         let uniforms = Uniforms {
             view_proj: vp.to_cols_array_2d(),
             light_dir: [light_dir.x, light_dir.y, light_dir.z],
-            ambient: world.light.ambient,
-            light_color: world.light.color.into(),
+            ambient: world.light().ambient,
+            light_color: world.light().color.into(),
             _pad: 0.0,
             eye: [eye.x, eye.y, eye.z],
             time: world.time(),
@@ -1140,7 +1140,7 @@ impl Renderer {
         self.queue
             .write_buffer(uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         if let Some(sky) = world.sky() {
-            let sky_u = SkyUniforms::from_scene(&sky, camera, &world.light, aspect, world.time());
+            let sky_u = SkyUniforms::from_scene(&sky, camera, world.light(), aspect, world.time());
             self.queue
                 .write_buffer(&self.sky.uniform_bufs[slot], 0, bytemuck::bytes_of(&sky_u));
         }
@@ -1152,14 +1152,14 @@ impl Renderer {
     }
 
     fn main_scene_camera(world: &World) -> Camera {
-        let camera = &world.camera;
-        let look = camera.target - camera.eye;
+        let camera = world.camera();
+        let look = camera.target() - camera.eye();
         if look.length_squared() <= 0.0 {
             return camera.clone();
         }
         let live = world.living_in();
         world
-            .visible_portals(camera.eye, look, live)
+            .visible_portals(camera.eye(), look, live)
             .into_iter()
             .find_map(|visible| {
                 world
@@ -1198,7 +1198,7 @@ impl Renderer {
             }
         };
 
-        let clear = world.clear_color.to_vec3();
+        let clear = world.clear_color().to_vec3();
         let depth = self.depth_view.clone();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("world-pass"),
@@ -1266,11 +1266,11 @@ impl Renderer {
                 },
         } = level;
         let level = depth;
-        let look = camera.target - camera.eye;
+        let look = camera.target() - camera.eye();
         if look.length_squared() <= 0.0 {
             return;
         }
-        let portals = world.visible_portals(camera.eye, look, space);
+        let portals = world.visible_portals(camera.eye(), look, space);
         let scene_camera = portals
             .first()
             .and_then(|visible| world.portal_plane(visible.src).ok())
@@ -1312,7 +1312,7 @@ impl Renderer {
         }
 
         for visible in portals {
-            if !self.portal_in_frustum(world, visible.src, camera.eye) {
+            if !self.portal_in_frustum(world, visible.src, camera.eye()) {
                 continue;
             }
             let src_plane = world
@@ -1804,7 +1804,7 @@ impl Renderer {
             return;
         }
         let far = world.shadows().map(|s| s.cascade_end_m[2]).unwrap_or(120.0);
-        let focus = world.camera.target;
+        let focus = world.camera().target();
         let submit = world.instance_submit();
         let frustums = self.shadow_vp.map(Frustum::from_view_projection);
         let selections = self.select_shadow_culls(world, &frustums);
