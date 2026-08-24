@@ -388,6 +388,7 @@ pub struct Mesh {
     faces: Vec<Vec<PointId>>,
     albedo: Option<AlbedoMap>,
     surface: SurfaceMaterial,
+    surface_overrides: Vec<SurfaceMaterial>,
 }
 
 /// Friendly alias — same type as [`Mesh`].
@@ -447,6 +448,7 @@ impl Mesh {
         self.points.push(position);
         self.colors.push(Color::rgb(191, 191, 191).to_vec4());
         self.uvs.push([0.0, 0.0]);
+        self.surface_overrides.push(self.surface);
         Ok(id)
     }
 
@@ -542,10 +544,20 @@ impl Mesh {
     /// Apply one reusable material descriptor to this mesh.
     pub fn set_surface_material(&mut self, material: SurfaceMaterial) {
         self.surface = material;
+        self.surface_overrides.fill(material);
     }
 
     pub fn surface_material(&self) -> SurfaceMaterial {
         self.surface
+    }
+
+    pub(crate) fn set_surface_overrides(&mut self, overrides: Vec<SurfaceMaterial>) {
+        assert_eq!(
+            overrides.len(),
+            self.points.len(),
+            "surface override count must match mesh points"
+        );
+        self.surface_overrides = overrides;
     }
 
     /// Paint every point one colour.
@@ -692,13 +704,14 @@ impl Mesh {
         let mut colors = Vec::new();
         let mut uvs = Vec::new();
         let mut indices = Vec::new();
+        let mut surfaces = Vec::new();
 
-        let emit = |faces: &[&[PointId]],
-                    positions: &mut Vec<Vec3>,
-                    normals: &mut Vec<Vec3>,
-                    colors: &mut Vec<Vec4>,
-                    uvs: &mut Vec<[f32; 2]>,
-                    indices: &mut Vec<u32>| {
+        let mut emit = |faces: &[&[PointId]],
+                        positions: &mut Vec<Vec3>,
+                        normals: &mut Vec<Vec3>,
+                        colors: &mut Vec<Vec4>,
+                        uvs: &mut Vec<[f32; 2]>,
+                        indices: &mut Vec<u32>| {
             for face in faces {
                 let tris: [[PointId; 3]; 2] = match face.len() {
                     3 => [[face[0], face[1], face[2]], [face[0], face[0], face[0]]],
@@ -729,6 +742,11 @@ impl Mesh {
                     uvs.push(self.uvs[tri[0].0 as usize]);
                     uvs.push(self.uvs[tri[1].0 as usize]);
                     uvs.push(self.uvs[tri[2].0 as usize]);
+                    surfaces.extend([
+                        self.surface_overrides[tri[0].0 as usize],
+                        self.surface_overrides[tri[1].0 as usize],
+                        self.surface_overrides[tri[2].0 as usize],
+                    ]);
                     indices.extend([base, base + 1, base + 2]);
                 }
             }
@@ -760,6 +778,7 @@ impl Mesh {
             indices,
             opaque_index_count,
             surface: self.surface,
+            surface_overrides: surfaces,
         }
     }
 
@@ -785,14 +804,15 @@ impl Mesh {
         let mut colors = Vec::new();
         let mut uvs = Vec::new();
         let mut indices = Vec::new();
+        let mut surfaces = Vec::new();
 
-        let emit = |faces: &[&[PointId]],
-                    remap: &mut [u32],
-                    positions: &mut Vec<Vec3>,
-                    normals: &mut Vec<Vec3>,
-                    colors: &mut Vec<Vec4>,
-                    uvs: &mut Vec<[f32; 2]>,
-                    indices: &mut Vec<u32>| {
+        let mut emit = |faces: &[&[PointId]],
+                        remap: &mut [u32],
+                        positions: &mut Vec<Vec3>,
+                        normals: &mut Vec<Vec3>,
+                        colors: &mut Vec<Vec4>,
+                        uvs: &mut Vec<[f32; 2]>,
+                        indices: &mut Vec<u32>| {
             remap.fill(u32::MAX);
             for face in faces {
                 let tris: [[PointId; 3]; 2] = match face.len() {
@@ -826,6 +846,7 @@ impl Mesh {
                             normals.push(n);
                             colors.push(self.colors[pi]);
                             uvs.push(self.uvs[pi]);
+                            surfaces.push(self.surface_overrides[pi]);
                         }
                         gpu[k] = remap[pi];
                     }
@@ -862,6 +883,7 @@ impl Mesh {
             indices,
             opaque_index_count,
             surface: self.surface,
+            surface_overrides: surfaces,
         }
     }
 
@@ -912,6 +934,8 @@ pub struct BuiltMesh {
     /// Indices `[0..opaque_index_count)` are opaque; the rest use alpha blending.
     pub opaque_index_count: usize,
     pub surface: SurfaceMaterial,
+    /// Optional per-vertex materials for imported multi-material meshes.
+    pub surface_overrides: Vec<SurfaceMaterial>,
 }
 
 impl BuiltMesh {
@@ -937,36 +961,61 @@ impl BuiltMesh {
                 normal: (*n).into(),
                 color: self.colors[i].into(),
                 uv: self.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
-                surface: [
-                    self.surface.roughness,
-                    self.surface.metallic,
-                    self.surface.emission,
-                    self.surface.detail_scale,
-                ],
-                surface2: [
-                    self.surface.strata_strength,
-                    self.surface.seed,
-                    self.surface.warp_strength,
-                    self.surface.noise_gain,
-                ],
-                surface3: [
-                    self.surface.orientation[0],
-                    self.surface.orientation[1],
-                    self.surface.orientation[2],
-                    self.surface.profile,
-                ],
-                surface4: [
-                    self.surface.coverage_direction[0],
-                    self.surface.coverage_direction[1],
-                    self.surface.coverage_direction[2],
-                    self.surface.coverage_level,
-                ],
-                surface5: [
-                    self.surface.coverage_softness,
-                    self.surface.coverage_strength,
-                    self.surface.overlay_roughness,
-                    self.surface.overlay_metallic,
-                ],
+                surface: {
+                    let m = self
+                        .surface_overrides
+                        .get(i)
+                        .copied()
+                        .unwrap_or(self.surface);
+                    [m.roughness, m.metallic, m.emission, m.detail_scale]
+                },
+                surface2: {
+                    let m = self
+                        .surface_overrides
+                        .get(i)
+                        .copied()
+                        .unwrap_or(self.surface);
+                    [m.strata_strength, m.seed, m.warp_strength, m.noise_gain]
+                },
+                surface3: {
+                    let m = self
+                        .surface_overrides
+                        .get(i)
+                        .copied()
+                        .unwrap_or(self.surface);
+                    [
+                        m.orientation[0],
+                        m.orientation[1],
+                        m.orientation[2],
+                        m.profile,
+                    ]
+                },
+                surface4: {
+                    let m = self
+                        .surface_overrides
+                        .get(i)
+                        .copied()
+                        .unwrap_or(self.surface);
+                    [
+                        m.coverage_direction[0],
+                        m.coverage_direction[1],
+                        m.coverage_direction[2],
+                        m.coverage_level,
+                    ]
+                },
+                surface5: {
+                    let m = self
+                        .surface_overrides
+                        .get(i)
+                        .copied()
+                        .unwrap_or(self.surface);
+                    [
+                        m.coverage_softness,
+                        m.coverage_strength,
+                        m.overlay_roughness,
+                        m.overlay_metallic,
+                    ]
+                },
             })
             .collect()
     }
@@ -978,16 +1027,17 @@ impl BuiltMesh {
         let mut colors = Vec::new();
         let mut uvs = Vec::new();
         let mut indices = Vec::new();
+        let mut surfaces = Vec::new();
 
-        let push_range = |src: &BuiltMesh,
-                          index_start: usize,
-                          index_end: usize,
-                          translation: Vec3,
-                          positions: &mut Vec<Vec3>,
-                          normals: &mut Vec<Vec3>,
-                          colors: &mut Vec<Vec4>,
-                          uvs: &mut Vec<[f32; 2]>,
-                          indices: &mut Vec<u32>| {
+        let mut push_range = |src: &BuiltMesh,
+                              index_start: usize,
+                              index_end: usize,
+                              translation: Vec3,
+                              positions: &mut Vec<Vec3>,
+                              normals: &mut Vec<Vec3>,
+                              colors: &mut Vec<Vec4>,
+                              uvs: &mut Vec<[f32; 2]>,
+                              indices: &mut Vec<u32>| {
             let mut remap = HashMap::new();
             for &old in &src.indices[index_start..index_end] {
                 let new = *remap.entry(old).or_insert_with(|| {
@@ -997,6 +1047,7 @@ impl BuiltMesh {
                     normals.push(src.normals[i]);
                     colors.push(src.colors[i]);
                     uvs.push(src.uvs.get(i).copied().unwrap_or([0.0, 0.0]));
+                    surfaces.push(src.surface_overrides.get(i).copied().unwrap_or(src.surface));
                     id
                 });
                 indices.push(new);
@@ -1053,6 +1104,7 @@ impl BuiltMesh {
         self.normals = normals;
         self.colors = colors;
         self.uvs = uvs;
+        self.surface_overrides = surfaces;
         self.indices = indices;
         self.opaque_index_count = opaque_index_count;
     }

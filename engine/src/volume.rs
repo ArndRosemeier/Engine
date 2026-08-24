@@ -339,6 +339,7 @@ impl Volume {
             indices: Vec::new(),
             opaque_index_count: 0,
             surface: Default::default(),
+            surface_overrides: Vec::new(),
         };
         let mut keys: Vec<IVec3> = self.chunks.keys().copied().collect();
         keys.sort_by_key(|k| (k.y, k.z, k.x));

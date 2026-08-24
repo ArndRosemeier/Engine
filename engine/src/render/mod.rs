@@ -1,5 +1,5 @@
 mod clipmap;
-mod frustum;
+pub(crate) mod frustum;
 mod gpu_mesh;
 mod gpu_profile;
 mod instance_cull;
@@ -101,7 +101,7 @@ impl GpuFrameStats {
             self.boundary_batches,
             self.cull_instances,
             self.cull_workgroups,
-            self.indirect_draws
+            self.indirect_draws,
         )
     }
 }

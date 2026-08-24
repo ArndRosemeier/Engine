@@ -75,7 +75,7 @@ struct Uniforms {
 
 // Light from the viewer's own lantern. A point light at the eye with a
 // distance falloff that stays gentle near the holder and dies at `reach`:
-//   1 - (d/reach)^2  clamped — quadratic near, linear tail, zero past reach.
+//   1 - (d/reach)^2  clamped â€” quadratic near, linear tail, zero past reach.
 // The 1/(1+d*d) term keeps a hand's-breadth wall from blowing out.
 fn torch_light(world_p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     if u.torch_radius_m <= 0.0 {
@@ -97,7 +97,7 @@ fn torch_light(world_p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
 // so the amount crossed is the integral of exp(-(y - base) / H) along the ray,
 // which has a closed form: a summit looks out over tens of kilometres while the
 // valley below it is milk within five. Taking the density at the midpoint
-// instead — the obvious shortcut — all but switches the haze off as soon as the
+// instead â€” the obvious shortcut â€” all but switches the haze off as soon as the
 // eye climbs a mountain, and the view from up there is the one that matters.
 fn haze(color: vec3<f32>, world_p: vec3<f32>) -> vec3<f32> {
     if u.haze_density <= 0.0 {
@@ -304,35 +304,60 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     let seed = in.surface2.y;
-    let leaf_tex = textureSample(albedo_tex, albedo_sampler, in.uv);
-    // Foliage cards stay on the opaque path. The silhouette is an analytic,
-    // camera-independent lobe pattern: no hashed coverage, derivatives, alpha
-    // blending, or per-frame threshold can make its edge appear/disappear.
-    if in.surface3.w > 5.5 && in.surface3.w < 7.5 {
-        let leaf_uv = in.uv * vec2<f32>(2.0, 3.0);
-        let cell = floor(leaf_uv);
-        let local = fract(leaf_uv) - vec2<f32>(0.5);
-        let row_offset = select(0.0, 0.13, (cell.y % 2.0) > 0.5);
-        let leaf_local = local - vec2<f32>(row_offset, 0.0);
-        let lobe = length(leaf_local * vec2<f32>(1.0, 1.35));
-        let rib = abs(leaf_local.x) * 1.8 + abs(leaf_local.y) * 0.12;
-        if lobe > 0.43 || rib > 0.84 {
+    let leaf_tex = textureSample(albedo_tex, albedo_sampler, in.uv);    // Imported cutouts own the visible silhouette for SpeedTree-style foliage.
+    if leaf_tex.a < 0.08 {
+        discard;
+    }
+    // Foliage cards stay on the opaque path. Each card is a compact proxy for
+    // many leaves: one deterministic leaf is evaluated per UV cell, so the
+    // mesh can remain cheap without presenting large rectangular panels.
+    let is_broadleaf = in.surface3.w > 5.5 && in.surface3.w < 6.5;
+    let is_needled = in.surface3.w > 6.5 && in.surface3.w < 7.5;
+    if is_broadleaf || is_needled {
+        // A deliberately overlapping field: cells are only a sampling lattice,
+        // not visible tiles. Warped coordinates and generous silhouettes hide
+        // the lattice while keeping the fragment cost constant.
+        let grid = select(vec2<f32>(7.0, 6.0), vec2<f32>(6.0, 9.0), is_broadleaf);
+        let leaf_uv = in.uv * grid;
+        let cell = floor(leaf_uv + vec2<f32>(0.37, 0.19));
+        let cell_hash = hash31(vec3<f32>(cell, seed));
+        let cell_hash2 = hash31(vec3<f32>(cell + vec2<f32>(19.0, 7.0), seed + 13.0));
+        let local = fract(leaf_uv + vec2<f32>(0.37, 0.19)) - vec2<f32>(0.5);
+        let offset = (vec2<f32>(cell_hash, cell_hash2) - vec2<f32>(0.5)) * 0.34;
+        let angle = (cell_hash * 2.0 - 1.0) * 1.7;
+        let leaf_local = rotate2(local - offset, angle);
+        var silhouette = 0.0;
+        if is_broadleaf {
+            let length = 0.48 + cell_hash2 * 0.14;
+            let width = 0.25 + cell_hash * 0.10;
+            let taper = max(1.0 - abs(leaf_local.y) / max(length, 0.01), 0.0);
+            silhouette = taper * taper - abs(leaf_local.x) / max(width, 0.01);
+        } else {
+            let length = 0.52 + cell_hash2 * 0.16;
+            let width = 0.085 + cell_hash * 0.045;
+            silhouette = 1.0 - abs(leaf_local.x) / width - abs(leaf_local.y) / length;
+        }
+        // Smooth the analytic cutout over a pixel footprint. Hard, high-frequency
+        // discard edges were the source of the close-range shimmer/noise.
+        let edge = max(fwidth(silhouette), 0.015);
+        if silhouette <= -edge {
             discard;
         }
-        let vein = exp(-abs(leaf_local.x) * 28.0) * 0.14
-            + abs(sin(leaf_local.y * 16.0)) * 0.025;
+        let vein = select(0.0, exp(-abs(leaf_local.x) * 24.0) * 0.10, is_broadleaf);
         let base_leaf = in.color * leaf_tex;
-        let leaf_tone = vec3<f32>(0.72, 0.92, 0.42)
-            + vec3<f32>(0.12, 0.10, 0.06) * select(0.0, 1.0, (cell.x + cell.y) % 2.0 > 0.5);
-        let leaf_base = base_leaf.rgb * leaf_tone + base_leaf.rgb * vein;
+        let coverage = smoothstep(-edge, edge, silhouette);
+        let variation = 0.90 + cell_hash * 0.15 + cell_hash2 * 0.07;
+        let leaf_tone = select(vec3<f32>(0.22, 0.38, 0.15), vec3<f32>(0.40, 0.58, 0.20), is_broadleaf);
+        let leaf_base = base_leaf.rgb * leaf_tone * variation + base_leaf.rgb * vein;
         let n = normalize(in.world_n);
         let l = normalize(u.light_dir);
-        let ndl = max(dot(n, l), 0.0);
-        let wrap = ndl * 0.55 + 0.45;
+        let ndl = dot(n, l);
+        let front = max(ndl, 0.0);
+        let transmission = max(-ndl, 0.0) * select(0.10, 0.24, is_broadleaf);
+        let wrap = front * 0.55 + 0.45;
         let vis = sun_visibility(in.world_p, n, u.eye);
-        let transmission = max(dot(-n, l), 0.0) * 0.16;
         let light = u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis + transmission;
-        return vec4<f32>(haze(leaf_base * light, in.world_p), 1.0);
+        return vec4<f32>(haze(leaf_base * light, in.world_p), coverage);
     }
 
     // Default-material meshes have no authored orientation and carry a zero
@@ -419,7 +444,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     fine_color = select(fine_color, 0.82 + wood_fine * 0.34,
         in.surface3.w > 0.5 && in.surface3.w < 1.5);
     let base = in.color * texel * layer * wood_tone * fine_color;
-    // Soft wrap lighting — enough contrast for smooth heightfields to read as
+    // Soft wrap lighting â€” enough contrast for smooth heightfields to read as
     // hills. Sky and sun share one budget, so raising ambient fills the shadows
     // instead of blowing out everything the sun already reaches.
     let wrap = ndl * 0.65 + 0.35;
@@ -496,7 +521,7 @@ pub struct Pipelines {
     pub bind_layout: wgpu::BindGroupLayout,
     pub albedo_layout: wgpu::BindGroupLayout,
     pub albedo_sampler: wgpu::Sampler,
-    /// Keeps the 1×1 white texel alive for `white_albedo`.
+    /// Keeps the 1Ã—1 white texel alive for `white_albedo`.
     #[allow(dead_code)]
     pub white_texture: wgpu::Texture,
     pub white_albedo: wgpu::BindGroup,

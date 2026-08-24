@@ -3,7 +3,7 @@
 use crate::color::Color;
 use crate::error::{EngineError, EngineResult};
 use crate::limits::EngineLimits;
-use crate::mesh::{AlbedoMap, BuiltMesh, Mesh};
+use crate::mesh::{AlbedoMap, BuiltMesh, Mesh, SurfaceMaterial};
 use crate::place::Place;
 use glam::{Mat4, Vec3};
 use std::path::{Path, PathBuf};
@@ -50,6 +50,7 @@ impl Model {
         if let Some(map) = first_base_color_albedo(&document, &images)? {
             mesh.set_albedo_rgba(map.width, map.height, map.rgba)?;
         }
+        mesh.set_surface_overrides(built.surface_overrides);
         Ok(mesh)
     }
 }
@@ -77,6 +78,20 @@ fn resolve_allowed_path(path: &Path, base_dir: &Path) -> EngineResult<PathBuf> {
     Ok(canonical)
 }
 
+fn imported_surface_material(name: Option<&str>) -> SurfaceMaterial {
+    let name = name.unwrap_or_default().to_ascii_lowercase();
+    if name.contains("foliage") || name.contains("leaf") || name.contains("crown") {
+        if name.contains("needle") || name.contains("pine") || name.contains("spruce") {
+            return SurfaceMaterial::NEEDLED_FOLIAGE;
+        }
+        return SurfaceMaterial::FOLIAGE;
+    }
+    if name.contains("bark") || name.contains("wood") || name.contains("trunk") {
+        return SurfaceMaterial::WOOD;
+    }
+    SurfaceMaterial::DEFAULT
+}
+
 fn load_gltf_document(
     document: &gltf::Document,
     buffers: &[gltf::buffer::Data],
@@ -91,6 +106,7 @@ fn load_gltf_document(
         indices: Vec::new(),
         opaque_index_count: 0,
         surface: Default::default(),
+        surface_overrides: Vec::new(),
     };
 
     for mesh in document.meshes() {
@@ -194,14 +210,18 @@ fn load_gltf_document(
                 vec![[0.0, 0.0]; positions.len()]
             };
 
+            let material = imported_surface_material(primitive.material().name());
+            let vertex_count = positions.len();
             let part = BuiltMesh {
                 positions: positions.into_iter().map(Vec3::from).collect(),
+                // Primitive vertex count is retained before positions is moved.
                 normals,
                 colors,
                 uvs,
                 opaque_index_count: indices.len(),
                 indices,
-                surface: Default::default(),
+                surface: material,
+                surface_overrides: vec![material; vertex_count],
             };
             combined.append_translated(&part, Vec3::ZERO);
 

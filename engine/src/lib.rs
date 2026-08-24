@@ -27,6 +27,8 @@ pub mod surface;
 pub mod surface_terrain;
 pub mod terrain;
 pub mod texture;
+
+pub mod tree;
 pub mod ui;
 pub mod water_mesh;
 pub mod world;
@@ -77,7 +79,9 @@ pub use texture::{
     generate_cave_albedo, generate_terrain_albedo, load_rgba8_png, MaterialId, TerrainAlbedo,
     TerrainMaterialDesc, TextureId,
 };
+pub use tree::{BranchNode, LeafKind, TreeAsset, TreeKind, TreeLod, TreeProfile, TreeSettings};
 pub use ui::{egui, UiFrame, UiPanel};
+
 pub use water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use world::{
     AnimatedEntity, EntityId, Frame, Haze, HitchSpan, InstanceSubmit, Light, ShadowSettings, Sky,
