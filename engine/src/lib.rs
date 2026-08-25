@@ -17,11 +17,13 @@ pub mod landscape;
 pub mod limits;
 pub mod mesh;
 pub mod model;
+pub mod particles;
 pub mod place;
 pub mod portal;
 pub mod prelude;
 pub mod proc;
 pub mod proc_terrain;
+pub mod ribbons;
 pub mod space;
 pub mod surface;
 pub mod surface_terrain;
@@ -30,6 +32,7 @@ pub mod texture;
 
 pub mod tree;
 pub mod ui;
+pub mod vfx;
 pub mod water_mesh;
 pub mod world;
 
@@ -65,9 +68,14 @@ pub use landscape::Landscape;
 pub use limits::EngineLimits;
 pub use mesh::{BuiltMesh, Mesh, PointId, Shape, SurfaceMaterial};
 pub use model::{scatter_places, Model};
+pub use particles::{
+    EmitterId, ParticleBlend, ParticleEmitter, ParticleForce, ParticleMode, ParticleShape,
+    ParticleSilhouette, ParticleWorld, SizeOverLife,
+};
 pub use place::{GlobalPlace, MeshInstance, Place};
 pub use portal::{Portal, PortalId, PortalSettings, SpaceId};
 pub use proc_terrain::{demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain};
+pub use ribbons::{RibbonId, RibbonProfile, RibbonStyle, RibbonWorld};
 pub use space::{
     ChunkCoord, ChunkId, ChunkLayer, ChunkLevel, ChunkSpan, GlobalPosition, GlobalXZ, RenderOrigin,
     RenderPosition,
@@ -81,11 +89,12 @@ pub use texture::{
 };
 pub use tree::{BranchNode, LeafKind, TreeAsset, TreeKind, TreeLod, TreeProfile, TreeSettings};
 pub use ui::{egui, UiFrame, UiPanel};
+pub use vfx::{Delivery, EffectHandle, EffectSpec, VfxPalette, VfxSystem, VisualKind};
 
 pub use water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use world::{
-    AnimatedEntity, EntityId, Frame, Haze, HitchSpan, InstanceSubmit, Light, ShadowSettings, Sky,
-    TorchLight, World,
+    AnimatedEntity, BloomSettings, EntityId, Frame, Haze, HitchSpan, InstanceSubmit, Light,
+    ShadowSettings, Sky, TorchLight, World,
 };
 
 /// Entry point matching the planned `Engine::run` shape.

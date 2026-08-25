@@ -7,12 +7,14 @@ use crate::error::{EngineError, EngineResult};
 use crate::input::Input;
 use crate::limits::EngineLimits;
 use crate::mesh::{AlbedoMap, BuiltMesh, Mesh};
+use crate::particles::ParticleWorld;
 use crate::place::{GlobalPlace, MeshInstance, Place};
 use crate::portal::{
     opening_extents, segment_crosses_opening, teleport_yaw, Portal, PortalId, PortalPlane,
     PortalSettings, SpaceId, VisiblePortal,
 };
 use crate::proc_terrain::{HeightField, ProcTerrain};
+use crate::ribbons::RibbonWorld;
 use crate::space::{ChunkId, GlobalPosition, GlobalXZ, RenderOrigin};
 use crate::texture::{
     generate_terrain_albedo, load_rgba8_png, CpuTexture, MaterialId, TerrainAlbedo,
@@ -61,7 +63,7 @@ impl Default for Light {
     }
 }
 
-/// A light carried by the viewer — a lantern, a torch, headlamp.
+/// A light carried by the viewer ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a lantern, a torch, headlamp.
 ///
 /// Shaded as a point light at the camera eye with a smooth inverse-square-ish
 /// falloff, so nearby surfaces brighten and the glow dies out over
@@ -118,6 +120,129 @@ impl InstanceSubmit {
     }
 }
 
+/// HDR bloom and tone-mapping controls for the rendered world.
+///
+/// Values are validated when constructed or changed. Disabling bloom leaves
+/// HDR rendering and filmic tone mapping active, but contributes no blur.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BloomSettings {
+    enabled: bool,
+    threshold: f32,
+    soft_knee: f32,
+    intensity: f32,
+    exposure: f32,
+}
+
+impl Default for BloomSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            threshold: 1.0,
+            soft_knee: 0.5,
+            intensity: 0.35,
+            exposure: 1.0,
+        }
+    }
+}
+
+impl BloomSettings {
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::default()
+        }
+    }
+
+    pub fn enabled(self) -> bool {
+        self.enabled
+    }
+
+    pub fn threshold(self) -> f32 {
+        self.threshold
+    }
+
+    pub fn soft_knee(self) -> f32 {
+        self.soft_knee
+    }
+
+    pub fn intensity(self) -> f32 {
+        self.intensity
+    }
+
+    pub fn exposure(self) -> f32 {
+        self.exposure
+    }
+
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub fn with_threshold(mut self, threshold: f32) -> EngineResult<Self> {
+        self.set_threshold(threshold)?;
+        Ok(self)
+    }
+
+    pub fn with_soft_knee(mut self, soft_knee: f32) -> EngineResult<Self> {
+        self.set_soft_knee(soft_knee)?;
+        Ok(self)
+    }
+
+    pub fn with_intensity(mut self, intensity: f32) -> EngineResult<Self> {
+        self.set_intensity(intensity)?;
+        Ok(self)
+    }
+
+    pub fn with_exposure(mut self, exposure: f32) -> EngineResult<Self> {
+        self.set_exposure(exposure)?;
+        Ok(self)
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    pub fn set_threshold(&mut self, threshold: f32) -> EngineResult<()> {
+        require_finite_non_negative("bloom threshold", threshold)?;
+        self.threshold = threshold;
+        Ok(())
+    }
+
+    pub fn set_soft_knee(&mut self, soft_knee: f32) -> EngineResult<()> {
+        if !soft_knee.is_finite() || !(0.0..=1.0).contains(&soft_knee) {
+            return Err(EngineError::InvalidValue(
+                "bloom soft knee must be finite and in 0..=1".into(),
+            ));
+        }
+        self.soft_knee = soft_knee;
+        Ok(())
+    }
+
+    pub fn set_intensity(&mut self, intensity: f32) -> EngineResult<()> {
+        require_finite_non_negative("bloom intensity", intensity)?;
+        self.intensity = intensity;
+        Ok(())
+    }
+
+    pub fn set_exposure(&mut self, exposure: f32) -> EngineResult<()> {
+        if !exposure.is_finite() || exposure <= 0.0 {
+            return Err(EngineError::InvalidValue(
+                "tone-map exposure must be finite and > 0".into(),
+            ));
+        }
+        self.exposure = exposure;
+        Ok(())
+    }
+}
+
+fn require_finite_non_negative(name: &str, value: f32) -> EngineResult<()> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(EngineError::InvalidValue(format!(
+            "{name} must be finite and >= 0"
+        )));
+    }
+    Ok(())
+}
 impl fmt::Display for InstanceSubmit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -227,7 +352,7 @@ impl Haze {
 
     /// Reciprocal metres for the shader, from the visibility distance.
     ///
-    /// `1 - exp(-(d·k)²)` reaches 0.98 at `d = visibility`, which is where a
+    /// `1 - exp(-(dÃƒâ€šÃ‚Â·k)Ãƒâ€šÃ‚Â²)` reaches 0.98 at `d = visibility`, which is where a
     /// surface stops being distinguishable from the sky behind it.
     pub fn density(&self) -> f32 {
         1.978 / self.visibility_m.max(1.0)
@@ -258,7 +383,7 @@ pub struct Entity {
     /// with no instances draws once at `transform`.
     pub(crate) instanced: bool,
     pub(crate) material: Option<SurfaceMaterialRef>,
-    /// Optional baked albedo sampled with mesh UVs. `None` uses a white 1×1.
+    /// Optional baked albedo sampled with mesh UVs. `None` uses a white 1ÃƒÆ’Ã¢â‚¬â€1.
     pub(crate) albedo: Option<TextureId>,
     /// Bumped when transform or instance list changes. The renderer skips
     /// rewriting the GPU instance buffer when this matches the last upload.
@@ -393,6 +518,7 @@ pub struct World {
     shadows: Option<ShadowSettings>,
     /// Instanced mesh submit path. Default stays CPU so Engine demos match today.
     instance_submit: InstanceSubmit,
+    bloom: BloomSettings,
     /// Resident contact grids, pushed by the chunk streamer when they change.
     shadow_contact: ContactSnapshot,
     shadow_contact_epoch: u64,
@@ -421,6 +547,8 @@ pub struct World {
     travel_prev: Option<(SpaceId, Vec3)>,
     /// Destination opening ignored for one frame after crossing (prevents ping-pong).
     travel_gate: Option<EntityId>,
+    particles: ParticleWorld,
+    ribbons: RibbonWorld,
 }
 
 impl Default for World {
@@ -459,6 +587,7 @@ impl Default for World {
             torch: None,
             shadows: Some(ShadowSettings::default()),
             instance_submit: InstanceSubmit::CpuIndexed,
+            bloom: BloomSettings::default(),
             shadow_contact: ContactSnapshot::default(),
             shadow_contact_epoch: 0,
             hitch_spans: Vec::new(),
@@ -477,6 +606,8 @@ impl Default for World {
             portal_recursion: 3,
             travel_prev: None,
             travel_gate: None,
+            particles: ParticleWorld::default(),
+            ribbons: RibbonWorld::default(),
         }
     }
 }
@@ -489,6 +620,20 @@ impl World {
     pub fn with_limits(mut self, limits: EngineLimits) -> Self {
         self.limits = limits;
         self
+    }
+
+    pub fn ribbons_mut(&mut self) -> &mut RibbonWorld {
+        &mut self.ribbons
+    }
+    pub(crate) fn ribbon_frame(&self) -> Vec<crate::ribbons::RibbonSnapshot> {
+        self.ribbons.snapshots()
+    }
+
+    pub fn particles_mut(&mut self) -> &mut ParticleWorld {
+        &mut self.particles
+    }
+    pub(crate) fn particles_frame(&mut self) -> (Vec<crate::particles::ParticleCommand>, f32, f32) {
+        self.particles.drain()
     }
 
     pub fn camera(&self) -> &Camera {
@@ -1252,7 +1397,7 @@ impl World {
     ) -> EngineResult<EntityId> {
         let offset = anchor.to_render(self.render_origin)?.vec3();
         if let Some(existing) = self.anchored_chunks.remove(&id) {
-            // Remesh needs a new GPU upload — swap entity id so the renderer rebuilds.
+            // Remesh needs a new GPU upload ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â swap entity id so the renderer rebuilds.
             self.despawn(existing.entity);
         }
         let material = self.chunk_material(&built);
@@ -1299,7 +1444,7 @@ impl World {
     /// This is a request, not a guarantee: the window drops the grab when it
     /// loses focus and when Escape is pressed, and clears the flag with it, so
     /// a game that wants the pointer back has to ask again. Nothing should pin
-    /// the cursor without the player having asked for it — a grab taken on
+    /// the cursor without the player having asked for it ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a grab taken on
     /// startup follows them out of the window.
     pub fn set_pointer_lock(&mut self, locked: bool) {
         self.pointer_lock = locked;
@@ -1530,7 +1675,7 @@ impl World {
         self.light.ambient = ambient.clamp(0.0, 1.0);
     }
 
-    /// Light the scene from the camera eye — a lantern or headlamp — or take
+    /// Light the scene from the camera eye ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a lantern or headlamp ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â or take
     /// it out again with `None`.
     ///
     /// The torch follows the view every frame; there is no separate position.
@@ -1564,6 +1709,13 @@ impl World {
         self.instance_submit
     }
 
+    pub fn bloom(&self) -> BloomSettings {
+        self.bloom
+    }
+
+    pub fn set_bloom(&mut self, bloom: BloomSettings) {
+        self.bloom = bloom;
+    }
     pub(crate) fn note_shadow_contact(&mut self, snap: ContactSnapshot, epoch: u64) {
         if self.shadow_contact_epoch != epoch {
             self.shadow_contact_epoch = epoch;
@@ -1631,7 +1783,7 @@ impl World {
     /// Like [`set_chunk`] but accepts a pre-built mesh (for background generation).
     pub fn set_chunk_built(&mut self, key: IVec3, built: BuiltMesh) -> EntityId {
         if let Some(&id) = self.chunk_entities.get(&key) {
-            // Remesh requires a new GPU upload — swap entity id so renderer rebuilds.
+            // Remesh requires a new GPU upload ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â swap entity id so renderer rebuilds.
             self.despawn(id);
             self.chunk_entities.remove(&key);
         }
@@ -2021,4 +2173,24 @@ pub struct Frame {
     pub input: Input,
     /// Immediate-mode UI (modals, buttons, images).
     pub ui: UiFrame,
+}
+
+#[cfg(test)]
+mod bloom_tests {
+    use super::*;
+
+    #[test]
+    fn bloom_settings_reject_invalid_values() {
+        assert!(BloomSettings::default().with_threshold(f32::NAN).is_err());
+        assert!(BloomSettings::default().with_soft_knee(1.1).is_err());
+        assert!(BloomSettings::default().with_intensity(-0.01).is_err());
+        assert!(BloomSettings::default().with_exposure(0.0).is_err());
+    }
+
+    #[test]
+    fn bloom_can_be_explicitly_disabled() {
+        let settings = BloomSettings::disabled();
+        assert!(!settings.enabled());
+        assert_eq!(settings.intensity(), BloomSettings::default().intensity());
+    }
 }

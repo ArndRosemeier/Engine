@@ -25,6 +25,10 @@ pub struct Uniforms {
     /// Viewer-carried point light (lantern / headlamp); rgb, alpha unused.
     /// Radius 0 switches it off.
     pub torch_color: [f32; 4],
+    pub camera_right: [f32; 3],
+    pub camera_up: [f32; 3],
+    pub _camera_pad: [f32; 2],
+    pub _scene_pad: [f32; 8],
 }
 
 impl Uniforms {
@@ -44,6 +48,10 @@ impl Uniforms {
             torch_radius_m: 0.0,
             torch_curve: 2.0,
             torch_color: [0.0, 0.0, 0.0, 0.0],
+            camera_right: [1.0, 0.0, 0.0],
+            camera_up: [0.0, 1.0, 0.0],
+            _camera_pad: [0.0; 2],
+            _scene_pad: [0.0; 8],
         }
     }
 }
@@ -69,13 +77,17 @@ struct Uniforms {
     torch_radius_m: f32,
     torch_curve: f32,
     torch_color: vec4<f32>,
+    camera_right: vec3<f32>,
+    camera_up: vec3<f32>,
+    _camera_pad: vec2<f32>,
+    _scene_pad: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
 // Light from the viewer's own lantern. A point light at the eye with a
 // distance falloff that stays gentle near the holder and dies at `reach`:
-//   1 - (d/reach)^2  clamped â€” quadratic near, linear tail, zero past reach.
+//   1 - (d/reach)^2  clamped ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â quadratic near, linear tail, zero past reach.
 // The 1/(1+d*d) term keeps a hand's-breadth wall from blowing out.
 fn torch_light(world_p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     if u.torch_radius_m <= 0.0 {
@@ -97,7 +109,7 @@ fn torch_light(world_p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
 // so the amount crossed is the integral of exp(-(y - base) / H) along the ray,
 // which has a closed form: a summit looks out over tens of kilometres while the
 // valley below it is milk within five. Taking the density at the midpoint
-// instead â€” the obvious shortcut â€” all but switches the haze off as soon as the
+// instead ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â the obvious shortcut ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â all but switches the haze off as soon as the
 // eye climbs a mountain, and the view from up there is the one that matters.
 fn haze(color: vec3<f32>, world_p: vec3<f32>) -> vec3<f32> {
     if u.haze_density <= 0.0 {
@@ -299,7 +311,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let base = in.color * textureSample(albedo_tex, albedo_sampler, in.uv);
         let vis = sun_visibility(in.world_p, n, u.eye);
         let lit = base.rgb * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis)
-            + base.rgb * torch_light(in.world_p, n);
+            + base.rgb * torch_light(in.world_p, n)
+            + base.rgb * in.surface.z * 3.0;
         return vec4<f32>(haze(lit, in.world_p), base.a);
     }
 
@@ -444,7 +457,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     fine_color = select(fine_color, 0.82 + wood_fine * 0.34,
         in.surface3.w > 0.5 && in.surface3.w < 1.5);
     let base = in.color * texel * layer * wood_tone * fine_color;
-    // Soft wrap lighting â€” enough contrast for smooth heightfields to read as
+    // Soft wrap lighting ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â enough contrast for smooth heightfields to read as
     // hills. Sky and sun share one budget, so raising ambient fills the shadows
     // instead of blowing out everything the sun already reaches.
     let wrap = ndl * 0.65 + 0.35;
@@ -493,7 +506,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         * vec3<f32>(0.32, 0.48, 0.72);
     let overlay_specular = mix(0.0, 0.06 * (1.0 - in.surface5.z), overlay_mix)
         + snow_bump * 0.22;
-    let emission = vec3<f32>(1.0, 0.78, 0.48) * in.surface.z;
+    let emission = base.rgb * in.surface.z * 3.0;
     return vec4<f32>(haze(mix(lit, overlay_lit, overlay_mix) + overlay_specular + snow_sparkle + emission, in.world_p), alpha);
 }
 "#;
@@ -521,7 +534,7 @@ pub struct Pipelines {
     pub bind_layout: wgpu::BindGroupLayout,
     pub albedo_layout: wgpu::BindGroupLayout,
     pub albedo_sampler: wgpu::Sampler,
-    /// Keeps the 1Ã—1 white texel alive for `white_albedo`.
+    /// Keeps the 1ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â1 white texel alive for `white_albedo`.
     #[allow(dead_code)]
     pub white_texture: wgpu::Texture,
     pub white_albedo: wgpu::BindGroup,

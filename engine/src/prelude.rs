@@ -15,10 +15,15 @@ pub use crate::landscape::Landscape;
 pub use crate::limits::EngineLimits;
 pub use crate::mesh::{Mesh, PointId, Shape, SurfaceMaterial};
 pub use crate::model::{scatter_places, Model};
+pub use crate::particles::{
+    EmitterId, ParticleBlend, ParticleEmitter, ParticleForce, ParticleMode, ParticleShape,
+    ParticleSilhouette, ParticleWorld, SizeOverLife,
+};
 pub use crate::place::{GlobalPlace, MeshInstance, Place};
 pub use crate::portal::{Portal, PortalId, PortalSettings, SpaceId};
 pub use crate::proc::{scatter_on_xz, Noise};
 pub use crate::proc_terrain::{demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain};
+pub use crate::ribbons::{RibbonId, RibbonProfile, RibbonStyle, RibbonWorld};
 pub use crate::space::{
     ChunkCoord, ChunkId, ChunkLayer, ChunkLevel, ChunkSpan, GlobalPosition, GlobalXZ, RenderOrigin,
     RenderPosition,
@@ -31,10 +36,12 @@ pub use crate::texture::{
     TerrainMaterialDesc, TextureId,
 };
 pub use crate::ui::{UiFrame, UiPanel};
+pub use crate::vfx::{Delivery, EffectHandle, EffectSpec, VfxPalette, VfxSystem, VisualKind};
 pub use crate::water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use crate::world::AnimatedEntity;
 pub use crate::world::{
-    EntityId, Frame, Haze, InstanceSubmit, Light, ShadowSettings, Sky, TorchLight, World,
+    BloomSettings, EntityId, Frame, Haze, InstanceSubmit, Light, ShadowSettings, Sky, TorchLight,
+    World,
 };
 pub use crate::Engine;
 pub use glam::Vec3;

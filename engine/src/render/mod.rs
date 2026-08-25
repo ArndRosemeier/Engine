@@ -3,8 +3,11 @@ pub(crate) mod frustum;
 mod gpu_mesh;
 mod gpu_profile;
 mod instance_cull;
+mod particles_gpu;
 mod pipeline;
 mod portal;
+mod postprocess;
+mod ribbons_gpu;
 mod shadow;
 mod skinned;
 mod sky_pipeline;
@@ -28,8 +31,11 @@ use instance_cull::{
     CullDraws, CullJob, InstanceCull, OPAQUE_INDIRECT_OFFSET, TRANSLUCENT_INDIRECT_OFFSET,
     WORKGROUP,
 };
+use particles_gpu::ParticleGpu;
 use pipeline::{create_pipelines, Pipelines, Uniforms};
 use portal::PortalGpu;
+use postprocess::{Postprocess, HDR_FORMAT};
+use ribbons_gpu::RibbonGpu;
 use shadow::{material_casts_shadow, ShadowGpu};
 use skinned::{
     create_skinned_pipelines, joint_bind_layout, GpuSkinnedEntity, GpuSkinnedMesh, SkinnedPipelines,
@@ -295,6 +301,9 @@ pub struct Renderer {
     joint_out: Vec<glam::Mat4>,
     /// Last frame after overlay passes (egui). For capture_png.
     last_color: Option<wgpu::Texture>,
+    particles: ParticleGpu,
+    ribbons: RibbonGpu,
+    postprocess: Postprocess,
 }
 
 impl Renderer {
@@ -342,6 +351,22 @@ impl Renderer {
             .await
             .expect("failed to create device");
 
+        let hdr_features = adapter.get_texture_format_features(HDR_FORMAT);
+        let hdr_usages =
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        if !hdr_features.allowed_usages.contains(hdr_usages)
+            || !hdr_features
+                .flags
+                .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
+            || !hdr_features
+                .flags
+                .contains(wgpu::TextureFormatFeatureFlags::BLENDABLE)
+        {
+            panic!(
+                "GPU adapter does not support filterable, blendable Rgba16Float render targets required for Engine HDR bloom"
+            );
+        }
+
         let caps = surface.get_capabilities(&adapter);
         let format = caps
             .formats
@@ -380,23 +405,26 @@ impl Renderer {
 
         let joint_layout = joint_bind_layout(&device);
         let shadow = ShadowGpu::new(&device, &queue, ShadowSettings::default(), &joint_layout);
-        let pipelines = create_pipelines(&device, &queue, format, &shadow);
-        let terrain = create_terrain_pipelines(&device, format, &pipelines.bind_layout);
-        let water = create_water_pipelines(&device, format, &pipelines.bind_layout);
+        let pipelines = create_pipelines(&device, &queue, HDR_FORMAT, &shadow);
+        let terrain = create_terrain_pipelines(&device, HDR_FORMAT, &pipelines.bind_layout);
+        let water = create_water_pipelines(&device, HDR_FORMAT, &pipelines.bind_layout);
         let skinned = create_skinned_pipelines(
             &device,
-            format,
+            HDR_FORMAT,
             &pipelines.bind_layout,
             joint_layout,
             &pipelines.albedo_layout,
         );
-        let sky = create_sky_pipelines(&device, format);
-        let portal = PortalGpu::new(&device, format, &pipelines.bind_layout);
+        let sky = create_sky_pipelines(&device, HDR_FORMAT);
+        let portal = PortalGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
         let instance_cull = InstanceCull::new(&device);
         let gpu_profiler = gpu_profile_interval
             .map(|every| GpuProfiler::new(&device, queue.get_timestamp_period(), every));
 
+        let particles = ParticleGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
+        let ribbons = RibbonGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
+        let postprocess = Postprocess::new(&device, format, config.width, config.height);
         Self {
             surface,
             device,
@@ -460,6 +488,9 @@ impl Renderer {
             joint_global: Vec::new(),
             joint_out: Vec::new(),
             last_color: None,
+            particles,
+            ribbons,
+            postprocess,
         }
     }
 
@@ -476,6 +507,8 @@ impl Renderer {
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
         self.portal.resize();
+        self.postprocess
+            .resize(&self.device, self.config.width, self.config.height);
         self.last_color = None;
     }
 
@@ -483,7 +516,11 @@ impl Renderer {
         std::mem::take(&mut self.gpu_stats)
     }
 
-    pub fn sync_world(&mut self, world: &World) {
+    pub fn sync_world(&mut self, world: &mut World) {
+        self.ribbons.sync(&self.queue, world.ribbon_frame());
+        let (particle_commands, particle_dt, particle_time) = world.particles_frame();
+        self.particles
+            .sync(&self.queue, particle_commands, particle_dt, particle_time);
         self.gpu_stats = GpuFrameStats::default();
         self.gpu_stats.entities =
             u32::try_from(world.entity_count()).expect("entity count exceeds u32");
@@ -498,7 +535,7 @@ impl Renderer {
         }
 
         if let Some(proc) = world.proc_terrain() {
-            let format = self.config.format;
+            let format = HDR_FORMAT;
             match self.clipmap.as_mut() {
                 Some(clip) => clip.ensure_config(&self.device, format, &proc.config),
                 None => {
@@ -923,7 +960,10 @@ impl Renderer {
                 .expect("active GPU profiler")
                 .timestamp(&mut encoder, 0);
         }
-        self.encode_world(&mut encoder, &view, world);
+        let scene_view = self.postprocess.scene_view().clone();
+        self.encode_world(&mut encoder, &scene_view, world);
+        self.postprocess
+            .encode(&self.queue, &mut encoder, &view, world.bloom());
         if profile_gpu {
             self.gpu_profiler
                 .as_ref()
@@ -1116,6 +1156,9 @@ impl Renderer {
         let eye = camera.eye();
         let haze = world.haze();
         let torch = world.torch();
+        let forward = (camera.target() - camera.eye()).normalize_or_zero();
+        let right = forward.cross(camera.up()).normalize_or_zero();
+        let up = right.cross(forward).normalize_or_zero();
         let uniforms = Uniforms {
             view_proj: vp.to_cols_array_2d(),
             light_dir: [light_dir.x, light_dir.y, light_dir.z],
@@ -1138,6 +1181,10 @@ impl Renderer {
                     [c.x, c.y, c.z, 0.0]
                 })
                 .unwrap_or([0.0, 0.0, 0.0, 0.0]),
+            camera_right: right.into(),
+            camera_up: up.into(),
+            _camera_pad: [0.0; 2],
+            _scene_pad: [0.0; 8],
         };
         // Destination and live views share one encoder. Queue writes land
         // before that encoder runs, so they cannot share a uniform buffer.
@@ -1186,6 +1233,8 @@ impl Renderer {
         self.write_shadows(world);
         self.begin_instance_cull_frame(world);
         self.encode_shadow_pass(encoder, world);
+        self.particles
+            .encode_compute(encoder, self.pipelines.scene_bind_group(0));
 
         let live = world.living_in();
         self.collect_draws(world, live, true);
@@ -1746,6 +1795,11 @@ impl Renderer {
             );
         }
 
+        self.ribbons
+            .draw(pass, self.pipelines.scene_bind_group(uniform_slot));
+        self.particles
+            .draw(pass, self.pipelines.scene_bind_group(uniform_slot));
+
         if draw_environment {
             if let Some(clip) = self.clipmap.as_ref() {
                 clip.draw_water(pass, &self.shadow.resource_bind, portal_mask);
@@ -2106,7 +2160,7 @@ impl Renderer {
             self.device
                 .create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
                     label: Some("visible-terrain-bundle"),
-                    color_formats: &[Some(self.config.format)],
+                    color_formats: &[Some(HDR_FORMAT)],
                     depth_stencil: Some(wgpu::RenderBundleDepthStencil {
                         format: DEPTH_FORMAT,
                         depth_read_only: false,

@@ -182,7 +182,7 @@ impl ApplicationHandler for App {
                     self.fps_accum_s = 0.0;
                     self.fps_frames = 0;
                     if let Some(window) = &self.window {
-                        window.set_title(&format!("{} — {:.0} FPS", self.title, self.fps));
+                        window.set_title(&format!("{} â€” {:.0} FPS", self.title, self.fps));
                     }
                 }
 
@@ -259,7 +259,7 @@ impl ApplicationHandler for App {
 
                 if let Some(renderer) = self.renderer.as_mut() {
                     let sync_t = Instant::now();
-                    renderer.sync_world(&self.world);
+                    renderer.sync_world(&mut self.world);
                     let sync_ms = elapsed_ms(sync_t);
                     let ui_backend = self.ui_backend.as_mut().expect("ui backend");
                     let render_t = Instant::now();
