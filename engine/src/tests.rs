@@ -1194,6 +1194,28 @@ fn same_space_portals_work_in_both_directions() {
 }
 
 #[test]
+fn disabled_portal_openings_remain_stencil_only() {
+    let mut world = crate::World::default();
+    let house = world.space("disabled-portal-house").unwrap();
+    let outside = world
+        .place(Mesh::opening(1.2, 2.2).unwrap(), Place::default())
+        .unwrap();
+    world.in_space(house).unwrap();
+    let inside = world
+        .place(Mesh::opening(1.2, 2.2).unwrap(), Place::default())
+        .unwrap();
+    world.in_space(crate::SpaceId::DEFAULT).unwrap();
+    let portal = world
+        .create_portal(outside, inside, crate::PortalSettings::TELEPORTING)
+        .unwrap();
+    world.set_portal_enabled(portal, false).unwrap();
+    assert!(world.is_portal_surface(outside));
+    assert!(world.is_portal_surface(inside));
+    assert!(world
+        .visible_portals(Vec3::Z, -Vec3::Z, crate::SpaceId::DEFAULT)
+        .is_empty());
+}
+#[test]
 fn destroy_portal_stops_crossing() {
     let mut world = crate::World::default();
     let house = world.space("house").unwrap();

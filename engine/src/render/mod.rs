@@ -28,8 +28,8 @@ use frustum::{Bounds, Frustum, Visibility};
 use gpu_mesh::GpuMesh;
 use gpu_profile::GpuProfiler;
 use instance_cull::{
-    CullDraws, CullJob, InstanceCull, OPAQUE_INDIRECT_OFFSET, TRANSLUCENT_INDIRECT_OFFSET,
-    WORKGROUP,
+    ActiveInstanceRange, CullDraws, CullJob, InstanceCull, OPAQUE_INDIRECT_OFFSET,
+    TRANSLUCENT_INDIRECT_OFFSET, WORKGROUP,
 };
 use particles_gpu::ParticleGpu;
 use pipeline::{create_pipelines, Pipelines, Uniforms};
@@ -150,9 +150,7 @@ struct PortalLevelView {
 struct ScenePass {
     /// Drawing seen through a stencil-marked portal opening.
     portal_mask: bool,
-    /// Portal recursion depth; also picks sky + scene uniform slots.
-    level: u8,
-    /// Scene uniform buffer slot matching `level`.
+    /// Immutable scene/sky uniform slot for this encoded view.
     uniform_slot: usize,
 }
 
@@ -177,6 +175,13 @@ struct ShadowBundleKey {
 struct GpuInstanceBatch {
     gpu: GpuMesh,
     slots: Vec<BatchSlot>,
+    active_ranges: Vec<ActiveInstanceRange>,
+}
+
+impl GpuInstanceBatch {
+    fn rebuild_active_ranges(&mut self) {
+        self.active_ranges = active_instance_ranges(&self.slots);
+    }
 }
 
 impl GpuInstanceBatch {
@@ -194,6 +199,20 @@ struct BatchSlot {
     capacity: usize,
     active_count: usize,
     bounds: Option<Bounds>,
+}
+
+fn active_instance_ranges(slots: &[BatchSlot]) -> Vec<ActiveInstanceRange> {
+    slots
+        .iter()
+        .filter_map(|slot| {
+            (slot.active_count > 0).then(|| ActiveInstanceRange {
+                start: u32::try_from(slot.start)
+                    .expect("instance batch start exceeds GPU u32 range"),
+                count: u32::try_from(slot.active_count)
+                    .expect("instance batch active count exceeds GPU u32 range"),
+            })
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -294,6 +313,7 @@ pub struct Renderer {
     batch_transparent: Vec<EntityId>,
     batch_water: Vec<EntityId>,
     gpu_stats: GpuFrameStats,
+    next_scene_uniform_slot: usize,
     gpu_profiler: Option<GpuProfiler>,
     instance_cull: InstanceCull,
     joint_locals: Vec<(glam::Vec3, glam::Quat, glam::Vec3)>,
@@ -482,6 +502,7 @@ impl Renderer {
             batch_transparent: Vec::new(),
             batch_water: Vec::new(),
             gpu_stats: GpuFrameStats::default(),
+            next_scene_uniform_slot: 0,
             gpu_profiler,
             instance_cull,
             joint_locals: Vec::new(),
@@ -853,8 +874,6 @@ impl Renderer {
                                 )
                             }));
                         slot.bounds = batch.gpu.bounds_for_instances(&self.instance_scratch);
-                        self.instance_scratch
-                            .resize(slot.capacity, inactive_instance());
                         batch.gpu.write_instances_at(
                             &self.queue,
                             slot.start,
@@ -864,6 +883,7 @@ impl Renderer {
                         slot.active_count = source.instance_count;
                         self.gpu_stats.batch_partial_writes += 1;
                     }
+                    batch.rebuild_active_ranges();
                     batch.gpu.bounds = batch
                         .slots
                         .iter()
@@ -891,8 +911,10 @@ impl Renderer {
                 let bounds = prototype_gpu.bounds_for_instances(&self.instance_scratch[start..]);
                 let capacity =
                     batch_slot_capacity(source.instance_count.max(source.instance_reserve));
-                self.instance_scratch
-                    .resize(start + capacity, inactive_instance());
+                self.instance_scratch.resize(
+                    start + capacity,
+                    InstanceRaw::from_matrix(glam::Mat4::IDENTITY),
+                );
                 slots.push(BatchSlot {
                     id: source.id,
                     xform_rev: source.xform_rev,
@@ -912,8 +934,18 @@ impl Renderer {
                 .iter()
                 .filter_map(|slot| slot.bounds)
                 .reduce(|combined, bounds| combined.union(bounds));
+            self.gpu_instance_batches.insert(
+                prototype,
+                GpuInstanceBatch {
+                    gpu,
+                    slots,
+                    active_ranges: Vec::new(),
+                },
+            );
             self.gpu_instance_batches
-                .insert(prototype, GpuInstanceBatch { gpu, slots });
+                .get_mut(&prototype)
+                .expect("instance batch was just inserted")
+                .rebuild_active_ranges();
             self.gpu_stats.batch_rewrites += 1;
             shadow_buffers_changed = true;
         }
@@ -1142,10 +1174,13 @@ impl Renderer {
         camera: &Camera,
         clip_plane: Option<(glam::Vec3, glam::Vec3)>,
         target: SceneUniformTarget,
-        slot: usize,
-    ) {
+    ) -> usize {
         let _ = target;
-        let slot = slot.min(pipeline::SCENE_UNIFORM_SLOTS - 1);
+        let slot = self.next_scene_uniform_slot;
+        self.next_scene_uniform_slot = self
+            .next_scene_uniform_slot
+            .checked_add(1)
+            .expect("scene uniform slot counter overflow");
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         let vp = match clip_plane {
             Some((point, normal)) => oblique_view_projection(camera, aspect, point, normal),
@@ -1196,6 +1231,7 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.sky.uniform_bufs[slot], 0, bytemuck::bytes_of(&sky_u));
         }
+        slot
     }
 
     fn write_shadows(&mut self, world: &World) {
@@ -1228,13 +1264,15 @@ impl Renderer {
         color: &wgpu::TextureView,
         world: &World,
     ) {
+        self.next_scene_uniform_slot = 0;
         let scene_camera = Self::main_scene_camera(world);
-        self.write_scene_uniforms(world, &scene_camera, None, SceneUniformTarget::Main, 0);
+        let main_uniform_slot =
+            self.write_scene_uniforms(world, &scene_camera, None, SceneUniformTarget::Main);
         self.write_shadows(world);
         self.begin_instance_cull_frame(world);
         self.encode_shadow_pass(encoder, world);
         self.particles
-            .encode_compute(encoder, self.pipelines.scene_bind_group(0));
+            .encode_compute(encoder, self.pipelines.scene_bind_group(main_uniform_slot));
 
         let live = world.living_in();
         self.collect_draws(world, live, true);
@@ -1330,15 +1368,9 @@ impl Renderer {
             .and_then(|visible| world.portal_plane(visible.src).ok())
             .map(|plane| portal_render_camera(camera, plane))
             .unwrap_or_else(|| camera.clone());
-        self.write_scene_uniforms(
-            world,
-            &scene_camera,
-            clip_plane,
-            SceneUniformTarget::Main,
-            usize::from(level),
-        );
+        let uniform_slot =
+            self.write_scene_uniforms(world, &scene_camera, clip_plane, SceneUniformTarget::Main);
         pass.set_stencil_reference(u32::from(level));
-        let uniform_slot = usize::from(level);
 
         self.draw_space_scene(
             pass,
@@ -1352,7 +1384,6 @@ impl Renderer {
             },
             ScenePass {
                 portal_mask: level > 0,
-                level,
                 uniform_slot,
             },
         );
@@ -1373,14 +1404,9 @@ impl Renderer {
                 .portal_plane(visible.src)
                 .expect("visible portal has a plane");
             let render_cam = portal_render_camera(camera, src_plane);
-            self.write_scene_uniforms(
-                world,
-                &render_cam,
-                clip_plane,
-                SceneUniformTarget::Main,
-                uniform_slot,
-            );
-            self.draw_portal_stencil_incr(pass, world, visible.src, level, uniform_slot);
+            let stencil_uniform_slot =
+                self.write_scene_uniforms(world, &render_cam, clip_plane, SceneUniformTarget::Main);
+            self.draw_portal_stencil_incr(pass, world, visible.src, level, stencil_uniform_slot);
             pass.set_pipeline(&self.portal.depth_clear);
             pass.set_stencil_reference(u32::from(level + 1));
             pass.draw(0..3, 0..1);
@@ -1391,14 +1417,8 @@ impl Renderer {
             // Cull destination draws with the virtual camera's normal frustum.
             // Oblique clipping is applied when the pass actually draws; using it
             // here over-tightens culling and drops the whole yard at doorways.
-            self.write_scene_uniforms(
-                world,
-                &virt,
-                None,
-                SceneUniformTarget::Main,
-                usize::from(level + 1),
-            );
             self.collect_draws(world, visible.dest_space, false);
+
             self.render_portal_level(
                 pass,
                 world,
@@ -1414,15 +1434,16 @@ impl Renderer {
                 },
                 main_cull,
             );
-            self.write_scene_uniforms(
-                world,
-                camera,
-                clip_plane,
-                SceneUniformTarget::Main,
-                usize::from(level),
-            );
+            let restore_uniform_slot =
+                self.write_scene_uniforms(world, camera, clip_plane, SceneUniformTarget::Main);
             self.collect_draws(world, space, true);
-            self.draw_portal_stencil_decr(pass, world, visible.src, level + 1, uniform_slot);
+            self.draw_portal_stencil_decr(
+                pass,
+                world,
+                visible.src,
+                level + 1,
+                restore_uniform_slot,
+            );
         }
     }
 
@@ -1490,7 +1511,6 @@ impl Renderer {
     ) {
         let ScenePass {
             portal_mask,
-            level,
             uniform_slot,
         } = scene;
         let PortalLevelView {
@@ -1506,7 +1526,7 @@ impl Renderer {
             } else {
                 &self.sky.pipeline
             });
-            pass.set_bind_group(0, self.sky.bind_group(usize::from(level)), &[]);
+            pass.set_bind_group(0, self.sky.bind_group(uniform_slot), &[]);
             pass.draw(0..3, 0..1);
             pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
         }
@@ -1553,24 +1573,20 @@ impl Renderer {
             let entity = world
                 .entity(prototype)
                 .expect("batch draw prototype is live");
-            let gpu = &self
+            let batch = self
                 .gpu_instance_batches
                 .get(&prototype)
-                .expect("batch draw is synced")
-                .gpu;
+                .expect("batch draw is synced");
+            let gpu = &batch.gpu;
             let albedo = entity
                 .albedo
                 .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
                 .unwrap_or(&self.pipelines.white_albedo);
             pass.set_bind_group(1, albedo, &[]);
-            submit_mesh_draw(
+            submit_batch_draw(
                 pass,
-                gpu,
-                if use_cull {
-                    mesh_submit(&main_cull.compacted, prototype)
-                } else {
-                    MeshSubmit::Direct
-                },
+                batch,
+                use_cull.then(|| mesh_submit(&main_cull.compacted, prototype)),
                 0..gpu.opaque_index_count as u32,
                 OPAQUE_INDIRECT_OFFSET,
                 &mut self.gpu_stats.indirect_draws,
@@ -1620,11 +1636,11 @@ impl Renderer {
             let entity = world
                 .entity(prototype)
                 .expect("batch draw prototype is live");
-            let gpu = &self
+            let batch = self
                 .gpu_instance_batches
                 .get(&prototype)
-                .expect("batch draw is synced")
-                .gpu;
+                .expect("batch draw is synced");
+            let gpu = &batch.gpu;
             let Some(SurfaceMaterialRef::Terrain(mid)) = entity.material else {
                 panic!("terrain batch {prototype} lost its terrain material");
             };
@@ -1633,14 +1649,10 @@ impl Renderer {
                 .get(&mid)
                 .unwrap_or_else(|| panic!("terrain batch {prototype} material is not synced"));
             pass.set_bind_group(1, &mat.bind_group, &[]);
-            submit_mesh_draw(
+            submit_batch_draw(
                 pass,
-                gpu,
-                if use_cull {
-                    mesh_submit(&main_cull.compacted, prototype)
-                } else {
-                    MeshSubmit::Direct
-                },
+                batch,
+                use_cull.then(|| mesh_submit(&main_cull.compacted, prototype)),
                 0..gpu.opaque_index_count as u32,
                 OPAQUE_INDIRECT_OFFSET,
                 &mut self.gpu_stats.indirect_draws,
@@ -1706,24 +1718,20 @@ impl Renderer {
             let entity = world
                 .entity(prototype)
                 .expect("batch draw prototype is live");
-            let gpu = &self
+            let batch = self
                 .gpu_instance_batches
                 .get(&prototype)
-                .expect("batch draw is synced")
-                .gpu;
+                .expect("batch draw is synced");
+            let gpu = &batch.gpu;
             let albedo = entity
                 .albedo
                 .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
                 .unwrap_or(&self.pipelines.white_albedo);
             pass.set_bind_group(1, albedo, &[]);
-            submit_mesh_draw(
+            submit_batch_draw(
                 pass,
-                gpu,
-                if use_cull {
-                    mesh_submit(&main_cull.compacted, prototype)
-                } else {
-                    MeshSubmit::Direct
-                },
+                batch,
+                use_cull.then(|| mesh_submit(&main_cull.compacted, prototype)),
                 gpu.opaque_index_count as u32..gpu.index_count as u32,
                 TRANSLUCENT_INDIRECT_OFFSET,
                 &mut self.gpu_stats.indirect_draws,
@@ -1768,11 +1776,11 @@ impl Renderer {
             let entity = world
                 .entity(prototype)
                 .expect("batch draw prototype is live");
-            let gpu = &self
+            let batch = self
                 .gpu_instance_batches
                 .get(&prototype)
-                .expect("batch draw is synced")
-                .gpu;
+                .expect("batch draw is synced");
+            let gpu = &batch.gpu;
             let Some(SurfaceMaterialRef::Water(mid)) = entity.material else {
                 panic!("water batch {prototype} lost its water material");
             };
@@ -1781,14 +1789,10 @@ impl Renderer {
                 .get(&mid)
                 .unwrap_or_else(|| panic!("water batch {prototype} material is not synced"));
             pass.set_bind_group(1, &mat.bind_group, &[]);
-            submit_mesh_draw(
+            submit_batch_draw(
                 pass,
-                gpu,
-                if use_cull {
-                    mesh_submit(&main_cull.compacted, prototype)
-                } else {
-                    MeshSubmit::Direct
-                },
+                batch,
+                use_cull.then(|| mesh_submit(&main_cull.compacted, prototype)),
                 gpu.opaque_index_count as u32..gpu.index_count as u32,
                 TRANSLUCENT_INDIRECT_OFFSET,
                 &mut self.gpu_stats.indirect_draws,
@@ -2114,7 +2118,17 @@ impl Renderer {
                     }
                     CullView::Main | CullView::Shadow => CullDraws::OpaqueOnly,
                 };
-                CullJob { gpu, local, draws }
+                let active_ranges = &self
+                    .gpu_instance_batches
+                    .get(id)
+                    .expect("instance batch cull list is synced")
+                    .active_ranges;
+                CullJob {
+                    gpu,
+                    local,
+                    draws,
+                    active_ranges,
+                }
             })
             .collect();
         self.instance_cull
@@ -2123,9 +2137,10 @@ impl Renderer {
         self.gpu_stats.compute_culls += job_count;
         self.gpu_stats.boundary_batches += job_count;
         for job in jobs {
-            self.gpu_stats.cull_instances += job.gpu.instance_count as u64;
-            self.gpu_stats.cull_workgroups +=
-                (job.gpu.instance_count as u64).div_ceil(WORKGROUP as u64);
+            for range in job.active_ranges {
+                self.gpu_stats.cull_instances += u64::from(range.count);
+                self.gpu_stats.cull_workgroups += u64::from(range.count).div_ceil(WORKGROUP as u64);
+            }
         }
     }
 
@@ -2138,9 +2153,12 @@ impl Renderer {
         } else {
             1usize
         };
-        let max_jobs = self
+        let active_ranges = self
             .gpu_instance_batches
-            .len()
+            .values()
+            .map(|batch| batch.active_ranges.len())
+            .sum::<usize>();
+        let max_jobs = active_ranges
             .checked_mul(views)
             .expect("instance-cull frame job count overflow");
         self.instance_cull.begin_frame(&self.device, max_jobs);
@@ -2540,14 +2558,6 @@ fn batch_slot_capacity(instance_count: usize) -> usize {
         .max(8)
 }
 
-fn inactive_instance() -> InstanceRaw {
-    InstanceRaw::from_matrix(glam::Mat4::from_scale_rotation_translation(
-        glam::Vec3::ZERO,
-        glam::Quat::IDENTITY,
-        glam::Vec3::splat(1.0e20),
-    ))
-}
-
 fn encode_shadow_bundle_draw<'a>(
     bundle: &mut wgpu::RenderBundleEncoder<'a>,
     gpu: &'a GpuMesh,
@@ -2571,6 +2581,30 @@ fn encode_shadow_bundle_draw<'a>(
     }
 }
 
+fn submit_batch_draw(
+    pass: &mut wgpu::RenderPass<'_>,
+    batch: &GpuInstanceBatch,
+    submit: Option<MeshSubmit>,
+    indices: std::ops::Range<u32>,
+    indirect_offset: u64,
+    indirect_draws: &mut u32,
+) {
+    let gpu = &batch.gpu;
+    if let Some(submit) = submit {
+        submit_mesh_draw(pass, gpu, submit, indices, indirect_offset, indirect_draws);
+        return;
+    }
+    pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
+    pass.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+    let stride = std::mem::size_of::<InstanceRaw>() as u64;
+    for range in &batch.active_ranges {
+        let byte_start = u64::from(range.start)
+            .checked_mul(stride)
+            .expect("active instance range byte offset overflow");
+        pass.set_vertex_buffer(1, gpu.instance_buf.slice(byte_start..));
+        pass.draw_indexed(indices.clone(), 0, 0..range.count);
+    }
+}
 fn submit_mesh_draw(
     pass: &mut wgpu::RenderPass<'_>,
     gpu: &GpuMesh,
@@ -2627,4 +2661,35 @@ fn create_depth(
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
+}
+
+#[cfg(test)]
+mod active_instance_range_tests {
+    use super::*;
+
+    fn slot(start: usize, capacity: usize, active_count: usize) -> BatchSlot {
+        BatchSlot {
+            id: EntityId::test(1),
+            xform_rev: 1,
+            start,
+            capacity,
+            active_count,
+            bounds: None,
+        }
+    }
+
+    #[test]
+    fn reserved_holes_are_not_part_of_gpu_cull_ranges() {
+        let slots = [slot(0, 1024, 3), slot(1024, 1024, 0), slot(2048, 1024, 7)];
+        assert_eq!(
+            active_instance_ranges(&slots),
+            vec![
+                ActiveInstanceRange { start: 0, count: 3 },
+                ActiveInstanceRange {
+                    start: 2048,
+                    count: 7
+                },
+            ]
+        );
+    }
 }

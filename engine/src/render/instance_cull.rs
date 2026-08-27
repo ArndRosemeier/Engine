@@ -43,9 +43,10 @@ struct CullParams {
     planes: [[f32; 4]; 6],
     centre: [f32; 3],
     radius: f32,
+    source_start: u32,
     instance_count: u32,
     draw_slots: u32,
-    _pad: [u32; 2],
+    _pad: u32,
 }
 
 const SHADER: &str = r#"
@@ -53,6 +54,7 @@ struct CullParams {
     planes: array<vec4<f32>, 6>,
     centre: vec3<f32>,
     radius: f32,
+    source_start: u32,
     instance_count: u32,
     draw_slots: u32,
 };
@@ -91,7 +93,7 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
     if i >= params.instance_count {
         return;
     }
-    let inst = src[i];
+    let inst = src[params.source_start + i];
     let model = inst.model;
     let scale = max(
         length(model[0].xyz),
@@ -126,6 +128,13 @@ pub struct CullJob<'a> {
     pub gpu: &'a GpuMesh,
     pub local: Bounds,
     pub draws: CullDraws,
+    pub active_ranges: &'a [ActiveInstanceRange],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActiveInstanceRange {
+    pub start: u32,
+    pub count: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -279,12 +288,13 @@ impl InstanceCull {
         frustum: &Frustum,
         jobs: &[CullJob<'_>],
     ) {
-        if jobs.is_empty() {
+        let dispatch_count: usize = jobs.iter().map(|job| job.active_ranges.len()).sum();
+        if dispatch_count == 0 {
             return;
         }
         let end = self
             .params_cursor
-            .checked_add(jobs.len())
+            .checked_add(dispatch_count)
             .expect("instance-cull parameter cursor overflow");
         if end > self.params_capacity {
             panic!(
@@ -294,29 +304,11 @@ impl InstanceCull {
         }
 
         let planes = frustum.planes().map(|p| [p.x, p.y, p.z, p.w]);
-        let upload_len = self.params_stride as usize * jobs.len();
+        let upload_len = self.params_stride as usize * dispatch_count;
         self.params_scratch.clear();
         self.params_scratch.resize(upload_len, 0);
-        for (job_index, job) in jobs.iter().enumerate() {
-            let instance_count = u32::try_from(job.gpu.instance_count)
-                .expect("instance count exceeds GPU u32 range");
-            if instance_count == 0 {
-                panic!("instance cull dispatched with zero instances");
-            }
-            let params = CullParams {
-                planes,
-                centre: job.local.centre.into(),
-                radius: job.local.radius,
-                instance_count,
-                draw_slots: job.draws.slots(),
-                _pad: [0, 0],
-            };
-            let start = job_index * self.params_stride as usize;
-            let bytes = bytemuck::bytes_of(&params);
-            self.params_scratch[start..start + bytes.len()].copy_from_slice(bytes);
-
-            // These clears are commands, so each shadow/main compact starts from
-            // zero at the exact point it executes in the command buffer.
+        let mut dispatch_index = 0usize;
+        for job in jobs {
             encoder.clear_buffer(&job.gpu.indirect_buf, INSTANCE_COUNT_OFFSET, Some(4));
             if job.draws == CullDraws::OpaqueAndTranslucent {
                 encoder.clear_buffer(
@@ -325,26 +317,44 @@ impl InstanceCull {
                     Some(4),
                 );
             }
+            for range in job.active_ranges {
+                if range.count == 0 {
+                    panic!("instance cull active range must not be empty");
+                }
+                let params = CullParams {
+                    planes,
+                    centre: job.local.centre.into(),
+                    radius: job.local.radius,
+                    source_start: range.start,
+                    instance_count: range.count,
+                    draw_slots: job.draws.slots(),
+                    _pad: 0,
+                };
+                let start = dispatch_index * self.params_stride as usize;
+                let bytes = bytemuck::bytes_of(&params);
+                self.params_scratch[start..start + bytes.len()].copy_from_slice(bytes);
+                dispatch_index += 1;
+            }
         }
         let upload_offset = self.params_cursor as u64 * self.params_stride;
         queue.write_buffer(&self.params_buf, upload_offset, &self.params_scratch);
 
-        // One compute pass per view, not one pass per entity. Dispatches remain
-        // separate because each bin owns its source, compact, and indirect buffers.
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("instance-cull"),
             timestamp_writes: None,
         });
         pass.set_pipeline(&self.pipeline);
-        for (job_index, job) in jobs.iter().enumerate() {
-            let params_index = self.params_cursor + job_index;
-            let dynamic_offset = u32::try_from(params_index as u64 * self.params_stride)
-                .expect("instance-cull dynamic uniform offset exceeds u32");
-            pass.set_bind_group(0, &self.params_bind, &[dynamic_offset]);
+        let mut dispatch_index = 0usize;
+        for job in jobs {
             pass.set_bind_group(1, &job.gpu.cull_bind, &[]);
-            let instance_count = u32::try_from(job.gpu.instance_count)
-                .expect("instance count exceeds GPU u32 range");
-            pass.dispatch_workgroups(instance_count.div_ceil(WORKGROUP), 1, 1);
+            for range in job.active_ranges {
+                let params_index = self.params_cursor + dispatch_index;
+                let dynamic_offset = u32::try_from(params_index as u64 * self.params_stride)
+                    .expect("instance-cull dynamic uniform offset exceeds u32");
+                pass.set_bind_group(0, &self.params_bind, &[dynamic_offset]);
+                pass.dispatch_workgroups(range.count.div_ceil(WORKGROUP), 1, 1);
+                dispatch_index += 1;
+            }
         }
         drop(pass);
         self.params_cursor = end;

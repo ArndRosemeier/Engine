@@ -511,7 +511,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-pub const SCENE_UNIFORM_SLOTS: usize = 8;
+pub const SCENE_UNIFORM_SLOTS: usize = 64;
 
 pub struct SceneUniformSlots {
     pub buffers: [wgpu::Buffer; SCENE_UNIFORM_SLOTS],
@@ -519,9 +519,15 @@ pub struct SceneUniformSlots {
 }
 
 impl SceneUniformSlots {
-    pub fn get(&self, level: usize) -> (&wgpu::Buffer, &wgpu::BindGroup) {
-        let level = level.min(SCENE_UNIFORM_SLOTS - 1);
-        (&self.buffers[level], &self.bind_groups[level])
+    pub fn get(&self, slot: usize) -> (&wgpu::Buffer, &wgpu::BindGroup) {
+        (
+            self.buffers.get(slot).unwrap_or_else(|| {
+                panic!("scene uniform slot {slot} exceeds capacity {SCENE_UNIFORM_SLOTS}")
+            }),
+            self.bind_groups.get(slot).unwrap_or_else(|| {
+                panic!("scene uniform slot {slot} exceeds capacity {SCENE_UNIFORM_SLOTS}")
+            }),
+        )
     }
 }
 
@@ -541,8 +547,8 @@ pub struct Pipelines {
 }
 
 impl Pipelines {
-    pub fn scene_bind_group(&self, level: usize) -> &wgpu::BindGroup {
-        &self.scene_uniforms.bind_groups[level.min(SCENE_UNIFORM_SLOTS - 1)]
+    pub fn scene_bind_group(&self, slot: usize) -> &wgpu::BindGroup {
+        self.scene_uniforms.get(slot).1
     }
 }
 

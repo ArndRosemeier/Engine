@@ -74,8 +74,13 @@ pub struct SkyPipelines {
 }
 
 impl SkyPipelines {
-    pub fn bind_group(&self, level: usize) -> &wgpu::BindGroup {
-        &self.bind_groups[level.min(super::pipeline::SCENE_UNIFORM_SLOTS - 1)]
+    pub fn bind_group(&self, slot: usize) -> &wgpu::BindGroup {
+        self.bind_groups.get(slot).unwrap_or_else(|| {
+            panic!(
+                "sky uniform slot {slot} exceeds capacity {}",
+                super::pipeline::SCENE_UNIFORM_SLOTS
+            )
+        })
     }
 }
 
@@ -135,7 +140,10 @@ fn hash33(p: vec3<f32>) -> vec3<f32> {
 fn grad(i: vec3<f32>, f: vec3<f32>, c: vec3<f32>) -> f32 {
     var g = hash33(i + c);
     let len = length(g);
-    g = select(vec3<f32>(1.0, 0.0, 0.0), g / len, len > 1e-5);
+    // WGSL `select` may evaluate both values. Dividing by zero here poisoned
+    // directional sky-noise pixels with NaNs, which some GPUs present as black tiles.
+    let normalized = g / max(len, 1e-5);
+    g = select(vec3<f32>(1.0, 0.0, 0.0), normalized, len > 1e-5);
     return dot(g, f - c);
 }
 
@@ -183,10 +191,12 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
 
     let flat = vec3<f32>(dir.x, 0.0, dir.z);
     let sun_flat = vec3<f32>(s.sun_dir.x, 0.0, s.sun_dir.z);
-    let az = 0.5 + 0.5 * dot(
+    // A normalized-vector dot can round just below -1 at the anti-sun
+    // azimuth. Fractional pow of a negative value is NaN.
+    let az = clamp(0.5 + 0.5 * dot(
         normalize(flat + vec3<f32>(1e-5, 0.0, 0.0)),
         normalize(sun_flat + vec3<f32>(1e-5, 0.0, 0.0)),
-    );
+    ), 0.0, 1.0);
     let band = pow(clamp(1.0 - abs(elev), 0.0, 1.0), 2.2);
     let cool_h = mix(s.horizon, s.zenith, 0.22);
     let warm_h = mix(s.horizon, s.sun_color, 0.62);
@@ -220,6 +230,23 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+#[cfg(test)]
+mod tests {
+    use super::SHADER;
+
+    #[test]
+    fn gradient_normalization_never_divides_by_zero() {
+        assert!(SHADER.contains("g / max(len, 1e-5)"));
+        assert!(!SHADER.contains("g / len"));
+    }
+
+    #[test]
+    fn anti_sun_azimuth_is_clamped_before_fractional_power() {
+        assert!(SHADER.contains("let az = clamp(0.5 + 0.5 * dot("));
+        assert!(SHADER.contains("), 0.0, 1.0);"));
+        assert!(SHADER.contains("pow(az, 1.35)"));
+    }
+}
 pub fn create_sky_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> SkyPipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("sky-shader"),

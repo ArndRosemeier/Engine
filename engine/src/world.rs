@@ -1036,10 +1036,10 @@ impl World {
             .next()
     }
 
+    /// Whether this entity is portal stencil geometry, enabled or disabled.
+    /// Disabled portals must remain excluded from ordinary mesh rendering.
     pub fn is_portal_surface(&self, id: EntityId) -> bool {
-        self.portals
-            .iter()
-            .any(|p| p.is_enabled() && (p.a() == id || p.b() == id))
+        self.portals.iter().any(|p| p.a() == id || p.b() == id)
     }
 
     pub(crate) fn is_linked_opening(&self, id: EntityId) -> bool {
