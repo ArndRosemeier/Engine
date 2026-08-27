@@ -13,6 +13,7 @@ pub struct EffectHandle(u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delivery {
     SingleTarget,
+    AtTarget,
     Aoe,
     Pbaoe,
     Cone,
@@ -564,6 +565,27 @@ fn build_recipe(world: &mut World, s: EffectSpec, e: &mut ActiveEffect) -> Engin
                 },
             )?;
             delay_last_mesh(e, 0.44, 0.66);
+        }
+        Delivery::AtTarget => {
+            for (scale, phase, start, end, color) in [
+                (0.72, 0.0, 0.0, 0.42, p.secondary.with_alpha(0.30)),
+                (1.18, 1.4, 0.18, 0.72, p.primary.with_alpha(0.34)),
+                (1.52, 2.5, 0.38, 0.94, p.accent.with_alpha(0.24)),
+            ] {
+                add_mesh(
+                    world,
+                    e,
+                    ring(color, 40),
+                    s.target,
+                    s.scale * scale,
+                    0.0,
+                    Motion::Pulse {
+                        center: s.target,
+                        phase,
+                    },
+                )?;
+                delay_last_mesh(e, start, end);
+            }
         }
         Delivery::Aoe | Delivery::Pbaoe => {
             add_mesh(
@@ -1370,6 +1392,7 @@ fn fire_layers(
     }
     let impact_s = match s.delivery {
         Delivery::SingleTarget => 0.43,
+        Delivery::AtTarget => 0.08,
         Delivery::Aoe | Delivery::Pbaoe => 0.22,
         Delivery::Cone => 0.16,
     } * s.duration_s;
@@ -1718,6 +1741,38 @@ mod tests {
         let mut s = spec(VisualKind::Fire, Delivery::Cone);
         s.angle_deg = 0.0;
         assert!(s.validate().is_err());
+    }
+    #[test]
+    fn coincident_at_target_delivery_spawns_stationary_layers() {
+        let mut world = World::new();
+        let base = world.entity_count();
+        let mut vfx = VfxSystem::new();
+        let mut stationary = spec(VisualKind::Frost, Delivery::AtTarget);
+        stationary.target = stationary.origin;
+
+        let handle = vfx
+            .spawn(&mut world, stationary)
+            .expect("coincident at-target VFX must spawn");
+
+        assert!(vfx.is_active(handle));
+        assert!(world.entity_count() >= base + 3);
+    }
+
+    #[test]
+    fn coincident_single_target_delivery_remains_invalid() {
+        let mut traveling = spec(VisualKind::Frost, Delivery::SingleTarget);
+        traveling.target = traveling.origin;
+
+        let error = traveling
+            .validate()
+            .expect_err("coincident traveling VFX must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("single-target VFX origin and target must differ"),
+            "{error}"
+        );
     }
     #[test]
     fn lifecycle_cleanup_and_stale_handles() {
