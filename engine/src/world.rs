@@ -519,6 +519,9 @@ pub struct World {
     /// Instanced mesh submit path. Default stays CPU so Engine demos match today.
     instance_submit: InstanceSubmit,
     bloom: BloomSettings,
+    /// Surface presentation sync. Engine default stays on so demos never tear;
+    /// the renderer applies it at every present.
+    vsync: bool,
     /// Resident contact grids, pushed by the chunk streamer when they change.
     shadow_contact: ContactSnapshot,
     shadow_contact_epoch: u64,
@@ -588,6 +591,7 @@ impl Default for World {
             shadows: Some(ShadowSettings::default()),
             instance_submit: InstanceSubmit::CpuIndexed,
             bloom: BloomSettings::default(),
+            vsync: true,
             shadow_contact: ContactSnapshot::default(),
             shadow_contact_epoch: 0,
             hitch_spans: Vec::new(),
@@ -1661,6 +1665,10 @@ impl World {
         }
     }
 
+    /// Look up one skinned/animated entity by its typed render identity.
+    pub fn animated_entity(&self, id: EntityId) -> EngineResult<&AnimatedEntity> {
+        self.animated.get(&id).ok_or(EngineError::UnknownEntity)
+    }
     pub fn animated_entities(&self) -> impl Iterator<Item = (&EntityId, &AnimatedEntity)> {
         self.animated_order
             .iter()
@@ -1729,6 +1737,17 @@ impl World {
 
     pub fn set_bloom(&mut self, bloom: BloomSettings) {
         self.bloom = bloom;
+    }
+
+    /// Request synchronized presentation (FIFO). Turning it off presents
+    /// uncapped (`Immediate`, or `Mailbox` when the surface offers it); the
+    /// renderer must refuse a surface that cannot present uncapped.
+    pub fn set_vsync(&mut self, vsync: bool) {
+        self.vsync = vsync;
+    }
+
+    pub fn vsync(&self) -> bool {
+        self.vsync
     }
     pub(crate) fn note_shadow_contact(&mut self, snap: ContactSnapshot, epoch: u64) {
         if self.shadow_contact_epoch != epoch {
@@ -2206,5 +2225,20 @@ mod bloom_tests {
         let settings = BloomSettings::disabled();
         assert!(!settings.enabled());
         assert_eq!(settings.intensity(), BloomSettings::default().intensity());
+    }
+}
+
+#[cfg(test)]
+mod vsync_tests {
+    use super::*;
+
+    #[test]
+    fn vsync_defaults_on_and_tracks_the_preference() {
+        let mut world = World::default();
+        assert!(world.vsync(), "engine default must be synchronized");
+        world.set_vsync(false);
+        assert!(!world.vsync());
+        world.set_vsync(true);
+        assert!(world.vsync());
     }
 }

@@ -255,7 +255,14 @@ pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    adapter: wgpu::Adapter,
     config: wgpu::SurfaceConfiguration,
+    /// `ENGINE_PRESENT_MODE` pins presentation for stress tests; when set it
+    /// overrides the world's vsync preference.
+    env_present_mode: Option<wgpu::PresentMode>,
+    /// Last vsync preference applied to the surface, so capability queries
+    /// and reconfiguration only run when the preference changes.
+    synced_vsync: Option<bool>,
     pipelines: Pipelines,
     terrain: TerrainPipelines,
     water: WaterPipelines,
@@ -398,8 +405,8 @@ impl Renderer {
         // FIFO is the synchronized default: it prevents startup tearing and
         // keeps normal presentation stable across GPUs and window compositors.
         // Uncapped modes remain available explicitly for rendering stress tests.
-        let present_mode = match std::env::var("ENGINE_PRESENT_MODE") {
-            Ok(value) => match value.as_str() {
+        let env_present_mode = match std::env::var("ENGINE_PRESENT_MODE") {
+            Ok(value) => Some(match value.as_str() {
                 "immediate" => wgpu::PresentMode::Immediate,
                 "mailbox" => wgpu::PresentMode::Mailbox,
                 "fifo-relaxed" => wgpu::PresentMode::FifoRelaxed,
@@ -407,12 +414,13 @@ impl Renderer {
                 _ => panic!(
                     "ENGINE_PRESENT_MODE must be one of: fifo, fifo-relaxed, mailbox, immediate; got {value:?}"
                 ),
-            },
-            Err(std::env::VarError::NotPresent) => wgpu::PresentMode::Fifo,
+            }),
+            Err(std::env::VarError::NotPresent) => None,
             Err(std::env::VarError::NotUnicode(_)) => {
                 panic!("ENGINE_PRESENT_MODE must contain valid Unicode")
             }
         };
+        let present_mode = env_present_mode.unwrap_or(wgpu::PresentMode::Fifo);
         if !caps.present_modes.contains(&present_mode) {
             panic!("requested present mode {present_mode:?} is unsupported by this surface");
         }
@@ -455,7 +463,10 @@ impl Renderer {
             surface,
             device,
             queue,
+            adapter,
             config,
+            env_present_mode,
+            synced_vsync: None,
             pipelines,
             terrain,
             water,
@@ -521,6 +532,33 @@ impl Renderer {
         }
     }
 
+    /// Apply the world's presentation preference to the surface.
+    ///
+    /// `ENGINE_PRESENT_MODE` pins the mode for stress tests and overrides the
+    /// preference. Without the pin, vsync requests FIFO and vsync off requires
+    /// Immediate. A surface that cannot present immediately is a loud
+    /// configuration error.
+    fn apply_present_mode(&mut self, vsync: bool) {
+        if self.synced_vsync == Some(vsync) {
+            return;
+        }
+        if let Some(pinned) = self.env_present_mode {
+            if self.config.present_mode != pinned {
+                self.config.present_mode = pinned;
+                self.surface.configure(&self.device, &self.config);
+            }
+            self.synced_vsync = Some(vsync);
+            return;
+        }
+        let caps = self.surface.get_capabilities(&self.adapter);
+        let requested = resolve_present_mode(vsync, &caps.present_modes);
+        if requested != self.config.present_mode {
+            self.config.present_mode = requested;
+            self.surface.configure(&self.device, &self.config);
+        }
+        self.synced_vsync = Some(vsync);
+    }
+
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
         if new_size.width == 0 || new_size.height == 0 {
             return;
@@ -544,6 +582,7 @@ impl Renderer {
     }
 
     pub fn sync_world(&mut self, world: &mut World) {
+        self.apply_present_mode(world.vsync());
         self.ribbons.sync(&self.queue, world.ribbon_frame());
         let (particle_commands, particle_dt, particle_time) = world.particles_frame();
         self.particles
@@ -2715,5 +2754,51 @@ mod active_instance_range_tests {
                 },
             ]
         );
+    }
+}
+
+/// Map the vsync preference to a present mode. FIFO synchronizes presentation;
+/// Immediate is the explicit uncapped, tearing-allowed mode.
+///
+/// `supported` must come from `Surface::get_capabilities`. Vsync off on a
+/// surface without Immediate support is a loud error rather than a refresh-
+/// paced Mailbox/FIFO substitution that lies about the setting.
+fn resolve_present_mode(vsync: bool, supported: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+    let requested = if vsync {
+        wgpu::PresentMode::Fifo
+    } else {
+        wgpu::PresentMode::Immediate
+    };
+    if !supported.contains(&requested) {
+        panic!(
+            "vsync {} requires {requested:?}, but the surface supports only {supported:?}",
+            if vsync { "on" } else { "off" }
+        );
+    }
+    requested
+}
+
+#[cfg(test)]
+mod vsync_tests {
+    use super::*;
+
+    #[test]
+    fn vsync_on_is_fifo_and_off_is_immediate() {
+        let supported = [wgpu::PresentMode::Fifo, wgpu::PresentMode::Immediate];
+        assert_eq!(
+            resolve_present_mode(true, &supported),
+            wgpu::PresentMode::Fifo
+        );
+        assert_eq!(
+            resolve_present_mode(false, &supported),
+            wgpu::PresentMode::Immediate
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "vsync off requires Immediate")]
+    fn vsync_off_without_immediate_support_is_loud() {
+        let refresh_paced_only = [wgpu::PresentMode::Fifo, wgpu::PresentMode::Mailbox];
+        resolve_present_mode(false, &refresh_paced_only);
     }
 }
