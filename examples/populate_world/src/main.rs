@@ -11,7 +11,7 @@ fn fallback_tree() -> Mesh {
     m
 }
 
-fn main() {
+fn main() -> EngineResult<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let asset = root.join("assets/lowpoly_tree.gltf");
 
@@ -75,5 +75,6 @@ fn main() {
             yaw
         };
         world.look_orbit((0.0, 2.0, 0.0), 38.0, yaw, 28.0);
-    });
+        Ok(())
+    })
 }

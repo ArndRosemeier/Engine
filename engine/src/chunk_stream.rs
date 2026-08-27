@@ -236,7 +236,7 @@ impl ChunkStream {
         self.epoch += 1;
         self.inflight.clear();
         self.ready.clear();
-        while self.rx.try_recv().is_ok() {}
+        self.discard_pending_results("invalidate");
         for &coord in coords {
             if self.resident.contains_key(&coord) {
                 self.dirty.insert(coord);
@@ -264,9 +264,20 @@ impl ChunkStream {
         self.missing.clear();
         self.upload_scratch.clear();
         self.dirty.clear();
-        while self.rx.try_recv().is_ok() {}
+        self.discard_pending_results("reset");
     }
 
+    fn discard_pending_results(&self, operation: &str) {
+        loop {
+            match self.rx.try_recv() {
+                Ok(_) => {}
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => panic!(
+                    "chunk worker result channel disconnected during {operation} while stream is alive"
+                ),
+            }
+        }
+    }
     /// Are all chunks in the required ring resident?
     pub fn required_ready(&self, focus: GlobalXZ) -> bool {
         let center = self.focus_chunk(focus);
@@ -419,7 +430,14 @@ impl ChunkStream {
     }
 
     fn drain_ready(&mut self) -> EngineResult<()> {
-        while let Ok(result) = self.rx.try_recv() {
+        loop {
+            let result = match self.rx.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    panic!("chunk worker result channel disconnected while stream is alive")
+                }
+            };
             self.inflight.remove(&result.coord);
             if result.epoch != self.epoch {
                 continue;
@@ -555,11 +573,17 @@ impl ChunkStream {
             let epoch = self.epoch;
             rayon::spawn(move || {
                 let payload = builder.build(coord);
-                let _ = tx.send(JobResult {
-                    coord,
-                    epoch,
-                    payload,
-                });
+                // Receiver loss means ChunkStream teardown; the completed job has no owner.
+                if tx
+                    .send(JobResult {
+                        coord,
+                        epoch,
+                        payload,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
             });
         }
         self.missing = missing;

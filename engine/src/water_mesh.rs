@@ -58,13 +58,16 @@ pub fn ribbon_mesh(
         let r = mesh
             .add_point(Vec3::new(right[i].x, y, right[i].y))
             .expect("ribbon right");
-        let _ = mesh.set_point_color(l, color);
-        let _ = mesh.set_point_color(r, color);
+        mesh.set_point_color(l, color)
+            .expect("new ribbon left point must accept color");
+        mesh.set_point_color(r, color)
+            .expect("new ribbon right point must accept color");
         lids.push(l);
         rids.push(r);
     }
     for i in 0..n - 1 {
-        let _ = mesh.add_quad(lids[i], lids[i + 1], rids[i + 1], rids[i]);
+        mesh.add_quad(lids[i], lids[i + 1], rids[i + 1], rids[i])
+            .expect("ribbon quad references points created above");
     }
     mesh.build_smooth()
 }
@@ -79,11 +82,13 @@ pub fn polygon_fill_mesh(ring: &[Vec2], z: f32, color: Color) -> BuiltMesh {
     let mut ids = Vec::with_capacity(ring.len());
     for p in ring {
         let id = mesh.add_point(Vec3::new(p.x, z, p.y)).expect("poly point");
-        let _ = mesh.set_point_color(id, color);
+        mesh.set_point_color(id, color)
+            .expect("new water mesh point must accept color");
         ids.push(id);
     }
     for k in 1..ids.len() - 1 {
-        let _ = mesh.add_triangle(ids[0], ids[k], ids[k + 1]);
+        mesh.add_triangle(ids[0], ids[k], ids[k + 1])
+            .expect("polygon fan triangle references points created above");
     }
     mesh.build_smooth()
 }
@@ -97,16 +102,19 @@ pub fn band_mesh(inner: &[Vec2], outer: &[Vec2], z: f32, color: Color) -> BuiltM
     let mut oids = Vec::with_capacity(outer.len());
     for p in inner {
         let id = mesh.add_point(Vec3::new(p.x, z, p.y)).expect("band inner");
-        let _ = mesh.set_point_color(id, color);
+        mesh.set_point_color(id, color)
+            .expect("new water mesh point must accept color");
         iids.push(id);
     }
     for p in outer {
         let id = mesh.add_point(Vec3::new(p.x, z, p.y)).expect("band outer");
-        let _ = mesh.set_point_color(id, color);
+        mesh.set_point_color(id, color)
+            .expect("new water mesh point must accept color");
         oids.push(id);
     }
     for i in 0..inner.len() - 1 {
-        let _ = mesh.add_quad(iids[i], iids[i + 1], oids[i + 1], oids[i]);
+        mesh.add_quad(iids[i], iids[i + 1], oids[i + 1], oids[i])
+            .expect("band quad references points created above");
     }
     mesh.build_smooth()
 }

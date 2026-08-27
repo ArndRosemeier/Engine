@@ -339,9 +339,17 @@ impl TerrainStream {
     }
 
     fn drain_ready(&mut self) {
-        while let Ok(item) = self.rx.try_recv() {
-            self.inflight.remove(&item.0);
-            self.ready_queue.push_back(item);
+        loop {
+            match self.rx.try_recv() {
+                Ok(item) => {
+                    self.inflight.remove(&item.0);
+                    self.ready_queue.push_back(item);
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    panic!("terrain worker result channel disconnected while stream is alive")
+                }
+            }
         }
     }
 
@@ -383,7 +391,10 @@ impl TerrainStream {
             let tx = self.tx.clone();
             rayon::spawn(move || {
                 let built = terrain.build_chunk_built(key.0, key.1);
-                let _ = tx.send((key, built));
+                // Receiver loss means TerrainStream teardown; the completed job has no owner.
+                if tx.send((key, built)).is_err() {
+                    return;
+                }
             });
         }
     }

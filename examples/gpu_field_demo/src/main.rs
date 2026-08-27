@@ -9,7 +9,7 @@ use engine::prelude::*;
 use engine::{FieldBounds, FieldGpuContext, FieldKernel, GpuField};
 use glam::Vec3;
 
-fn main() {
+fn main() -> EngineResult<()> {
     let mut mesh_spawned = false;
     let mut status = String::from("initializing GPU…");
     let mut tri_count = 0usize;
@@ -102,5 +102,6 @@ fn main() {
         } else {
             world.look_orbit((8.0, 8.0, 8.0), 28.0, 48.0, 24.0);
         }
-    });
+        Ok(())
+    })
 }

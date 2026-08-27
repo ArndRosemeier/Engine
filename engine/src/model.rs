@@ -56,7 +56,15 @@ impl Model {
 }
 
 fn resolve_allowed_path(path: &Path, base_dir: &Path) -> EngineResult<PathBuf> {
-    let base = std::fs::canonicalize(base_dir).unwrap_or_else(|_| base_dir.to_path_buf());
+    let base = std::fs::canonicalize(base_dir).map_err(|error| {
+        EngineError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to canonicalize model sandbox root {}: {error}",
+                base_dir.display()
+            ),
+        ))
+    })?;
     let candidate = if path.is_absolute() {
         path.to_path_buf()
     } else {

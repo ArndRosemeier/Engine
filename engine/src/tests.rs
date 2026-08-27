@@ -1078,7 +1078,7 @@ fn portals_doorway_stays_visible_inches_from_plane() {
     for z in [-3.96_f32, -3.92, -3.88] {
         let eye = Vec3::new(0.0, 1.6, z);
         let dist = plane.signed_distance(eye);
-        let portals = world.visible_portals(eye, look, house);
+        let portals = world.visible_portals(eye, look, house).unwrap();
         assert!(
             !portals.is_empty(),
             "portal should stay visible at z={z}, dist={dist}"
@@ -1213,6 +1213,7 @@ fn disabled_portal_openings_remain_stencil_only() {
     assert!(world.is_portal_surface(inside));
     assert!(world
         .visible_portals(Vec3::Z, -Vec3::Z, crate::SpaceId::DEFAULT)
+        .unwrap()
         .is_empty());
 }
 #[test]
@@ -1325,6 +1326,7 @@ fn looking_down_a_hatch_sees_the_destination() {
 
     let visible = world
         .visible_portal(Vec3::new(0.0, 12.0, 0.0), -Vec3::Y)
+        .expect("portal visibility must be valid")
         .expect("looking down at a hatch must see the other space");
     assert_eq!(visible.src, outside);
     assert_eq!(visible.dst, inside);

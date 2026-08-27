@@ -55,10 +55,15 @@ impl FieldGrid {
     /// Trilinear sample of the corner grid at a world position.
     pub fn sample_density(&self, density: &[f32], world: Vec3) -> f32 {
         let local = (world - self.bounds.min) / self.bounds.voxel_size();
+        let max_corner = self.corners.map(|count| {
+            count
+                .checked_sub(1)
+                .expect("FieldGrid invariant: every axis has at least one corner")
+        });
         let max = Vec3::new(
-            self.corners[0].saturating_sub(1) as f32,
-            self.corners[1].saturating_sub(1) as f32,
-            self.corners[2].saturating_sub(1) as f32,
+            max_corner[0] as f32,
+            max_corner[1] as f32,
+            max_corner[2] as f32,
         );
         let clamped = local.clamp(Vec3::ZERO, max);
         let base = clamped.floor();
@@ -66,9 +71,18 @@ impl FieldGrid {
         let x0 = base.x as u32;
         let y0 = base.y as u32;
         let z0 = base.z as u32;
-        let x1 = (x0 + 1).min(self.corners[0] - 1);
-        let y1 = (y0 + 1).min(self.corners[1] - 1);
-        let z1 = (z0 + 1).min(self.corners[2] - 1);
+        let x1 = x0
+            .checked_add(1)
+            .expect("sample x corner overflow")
+            .min(max_corner[0]);
+        let y1 = y0
+            .checked_add(1)
+            .expect("sample y corner overflow")
+            .min(max_corner[1]);
+        let z1 = z0
+            .checked_add(1)
+            .expect("sample z corner overflow")
+            .min(max_corner[2]);
 
         let c000 = self.corner_density(density, x0, y0, z0);
         let c100 = self.corner_density(density, x1, y0, z0);

@@ -62,7 +62,9 @@ mod proof {
         assert_ne!(&bytes_of(&raw_w)[64..80], &bytes_of(&raw_c)[64..80]);
 
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target");
-        std::fs::create_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap_or_else(|error| {
+            panic!("create tint proof directory {}: {error}", dir.display())
+        });
         write_solid(&dir.join("tint_proof_white.png"), w);
         write_solid(&dir.join("tint_proof_warm.png"), a);
         write_solid(&dir.join("tint_proof_cool.png"), b);

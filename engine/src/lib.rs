@@ -101,16 +101,19 @@ pub use world::{
 pub struct Engine;
 
 impl Engine {
-    pub fn run(title: impl Into<String>, update: impl FnMut(&mut World, &Frame) + 'static) {
-        app::run(title, update);
+    pub fn run(
+        title: impl Into<String>,
+        update: impl FnMut(&mut World, &Frame) -> EngineResult<()> + 'static,
+    ) -> EngineResult<()> {
+        app::run(title, update)
     }
 
     pub fn run_with(
         title: impl Into<String>,
         limits: EngineLimits,
-        update: impl FnMut(&mut World, &Frame) + 'static,
-    ) {
-        app::run_with(title, limits, update);
+        update: impl FnMut(&mut World, &Frame) -> EngineResult<()> + 'static,
+    ) -> EngineResult<()> {
+        app::run_with(title, limits, update)
     }
 }
 

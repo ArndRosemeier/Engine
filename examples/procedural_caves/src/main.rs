@@ -1,7 +1,7 @@
 //! Procedural landscape demo: hills + caves via the Landscape recipe.
 use engine::prelude::*;
 
-fn main() {
+fn main() -> EngineResult<()> {
     let mut yaw = 48.0_f32;
 
     Engine::run("procedural_caves", move |world, frame| {
@@ -27,5 +27,6 @@ fn main() {
             yaw
         };
         world.look_orbit((0.0, 5.0, 0.0), 36.0, yaw, 26.0);
-    });
+        Ok(())
+    })
 }

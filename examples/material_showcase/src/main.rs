@@ -1,4 +1,4 @@
-﻿//! Reusable surface-material showcase: stone, wet stone, calcite, metal,
+//! Reusable surface-material showcase: stone, wet stone, calcite, metal,
 //! and emissive mineral surfaces through the ordinary mesh renderer.
 use engine::egui;
 use engine::prelude::*;
@@ -135,7 +135,7 @@ fn showcase_tree(at: Vec3, seed: f32, broadleaf: bool) -> Mesh {
     mesh
 }
 
-fn main() {
+fn main() -> EngineResult<()> {
     let mut position = Vec3::new(1.0, 4.4, -5.0);
     let mut yaw = 0.0_f32;
     let mut pitch = -4.0_f32;
@@ -330,5 +330,6 @@ fn main() {
                 ui.label("Lower row: SPEEDTREE - connected branches and imported cutouts");
                 ui.label("Leaf sources: maple broadleaf / fern conifer");
             });
-    });
+        Ok(())
+    })
 }

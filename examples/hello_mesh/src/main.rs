@@ -53,7 +53,7 @@ fn house() -> Mesh {
     mesh
 }
 
-fn main() {
+fn main() -> EngineResult<()> {
     let mut yaw = -70.0_f32;
 
     Engine::run("hello_mesh", move |world, frame| {
@@ -75,5 +75,6 @@ fn main() {
             yaw
         };
         world.look_orbit((0.0, 1.0, 0.0), 8.0, yaw, 24.0);
-    });
+        Ok(())
+    })
 }

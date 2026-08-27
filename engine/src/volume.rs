@@ -77,17 +77,23 @@ impl Volume {
         })
     }
 
-    fn estimate_samples(min: Vec3, max: Vec3, step: f32) -> u64 {
+    fn estimate_samples(min: Vec3, max: Vec3, step: f32) -> EngineResult<u64> {
         let nx = ((max.x - min.x) / step).floor().max(0.0) as u64 + 1;
         let ny = ((max.y - min.y) / step).floor().max(0.0) as u64 + 1;
         let nz = ((max.z - min.z) / step).floor().max(0.0) as u64 + 1;
-        nx.saturating_mul(ny).saturating_mul(nz)
+        nx.checked_mul(ny)
+            .and_then(|xy| xy.checked_mul(nz))
+            .ok_or_else(|| {
+                EngineError::ResourceLimit(format!(
+                    "volume paint sample count overflow for dimensions {nx}x{ny}x{nz}"
+                ))
+            })
     }
 
     fn check_paint_budget(&self, min: Vec3, max: Vec3, limits: &EngineLimits) -> EngineResult<()> {
         ensure_finite3(min, "paint min")?;
         ensure_finite3(max, "paint max")?;
-        let samples = Self::estimate_samples(min, max, self.voxel_size);
+        let samples = Self::estimate_samples(min, max, self.voxel_size)?;
         if samples > limits.max_volume_samples_per_paint {
             return Err(EngineError::ResourceLimit(format!(
                 "volume paint would touch {samples} samples (limit {})",

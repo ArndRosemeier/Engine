@@ -398,14 +398,20 @@ impl Renderer {
         // FIFO is the synchronized default: it prevents startup tearing and
         // keeps normal presentation stable across GPUs and window compositors.
         // Uncapped modes remain available explicitly for rendering stress tests.
-        let present_mode = match std::env::var("ENGINE_PRESENT_MODE").as_deref() {
-            Ok("immediate") => wgpu::PresentMode::Immediate,
-            Ok("mailbox") => wgpu::PresentMode::Mailbox,
-            Ok("fifo-relaxed") => wgpu::PresentMode::FifoRelaxed,
-            Ok("fifo") | Err(_) => wgpu::PresentMode::Fifo,
-            Ok(value) => panic!(
-                "ENGINE_PRESENT_MODE must be one of: fifo, fifo-relaxed, mailbox, immediate; got {value:?}"
-            ),
+        let present_mode = match std::env::var("ENGINE_PRESENT_MODE") {
+            Ok(value) => match value.as_str() {
+                "immediate" => wgpu::PresentMode::Immediate,
+                "mailbox" => wgpu::PresentMode::Mailbox,
+                "fifo-relaxed" => wgpu::PresentMode::FifoRelaxed,
+                "fifo" => wgpu::PresentMode::Fifo,
+                _ => panic!(
+                    "ENGINE_PRESENT_MODE must be one of: fifo, fifo-relaxed, mailbox, immediate; got {value:?}"
+                ),
+            },
+            Err(std::env::VarError::NotPresent) => wgpu::PresentMode::Fifo,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                panic!("ENGINE_PRESENT_MODE must contain valid Unicode")
+            }
         };
         if !caps.present_modes.contains(&present_mode) {
             panic!("requested present mode {present_mode:?} is unsupported by this surface");
@@ -1038,7 +1044,11 @@ impl Renderer {
     }
 
     /// Render the current world to a PNG (for demo QA / automation).
-    pub fn capture_png(&mut self, _world: &World, path: impl AsRef<std::path::Path>) {
+    pub fn capture_png(
+        &mut self,
+        _world: &World,
+        path: impl AsRef<std::path::Path>,
+    ) -> crate::EngineResult<()> {
         let width = self.config.width.max(1);
         let height = self.config.height.max(1);
         let format = self.config.format;
@@ -1089,7 +1099,12 @@ impl Renderer {
 
         let slice = output.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            // Receiver loss is only possible if capture teardown abandons this operation.
+            if tx.send(result).is_err() {
+                return;
+            }
+        });
         self.device
             .poll(wgpu::PollType::Wait)
             .expect("device poll failed");
@@ -1118,8 +1133,12 @@ impl Renderer {
         drop(data);
         output.unmap();
 
-        image::save_buffer(path.as_ref(), &rgba, width, height, image::ColorType::Rgba8)
-            .unwrap_or_else(|e| panic!("failed to save screenshot: {e}"));
+        image::save_buffer(path.as_ref(), &rgba, width, height, image::ColorType::Rgba8).map_err(
+            |source| crate::EngineError::ScreenshotSave {
+                path: path.as_ref().to_path_buf(),
+                source,
+            },
+        )
     }
 
     fn store_composited(&mut self, encoder: &mut wgpu::CommandEncoder, src: &wgpu::Texture) {
@@ -1246,16 +1265,16 @@ impl Renderer {
             return camera.clone();
         }
         let live = world.living_in();
-        world
+        let portals = world
             .visible_portals(camera.eye(), look, live)
-            .into_iter()
-            .find_map(|visible| {
-                world
-                    .portal_plane(visible.src)
-                    .ok()
-                    .map(|plane| portal_render_camera(camera, plane))
-            })
-            .unwrap_or_else(|| camera.clone())
+            .expect("portal visibility invariants must hold while rendering");
+        let Some(visible) = portals.first() else {
+            return camera.clone();
+        };
+        let plane = world
+            .portal_plane(visible.src)
+            .expect("visible portal source must retain its validated plane");
+        portal_render_camera(camera, plane)
     }
 
     fn encode_world(
@@ -1362,12 +1381,17 @@ impl Renderer {
         if look.length_squared() <= 0.0 {
             return;
         }
-        let portals = world.visible_portals(camera.eye(), look, space);
-        let scene_camera = portals
-            .first()
-            .and_then(|visible| world.portal_plane(visible.src).ok())
-            .map(|plane| portal_render_camera(camera, plane))
-            .unwrap_or_else(|| camera.clone());
+        let portals = world
+            .visible_portals(camera.eye(), look, space)
+            .expect("portal visibility invariants must hold while rendering");
+        let scene_camera = if let Some(visible) = portals.first() {
+            let plane = world
+                .portal_plane(visible.src)
+                .expect("visible portal source must retain its validated plane");
+            portal_render_camera(camera, plane)
+        } else {
+            camera.clone()
+        };
         let uniform_slot =
             self.write_scene_uniforms(world, &scene_camera, clip_plane, SceneUniformTarget::Main);
         pass.set_stencil_reference(u32::from(level));

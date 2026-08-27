@@ -976,7 +976,7 @@ impl World {
         eye: Vec3,
         look: Vec3,
         live: SpaceId,
-    ) -> Vec<VisiblePortal> {
+    ) -> EngineResult<Vec<VisiblePortal>> {
         let look = {
             if look.length_squared() <= 0.0 {
                 panic!("visible_portals look direction is zero");
@@ -992,14 +992,20 @@ impl World {
                 self.entities.get(&portal.a()),
                 self.entities.get(&portal.b()),
             ) else {
-                continue;
+                return Err(EngineError::InvalidValue(format!(
+                    "enabled portal links missing entity {} or {}",
+                    portal.a(),
+                    portal.b()
+                )));
             };
             for (src, dst) in portal.directions(a.space, b.space, live) {
                 let src_e = if src == portal.a() { a } else { b };
                 let dst_e = if dst == portal.a() { a } else { b };
-                let Ok(src_plane) = self.portal_plane(src) else {
-                    continue;
-                };
+                let src_plane = self.portal_plane(src).map_err(|error| {
+                    EngineError::InvalidValue(format!(
+                        "visible portal source {src} has no valid plane: {error}"
+                    ))
+                })?;
                 if src_plane.signed_distance(eye) <= -crate::portal::PORTAL_VISIBILITY_PLANE_EPS {
                     continue;
                 }
@@ -1007,9 +1013,11 @@ impl World {
                     continue;
                 }
                 let dist = eye.distance_squared(src_plane.center);
-                let Ok(dst_plane) = self.portal_plane(dst) else {
-                    continue;
-                };
+                let dst_plane = self.portal_plane(dst).map_err(|error| {
+                    EngineError::InvalidValue(format!(
+                        "visible portal destination {dst} has no valid plane: {error}"
+                    ))
+                })?;
                 found.push((
                     dist,
                     VisiblePortal {
@@ -1024,16 +1032,22 @@ impl World {
                 ));
             }
         }
-        found.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        found.into_iter().map(|(_, p)| p).collect()
+        found.sort_by(|a, b| {
+            a.0.partial_cmp(&b.0)
+                .expect("finite portal planes produce finite distances")
+        });
+        Ok(found.into_iter().map(|(_, p)| p).collect())
     }
 
     /// Closest opening in the live space that the camera is facing.
     #[allow(dead_code)]
-    pub(crate) fn visible_portal(&self, eye: Vec3, look: Vec3) -> Option<VisiblePortal> {
+    pub(crate) fn visible_portal(
+        &self,
+        eye: Vec3,
+        look: Vec3,
+    ) -> EngineResult<Option<VisiblePortal>> {
         self.visible_portals(eye, look, self.live_space)
-            .into_iter()
-            .next()
+            .map(|portals| portals.into_iter().next())
     }
 
     /// Whether this entity is portal stencil geometry, enabled or disabled.

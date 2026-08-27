@@ -16,7 +16,7 @@ fn walker_mesh() -> Mesh {
     m
 }
 
-fn main() {
+fn main() -> EngineResult<()> {
     let rules = demo_terrain_rules();
     let field = HeightField::new(rules.clone());
     let mut pos = Vec3::new(0.0, 0.0, 0.0);
@@ -88,5 +88,6 @@ fn main() {
         }
 
         world.look_follow(pos, yaw, 9.0, 4.5);
-    });
+        Ok(())
+    })
 }

@@ -5,7 +5,7 @@
 use engine::prelude::*;
 use std::path::PathBuf;
 
-fn main() {
+fn main() -> EngineResult<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let asset = root.join("assets/deer.gltf");
     eprintln!("loading {}", asset.display());
@@ -65,5 +65,6 @@ fn main() {
 
         world.look_orbit(Vec3::new(0.0, 1.2, 0.0), 7.0, frame.time * 18.0, 22.0);
         world.set_sun(Vec3::new(0.45, 1.0, 0.25), 0.24);
-    });
+        Ok(())
+    })
 }

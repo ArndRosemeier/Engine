@@ -231,6 +231,10 @@ pub struct TreeAsset {
 impl TreeAsset {
     pub fn generate(origin: Vec3, settings: TreeSettings) -> Self {
         let profile = settings.kind.profile();
+        assert!(
+            profile.branching_depth >= 1,
+            "tree profile branching_depth must be at least 1"
+        );
         // Branch geometry was authored around an 8 m prototype. Keep branch reach
         // and leaf size proportional when species heights use mature-world metres;
         // otherwise taller trees collapse into bare sticks.
@@ -242,7 +246,11 @@ impl TreeAsset {
                 profile.foliage_per_cluster,
             ),
             TreeLod::Mid => (
-                profile.branching_depth.saturating_sub(1).max(1),
+                profile
+                    .branching_depth
+                    .checked_sub(1)
+                    .expect("validated branching depth")
+                    .max(1),
                 (profile.primary_branches * 3 / 4).max(3),
                 (profile.foliage_per_cluster * 3 / 4).max(2),
             ),

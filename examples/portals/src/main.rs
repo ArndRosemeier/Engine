@@ -43,7 +43,7 @@ fn apply_probe(pos: &mut Vec3, yaw: &mut f32, world: &mut World, house: SpaceId)
     }
 }
 
-fn main() {
+fn main() -> EngineResult<()> {
     let mut pos = Vec3::new(0.0, 1.6, -8.0);
     let mut yaw = 0.0_f32;
 
@@ -113,7 +113,7 @@ fn main() {
 
         if frame.first {
             world.look_first_person(pos, yaw, 0.0);
-            return;
+            return Ok(());
         }
 
         yaw += frame.input.axis(Key::D, Key::A) * 90.0 * frame.dt;
@@ -132,5 +132,6 @@ fn main() {
 
         world.travel(&mut pos, &mut yaw);
         world.look_first_person(pos, yaw, 0.0);
-    });
+        Ok(())
+    })
 }

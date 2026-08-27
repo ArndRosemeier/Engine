@@ -1,3 +1,4 @@
+use crate::error::{EngineError, EngineResult};
 use crate::input::Input;
 use crate::limits::EngineLimits;
 use crate::render::GpuFrameStats;
@@ -12,7 +13,7 @@ use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
-type UpdateFn = Box<dyn FnMut(&mut World, &Frame)>;
+type UpdateFn = Box<dyn FnMut(&mut World, &Frame) -> EngineResult<()>>;
 
 struct App {
     title: String,
@@ -34,20 +35,16 @@ struct App {
     fps_frames: u32,
     pointer_locked: bool,
     hitch_ms: f32,
+    fatal_error: Option<String>,
 }
 
 impl App {
-    fn new(title: String, limits: EngineLimits, update: UpdateFn) -> Self {
+    fn new(title: String, limits: EngineLimits, update: UpdateFn) -> EngineResult<Self> {
         let now = Instant::now();
-        let screenshot_path = std::env::var_os("ENGINE_SCREENSHOT").map(PathBuf::from);
-        let screenshot_frame = std::env::var("ENGINE_SCREENSHOT_FRAME")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(3);
-        let screenshot_wait = std::env::var("ENGINE_SCREENSHOT_WAIT")
-            .ok()
-            .is_some_and(|s| s == "1");
-        Self {
+        let screenshot_path = optional_path_env("ENGINE_SCREENSHOT")?;
+        let screenshot_frame = optional_parsed_env("ENGINE_SCREENSHOT_FRAME")?.unwrap_or(3);
+        let screenshot_wait = optional_bool_env("ENGINE_SCREENSHOT_WAIT")?.unwrap_or(false);
+        Ok(Self {
             title,
             window: None,
             renderer: None,
@@ -66,8 +63,9 @@ impl App {
             fps_accum_s: 0.0,
             fps_frames: 0,
             pointer_locked: false,
-            hitch_ms: hitch_threshold_ms(),
-        }
+            hitch_ms: hitch_threshold_ms()?,
+            fatal_error: None,
+        })
     }
 
     /// Match the window's pointer grab to what the game asked for.
@@ -93,16 +91,15 @@ impl App {
         self.pointer_locked = wanted;
     }
 
-    fn window_inner_size() -> winit::dpi::LogicalSize<u32> {
-        let w = std::env::var("ENGINE_WIDTH")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1920);
-        let h = std::env::var("ENGINE_HEIGHT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1080);
-        winit::dpi::LogicalSize::new(w.max(320), h.max(180))
+    fn window_inner_size() -> EngineResult<winit::dpi::LogicalSize<u32>> {
+        let w: u32 = optional_parsed_env("ENGINE_WIDTH")?.unwrap_or(1920);
+        let h: u32 = optional_parsed_env("ENGINE_HEIGHT")?.unwrap_or(1080);
+        if w < 320 || h < 180 {
+            return Err(EngineError::InvalidValue(format!(
+                "ENGINE_WIDTH and ENGINE_HEIGHT must be at least 320x180, got {w}x{h}"
+            )));
+        }
+        Ok(winit::dpi::LogicalSize::new(w, h))
     }
 }
 
@@ -113,7 +110,7 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes()
             .with_title(self.title.clone())
-            .with_inner_size(Self::window_inner_size());
+            .with_inner_size(Self::window_inner_size().expect("validated window size"));
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -186,16 +183,22 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                let size = self.renderer.as_ref().map(|r| r.size()).unwrap_or_default();
+                let size = self
+                    .renderer
+                    .as_ref()
+                    .expect("renderer must exist before redraw")
+                    .size();
                 let first = !self.first_update_done;
                 self.first_update_done = true;
 
-                let Some(window) = self.window.clone() else {
-                    return;
-                };
-                let Some(ui_backend) = self.ui_backend.as_mut() else {
-                    return;
-                };
+                let window = self
+                    .window
+                    .clone()
+                    .expect("window must exist before redraw");
+                let ui_backend = self
+                    .ui_backend
+                    .as_mut()
+                    .expect("UI backend must exist before redraw");
 
                 // A locked pointer means the game owns the mouse, so egui's
                 // hover state must not swallow look and movement input.
@@ -225,7 +228,26 @@ impl ApplicationHandler for App {
                             input: input.clone(),
                             ui: ui.clone(),
                         };
-                        update(world, &frame);
+                        if let Some(message) = self.fatal_error.as_ref() {
+                            egui::CentralPanel::default().show(ui.ctx(), |panel| {
+                                panel.vertical_centered(|panel| {
+                                    panel.add_space(48.0);
+                                    panel.heading("Fatal application error");
+                                    panel.add_space(12.0);
+                                    panel.label(message);
+                                    panel.add_space(16.0);
+                                    panel.label("Gameplay has stopped and will not resume.");
+                                    panel.label("Press Escape, close the window, or choose Exit.");
+                                    if panel.button("Exit").clicked() {
+                                        world.request_exit();
+                                    }
+                                });
+                            });
+                        } else if !run_callback_until_fatal(&mut self.fatal_error, || {
+                            update(world, &frame)
+                        }) {
+                            world.set_pointer_lock(false);
+                        }
                         ui.modal_was_open()
                     });
                     (ui_result, full_output)
@@ -252,12 +274,18 @@ impl ApplicationHandler for App {
                 let wants_lock = self.world.pointer_lock();
                 self.apply_pointer_lock(&window, wants_lock);
 
-                self.world.set_time(time);
                 let anim_t = Instant::now();
-                self.world.tick_animations(dt);
+                if self.fatal_error.is_none() {
+                    self.world.set_time(time);
+                    self.world.tick_animations(dt);
+                }
                 let anim_ms = elapsed_ms(anim_t);
 
-                if let Some(renderer) = self.renderer.as_mut() {
+                {
+                    let renderer = self
+                        .renderer
+                        .as_mut()
+                        .expect("renderer must exist before redraw");
                     let sync_t = Instant::now();
                     renderer.sync_world(&mut self.world);
                     let sync_ms = elapsed_ms(sync_t);
@@ -286,7 +314,12 @@ impl ApplicationHandler for App {
                         Err(wgpu::SurfaceError::OutOfMemory) => {
                             panic!("GPU out of memory");
                         }
-                        Err(wgpu::SurfaceError::Timeout) => {}
+                        // Timeout is transient presentation backpressure. Skip this frame, preserve
+                        // world state, and request the next redraw; repeated timeouts remain visible
+                        // through frame/hitch telemetry rather than corrupting renderer state.
+                        Err(wgpu::SurfaceError::Timeout) => {
+                            eprintln!("surface frame timed out; retrying on next redraw");
+                        }
                         Err(other) => panic!("surface error: {other}"),
                     }
                     let render_ms = elapsed_ms(render_t);
@@ -315,9 +348,17 @@ impl ApplicationHandler for App {
                     let queued = self.world.take_screenshot_queue();
                     for path in queued {
                         if let Some(parent) = path.parent() {
-                            let _ = std::fs::create_dir_all(parent);
+                            std::fs::create_dir_all(parent).unwrap_or_else(|error| {
+                                panic!(
+                                    "failed to create screenshot directory {} for {}: {error}",
+                                    parent.display(),
+                                    path.display()
+                                )
+                            });
                         }
-                        renderer.capture_png(&self.world, &path);
+                        renderer
+                            .capture_png(&self.world, &path)
+                            .unwrap_or_else(|error| panic!("{error}"));
                         eprintln!("wrote screenshot {}", path.display());
                     }
                     if self.world.take_exit_requested() {
@@ -327,15 +368,15 @@ impl ApplicationHandler for App {
                     if !self.screenshot_wait {
                         if let Some(path) = self.screenshot_path.clone() {
                             if self.frame_index >= self.screenshot_frame {
-                                renderer.capture_png(&self.world, &path);
+                                renderer
+                                    .capture_png(&self.world, &path)
+                                    .unwrap_or_else(|error| panic!("{error}"));
                                 eprintln!("wrote screenshot {}", path.display());
                                 event_loop.exit();
                                 return;
                             }
                         }
                     }
-                } else {
-                    let _ = self.world.take_hitch_spans();
                 }
 
                 window.request_redraw();
@@ -358,18 +399,74 @@ impl ApplicationHandler for App {
     }
 }
 
-fn hitch_threshold_ms() -> f32 {
+fn optional_string_env(name: &'static str) -> EngineResult<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(EngineError::InvalidValue(format!(
+            "{name} must contain valid Unicode"
+        ))),
+    }
+}
+
+fn optional_path_env(name: &'static str) -> EngineResult<Option<PathBuf>> {
+    match std::env::var_os(name) {
+        Some(value) if value.is_empty() => Err(EngineError::InvalidValue(format!(
+            "{name} must not be empty"
+        ))),
+        Some(value) => Ok(Some(PathBuf::from(value))),
+        None => Ok(None),
+    }
+}
+
+fn optional_parsed_env<T>(name: &'static str) -> EngineResult<Option<T>>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    optional_string_env(name)?
+        .map(|raw| {
+            raw.parse::<T>().map_err(|error| {
+                EngineError::InvalidValue(format!("{name} has invalid value {raw:?}: {error}"))
+            })
+        })
+        .transpose()
+}
+
+fn parse_bool_env_value(name: &'static str, raw: &str) -> EngineResult<bool> {
+    match raw {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err(EngineError::InvalidValue(format!(
+            "{name} must be 0 or 1, got {raw:?}"
+        ))),
+    }
+}
+
+fn optional_bool_env(name: &'static str) -> EngineResult<Option<bool>> {
+    optional_string_env(name)?
+        .map(|raw| parse_bool_env_value(name, &raw))
+        .transpose()
+}
+fn hitch_threshold_ms() -> EngineResult<f32> {
     match std::env::var("ENGINE_HITCH_MS") {
         Ok(raw) => {
-            let ms = raw.parse::<f32>().unwrap_or_else(|e| {
-                panic!("ENGINE_HITCH_MS must be a finite millisecond budget, got {raw:?}: {e}")
-            });
+            let ms = raw.parse::<f32>().map_err(|error| {
+                EngineError::InvalidValue(format!(
+                    "ENGINE_HITCH_MS must be a finite millisecond budget, got {raw:?}: {error}"
+                ))
+            })?;
             if !ms.is_finite() || ms <= 0.0 {
-                panic!("ENGINE_HITCH_MS must be > 0, got {ms}");
+                return Err(EngineError::InvalidValue(format!(
+                    "ENGINE_HITCH_MS must be > 0, got {ms}"
+                )));
             }
-            ms
+            Ok(ms)
         }
-        Err(_) => 33.0,
+        Err(std::env::VarError::NotPresent) => Ok(33.0),
+        Err(std::env::VarError::NotUnicode(_)) => Err(EngineError::InvalidValue(
+            "ENGINE_HITCH_MS must contain valid Unicode".into(),
+        )),
     }
 }
 
@@ -440,18 +537,87 @@ fn emit_hitch(
 }
 
 /// Run the engine: opens a window and calls `update` every frame.
-pub fn run(title: impl Into<String>, update: impl FnMut(&mut World, &Frame) + 'static) {
-    run_with(title, EngineLimits::default(), update);
+pub fn run(
+    title: impl Into<String>,
+    update: impl FnMut(&mut World, &Frame) -> EngineResult<()> + 'static,
+) -> EngineResult<()> {
+    run_with(title, EngineLimits::default(), update)
 }
 
 /// Run with custom resource limits.
 pub fn run_with(
     title: impl Into<String>,
     limits: EngineLimits,
-    update: impl FnMut(&mut World, &Frame) + 'static,
-) {
-    let event_loop = EventLoop::new().expect("failed to create event loop");
+    update: impl FnMut(&mut World, &Frame) -> EngineResult<()> + 'static,
+) -> EngineResult<()> {
+    let event_loop = EventLoop::new().map_err(EngineError::EventLoopCreation)?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new(title.into(), limits, Box::new(update));
-    event_loop.run_app(&mut app).expect("event loop error");
+    let mut app = App::new(title.into(), limits, Box::new(update))?;
+    event_loop
+        .run_app(&mut app)
+        .map_err(EngineError::EventLoopRun)
+}
+
+fn run_callback_until_fatal(
+    fatal_error: &mut Option<String>,
+    callback: impl FnOnce() -> EngineResult<()>,
+) -> bool {
+    if fatal_error.is_some() {
+        return false;
+    }
+    match callback() {
+        Ok(()) => true,
+        Err(error) => {
+            *fatal_error = Some(format_error_chain(&error));
+            false
+        }
+    }
+}
+
+fn format_error_chain(error: &EngineError) -> String {
+    let mut message = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(error) = source {
+        message.push_str("\nCaused by: ");
+        message.push_str(&error.to_string());
+        source = error.source();
+    }
+    message
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_bool_env_value, run_callback_until_fatal};
+
+    #[test]
+    fn boolean_environment_values_are_strict() {
+        assert!(!parse_bool_env_value("FLAG", "0").unwrap());
+        assert!(parse_bool_env_value("FLAG", "1").unwrap());
+        assert!(parse_bool_env_value("FLAG", "true").is_err());
+        assert!(parse_bool_env_value("FLAG", "").is_err());
+    }
+    use crate::error::{EngineError, EngineResult};
+
+    #[test]
+    fn callback_error_is_persistent_and_callback_never_runs_again() {
+        let mut fatal_error = None;
+        let mut calls = 0_u32;
+
+        assert!(!run_callback_until_fatal(&mut fatal_error, || {
+            calls += 1;
+            Err(EngineError::application(std::io::Error::other(
+                "session failed",
+            )))
+        }));
+        assert!(!run_callback_until_fatal(&mut fatal_error, || {
+            calls += 1;
+            EngineResult::Ok(())
+        }));
+
+        assert_eq!(calls, 1);
+        assert_eq!(
+            fatal_error.as_deref(),
+            Some("application callback failed: session failed\nCaused by: session failed")
+        );
+    }
 }

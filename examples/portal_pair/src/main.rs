@@ -21,7 +21,7 @@ fn portal_frame(center: Vec3, color: Color, world: &mut World) {
     world.spawn(box_at((center.x, 0.06, center.z), (w, t, t), color));
 }
 
-fn main() {
+fn main() -> EngineResult<()> {
     let mut pos = Vec3::new(0.0, 1.6, 0.0);
     let mut yaw = 180.0_f32;
 
@@ -92,5 +92,6 @@ fn main() {
 
         world.travel(&mut pos, &mut yaw);
         world.look_first_person(pos, yaw, 0.0);
-    });
+        Ok(())
+    })
 }

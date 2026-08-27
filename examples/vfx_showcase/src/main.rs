@@ -69,7 +69,7 @@ fn dummy(center: Vec3, color: Color) -> Mesh {
     }
     m
 }
-fn main() {
+fn main() -> EngineResult<()> {
     let mut kind = parse_kind();
     let mut delivery = parse_delivery();
     let fixed_time = env::var("VFX_SCREENSHOT_TIME").ok().map(|v| {
@@ -159,5 +159,6 @@ fn main() {
                 ui.small(format!("{kind:?} / {delivery:?} · {:.2}s", elapsed));
                 ui.small("1-8 kind · Q/W/E/R delivery · Space cast");
             });
-    });
+        Ok(())
+    })
 }

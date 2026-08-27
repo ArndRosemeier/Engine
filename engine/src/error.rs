@@ -35,6 +35,33 @@ pub enum EngineError {
 
     #[error("unknown material")]
     UnknownMaterial,
+
+    #[error("application callback failed: {source}")]
+    Application {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    #[error("event loop creation failed: {0}")]
+    EventLoopCreation(#[source] winit::error::EventLoopError),
+
+    #[error("event loop failed: {0}")]
+    EventLoopRun(#[source] winit::error::EventLoopError),
+
+    #[error("failed to save screenshot {path}: {source}")]
+    ScreenshotSave {
+        path: std::path::PathBuf,
+        #[source]
+        source: image::ImageError,
+    },
+}
+
+impl EngineError {
+    pub fn application(error: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Application {
+            source: Box::new(error),
+        }
+    }
 }
 
 pub type EngineResult<T> = Result<T, EngineError>;

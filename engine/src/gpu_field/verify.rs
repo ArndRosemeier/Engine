@@ -3,7 +3,17 @@
 //! Run with `ENGINE_GPU_TESTS=1 cargo test -p engine gpu_field::verify`.
 
 pub fn gpu_tests_enabled() -> bool {
-    std::env::var_os("ENGINE_GPU_TESTS").is_some()
+    match std::env::var("ENGINE_GPU_TESTS") {
+        Ok(value) => match value.as_str() {
+            "0" => false,
+            "1" => true,
+            _ => panic!("ENGINE_GPU_TESTS must be 0 or 1, got {value:?}"),
+        },
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("ENGINE_GPU_TESTS must contain valid Unicode")
+        }
+    }
 }
 
 #[cfg(test)]

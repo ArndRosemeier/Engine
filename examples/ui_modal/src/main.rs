@@ -26,7 +26,7 @@ fn checker_rgba(w: u32, h: u32) -> Vec<u8> {
     px
 }
 
-fn main() {
+fn main() -> EngineResult<()> {
     let mut show_atlas = true;
     let atlas = checker_rgba(128, 96);
 
@@ -59,5 +59,6 @@ fn main() {
                 *open = false;
             }
         });
-    });
+        Ok(())
+    })
 }
