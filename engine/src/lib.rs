@@ -28,6 +28,7 @@ pub mod proc;
 pub mod proc_terrain;
 pub mod props;
 pub mod ribbons;
+pub mod sky;
 pub mod space;
 pub mod surface;
 pub mod surface_terrain;

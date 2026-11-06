@@ -1362,3 +1362,23 @@ fn lod_set_moves_instances_between_levels_with_the_camera() {
     world.despawn_lod(id);
     assert!(world.entity(levels[0]).is_err());
 }
+
+#[test]
+fn physical_sky_drives_light_and_sky() {
+    use crate::sky::PhysicalSky;
+    let mut world = crate::world::World::new();
+    world.set_physical_sky(Some(PhysicalSky::at_hour(12.0)));
+    world.tick_sky();
+    let noon = world.light().clone();
+    assert!(noon.direction.y > 0.5, "noon sun is high");
+    let sky = world.sky().expect("sky derived");
+    assert!(sky.zenith.b > sky.zenith.r, "noon zenith is blue");
+
+    world.set_physical_sky(Some(PhysicalSky::at_hour(1.0)));
+    world.tick_sky();
+    let night = world.light();
+    assert!(
+        night.color.max_element() < noon.color.max_element() * 0.2,
+        "night is much darker than noon"
+    );
+}

@@ -476,7 +476,9 @@ impl TreeAsset {
                 &mut self.foliage,
                 centre
                     + tangent
-                        * ((leaf as f32 - foliage_per_cluster as f32 * 0.5) * 0.11 * self.leaf_scale),
+                        * ((leaf as f32 - foliage_per_cluster as f32 * 0.5)
+                            * 0.11
+                            * self.leaf_scale),
                 direction,
                 tangent,
                 size,
