@@ -38,9 +38,12 @@ struct FrameUniform {
     _pad_torch: [f32; 3],
     /// Viewer-carried point light (rgb + unused); radius 0 switches it off.
     torch_color: [f32; 4],
+    sky_up: [f32; 4],
+    sky_horizon: [f32; 4],
+    sky_down: [f32; 4],
 }
 
-const _: () = assert!(std::mem::size_of::<FrameUniform>() == 144);
+const _: () = assert!(std::mem::size_of::<FrameUniform>() == 192);
 
 const SHADER: &str = r#"
 struct TerrainParams {
@@ -71,7 +74,22 @@ struct FrameUniform {
     _pad_t1: f32,
     _pad_t2: f32,
     torch_color: vec4<f32>,
+    sky_up: vec4<f32>,
+    sky_horizon: vec4<f32>,
+    sky_down: vec4<f32>,
 };
+
+fn frame_light() -> SceneLight {
+    var light: SceneLight;
+    light.dir = normalize(frame.light_dir);
+    light.color = frame.light_color;
+    light.ambient = frame.ambient;
+    light.sky_up = frame.sky_up.rgb;
+    light.sky_horizon = frame.sky_horizon.rgb;
+    light.sky_down = frame.sky_down.rgb;
+    light.env_strength = 1.0;
+    return light;
+}
 
 struct RingUniform {
     center: vec2<f32>,
@@ -244,7 +262,10 @@ fn fs_land(in: VsOut) -> @location(0) vec4<f32> {
     let ndl = max(dot(n, l), 0.0);
     let wrap = ndl * 0.5 + 0.5;
     let vis = sun_visibility(in.world_p, n, frame.eye);
-    let lit = in.color.rgb * (frame.ambient + wrap * wrap * vis * frame.light_color)
+    let v = normalize(frame.eye - in.world_p);
+    // Full-strength sun as before; the sky dome now tints the shade.
+    let sun_diffuse = wrap * wrap / max(1.0 - frame.ambient, 0.05);
+    let lit = pbr_shade(in.color.rgb, n, v, frame_light(), 0.92, 0.0, vis, sun_diffuse)
         + in.color.rgb * torch_light(in.world_p, n);
     return vec4(lit, 1.0);
 }
@@ -331,7 +352,8 @@ impl ClipmapRenderer {
             label: Some("clipmap-shader"),
             source: wgpu::ShaderSource::Wgsl(
                 format!(
-                    "{SHADER}{}{}{}",
+                    "{}{SHADER}{}{}{}",
+                    super::pipeline::LIGHTING_WGSL,
                     super::shadow::SHADOW_UNIFORMS_WGSL,
                     super::shadow::CLIPMAP_SHADOW_WGSL,
                     super::shadow::SHADOW_EVAL_WGSL
@@ -551,8 +573,10 @@ impl ClipmapRenderer {
         torch_color: Vec3,
         torch_radius_m: f32,
         torch_curve: f32,
+        sky: super::SkyLight,
         proc: &ProcTerrain,
     ) {
+        let pad = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
         let frame = FrameUniform {
             view_proj: view_proj.to_cols_array_2d(),
             light_dir: [light_dir.x, light_dir.y, light_dir.z],
@@ -564,6 +588,9 @@ impl ClipmapRenderer {
             torch_curve,
             _pad_torch: [0.0; 3],
             torch_color: [torch_color.x, torch_color.y, torch_color.z, 0.0],
+            sky_up: pad(sky.up),
+            sky_horizon: pad(sky.horizon),
+            sky_down: pad(sky.down),
         };
         if self.last_frame.as_ref().map(bytemuck::bytes_of) != Some(bytemuck::bytes_of(&frame)) {
             queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&frame));

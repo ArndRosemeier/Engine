@@ -229,9 +229,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if view_distance < 260.0 {
         vis = sun_visibility(in.world_p, n, u.eye);
     }
-    let hemi = mix(vec3<f32>(0.42, 0.40, 0.38), vec3<f32>(0.72, 0.80, 0.96), n.y * 0.5 + 0.5);
-    let ground_light = u.ambient * hemi + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis;
-    var lit = albedo * ground_light;
+    // Rough, non-metal ground: the sky dome supplies the shade colour.
+    var lit = shade_surface(albedo, n, in.world_p, 0.92, 0.0, vis, wrap * wrap);
 
     // Snow is its own material. Mixing a grey into dark rock and lighting the
     // result as dirt is why caps read as ash; light a bright, sky-filled
