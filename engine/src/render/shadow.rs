@@ -25,6 +25,8 @@ const FLAG_ATLAS: u32 = 2;
 const FLAG_FORMULA: u32 = 4;
 /// The horizon-height map (`terrain_shadow`) covers `atlas_origin_xz`/`atlas_extent`.
 const FLAG_HORIZON: u32 = 8;
+/// Light probes from `gi.rs` cover `gi_origin` .. `gi_origin + gi_dims * gi_spacing`.
+const FLAG_GI: u32 = 16;
 const MISSING_HEIGHT: f32 = -10_000.0;
 
 #[repr(C)]
@@ -47,6 +49,10 @@ pub struct ShadowUniforms {
     pub lake_scale: f32,
     pub lake_threshold: f32,
     pub water_level: f32,
+    pub gi_origin: [f32; 3],
+    pub gi_spacing: f32,
+    pub gi_dims: [u32; 3],
+    pub _pad1: u32,
 }
 
 /// Texel-snapped ortho looking from the sun toward `focus`.
@@ -139,6 +145,10 @@ struct ShadowUniforms {
     lake_scale: f32,
     lake_threshold: f32,
     water_level: f32,
+    gi_origin: vec3<f32>,
+    gi_spacing: f32,
+    gi_dims: vec3<u32>,
+    _pad1: u32,
 };
 "#
     };
@@ -230,6 +240,9 @@ pub const SCENE_SHADOW_WGSL: &str = concat!(
 @group(0) @binding(5) var height_samp: sampler;
 @group(0) @binding(6) var ao_tex: texture_2d<f32>;
 @group(0) @binding(7) var ao_samp: sampler;
+@group(0) @binding(8) var gi_probe_r: texture_3d<f32>;
+@group(0) @binding(9) var gi_probe_g: texture_3d<f32>;
+@group(0) @binding(10) var gi_probe_b: texture_3d<f32>;
 
 "#,
     terrain_formula_wgsl!(),
@@ -261,6 +274,58 @@ pub const SHADOW_EVAL_WGSL: &str = r#"
 // Pipelines drawing over surfaces they do not occlude (glass, water) set
 // this false: the occlusion texture describes what lies behind them.
 override SCENE_AO: bool = true;
+
+// Sky and bounce light reaching a surface at `p` facing `n`, from the light
+// probes, in the units of `sky_irradiance * ambient`. Alpha is how much to
+// trust it: 0 outside the probe box or with no live probe around, fading to
+// 0 toward the box edge.
+fn gi_irradiance(p: vec3<f32>, n: vec3<f32>) -> vec4<f32> {
+    if (shadow.flags & 16u) == 0u {
+        return vec4<f32>(0.0);
+    }
+    let dims = vec3<i32>(shadow.gi_dims);
+    let size = vec3<f32>(dims);
+    // Half a probe off the surface, so the probes behind it do not count.
+    let g = (p + n * shadow.gi_spacing * 0.5 - shadow.gi_origin) / shadow.gi_spacing - vec3<f32>(0.5);
+    if any(g < vec3<f32>(-0.5)) || any(g > size - vec3<f32>(0.5)) {
+        return vec4<f32>(0.0);
+    }
+    let edge = min(min(g + vec3<f32>(0.5), size - vec3<f32>(0.5) - g), vec3<f32>(2.0));
+    let fade = smoothstep(0.0, 2.0, min(edge.x, min(edge.y, edge.z)));
+    let base = vec3<i32>(floor(g));
+    let f = g - floor(g);
+    var sum = vec3<f32>(0.0);
+    var weight = 0.0;
+    for (var i = 0; i < 8; i++) {
+        let o = vec3<i32>(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        let c = clamp(base + o, vec3<i32>(0), dims - vec3<i32>(1));
+        let r = textureLoad(gi_probe_r, c, 0);
+        if r.x < 0.0 {
+            continue;
+        }
+        let gr = textureLoad(gi_probe_g, c, 0);
+        let b = textureLoad(gi_probe_b, c, 0);
+        let corner = vec3<f32>(o);
+        let tri = mix(vec3<f32>(1.0) - f, f, corner);
+        let probe_p = shadow.gi_origin + (vec3<f32>(c) + vec3<f32>(0.5)) * shadow.gi_spacing;
+        let to_probe = normalize(probe_p - p + n * 1e-3);
+        // Favour probes in front of the surface.
+        let facing = (dot(to_probe, n) + 1.0) * 0.5;
+        let w = tri.x * tri.y * tri.z * (facing * facing + 0.05);
+        // Cosine-convolved linear SH: E/pi = mean + 2/3 lin . n.
+        let e = vec3<f32>(
+            r.x + dot(r.yzw, n) * (2.0 / 3.0),
+            gr.x + dot(gr.yzw, n) * (2.0 / 3.0),
+            b.x + dot(b.yzw, n) * (2.0 / 3.0),
+        );
+        sum += max(e, vec3<f32>(0.0)) * w;
+        weight += w;
+    }
+    if weight < 1e-5 {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(sum / weight, fade);
+}
 
 // Ambient occlusion where `clip` lands on screen; `strength` 0 switches it
 // off for views the occlusion was not computed from.
@@ -386,6 +451,9 @@ pub const CLIPMAP_SHADOW_WGSL: &str = r#"
 @group(1) @binding(4) var height_samp: sampler;
 @group(1) @binding(5) var ao_tex: texture_2d<f32>;
 @group(1) @binding(6) var ao_samp: sampler;
+@group(1) @binding(7) var gi_probe_r: texture_3d<f32>;
+@group(1) @binding(8) var gi_probe_g: texture_3d<f32>;
+@group(1) @binding(9) var gi_probe_b: texture_3d<f32>;
 
 fn atlas_ground(xz: vec2<f32>) -> f32 {
     if shadow.atlas_extent <= 0.0 {
@@ -470,11 +538,13 @@ fn vs_main(v: VsIn) -> @builtin(position) vec4<f32> {
 }
 "#;
 
-fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 7] {
+fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 10] {
     [
         wgpu::BindGroupLayoutEntry {
             binding: base,
-            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            visibility: wgpu::ShaderStages::VERTEX
+                | wgpu::ShaderStages::FRAGMENT
+                | wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
@@ -484,7 +554,7 @@ fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 7] {
         },
         wgpu::BindGroupLayoutEntry {
             binding: base + 1,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Depth,
                 view_dimension: wgpu::TextureViewDimension::D2Array,
@@ -494,13 +564,13 @@ fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 7] {
         },
         wgpu::BindGroupLayoutEntry {
             binding: base + 2,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
             count: None,
         },
         wgpu::BindGroupLayoutEntry {
             binding: base + 3,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: false },
                 view_dimension: wgpu::TextureViewDimension::D2,
@@ -510,14 +580,14 @@ fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 7] {
         },
         wgpu::BindGroupLayoutEntry {
             binding: base + 4,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
             count: None,
         },
         // Screen-space ambient occlusion (see `ssao.rs`).
         wgpu::BindGroupLayoutEntry {
             binding: base + 5,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
                 view_dimension: wgpu::TextureViewDimension::D2,
@@ -527,11 +597,28 @@ fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 7] {
         },
         wgpu::BindGroupLayoutEntry {
             binding: base + 6,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
             count: None,
         },
+        // Light probes, red/green/blue linear SH (see `gi.rs`).
+        gi_probe_entry(base + 7),
+        gi_probe_entry(base + 8),
+        gi_probe_entry(base + 9),
     ]
+}
+
+fn gi_probe_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D3,
+            multisampled: false,
+        },
+        count: None,
+    }
 }
 
 fn upload_atlas(queue: &wgpu::Queue, texture: &wgpu::Texture, pixels: &[f32], size: u32) {
@@ -594,6 +681,7 @@ pub(crate) fn apply_terrain_rules(u: &mut ShadowUniforms, rules: &TerrainRules) 
 }
 
 struct ResourceViews<'a> {
+    gi: &'a [wgpu::TextureView; 3],
     uniform: &'a wgpu::Buffer,
     map: &'a wgpu::TextureView,
     comparison: &'a wgpu::Sampler,
@@ -640,6 +728,18 @@ fn create_resource_bind(
                 binding: 6,
                 resource: wgpu::BindingResource::Sampler(v.ao_sampler),
             },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(&v.gi[0]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(&v.gi[1]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: wgpu::BindingResource::TextureView(&v.gi[2]),
+            },
         ],
     })
 }
@@ -664,6 +764,9 @@ pub struct ShadowGpu {
     atlas_sampler: wgpu::Sampler,
     ao_view: wgpu::TextureView,
     ao_sampler: wgpu::Sampler,
+    gi_views: [wgpu::TextureView; 3],
+    /// Probe box for this frame, from the renderer; None switches GI off.
+    gi: Option<super::gi::GiPlacement>,
     map_size: u32,
     atlas_size: u32,
     atlas_pixels: Vec<f32>,
@@ -795,6 +898,26 @@ impl ShadowGpu {
             ..Default::default()
         });
 
+        // No probes until the renderer hands over the GI volume.
+        let gi_views: [wgpu::TextureView; 3] = std::array::from_fn(|_| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("gi-none"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D3,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        });
+
         let resource_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow-resource-layout"),
             entries: &resource_layout_entries(0),
@@ -810,6 +933,7 @@ impl ShadowGpu {
                 atlas_sampler: &atlas_sampler,
                 ao: &ao_view,
                 ao_sampler: &ao_sampler,
+                gi: &gi_views,
             },
         );
 
@@ -955,6 +1079,8 @@ impl ShadowGpu {
             atlas_sampler,
             ao_view,
             ao_sampler,
+            gi_views,
+            gi: None,
             map_size,
             atlas_size,
             atlas_pixels,
@@ -998,6 +1124,22 @@ impl ShadowGpu {
     /// [`Self::scene_bind_entries`] must be rebuilt afterwards.
     pub fn set_ao_view(&mut self, device: &wgpu::Device, view: wgpu::TextureView) {
         self.ao_view = view;
+        self.rebuild_resource_bind(device);
+    }
+
+    /// Point the lit shaders at the GI probe textures. Bind groups made from
+    /// [`Self::scene_bind_entries`] must be rebuilt afterwards.
+    pub fn set_gi_views(&mut self, device: &wgpu::Device, views: [wgpu::TextureView; 3]) {
+        self.gi_views = views;
+        self.rebuild_resource_bind(device);
+    }
+
+    /// This frame's probe box, or None when GI is off.
+    pub fn set_gi(&mut self, placement: Option<super::gi::GiPlacement>) {
+        self.gi = placement;
+    }
+
+    fn rebuild_resource_bind(&mut self, device: &wgpu::Device) {
         self.resource_bind = create_resource_bind(
             device,
             &self.resource_layout,
@@ -1009,6 +1151,7 @@ impl ShadowGpu {
                 atlas_sampler: &self.atlas_sampler,
                 ao: &self.ao_view,
                 ao_sampler: &self.ao_sampler,
+                gi: &self.gi_views,
             },
         );
     }
@@ -1016,7 +1159,7 @@ impl ShadowGpu {
     pub fn scene_bind_entries<'a>(
         &'a self,
         scene_uniforms: wgpu::BindingResource<'a>,
-    ) -> [wgpu::BindGroupEntry<'a>; 8] {
+    ) -> [wgpu::BindGroupEntry<'a>; 11] {
         [
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -1050,6 +1193,18 @@ impl ShadowGpu {
                 binding: 7,
                 resource: wgpu::BindingResource::Sampler(&self.ao_sampler),
             },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(&self.gi_views[0]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: wgpu::BindingResource::TextureView(&self.gi_views[1]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: wgpu::BindingResource::TextureView(&self.gi_views[2]),
+            },
         ]
     }
 
@@ -1059,6 +1214,12 @@ impl ShadowGpu {
         let light = world.light().direction.normalize_or_zero();
         uniforms.light_dir = [light.x, light.y, light.z];
         uniforms.map_texel = 1.0 / self.map_size as f32;
+        if let Some(gi) = self.gi {
+            uniforms.flags |= FLAG_GI;
+            uniforms.gi_origin = gi.origin.into();
+            uniforms.gi_spacing = gi.spacing;
+            uniforms.gi_dims = gi.dims.into();
+        }
 
         let Some(settings) = world.shadows() else {
             queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
@@ -1069,7 +1230,7 @@ impl ShadowGpu {
             return [Mat4::IDENTITY; CASCADE_COUNT];
         };
 
-        uniforms.flags = FLAG_CSM;
+        uniforms.flags |= FLAG_CSM;
         let focus = world.camera().target();
         let ends = settings.cascade_end_m;
         uniforms.cascade_end = [ends[0], ends[1], ends[2], 0.0];

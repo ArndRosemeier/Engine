@@ -279,6 +279,42 @@ impl AmbientOcclusion {
     }
 }
 
+/// Global illumination: sky light that knows about walls, roofs and caves,
+/// plus sunlight bounced off nearby surfaces. Light probes around the camera
+/// trace a voxel copy of the scene that is rebuilt whenever geometry changes,
+/// so destruction relights itself. On by default;
+/// `World::set_global_illumination(None)` switches it off.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlobalIllumination {
+    probe_spacing_m: f32,
+}
+
+impl Default for GlobalIllumination {
+    fn default() -> Self {
+        Self {
+            probe_spacing_m: 2.0,
+        }
+    }
+}
+
+impl GlobalIllumination {
+    /// `probe_spacing_m`: metres between light probes. The probe box spans
+    /// 32 x 16 x 32 probes around the camera; voxels are half this size.
+    /// Smaller spacing gives finer detail over a smaller area.
+    pub fn new(probe_spacing_m: f32) -> EngineResult<Self> {
+        if !probe_spacing_m.is_finite() || probe_spacing_m <= 0.0 {
+            return Err(EngineError::InvalidValue(
+                "GI probe spacing must be finite and > 0".into(),
+            ));
+        }
+        Ok(Self { probe_spacing_m })
+    }
+
+    pub fn probe_spacing_m(self) -> f32 {
+        self.probe_spacing_m
+    }
+}
+
 fn require_finite_non_negative(name: &str, value: f32) -> EngineResult<()> {
     if !value.is_finite() || value < 0.0 {
         return Err(EngineError::InvalidValue(format!(
@@ -564,6 +600,7 @@ pub struct World {
     instance_submit: InstanceSubmit,
     bloom: BloomSettings,
     ambient_occlusion: Option<AmbientOcclusion>,
+    global_illumination: Option<GlobalIllumination>,
     /// Surface presentation sync. Engine default stays on so demos never tear;
     /// the renderer applies it at every present.
     vsync: bool,
@@ -637,6 +674,7 @@ impl Default for World {
             instance_submit: InstanceSubmit::CpuIndexed,
             bloom: BloomSettings::default(),
             ambient_occlusion: Some(AmbientOcclusion::default()),
+            global_illumination: Some(GlobalIllumination::default()),
             vsync: true,
             shadow_contact: ContactSnapshot::default(),
             shadow_contact_epoch: 0,
@@ -1787,6 +1825,14 @@ impl World {
 
     pub fn set_ambient_occlusion(&mut self, ao: Option<AmbientOcclusion>) {
         self.ambient_occlusion = ao;
+    }
+
+    pub fn global_illumination(&self) -> Option<GlobalIllumination> {
+        self.global_illumination
+    }
+
+    pub fn set_global_illumination(&mut self, gi: Option<GlobalIllumination>) {
+        self.global_illumination = gi;
     }
 
     pub fn bloom(&self) -> BloomSettings {
