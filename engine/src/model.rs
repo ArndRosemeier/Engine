@@ -3,7 +3,7 @@
 use crate::color::Color;
 use crate::error::{EngineError, EngineResult};
 use crate::limits::EngineLimits;
-use crate::mesh::{AlbedoMap, BuiltMesh, Mesh, SurfaceMaterial};
+use crate::mesh::{AlbedoMap, BuiltMesh, MaterialMaps, Mesh, SurfaceMaterial};
 use crate::place::Place;
 use glam::{Mat4, Vec3};
 use std::path::{Path, PathBuf};
@@ -11,12 +11,49 @@ use std::path::{Path, PathBuf};
 /// Friendly model loader with path + size limits.
 pub struct Model;
 
+/// A static glTF model split by material: one [`Mesh`] per glTF material,
+/// each with its own albedo and [`MaterialMaps`], in the model's own space
+/// (node transforms applied). Spawn every part with the same place.
+#[derive(Clone, Debug, Default)]
+pub struct ModelScene {
+    pub parts: Vec<Mesh>,
+}
+
+impl ModelScene {
+    pub fn triangle_count(&self) -> usize {
+        self.parts.iter().map(|m| m.build().triangle_count()).sum()
+    }
+
+    /// Box around every part, or `None` for an empty model.
+    pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
+        self.parts
+            .iter()
+            .filter_map(Mesh::bounds)
+            .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
+    }
+}
+
 impl Model {
     /// Load a glTF/GLB file into a [`Mesh`].
     ///
     /// The path must resolve under `base_dir` (default: current directory).
     pub fn load(path: impl AsRef<Path>) -> EngineResult<Mesh> {
         Self::load_with(path, PathBuf::from("."), &EngineLimits::default())
+    }
+
+    /// Load a glTF/GLB file as one mesh per material, with full PBR maps
+    /// (base colour, normal, metallic-roughness, occlusion, emissive).
+    pub fn load_scene(path: impl AsRef<Path>) -> EngineResult<ModelScene> {
+        Self::load_scene_with(path, PathBuf::from("."), &EngineLimits::default())
+    }
+
+    pub fn load_scene_with(
+        path: impl AsRef<Path>,
+        base_dir: impl AsRef<Path>,
+        limits: &EngineLimits,
+    ) -> EngineResult<ModelScene> {
+        let (document, buffers, images) = import_limited(path.as_ref(), base_dir.as_ref(), limits)?;
+        load_scene_document(&document, &buffers, &images, limits)
     }
 
     pub fn load_with(
@@ -288,6 +325,9 @@ fn built_to_mesh(built: &BuiltMesh) -> EngineResult<Mesh> {
         mesh.set_point_color(id, Color::rgba01(c.x, c.y, c.z, c.w).expect("color"))?;
         if let Some(uv) = built.uvs.get(i) {
             mesh.set_point_uv(id, *uv)?;
+        }
+        if let Some(n) = built.normals.get(i) {
+            mesh.set_point_normal(id, *n)?;
         }
         ids.push(id);
     }
@@ -583,5 +623,420 @@ mod tests {
             height: 1,
             rgba: vec![10, 20, 30, 200],
         })));
+    }
+}
+
+/// `gltf::import` inside the sandbox root and the size limits.
+pub(crate) fn import_limited(
+    path: &Path,
+    base_dir: &Path,
+    limits: &EngineLimits,
+) -> EngineResult<(
+    gltf::Document,
+    Vec<gltf::buffer::Data>,
+    Vec<gltf::image::Data>,
+)> {
+    let path = resolve_allowed_path(path, base_dir)?;
+    let meta = std::fs::metadata(&path)?;
+    if meta.len() > limits.max_gltf_buffer_bytes {
+        return Err(EngineError::ResourceLimit(format!(
+            "glTF file is {} bytes (limit {})",
+            meta.len(),
+            limits.max_gltf_buffer_bytes
+        )));
+    }
+    let (document, buffers, images) =
+        gltf::import(&path).map_err(|e| EngineError::Model(e.to_string()))?;
+    let total_buf: u64 = buffers.iter().map(|b| b.0.len() as u64).sum();
+    if total_buf > limits.max_gltf_buffer_bytes {
+        return Err(EngineError::ResourceLimit(format!(
+            "glTF buffers are {total_buf} bytes (limit {})",
+            limits.max_gltf_buffer_bytes
+        )));
+    }
+    Ok((document, buffers, images))
+}
+
+/// One material's geometry, gathered from every primitive that uses it.
+#[derive(Default)]
+struct Part {
+    positions: Vec<Vec3>,
+    normals: Vec<Vec3>,
+    colors: Vec<glam::Vec4>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+}
+
+fn load_scene_document(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    images: &[gltf::image::Data],
+    limits: &EngineLimits,
+) -> EngineResult<ModelScene> {
+    // Walk the default scene (or every root) with world transforms.
+    let roots: Vec<gltf::Node<'_>> = match document
+        .default_scene()
+        .or_else(|| document.scenes().next())
+    {
+        Some(scene) => scene.nodes().collect(),
+        None => document.nodes().collect(),
+    };
+    // Depth first in document order, so parts come out in a stable order.
+    let mut stack: Vec<(gltf::Node<'_>, Mat4)> = roots
+        .into_iter()
+        .rev()
+        .map(|n| (n, Mat4::IDENTITY))
+        .collect();
+    // Keyed by material index; `None` is glTF's default material.
+    let mut parts: Vec<(Option<usize>, gltf::Material<'_>, Part)> = Vec::new();
+    let mut triangles = 0u64;
+    while let Some((node, parent)) = stack.pop() {
+        let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
+        let children: Vec<_> = node.children().collect();
+        stack.extend(children.into_iter().rev().map(|c| (c, world)));
+        let Some(mesh) = node.mesh() else { continue };
+        let normal_matrix = glam::Mat3::from_mat4(world).inverse().transpose();
+        // A mirroring transform flips the winding; turn triangles back round.
+        let mirrored = world.determinant() < 0.0;
+        for primitive in mesh.primitives() {
+            if primitive.mode() != gltf::mesh::Mode::Triangles {
+                continue;
+            }
+            let reader = primitive.reader(|b| buffers.get(b.index()).map(|d| d.0.as_slice()));
+            let Some(positions) = reader.read_positions() else {
+                return Err(EngineError::Model("glTF primitive missing POSITION".into()));
+            };
+            let positions: Vec<Vec3> = positions
+                .map(|p| world.transform_point3(Vec3::from(p)))
+                .collect();
+            if positions.is_empty() {
+                continue;
+            }
+            let n = positions.len();
+            let normals: Vec<Vec3> = match reader.read_normals() {
+                Some(iter) => iter
+                    .map(|v| (normal_matrix * Vec3::from(v)).normalize_or_zero())
+                    .collect(),
+                None => vec![Vec3::ZERO; n],
+            };
+            let material = primitive.material();
+            let factor = glam::Vec4::from(material.pbr_metallic_roughness().base_color_factor());
+            let colors: Vec<glam::Vec4> = match reader.read_colors(0) {
+                Some(iter) => iter
+                    .into_rgba_f32()
+                    .map(|c| glam::Vec4::from(c) * factor)
+                    .collect(),
+                None => vec![factor; n],
+            };
+            let set = material
+                .pbr_metallic_roughness()
+                .base_color_texture()
+                .map_or(0, |t| t.tex_coord());
+            let uvs: Vec<[f32; 2]> = match reader.read_tex_coords(set) {
+                Some(iter) => iter.into_f32().collect(),
+                None => vec![[0.0, 0.0]; n],
+            };
+            let mut indices: Vec<u32> = match reader.read_indices() {
+                Some(iter) => iter.into_u32().collect(),
+                None => (0..n as u32).collect(),
+            };
+            if normals.len() != n || colors.len() != n || uvs.len() != n {
+                return Err(EngineError::Model(
+                    "glTF attribute lengths differ from POSITION".into(),
+                ));
+            }
+            if let Some(bad) = indices.iter().find(|&&i| i as usize >= n) {
+                return Err(EngineError::Model(format!(
+                    "glTF index {bad} out of range ({n} vertices)"
+                )));
+            }
+            indices.truncate(indices.len() / 3 * 3);
+            if mirrored {
+                for tri in indices.chunks_exact_mut(3) {
+                    tri.swap(1, 2);
+                }
+            }
+            triangles += indices.len() as u64 / 3;
+            if triangles > limits.max_model_triangles {
+                return Err(EngineError::ResourceLimit(format!(
+                    "model exceeds {} triangles",
+                    limits.max_model_triangles
+                )));
+            }
+            let key = material.index();
+            let part = match parts.iter().position(|(k, _, _)| *k == key) {
+                Some(i) => &mut parts[i].2,
+                None => {
+                    parts.push((key, material, Part::default()));
+                    &mut parts.last_mut().expect("just pushed").2
+                }
+            };
+            let base = part.positions.len() as u32;
+            part.positions.extend(positions);
+            part.normals.extend(normals);
+            part.colors.extend(colors);
+            part.uvs.extend(uvs);
+            part.indices.extend(indices.into_iter().map(|i| i + base));
+        }
+    }
+    if parts.is_empty() {
+        return Err(EngineError::Model(
+            "glTF has no triangle mesh primitives".into(),
+        ));
+    }
+
+    let mut out = Vec::with_capacity(parts.len());
+    for (_, material, part) in parts {
+        out.push(part_to_mesh(part, &material, images)?);
+    }
+    Ok(ModelScene { parts: out })
+}
+
+fn part_to_mesh(
+    part: Part,
+    material: &gltf::Material<'_>,
+    images: &[gltf::image::Data],
+) -> EngineResult<Mesh> {
+    let albedo = match material.pbr_metallic_roughness().base_color_texture() {
+        Some(info) => Some(image_to_albedo(texture_image(images, info.texture())?)?),
+        None => None,
+    };
+    reject_alpha_mode_without_real_alpha(material.alpha_mode(), &albedo)?;
+
+    let mut surface = imported_surface_material(material.name());
+    if surface == SurfaceMaterial::DEFAULT {
+        let pbr = material.pbr_metallic_roughness();
+        surface.roughness = pbr.roughness_factor();
+        surface.metallic = pbr.metallic_factor();
+    }
+
+    let mut mesh = Mesh::new();
+    let mut ids = Vec::with_capacity(part.positions.len());
+    let smooth = part.normals.iter().all(|n| *n != Vec3::ZERO);
+    for i in 0..part.positions.len() {
+        let id = mesh.add_point(part.positions[i])?;
+        let c = part.colors[i].clamp(glam::Vec4::ZERO, glam::Vec4::ONE);
+        mesh.set_point_color(id, Color::rgba01(c.x, c.y, c.z, c.w)?)?;
+        mesh.set_point_uv(id, part.uvs[i])?;
+        if smooth {
+            mesh.set_point_normal(id, part.normals[i])?;
+        }
+        ids.push(id);
+    }
+    for tri in part.indices.chunks_exact(3) {
+        let (a, b, c) = (
+            ids[tri[0] as usize],
+            ids[tri[1] as usize],
+            ids[tri[2] as usize],
+        );
+        if a == b || b == c || a == c {
+            continue;
+        }
+        mesh.add_triangle(a, b, c)?;
+    }
+    mesh.set_surface_material(surface);
+    if let Some(map) = albedo {
+        mesh.set_albedo_rgba(map.width, map.height, map.rgba)?;
+    }
+    // Neutral sets are dropped, so plain models stay on the cheap path.
+    mesh.set_material_maps(material_maps(material, images)?)?;
+    Ok(mesh)
+}
+
+fn texture_image<'a>(
+    images: &'a [gltf::image::Data],
+    texture: gltf::Texture<'_>,
+) -> EngineResult<&'a gltf::image::Data> {
+    let index = texture.source().index();
+    images
+        .get(index)
+        .ok_or_else(|| EngineError::Model(format!("glTF image {index} is missing")))
+}
+
+/// Normal, occlusion-roughness-metallic and emissive maps of a glTF material.
+///
+/// Occlusion and metallic-roughness are often one texture (ORM); when they
+/// are separate the occlusion is resampled into the red channel of the
+/// metallic-roughness map, so the shader always reads one packed texture.
+pub(crate) fn material_maps(
+    material: &gltf::Material<'_>,
+    images: &[gltf::image::Data],
+) -> EngineResult<MaterialMaps> {
+    let pbr = material.pbr_metallic_roughness();
+    let mut maps = MaterialMaps {
+        roughness: pbr.roughness_factor(),
+        metallic: pbr.metallic_factor(),
+        ..MaterialMaps::default()
+    };
+    if let Some(info) = material.normal_texture() {
+        maps.normal = Some(image_to_albedo(texture_image(images, info.texture())?)?);
+        maps.normal_scale = info.scale();
+    }
+    let mr = pbr.metallic_roughness_texture();
+    let occlusion = material.occlusion_texture();
+    if let Some(occ) = &occlusion {
+        maps.occlusion_strength = occ.strength();
+    }
+    match (mr, occlusion) {
+        (Some(mr), occ) => {
+            let mut orm = image_to_albedo(texture_image(images, mr.texture())?)?;
+            let same = occ
+                .as_ref()
+                .is_some_and(|o| o.texture().source().index() == mr.texture().source().index());
+            if !same {
+                let occ_map = match &occ {
+                    Some(o) => Some(image_to_albedo(texture_image(images, o.texture())?)?),
+                    None => None,
+                };
+                put_red(&mut orm, occ_map.as_ref());
+            }
+            maps.orm = Some(orm);
+        }
+        (None, Some(occ)) => {
+            let occ_map = image_to_albedo(texture_image(images, occ.texture())?)?;
+            let mut orm = AlbedoMap {
+                width: occ_map.width,
+                height: occ_map.height,
+                rgba: vec![255; occ_map.rgba.len()],
+            };
+            put_red(&mut orm, Some(&occ_map));
+            maps.orm = Some(orm);
+        }
+        (None, None) => {}
+    }
+    if let Some(info) = material.emissive_texture() {
+        maps.emissive = Some(image_to_albedo(texture_image(images, info.texture())?)?);
+    }
+    let strength = material.emissive_strength().unwrap_or(1.0);
+    maps.emissive_factor = material.emissive_factor().map(|c| c * strength);
+    Ok(maps)
+}
+
+/// Write `source`'s red channel (resampled to fit) into `target`'s red; no
+/// source means fully unoccluded.
+fn put_red(target: &mut AlbedoMap, source: Option<&AlbedoMap>) {
+    let (w, h) = (target.width as usize, target.height as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let r = source.map_or(255, |s| {
+                let sx = x * s.width as usize / w;
+                let sy = y * s.height as usize / h;
+                s.rgba[(sy * s.width as usize + sx) * 4]
+            });
+            target.rgba[(y * w + x) * 4] = r;
+        }
+    }
+}
+
+#[cfg(test)]
+mod scene_tests {
+    use super::*;
+
+    fn write_png(path: &Path, w: u32, h: u32, rgb: [u8; 3]) {
+        image::RgbImage::from_pixel(w, h, image::Rgb(rgb))
+            .save(path)
+            .expect("write PNG");
+    }
+
+    /// Two materials on two nodes, one moved, one mirrored.
+    fn write_two_material_gltf(dir: &Path) {
+        std::fs::create_dir_all(dir).expect("temp dir");
+        let mut bin = Vec::new();
+        let f = |bin: &mut Vec<u8>, v: &[f32]| {
+            for c in v {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        };
+        f(&mut bin, &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]); // 36 positions
+        f(&mut bin, &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]); // 36 normals
+        f(&mut bin, &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0]); // 24 uvs
+        for i in [0u16, 1, 2] {
+            bin.extend_from_slice(&i.to_le_bytes());
+        }
+        std::fs::write(dir.join("mesh.bin"), &bin).expect("bin");
+        write_png(&dir.join("normal.png"), 4, 4, [128, 128, 255]);
+        write_png(&dir.join("mr.png"), 4, 4, [9, 200, 50]);
+        write_png(&dir.join("occ.png"), 2, 2, [77, 0, 0]);
+        let json = r#"{
+  "asset":{"version":"2.0"},
+  "extensionsUsed":["KHR_materials_emissive_strength"],
+  "scene":0,
+  "scenes":[{"nodes":[0,1]}],
+  "nodes":[
+    {"mesh":0,"translation":[10,0,0]},
+    {"mesh":1,"scale":[-1,1,1]}
+  ],
+  "meshes":[
+    {"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3,"material":0}]},
+    {"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3,"material":1}]}
+  ],
+  "materials":[
+    {"normalTexture":{"index":0,"scale":0.5},
+     "occlusionTexture":{"index":2,"strength":0.8},
+     "pbrMetallicRoughness":{"metallicRoughnessTexture":{"index":1}},
+     "emissiveFactor":[1,0.5,0],
+     "extensions":{"KHR_materials_emissive_strength":{"emissiveStrength":4}}},
+    {"pbrMetallicRoughness":{"metallicFactor":0,"roughnessFactor":0.3}}
+  ],
+  "textures":[{"source":0},{"source":1},{"source":2}],
+  "images":[{"uri":"normal.png"},{"uri":"mr.png"},{"uri":"occ.png"}],
+  "accessors":[
+    {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","max":[1,1,0],"min":[0,0,0]},
+    {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+    {"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"},
+    {"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"}
+  ],
+  "bufferViews":[
+    {"buffer":0,"byteOffset":0,"byteLength":36},
+    {"buffer":0,"byteOffset":36,"byteLength":36},
+    {"buffer":0,"byteOffset":72,"byteLength":24},
+    {"buffer":0,"byteOffset":96,"byteLength":6}
+  ],
+  "buffers":[{"byteLength":102,"uri":"mesh.bin"}]
+}"#;
+        std::fs::write(dir.join("model.gltf"), json).expect("gltf");
+    }
+
+    #[test]
+    fn scene_splits_by_material_with_transforms_and_maps() {
+        let dir = std::env::temp_dir().join(format!("engine-scene-{}", std::process::id()));
+        write_two_material_gltf(&dir);
+        let scene = Model::load_scene_with(dir.join("model.gltf"), &dir, &EngineLimits::default())
+            .expect("scene loads");
+        assert_eq!(scene.parts.len(), 2);
+
+        // Part 0: moved by its node, full map set.
+        let moved = &scene.parts[0];
+        let (lo, hi) = moved.bounds().unwrap();
+        assert!((lo.x - 10.0).abs() < 1e-5 && (hi.x - 11.0).abs() < 1e-5);
+        assert!(moved.has_normals());
+        let maps = moved.material_maps().expect("maps kept");
+        assert!(maps.normal.is_some());
+        assert_eq!(maps.normal_scale, 0.5);
+        assert_eq!(maps.occlusion_strength, 0.8);
+        let orm = maps.orm.as_ref().expect("orm packed");
+        assert_eq!(
+            &orm.rgba[..3],
+            &[77, 200, 50],
+            "occlusion goes into red, roughness and metallic stay"
+        );
+        assert_eq!(maps.emissive_factor, [4.0, 2.0, 0.0]);
+
+        // Part 1: plain factors, mirrored, still facing +z.
+        let plain = &scene.parts[1];
+        assert!(plain.material_maps().is_none(), "neutral maps dropped");
+        let surface = plain.surface_material();
+        assert_eq!((surface.roughness, surface.metallic), (0.3, 0.0));
+        let built = plain.build();
+        let [a, b, c] = [0, 1, 2].map(|i| built.positions[built.indices[i] as usize]);
+        assert!(
+            (b - a).cross(c - a).z > 0.0,
+            "winding turned back after mirroring"
+        );
+        assert!(
+            built.normals.iter().all(|n| n.z > 0.99),
+            "authored normals kept"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -2,8 +2,8 @@
 
 use crate::error::{EngineError, EngineResult};
 use crate::limits::EngineLimits;
-use crate::mesh::AlbedoMap;
-use crate::model::{image_to_albedo, reject_alpha_mode_without_real_alpha};
+use crate::mesh::{AlbedoMap, MaterialMaps};
+use crate::model::{image_to_albedo, material_maps, reject_alpha_mode_without_real_alpha};
 use glam::{Mat4, Quat, Vec3, Vec4};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,6 +20,9 @@ pub struct Skeleton {
     pub inverse_bind: Vec<Mat4>,
     /// glTF node index for each joint (for animation channel targeting).
     pub joint_node_indices: Vec<usize>,
+    /// Transform of the non-joint nodes above each root joint (an armature
+    /// node turning a Z-up rig upright, say); identity for other joints.
+    pub root_transforms: Vec<Mat4>,
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +38,9 @@ pub struct SkinMesh {
     pub double_sided: bool,
     /// Per-primitive `baseColorTexture`, if the glTF has one.
     pub albedo: Option<AlbedoMap>,
+    /// Normal, ORM and emissive maps plus the material's roughness and
+    /// metallic factors.
+    pub maps: MaterialMaps,
 }
 
 #[derive(Clone, Debug)]
@@ -457,7 +463,14 @@ pub fn write_joint_matrices(
         let local = Mat4::from_scale_rotation_translation(s, r, t);
         global[i] = match skeleton.parents[i] {
             Some(p) => global[p] * local,
-            None => local,
+            None => {
+                skeleton
+                    .root_transforms
+                    .get(i)
+                    .copied()
+                    .unwrap_or(Mat4::IDENTITY)
+                    * local
+            }
         };
     }
 
@@ -680,11 +693,20 @@ fn load_animated_document(
     let bind_local: Vec<(Vec3, Quat, Vec3)> =
         joint_nodes.iter().map(|n| node_local_trs(n)).collect();
 
+    let root_transforms: Vec<Mat4> = joint_node_indices
+        .iter()
+        .zip(&parents)
+        .map(|(&ni, parent)| match (parent, node_parent.get(&ni)) {
+            (None, Some(&above)) => node_global_matrix(document, above, &node_parent),
+            _ => Mat4::IDENTITY,
+        })
+        .collect();
     let skeleton = Skeleton {
         joint_names,
         parents,
         inverse_bind,
         joint_node_indices: joint_node_indices.clone(),
+        root_transforms,
     };
 
     let mut meshes = Vec::new();
@@ -941,6 +963,7 @@ fn load_animated_document(
                 indices,
                 double_sided: primitive.material().double_sided(),
                 albedo,
+                maps: material_maps(&primitive.material(), images)?,
             });
         }
     }
@@ -1274,5 +1297,28 @@ mod tests {
             msg.contains("MASK") && msg.contains("alphaMode"),
             "expected MASK hole-body gate, got {msg}"
         );
+    }
+
+    #[test]
+    fn nodes_above_the_root_joint_move_the_skeleton() {
+        // An armature node above the rig (here the mesh node, moved up 5 m)
+        // belongs to every joint's transform, as glTF specifies.
+        let dir = std::env::temp_dir().join(format!("engine-anim-armature-{}", std::process::id()));
+        crate::model::write_minimal_skinned_gltf(&dir, "OPAQUE", false);
+        let path = dir.join("model.gltf");
+        let json = std::fs::read_to_string(&path).unwrap().replace(
+            r#"{"mesh":0,"skin":0,"children":[1]}"#,
+            r#"{"mesh":0,"skin":0,"children":[1],"translation":[0,5,0]}"#,
+        );
+        std::fs::write(&path, json).unwrap();
+        let model = AnimatedModel::load_with(&path, &dir, &EngineLimits::default()).unwrap();
+        let joints = sample_joint_matrices(&model, 0, 0.0);
+        let moved = joints[0].transform_point3(Vec3::ZERO);
+        assert!(
+            (moved - Vec3::new(0.0, 5.0, 0.0)).length() < 1e-5,
+            "{moved:?}"
+        );
+        let mesh = &model.meshes[0];
+        assert!(mesh.maps.normal.is_none() && mesh.maps.is_neutral());
     }
 }

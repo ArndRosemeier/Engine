@@ -4,6 +4,7 @@ mod gi;
 mod gpu_mesh;
 mod gpu_profile;
 mod instance_cull;
+mod material;
 mod particles_gpu;
 mod pipeline;
 mod portal;
@@ -755,8 +756,8 @@ impl Renderer {
                                     &self.device,
                                     &self.queue,
                                     &self.pipelines.albedo_layout,
-                                    &self.pipelines.albedo_sampler,
-                                    &self.pipelines.white_albedo,
+                                    &self.pipelines.material_sampler,
+                                    &self.pipelines.neutral_maps,
                                     m,
                                 )
                             })
@@ -2922,24 +2923,47 @@ impl Renderer {
             if self.gpu_mesh_albedo.contains_key(&tid) {
                 continue;
             }
-            let gpu = self
-                .gpu_textures
-                .get(&tid)
-                .expect("mesh albedo missing on GPU");
-            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("mesh-albedo"),
-                layout: &self.pipelines.albedo_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&gpu.view),
+            let p = &self.pipelines;
+            let bind = if let Some(maps) = world.surface_maps(tid) {
+                // Imported material sets: mipmapped, repeating, full PBR.
+                let cpu = &world.textures()[&tid];
+                let albedo = material::upload_map(
+                    &self.device,
+                    &self.queue,
+                    &crate::mesh::AlbedoMap {
+                        width: cpu.width,
+                        height: cpu.height,
+                        rgba: cpu.rgba.clone(),
                     },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.pipelines.albedo_sampler),
-                    },
-                ],
-            });
+                    material::MapKind::Color,
+                )
+                .create_view(&Default::default());
+                material::GpuMaterial::new(
+                    &self.device,
+                    &self.queue,
+                    &p.albedo_layout,
+                    &p.material_sampler,
+                    &p.neutral_maps,
+                    Some(&albedo),
+                    Some(maps),
+                )
+                .bind
+            } else {
+                let gpu = self
+                    .gpu_textures
+                    .get(&tid)
+                    .expect("mesh albedo missing on GPU");
+                material::GpuMaterial::new(
+                    &self.device,
+                    &self.queue,
+                    &p.albedo_layout,
+                    &p.albedo_sampler,
+                    &p.neutral_maps,
+                    Some(&gpu.view),
+                    None,
+                )
+                .bind
+            };
             self.gpu_mesh_albedo.insert(tid, bind);
         }
         self.gpu_mesh_albedo
