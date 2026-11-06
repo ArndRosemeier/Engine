@@ -301,7 +301,7 @@ pub(crate) mod tests {
     pub(crate) fn encode(version: u32, models: &[TestModel<'_>]) -> Vec<u8> {
         let mut out: Vec<u8> = b"FMPK".to_vec();
         let pad = |out: &mut Vec<u8>| {
-            while out.len() % 4 != 0 {
+            while !out.len().is_multiple_of(4) {
                 out.push(0);
             }
         };
