@@ -16,6 +16,7 @@ mod ssao;
 mod stencil;
 mod terrain_pipeline;
 mod terrain_shadow;
+mod voxel_terrain;
 mod water_pipeline;
 
 use crate::camera::Camera;
@@ -291,6 +292,7 @@ pub struct Renderer {
     ao_active: bool,
     /// Voxel scene and light probes for global illumination.
     gi: gi::GiVolume,
+    voxel: voxel_terrain::VoxelTerrainGpu,
     gpu_meshes: HashMap<EntityId, GpuMesh>,
     /// GPU-mode instance buffers, one per prototype instead of one per spatial bin.
     gpu_instance_batches: HashMap<EntityId, GpuInstanceBatch>,
@@ -464,6 +466,7 @@ impl Renderer {
         let ssao = ssao::Ssao::new(&device, &depth_texture, config.width, config.height);
         shadow.set_ao_view(&device, ssao.view().clone());
         let gi = gi::GiVolume::new(&device, &shadow.resource_layout);
+        let voxel = voxel_terrain::VoxelTerrainGpu::new(&device);
         shadow.set_gi_views(&device, gi.probe_views().clone());
         let pipelines = create_pipelines(&device, &queue, HDR_FORMAT, &shadow);
         let terrain = create_terrain_pipelines(&device, HDR_FORMAT, &pipelines.bind_layout);
@@ -506,6 +509,7 @@ impl Renderer {
             ssao,
             ao_active: false,
             gi,
+            voxel,
             gpu_meshes: HashMap::new(),
             gpu_instance_batches: HashMap::new(),
             gpu_batch_sources: Vec::new(),
@@ -1386,6 +1390,14 @@ impl Renderer {
             .global_illumination()
             .map(|gi| gi::GiPlacement::around(scene_camera.eye(), gi.probe_spacing_m()));
         self.shadow.set_gi(gi_placement);
+        self.voxel.update(
+            &self.device,
+            &self.queue,
+            encoder,
+            world.voxel_terrain(),
+            scene_camera.eye(),
+        );
+        self.mark_gpu(encoder, Mark::VoxelDone);
         self.write_shadows(world);
         self.begin_instance_cull_frame(world);
         if self.shadow.encode_horizon(encoder) {
@@ -1689,7 +1701,11 @@ impl Renderer {
             ambient: world.light().ambient,
             sky: SkyLight::from_world(world),
         };
-        if self.gi.prepare(&self.queue, &frame, world.render_epoch()) {
+        let epoch = world
+            .render_epoch()
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(self.voxel.epoch());
+        if self.gi.prepare(&self.queue, &frame, epoch) {
             self.gi.encode_fill(encoder, &self.shadow.resource_bind);
             self.voxelize_scene(encoder, world, placement);
         }
@@ -1740,9 +1756,19 @@ impl Renderer {
                         .is_some_and(|b| near_box(b.gpu.bounds))
             })
             .collect();
+        let voxel_draws = if space == SpaceId::DEFAULT {
+            self.voxel.visible(|b| near_box(Some(b)))
+        } else {
+            Vec::new()
+        };
         let mut draws = 0;
         for axis in 0..3 {
             let mut pass = self.gi.begin_voxelize(encoder, axis);
+            if !voxel_draws.is_empty() {
+                self.gi.use_terrain_voxelizer(&mut pass);
+                self.voxel.draw(&mut pass, &voxel_draws);
+                self.gi.use_mesh_voxelizer(&mut pass);
+            }
             for id in &meshes {
                 let gpu = &self.gpu_meshes[id];
                 submit_mesh_draw(
@@ -1806,6 +1832,13 @@ impl Renderer {
                 clip.draw_land_depth(&mut pass, &self.shadow.resource_bind);
                 pass.set_bind_group(0, scene_bind, &[]);
             }
+        }
+
+        if space == SpaceId::DEFAULT && self.voxel.is_drawing() {
+            let draws = self.voxel.visible_in(&self.frustum);
+            pass.set_pipeline(&self.pipelines.voxel_depth_prepass);
+            pass.set_bind_group(1, &self.pipelines.white_albedo, &[]);
+            self.voxel.draw(&mut pass, &draws);
         }
 
         pass.set_pipeline(&self.pipelines.depth_prepass);
@@ -1962,6 +1995,13 @@ impl Renderer {
                 // The clipmap owns group 0 while it draws; give it back.
                 pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
             }
+        }
+
+        if !portal_mask && space == SpaceId::DEFAULT && self.voxel.is_drawing() {
+            let draws = self.voxel.visible_in(&self.frustum);
+            pass.set_pipeline(&self.pipelines.voxel_opaque);
+            pass.set_bind_group(1, &self.pipelines.white_albedo, &[]);
+            self.voxel.draw(pass, &draws);
         }
 
         pass.set_pipeline(if portal_mask {
@@ -2334,6 +2374,12 @@ impl Renderer {
             });
             if let Some(bundle) = self.shadow_bundles[i].as_ref() {
                 pass.execute_bundles(std::iter::once(bundle));
+            }
+            if world.living_in() == SpaceId::DEFAULT && self.voxel.is_drawing() {
+                let draws = self.voxel.visible_in(frustum);
+                pass.set_pipeline(&self.shadow.voxel_pipeline);
+                pass.set_bind_group(0, &self.shadow.cascade_binds[i], &[]);
+                self.voxel.draw(&mut pass, &draws);
             }
             pass.set_pipeline(&self.shadow.skinned_pipeline);
             pass.set_bind_group(0, &self.shadow.cascade_binds[i], &[]);

@@ -601,6 +601,8 @@ pub struct World {
     bloom: BloomSettings,
     ambient_occlusion: Option<AmbientOcclusion>,
     global_illumination: Option<GlobalIllumination>,
+    /// Smooth destructible terrain, meshed by the renderer on the GPU.
+    voxel_terrain: Option<crate::voxel_terrain::VoxelTerrain>,
     /// Surface presentation sync. Engine default stays on so demos never tear;
     /// the renderer applies it at every present.
     vsync: bool,
@@ -675,6 +677,7 @@ impl Default for World {
             bloom: BloomSettings::default(),
             ambient_occlusion: Some(AmbientOcclusion::default()),
             global_illumination: Some(GlobalIllumination::default()),
+            voxel_terrain: None,
             vsync: true,
             shadow_contact: ContactSnapshot::default(),
             shadow_contact_epoch: 0,
@@ -1833,6 +1836,20 @@ impl World {
 
     pub fn set_global_illumination(&mut self, gi: Option<GlobalIllumination>) {
         self.global_illumination = gi;
+    }
+
+    /// Smooth destructible terrain drawn in the default space.
+    pub fn voxel_terrain(&self) -> Option<&crate::voxel_terrain::VoxelTerrain> {
+        self.voxel_terrain.as_ref()
+    }
+
+    /// Edit the voxel terrain; the renderer re-meshes the changed chunks.
+    pub fn voxel_terrain_mut(&mut self) -> Option<&mut crate::voxel_terrain::VoxelTerrain> {
+        self.voxel_terrain.as_mut()
+    }
+
+    pub fn set_voxel_terrain(&mut self, terrain: Option<crate::voxel_terrain::VoxelTerrain>) {
+        self.voxel_terrain = terrain;
     }
 
     pub fn bloom(&self) -> BloomSettings {

@@ -102,6 +102,7 @@ pub struct GiVolume {
     fill_pipeline: wgpu::ComputePipeline,
     update_pipeline: wgpu::ComputePipeline,
     voxel_pipeline: wgpu::RenderPipeline,
+    terrain_voxel_pipeline: wgpu::RenderPipeline,
     fill_bind: wgpu::BindGroup,
     update_bind: wgpu::BindGroup,
     voxel_binds: [wgpu::BindGroup; 3],
@@ -318,6 +319,32 @@ impl GiVolume {
             multiview: None,
             cache: None,
         });
+        let terrain_voxel_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("gi-voxelize-terrain"),
+                layout: Some(&voxel_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &voxel_shader,
+                    entry_point: Some("vs_voxel"),
+                    buffers: &super::voxel_terrain::VOXEL_BUFFERS,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &voxel_shader,
+                    entry_point: Some("fs_voxel"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::R8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::empty(),
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
         let raster_view = device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("gi-voxelize-target"),
@@ -409,6 +436,7 @@ impl GiVolume {
             fill_pipeline,
             update_pipeline,
             voxel_pipeline,
+            terrain_voxel_pipeline,
             fill_bind,
             update_bind,
             voxel_binds,
@@ -504,6 +532,16 @@ impl GiVolume {
         pass.set_pipeline(&self.voxel_pipeline);
         pass.set_bind_group(0, &self.voxel_binds[axis], &[]);
         pass
+    }
+
+    /// Switch a voxelize pass over to voxel-terrain geometry.
+    pub fn use_terrain_voxelizer(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_pipeline(&self.terrain_voxel_pipeline);
+    }
+
+    /// Back to regular meshes after [`Self::use_terrain_voxelizer`].
+    pub fn use_mesh_voxelizer(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_pipeline(&self.voxel_pipeline);
     }
 
     /// Trace this frame's probe rays and fold them into the history.

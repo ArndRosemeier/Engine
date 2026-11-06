@@ -4,26 +4,27 @@
 //! timed (the readback waits for the GPU, so frame pacing is not
 //! representative), and the average of the last `N` frames is printed:
 //!
-//! `gpu_profile frames=N shadow=… gi=… ao=… world=… post=… ui=… total=…`
+//! `gpu_profile frames=N voxel=… shadow=… gi=… ao=… world=… post=… ui=… total=…`
 //!
-//! `gi` is the voxel rebuild and probe update, `ao` the depth prepass plus
+//! `voxel` is voxel-terrain meshing, `gi` the voxel rebuild and probe update, `ao` the depth prepass plus
 //! the SSAO passes.
 
 /// Timestamp slots, written in this order during a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mark {
     Start = 0,
-    ShadowDone = 1,
-    GiDone = 2,
-    AoDone = 3,
-    WorldDone = 4,
-    PostDone = 5,
-    UiDone = 6,
+    VoxelDone = 1,
+    ShadowDone = 2,
+    GiDone = 3,
+    AoDone = 4,
+    WorldDone = 5,
+    PostDone = 6,
+    UiDone = 7,
 }
 
-const QUERY_COUNT: u32 = 7;
+const QUERY_COUNT: u32 = 8;
 const QUERY_BYTES: u64 = QUERY_COUNT as u64 * wgpu::QUERY_SIZE as u64;
-const PHASES: [&str; 6] = ["shadow", "gi", "ao", "world", "post", "ui"];
+const PHASES: [&str; 7] = ["voxel", "shadow", "gi", "ao", "world", "post", "ui"];
 
 pub struct GpuProfiler {
     query_set: wgpu::QuerySet,
@@ -31,7 +32,7 @@ pub struct GpuProfiler {
     read_buffer: wgpu::Buffer,
     timestamp_period_ns: f32,
     every_frames: u32,
-    sums_ms: [f64; 6],
+    sums_ms: [f64; 7],
     frames: u32,
 }
 
@@ -77,7 +78,7 @@ impl GpuProfiler {
             read_buffer,
             timestamp_period_ns,
             every_frames,
-            sums_ms: [0.0; 6],
+            sums_ms: [0.0; 7],
             frames: 0,
         }
     }
@@ -135,7 +136,7 @@ impl GpuProfiler {
             }
             line.push_str(&format!(" total={total:.3}ms"));
             eprintln!("{line}");
-            self.sums_ms = [0.0; 6];
+            self.sums_ms = [0.0; 7];
             self.frames = 0;
         }
     }

@@ -33,6 +33,7 @@ pub mod texture;
 pub mod tree;
 pub mod ui;
 pub mod vfx;
+pub mod voxel_terrain;
 pub mod water_mesh;
 pub mod world;
 
@@ -90,6 +91,7 @@ pub use texture::{
 pub use tree::{BranchNode, LeafKind, TreeAsset, TreeKind, TreeLod, TreeProfile, TreeSettings};
 pub use ui::{egui, UiFrame, UiPanel};
 pub use vfx::{Delivery, EffectHandle, EffectSpec, VfxPalette, VfxSystem, VisualKind};
+pub use voxel_terrain::{VoxelTerrain, VOXEL_MAX_LOD};
 
 pub use water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use world::{
