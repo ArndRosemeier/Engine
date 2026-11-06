@@ -227,6 +227,10 @@ pub struct TreeAsset {
     foliage_clusters: usize,
     kind: TreeKind,
     lod: TreeLod,
+    /// Deepest branch level that gets a bark tube.
+    bark_depth: u32,
+    /// Leaf card size factor that keeps coarse levels' leaf area.
+    leaf_scale: f32,
 }
 impl TreeAsset {
     pub fn generate(origin: Vec3, settings: TreeSettings) -> Self {
@@ -239,23 +243,25 @@ impl TreeAsset {
         // and leaf size proportional when species heights use mature-world metres;
         // otherwise taller trees collapse into bare sticks.
         let structure_scale = profile.height / 8.0;
-        let (branch_depth, primary_branches, foliage_per_cluster) = match settings.lod {
-            TreeLod::Hero => (
-                profile.branching_depth,
-                profile.primary_branches,
-                profile.foliage_per_cluster,
-            ),
+        // Every level grows the full branch layout, so the canopy stands where
+        // the detailed tree's does. Coarser levels drop the finer bark and keep
+        // every 2nd (Mid) or 3rd (Far) leaf cluster with fewer, bigger cards.
+        // Cards grow less than the dropped area: overlap hides most of it, and
+        // full compensation makes distant crowns too dense.
+        let branch_depth = profile.branching_depth;
+        let primary_branches = profile.primary_branches;
+        let (bark_depth, cluster_stride, foliage_per_cluster) = match settings.lod {
+            TreeLod::Hero => (branch_depth, 1, profile.foliage_per_cluster),
             TreeLod::Mid => (
-                profile
-                    .branching_depth
-                    .checked_sub(1)
-                    .expect("validated branching depth")
-                    .max(1),
-                (profile.primary_branches * 3 / 4).max(3),
+                branch_depth.saturating_sub(1).max(1),
+                2,
                 (profile.foliage_per_cluster * 3 / 4).max(2),
             ),
-            TreeLod::Far => (1, (profile.primary_branches / 2).max(3), 2),
+            TreeLod::Far => (1, 3, 3.min(profile.foliage_per_cluster).max(1)),
         };
+        let leaf_scale = ((cluster_stride * profile.foliage_per_cluster) as f32
+            / foliage_per_cluster as f32)
+            .powf(0.35);
         let mut asset = Self {
             bark: Mesh::new(),
             foliage: Mesh::new(),
@@ -263,6 +269,8 @@ impl TreeAsset {
             foliage_clusters: 0,
             kind: settings.kind,
             lod: settings.lod,
+            bark_depth,
+            leaf_scale,
         };
         let trunk_end = origin + Vec3::Y * profile.height;
         let trunk = asset.add_branch(
@@ -350,7 +358,10 @@ impl TreeAsset {
                         .any(|child| child.parent == Some(*index))
             })
             .collect();
-        for (index, branch) in terminals {
+        for (n, (index, branch)) in terminals.into_iter().enumerate() {
+            if n as u32 % cluster_stride != 0 {
+                continue;
+            }
             asset.add_cluster(
                 &branch,
                 index,
@@ -438,7 +449,9 @@ impl TreeAsset {
             depth,
             wind_phase,
         });
-        add_tube(&mut self.bark, start, end, start_radius, end_radius);
+        if depth <= self.bark_depth {
+            add_tube(&mut self.bark, start, end, start_radius, end_radius);
+        }
         index
     }
     fn add_cluster(
@@ -454,16 +467,19 @@ impl TreeAsset {
         let direction = (branch.end - branch.start).normalize();
         let side = direction.cross(Vec3::Y).try_normalize().unwrap_or(Vec3::X);
         let up = side.cross(direction).normalize();
-        let centre = branch.end + direction * profile.foliage_size * structure_scale * 0.16;
+        let size = profile.foliage_size * structure_scale * self.leaf_scale;
+        let centre = branch.end + direction * size * 0.16;
         for leaf in 0..foliage_per_cluster {
             let phase = hash(seed, index as u32 * 31 + leaf) as f32 * 0.021;
             let tangent = (side * phase.cos() + up * phase.sin()).normalize();
             add_leaf(
                 &mut self.foliage,
-                centre + tangent * ((leaf as f32 - foliage_per_cluster as f32 * 0.5) * 0.11),
+                centre
+                    + tangent
+                        * ((leaf as f32 - foliage_per_cluster as f32 * 0.5) * 0.11 * self.leaf_scale),
                 direction,
                 tangent,
-                profile.foliage_size * structure_scale,
+                size,
                 phase,
                 kind.leaf_kind(),
             );
