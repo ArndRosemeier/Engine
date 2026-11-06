@@ -14,6 +14,7 @@ pub use crate::error::{EngineError, EngineResult};
 pub use crate::input::{Input, Key, MouseButton};
 pub use crate::landscape::Landscape;
 pub use crate::limits::EngineLimits;
+pub use crate::lod::{LodId, LodLevel};
 pub use crate::mesh::{Mesh, PointId, Shape, SurfaceMaterial};
 pub use crate::model::{scatter_places, Model, ModelScene};
 pub use crate::particles::{

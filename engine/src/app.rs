@@ -279,6 +279,7 @@ impl ApplicationHandler for App {
                     self.world.set_time(time);
                     self.world.tick_animations(dt);
                     self.world.tick_debris(dt);
+                    self.world.tick_lods();
                 }
                 let anim_ms = elapsed_ms(anim_t);
 

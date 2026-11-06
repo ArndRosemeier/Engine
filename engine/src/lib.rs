@@ -17,6 +17,7 @@ pub mod gpu_field;
 pub mod input;
 pub mod landscape;
 pub mod limits;
+pub mod lod;
 pub mod mesh;
 pub mod model;
 pub mod particles;
