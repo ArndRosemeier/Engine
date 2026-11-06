@@ -33,7 +33,7 @@ egui = "0.32.3"
 egui-wgpu = "0.32.3"
 egui-winit = "0.32.3"
 glam = { version = "0.30", features = ["bytemuck"] }
-gltf = { version = "1.4", default-features = true, features = ["utils", "KHR_materials_emissive_strength"] }
+gltf = { version = "1.4", default-features = true, features = ["utils", "extras", "extensions", "KHR_materials_emissive_strength", "KHR_texture_transform"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 noise = "0.9"
 pollster = "0.4"

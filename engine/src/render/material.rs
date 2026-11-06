@@ -17,6 +17,8 @@ pub struct MaterialParams {
     pub emissive: [f32; 3],
     /// 1 when a normal map is bound.
     pub has_normal: f32,
+    /// Normal map UV scale (xy) and offset (zw).
+    pub normal_uv: [f32; 4],
 }
 
 impl MaterialParams {
@@ -32,6 +34,7 @@ impl MaterialParams {
             metallic: maps.metallic,
             emissive: maps.emissive_factor,
             has_normal: if maps.normal.is_some() { 1.0 } else { 0.0 },
+            normal_uv: maps.normal_uv,
         }
     }
 }
@@ -48,6 +51,7 @@ struct MaterialParams {{
     metallic: f32,
     emissive: vec3<f32>,
     has_normal: f32,
+    normal_uv: vec4<f32>,
 }};
 @group({group}) @binding(2) var normal_tex: texture_2d<f32>;
 @group({group}) @binding(3) var orm_tex: texture_2d<f32>;
@@ -57,10 +61,11 @@ struct MaterialParams {{
 // Shading normal from the tangent-space normal map. The tangent frame comes
 // from screen-space derivatives of position and UV (a cotangent frame), so
 // meshes need no stored tangents and mirrored UVs just work.
-fn mapped_normal(n: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {{
+fn mapped_normal(n: vec3<f32>, p: vec3<f32>, mesh_uv: vec2<f32>) -> vec3<f32> {{
     if mat.has_normal < 0.5 {{
         return n;
     }}
+    let uv = mesh_uv * mat.normal_uv.xy + mat.normal_uv.zw;
     var t = textureSample(normal_tex, albedo_sampler, uv).xyz * 2.0 - 1.0;
     t = vec3<f32>(t.xy * mat.normal_scale, t.z);
     let dp1 = dpdx(p);
