@@ -16,6 +16,7 @@ members = [
     "examples/voxel_destruction",
     "examples/model_viewer",
     "examples/lod_forest",
+    "examples/sky_day",
 ]
 default-members = ["engine"]
 

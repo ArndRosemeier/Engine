@@ -1348,7 +1348,11 @@ impl Renderer {
         self.queue
             .write_buffer(uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         if let Some(sky) = world.sky() {
-            let sky_u = SkyUniforms::from_scene(&sky, camera, world.light(), aspect, world.time());
+            let mut sky_u =
+                SkyUniforms::from_scene(&sky, camera, world.light(), aspect, world.time());
+            if let Some(physical) = world.physical_sky() {
+                sky_u = sky_u.with_physical(&physical, camera, world.time());
+            }
             self.queue
                 .write_buffer(&self.sky.uniform_bufs[slot], 0, bytemuck::bytes_of(&sky_u));
         }

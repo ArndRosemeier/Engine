@@ -602,6 +602,8 @@ pub struct World {
     haze: Option<Haze>,
     /// Procedural sky behind the scene, when the game wants one.
     sky: Option<Sky>,
+    /// Time of day and weather driving sun, sky, haze and exposure.
+    physical_sky: Option<crate::sky::PhysicalSky>,
     /// Light carried by the viewer (lantern / headlamp), when lit.
     torch: Option<TorchLight>,
     /// Nearby mesh CSM + height raymarch. `None` disables shadows.
@@ -689,6 +691,7 @@ impl Default for World {
             view_distance: Camera::default().far(),
             haze: None,
             sky: None,
+            physical_sky: None,
             torch: None,
             shadows: Some(ShadowSettings::default()),
             instance_submit: InstanceSubmit::CpuIndexed,
@@ -2211,6 +2214,53 @@ impl World {
 
     pub fn sky(&self) -> Option<Sky> {
         self.sky
+    }
+
+    /// Drive the sun, moon, sky dome, ambient light, haze and exposure from
+    /// a time of day and weather (see [`crate::sky`]). Change `hour` every
+    /// frame for a running day. `None` hands sun, sky and haze back to the
+    /// game, as they were last set.
+    pub fn set_physical_sky(&mut self, sky: Option<crate::sky::PhysicalSky>) {
+        self.physical_sky = sky;
+        self.tick_sky();
+    }
+
+    pub fn physical_sky(&self) -> Option<crate::sky::PhysicalSky> {
+        self.physical_sky
+    }
+
+    /// Apply the physical sky's lighting to the world's light, sky, haze
+    /// and exposure. Runs every frame before rendering.
+    pub(crate) fn tick_sky(&mut self) {
+        let Some(sky) = self.physical_sky else {
+            return;
+        };
+        let l = sky.lighting();
+        // AssetGenerator's sun is 3.2 at a clear low sun, ~4.5 at noon, under
+        // an exposure of 0.55; the engine's daylight is 1.0 under exposure 1.
+        self.light.direction = l.light_dir;
+        self.light.color = l.light_color * (l.light_intensity / 3.2);
+        self.light.ambient = (l.hemi_intensity * 0.3).clamp(0.0, 1.0);
+        let c = |v: Vec3| Color {
+            r: v.x,
+            g: v.y,
+            b: v.z,
+            a: 1.0,
+        };
+        let sun_color = l.light_color / l.light_color.max_element().max(1e-3);
+        self.sky = Some(Sky {
+            zenith: c(l.sky_color),
+            horizon: c(l.fog_color),
+            ground: c(l.ground_color),
+            sun_color: c(sun_color),
+            sun_size_degrees: crate::sky::SUN_RADIUS.to_degrees(),
+            sun_bloom_degrees: 20.0,
+            curve: 0.22,
+        });
+        // exp(-d * density) reaches 2% at 3.9 / density.
+        let visibility = (3.9 / l.fog_density).min(self.view_distance.max(50.0) * 1.5);
+        self.haze = Some(Haze::new(c(l.fog_color), visibility));
+        let _ = self.bloom.set_exposure((l.exposure / 0.55).clamp(0.1, 8.0));
     }
 
     pub fn entity(&self, id: EntityId) -> EngineResult<&Entity> {

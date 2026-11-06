@@ -25,9 +25,20 @@ pub struct SkyUniforms {
     pub ground: [f32; 3],
     pub sun_bloom: f32,
     pub sun_dir: [f32; 3],
-    pub _pad: f32,
+    /// 1 draws the physical sky (crate::sky), 0 the colour gradient.
+    pub physical: f32,
     pub sun_color: [f32; 3],
-    pub _pad2: f32,
+    pub overcast: f32,
+    pub moon_dir: [f32; 3],
+    pub moon_bright: f32,
+    pub moon_sun: [f32; 3],
+    pub stars: f32,
+    pub fog_col: [f32; 3],
+    pub sky_fog: f32,
+    pub cloud_origin: [f32; 3],
+    pub cloud_cover: f32,
+    /// Cloud density, storm darkness, layer height (m), drift time.
+    pub cloud: [f32; 4],
 }
 
 impl SkyUniforms {
@@ -59,10 +70,49 @@ impl SkyUniforms {
             ground: sky.ground.to_vec3().into(),
             sun_bloom: bloom.cos(),
             sun_dir: sun_dir.into(),
-            _pad: 0.0,
+            physical: 0.0,
             sun_color: sky.sun_color.to_vec3().into(),
-            _pad2: 0.0,
+            overcast: 0.0,
+            moon_dir: [0.0, -1.0, 0.0],
+            moon_bright: 0.0,
+            moon_sun: [0.0, 1.0, 0.0],
+            stars: 0.0,
+            fog_col: [0.0; 3],
+            sky_fog: 0.0,
+            cloud_origin: [0.0; 3],
+            cloud_cover: 0.0,
+            cloud: [0.0; 4],
         }
+    }
+
+    /// The physical sky's parameters on top of the camera basis.
+    pub fn with_physical(
+        mut self,
+        sky: &crate::sky::PhysicalSky,
+        camera: &Camera,
+        time: f32,
+    ) -> Self {
+        let light = sky.lighting();
+        let moon = sky.moon();
+        self.physical = 1.0;
+        self.sun_dir = sky.sun().into();
+        self.sun_cos = crate::sky::SUN_RADIUS.cos();
+        self.overcast = light.overcast;
+        self.moon_dir = moon.dir.into();
+        self.moon_bright = light.moon_bright;
+        self.moon_sun = moon.sun_side.into();
+        self.stars = light.stars;
+        self.fog_col = light.fog_color.into();
+        self.sky_fog = light.sky_fog;
+        self.cloud_origin = camera.eye().into();
+        self.cloud_cover = sky.weather.cover;
+        self.cloud = [
+            sky.weather.density,
+            sky.weather.dark,
+            sky.cloud_height_m,
+            time * sky.cloud_speed,
+        ];
+        self
     }
 }
 
@@ -99,9 +149,18 @@ struct SkyUniforms {
     ground: vec3<f32>,
     sun_bloom: f32,
     sun_dir: vec3<f32>,
-    _pad: f32,
+    physical: f32,
     sun_color: vec3<f32>,
-    _pad2: f32,
+    overcast: f32,
+    moon_dir: vec3<f32>,
+    moon_bright: f32,
+    moon_sun: vec3<f32>,
+    stars: f32,
+    fog_col: vec3<f32>,
+    sky_fog: f32,
+    cloud_origin: vec3<f32>,
+    cloud_cover: f32,
+    cloud: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> s: SkyUniforms;
@@ -178,6 +237,215 @@ fn fbm3(p: vec3<f32>) -> f32 {
     return v * 0.5 + 0.5;
 }
 
+const PHYSICAL_SKY_SCALE: f32 = 1.0;
+// ---- Physical sky (port of AssetGenerator's @futuremagic/sky SkyMesh) ----
+
+fn pgrad(i: vec2<f32>) -> vec2<f32> {
+    var p = fract(i.xyx * vec3<f32>(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.xx + p.yz) * p.zy) * 2.0 - 1.0;
+}
+
+fn pnoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let a = dot(pgrad(i), f);
+    let b = dot(pgrad(i + vec2<f32>(1.0, 0.0)), f - vec2<f32>(1.0, 0.0));
+    let c = dot(pgrad(i + vec2<f32>(0.0, 1.0)), f - vec2<f32>(0.0, 1.0));
+    let d = dot(pgrad(i + vec2<f32>(1.0, 1.0)), f - vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 1.6;
+}
+
+fn pfbm(position: vec2<f32>, drift: f32) -> f32 {
+    var p = position;
+    var result = 0.0;
+    var amplitude = 1.0;
+    for (var i = 0; i < 4; i++) {
+        result += amplitude * pnoise(p);
+        amplitude *= 0.5;
+        p = p * 2.0 + drift;
+    }
+    return result;
+}
+
+// The glow while the sun is just below the horizon, where Preetham is black.
+fn twilight(direction: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
+    let sy = sun.y;
+    let glow = smoothstep(-0.18, -0.01, sy) * ((1.0 - smoothstep(-0.01, 0.06, sy)) * 0.85 + 0.15)
+        * (1.0 - smoothstep(0.03, 0.1, sy));
+    let h = max(direction.y, 0.0);
+    let flat_d = vec2<f32>(direction.x, direction.z);
+    let flat_s = vec2<f32>(sun.x, sun.z);
+    let toward = clamp(dot(flat_d / max(length(flat_d), 1e-4), flat_s / max(length(flat_s), 1e-4)) * 0.5 + 0.5, 0.0, 1.0);
+    let low = pow(1.0 - h, 6.0);
+    let band = vec3<f32>(0.9, 0.38, 0.12) * low * (pow(toward, 3.0) * 0.85 + 0.15) * smoothstep(-0.18, -0.02, sy);
+    let blue = mix(vec3<f32>(0.05, 0.08, 0.16), vec3<f32>(0.012, 0.03, 0.085), pow(h, 0.6)) * (smoothstep(-0.2, -0.04, sy) + 0.3);
+    let belt = vec3<f32>(0.12, 0.06, 0.09) * pow(1.0 - h, 3.0) * pow(1.0 - toward, 2.0);
+    return (band + blue + belt) * glow * 0.5 * smoothstep(-0.12, 0.0, direction.y);
+}
+
+// The night once twilight has gone: deep blue, lighter at the horizon and under the moon.
+fn night_sky(direction: vec3<f32>, sun: vec3<f32>, moon: vec3<f32>) -> vec3<f32> {
+    let dark = 1.0 - smoothstep(-0.2, -0.06, sun.y);
+    let h = max(direction.y, 0.0);
+    let base = mix(vec3<f32>(0.022, 0.03, 0.055), vec3<f32>(0.006, 0.011, 0.03), pow(h, 0.5));
+    let moon_up = smoothstep(-0.05, 0.25, moon.y);
+    let halo = vec3<f32>(0.05, 0.06, 0.08) * pow(max(dot(direction, moon), 0.0), 12.0) * moon_up;
+    return (base * (moon_up * 1.2 + 0.6) + halo) * dark * smoothstep(-0.15, 0.0, direction.y);
+}
+
+// Stars: one per cell of a cube-mapped grid, twinkling a little.
+fn star_field(direction: vec3<f32>) -> vec3<f32> {
+    let a = abs(direction);
+    var uv: vec2<f32>;
+    var face: f32;
+    if a.x >= a.y && a.x >= a.z {
+        uv = direction.yz / a.x;
+        face = sign(direction.x);
+    } else if a.y >= a.z {
+        uv = direction.xz / a.y;
+        face = 2.0 + sign(direction.y);
+    } else {
+        uv = direction.xy / a.z;
+        face = 4.0 + sign(direction.z);
+    }
+    let cells = 220.0;
+    let g = uv * cells;
+    let cell = floor(g);
+    let r = hash21(cell + vec2<f32>(face * 17.0, face * 31.0));
+    if r < 0.93 {
+        return vec3<f32>(0.0);
+    }
+    let pos = vec2<f32>(hash21(cell + 3.7), hash21(cell + 9.1)) * 0.7 + 0.15;
+    let d = length(fract(g) - pos);
+    let b = (r - 0.93) / 0.07;
+    let tw = 0.75 + 0.25 * sin(s.time * (1.5 + 3.0 * b) + r * 60.0);
+    let core = smoothstep(0.09, 0.0, d) * (0.3 + 1.7 * b * b) * tw;
+    return vec3<f32>(1.0, 0.95 + 0.05 * b, 0.88 + 0.2 * b) * core;
+}
+
+fn physical_sky(direction: vec3<f32>) -> vec3<f32> {
+    let pi = 3.141592653589793;
+    let sun = normalize(s.sun_dir);
+    // Preetham: per-frame constants, cheap enough per pixel.
+    let total_rayleigh = vec3<f32>(5.804542996261093e-6, 1.3562911419845635e-5, 3.0265902468824876e-5);
+    let mie_const = vec3<f32>(1.8399918514433978e14, 2.7798023919660528e14, 4.0790479543861094e14);
+    let turbidity = 4.0;
+    let rayleigh = 1.4;
+    let mie_coefficient = 0.004;
+    let mie_g = 0.8;
+    let zenith_cos = clamp(sun.y, -1.0, 1.0);
+    let sun_e = 1000.0 * max(0.0, 1.0 - exp(-((1.6110731556870734 - acos(zenith_cos)) / 1.5)));
+    let beta_r = total_rayleigh * rayleigh;
+    let beta_m = 0.434 * (0.2 * turbidity * 10e-18) * mie_const * mie_coefficient;
+
+    let zenith_angle = acos(max(0.0, direction.y));
+    let inv = 1.0 / (cos(zenith_angle) + 0.15 * pow(max(93.885 - zenith_angle * 180.0 / pi, 1e-3), -1.253));
+    let fex = exp(-(beta_r * 8.4e3 * inv + beta_m * 1.25e3 * inv));
+    let cos_theta = dot(direction, sun);
+    let cc = cos_theta * 0.5 + 0.5;
+    let r_phase = 0.05968310365946075 * (1.0 + cc * cc);
+    let g2 = mie_g * mie_g;
+    let m_phase = 0.07957747154594767 * (1.0 - g2) / pow(max(1.0 - 2.0 * mie_g * cos_theta + g2, 1e-6), 1.5);
+    let scatter = (beta_r * r_phase + beta_m * m_phase) / (beta_r + beta_m);
+    var lin = pow(sun_e * scatter * (1.0 - fex), vec3<f32>(1.5));
+    lin *= mix(vec3<f32>(1.0), pow(sun_e * scatter * fex, vec3<f32>(0.5)), clamp(pow(1.0 - sun.y, 5.0), 0.0, 1.0));
+    let l0 = vec3<f32>(0.1) * fex;
+
+    // Sun disc, bright but keeping its colour.
+    let disc = smoothstep(s.sun_cos - 0.00002, s.sun_cos + 0.00002, cos_theta);
+    let disc_color = fex / max(max(fex.r, fex.g), max(fex.b, 1e-4)) * disc * (1.0 - s.overcast)
+        * mix(9.0, 30.0, smoothstep(0.0, 0.35, sun.y)) * smoothstep(0.0, 0.05, sun_e / 1000.0);
+
+    // Glare round a low sun, compressed above a soft knee.
+    var sky_c = (lin + l0) * 0.04;
+    let sky_l = max(max(sky_c.r, sky_c.g), sky_c.b);
+    if sky_l > 1.0 {
+        sky_c = sky_c * (1.0 + log(sky_l)) / sky_l;
+    }
+    var color = sky_c + disc_color + vec3<f32>(0.0, 0.0003, 0.00075);
+    let cz = max(cos_theta, 0.0);
+    color += min(sun_e * fex, vec3<f32>(80.0)) * (0.05 * pow(cz, 6000.0) + 0.003 * pow(cz, 400.0))
+        * (1.0 - s.overcast) * smoothstep(-0.05, 0.02, direction.y);
+
+    let twi = twilight(direction, sun);
+    color += twi * (1.0 - s.overcast * 0.6);
+    let night = night_sky(direction, sun, s.moon_dir);
+    color += night * (1.0 - s.overcast * 0.5);
+
+    // Stars, hidden behind the moon's disc.
+    let cos_m = dot(direction, s.moon_dir);
+    if s.stars > 0.0 && cos_m < cos(0.024) {
+        color += star_field(direction) * s.stars * 0.6 * smoothstep(0.0, 0.08, direction.y);
+    }
+
+    // The moon: a sphere lit from the sun's side (its phase), maria, craters, reddened low down.
+    let moon_r = 0.024;
+    if s.moon_bright > 0.0 && cos_m > cos(moon_r * 1.05) {
+        let m_right = normalize(cross(s.moon_dir, vec3<f32>(0.0, 1.0, 0.0)) + vec3<f32>(1e-5, 0.0, 0.0));
+        let m_up = cross(m_right, s.moon_dir);
+        let mp = vec2<f32>(dot(direction, m_right), dot(direction, m_up)) / moon_r;
+        let mr2 = dot(mp, mp);
+        let m_disc = 1.0 - smoothstep(0.92, 1.0, mr2);
+        let m_n = mp.x * m_right + mp.y * m_up - sqrt(max(0.0, 1.0 - mr2)) * s.moon_dir;
+        let m_lit = smoothstep(-0.04, 0.12, dot(m_n, s.moon_sun));
+        let maria = smoothstep(0.05, 0.45, pnoise(mp * 1.7 + vec2<f32>(3.1, 7.4)) * 0.7 + pnoise(mp * 3.9 + vec2<f32>(1.3, 2.9)) * 0.3);
+        let craters = smoothstep(0.35, 0.7, pnoise(mp * 6.0 + vec2<f32>(5.7, 0.4))) * 0.14;
+        let albedo = (1.0 - maria * 0.38) * (1.0 - craters);
+        let m_col = vec3<f32>(0.92, 0.9, 0.85) * albedo * (m_lit + 0.006)
+            * mix(vec3<f32>(1.0, 0.62, 0.38), vec3<f32>(1.0), smoothstep(0.0, 0.22, direction.y));
+        color += m_col * m_disc * s.moon_bright * (1.0 - s.overcast) * smoothstep(-0.01, 0.02, direction.y);
+    }
+
+    // Clouds: a layer `cloud.z` metres up, drifting.
+    let cloud_scale = 0.0002;
+    let cloud_speed = 0.00002;
+    let cloud_elevation = 0.5;
+    if direction.y > 0.0 && s.cloud_cover > 0.0 {
+        let origin = select(vec3<f32>(0.0), s.cloud_origin, s.cloud.z > 0.0);
+        let elevation = mix(1.0, 0.1, cloud_elevation);
+        let flat_uv = direction.xz / max(direction.y, 0.02) + origin.xz / max(s.cloud.z, 1.0);
+        let cloud_uv = flat_uv / elevation * cloud_scale + s.cloud.w * cloud_speed;
+        let evolve = s.cloud.w * cloud_speed * 300.0;
+        let cloud_noise = clamp(pfbm(cloud_uv * 1000.0, evolve) * 0.7 + 0.5, 0.0, 1.0);
+        let region = pnoise(cloud_uv * 300.0) * 0.37 + 0.5;
+        let cov = clamp(s.cloud_cover + (region - 0.5) * 0.6, 0.0, 1.0);
+        let threshold = 1.0 - cov;
+        let horizon_fade = smoothstep(0.0, 0.03 + 0.06 * cloud_elevation, direction.y);
+        let mask = smoothstep(threshold, threshold + 0.3, cloud_noise) * horizon_fade;
+        let day_factor = smoothstep(-0.08, 0.3, sun.y);
+        let sun_color = sun_e * fex * 0.22 * 0.04;
+        let sky_ambient = lin * 0.04 + vec3<f32>(0.0, 0.0003, 0.00075);
+        let depth = max(0.0, cloud_noise - threshold);
+        let beer = exp(-depth * 4.0);
+        let powder = 1.0 - beer * beer;
+        let shade = mix(0.45, 1.0, clamp(beer * powder * 2.6, 0.0, 1.0));
+        let silver = clamp(0.51 / pow(max(1.49 - cos_theta * 1.4, 1e-3), 1.5), 0.0, 3.0);
+        let edge = mask * (1.0 - mask) * 4.0;
+        var cloud_color = sky_ambient + sun_color * shade;
+        cloud_color += sun_color * silver * edge * 0.6;
+        cloud_color *= max(day_factor, 0.03);
+        cloud_color += twi * 0.6 + twilight(normalize(vec3<f32>(direction.x, 0.0, direction.z) + vec3<f32>(1e-5, 0.0, 0.0)), sun) * 0.5;
+        cloud_color += night * 0.8;
+        cloud_color *= 1.0 - s.cloud.y * 0.72;
+        let alpha = (1.0 - exp(-depth * s.cloud.x * 12.0)) * horizon_fade;
+        color -= l0 * 0.04 * alpha;
+        let aerial = mix(color, cloud_color, fex);
+        color = mix(color, aerial, alpha);
+    }
+
+    // Overcast greys the sky; fog veils the horizon (everything in thick fog).
+    let lum = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+    color = mix(color, vec3<f32>(lum) * (0.72 - s.cloud.y * 0.4), s.overcast);
+    let hz = 1.0 - smoothstep(-0.02, 0.4, direction.y);
+    color = mix(color, s.fog_col, clamp(s.sky_fog * mix(hz, 1.0, s.sky_fog * s.sky_fog), 0.0, 1.0));
+    // Below the horizon: the horizon colour, darkening, never black (no ground drawn there).
+    let below = smoothstep(0.0, -0.3, direction.y);
+    color = mix(color, s.fog_col * 0.6, below);
+    return max(color, vec3<f32>(0.0)) * PHYSICAL_SKY_SCALE;
+}
+
 @fragment
 fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     let view = vec3<f32>(
@@ -186,6 +454,10 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         1.0,
     );
     let dir = normalize(s.right * view.x + s.up * view.y + s.forward * view.z);
+    if s.physical > 0.5 {
+        let dither = (hash21(v.ndc * vec2<f32>(137.0, 251.0)) - 0.5) * 0.004;
+        return vec4<f32>(physical_sky(dir) + dither, 1.0);
+    }
     let elev = dir.y;
     let toward = max(dot(dir, s.sun_dir), 0.0);
 
@@ -267,9 +539,18 @@ pub fn create_sky_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) 
         ground: [0.4, 0.42, 0.44],
         sun_bloom: 0.97,
         sun_dir: [0.4, 0.8, 0.3],
-        _pad: 0.0,
+        physical: 0.0,
         sun_color: [1.0, 0.95, 0.85],
-        _pad2: 0.0,
+        overcast: 0.0,
+        moon_dir: [0.0, -1.0, 0.0],
+        moon_bright: 0.0,
+        moon_sun: [0.0, 1.0, 0.0],
+        stars: 0.0,
+        fog_col: [0.0; 3],
+        sky_fog: 0.0,
+        cloud_origin: [0.0; 3],
+        cloud_cover: 0.0,
+        cloud: [0.0; 4],
     };
 
     let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
