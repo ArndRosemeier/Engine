@@ -792,8 +792,9 @@ impl Mesh {
     }
 
     /// Merge every point and face of `other` into `self`, translating by
-    /// `translation`. Colors, UVs, faces and albedo carry over; point ids in
-    /// `other` do not remain valid for the merged result.
+    /// `translation`. Colors, UVs, normals, per-point surfaces, faces and
+    /// albedo carry over; point ids in `other` do not remain valid for the
+    /// merged result.
     pub fn append_translated(&mut self, other: &Mesh, translation: Vec3) -> EngineResult<()> {
         let mut ids = Vec::with_capacity(other.points.len());
         for p in &other.points {
@@ -802,6 +803,7 @@ impl Mesh {
         let n = self.points.len() - ids.len();
         self.colors[n..].copy_from_slice(&other.colors);
         self.uvs[n..].copy_from_slice(&other.uvs);
+        self.surface_overrides[n..].copy_from_slice(&other.surface_overrides);
         if other.has_normals() {
             if self.normals.is_empty() {
                 self.normals = vec![Vec3::ZERO; self.points.len()];

@@ -25,6 +25,7 @@ pub mod portal;
 pub mod prelude;
 pub mod proc;
 pub mod proc_terrain;
+pub mod props;
 pub mod ribbons;
 pub mod space;
 pub mod surface;
@@ -79,6 +80,7 @@ pub use particles::{
 pub use place::{GlobalPlace, MeshInstance, Place};
 pub use portal::{Portal, PortalId, PortalSettings, SpaceId};
 pub use proc_terrain::{demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain};
+pub use props::{PropModel, PropPack};
 pub use ribbons::{RibbonId, RibbonProfile, RibbonStyle, RibbonWorld};
 pub use space::{
     ChunkCoord, ChunkId, ChunkLayer, ChunkLevel, ChunkSpan, GlobalPosition, GlobalXZ, RenderOrigin,
