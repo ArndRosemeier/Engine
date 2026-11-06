@@ -8,7 +8,8 @@ pub struct Uniforms {
     pub light_dir: [f32; 3],
     pub ambient: f32,
     pub light_color: [f32; 3],
-    pub _pad: f32,
+    /// Wind strength for swaying vegetation: 0 calm, 1 breeze, 2 storm.
+    pub wind: f32,
     pub eye: [f32; 3],
     /// Seconds since start, for materials that animate.
     pub time: f32,
@@ -40,7 +41,8 @@ pub struct Uniforms {
     pub _horizon_pad: f32,
     /// Light bounced up from the ground, same scale as `sky_up`.
     pub sky_down: [f32; 3],
-    pub _down_pad: f32,
+    /// 0 summer green, 0.5 early autumn, 1 full autumn colours.
+    pub season: f32,
 }
 
 const _: () = assert!(std::mem::size_of::<Uniforms>() == 240);
@@ -52,7 +54,7 @@ impl Uniforms {
             light_dir: [0.0, 1.0, 0.0],
             ambient: 0.2,
             light_color: [1.0, 1.0, 1.0],
-            _pad: 0.0,
+            wind: 0.0,
             eye: [0.0, 0.0, 0.0],
             time: 0.0,
             haze_color: [1.0, 1.0, 1.0],
@@ -71,7 +73,7 @@ impl Uniforms {
             sky_horizon: [1.0, 1.0, 1.0],
             _horizon_pad: 0.0,
             sky_down: [1.0, 1.0, 1.0],
-            _down_pad: 0.0,
+            season: 0.0,
         }
     }
 }
@@ -87,7 +89,7 @@ struct Uniforms {
     light_dir: vec3<f32>,
     ambient: f32,
     light_color: vec3<f32>,
-    _pad: f32,
+    wind: f32,
     eye: vec3<f32>,
     time: f32,
     haze_color: vec3<f32>,
@@ -106,7 +108,7 @@ struct Uniforms {
     sky_horizon: vec3<f32>,
     _horizon_pad: f32,
     sky_down: vec3<f32>,
-    _down_pad: f32,
+    season: f32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -303,9 +305,37 @@ fn pbr_shade(
 }
 "#;
 
+/// Vegetation wind (shared by the scene and shadow shaders): sways a vertex
+/// in its instance's own space. `w` is the sway weight (0 root, 1 twig tip),
+/// `flutter` 1 for leaves, `seed` a per-tuft random for the flutter phase.
+/// Port of AssetGenerator's `vegWind`.
+pub(crate) const VEG_WIND_WGSL: &str = r#"
+fn veg_wind(p: vec3<f32>, n: vec3<f32>, w: f32, flutter: f32, seed: f32,
+        model: mat4x4<f32>, t: f32, strength: f32) -> vec3<f32> {
+    let org = model[3].xyz;
+    let ph = dot(org.xz, vec2<f32>(0.137, 0.213));
+    let dir_w = vec3<f32>(0.9216, 0.0, 0.3871);
+    let sc = max(1e-3, length(model[0].xyz));
+    // The world wind direction in the instance's space (any yaw, uniform scale).
+    let dir = vec3<f32>(dot(model[0].xyz, dir_w), dot(model[1].xyz, dir_w), dot(model[2].xyz, dir_w)) / sc;
+    let gust = 0.55 + 0.45 * sin(t * 0.37 + ph * 0.5) * sin(t * 0.23 + ph * 0.9 + 1.3);
+    let s = strength * (0.35 + gust);
+    let w2 = w * w;
+    let sway = 0.55 + 0.45 * sin(t * 1.05 + ph);
+    var off = dir * (s * w2 * 0.42 * sway);
+    let bp = ph * 3.0 + dot(p, vec3<f32>(0.45, 0.31, 0.38));
+    let osc = vec3<f32>(sin(t * 2.1 + bp), 0.35 * sin(t * 2.7 + bp * 1.3), sin(t * 1.8 + bp * 0.8 + 1.7));
+    off += osc * (s * w2 * w * 0.13);
+    off += n * (sin(t * 9.0 + seed * 40.0 + bp * 2.0) * flutter * s * w * 0.05);
+    off.y -= dot(off.xz, off.xz) * 0.12;
+    return p + off;
+}
+"#;
+
 pub fn scene_shader_prefix() -> String {
     format!(
-        "{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}",
+        VEG_WIND_WGSL,
         crate::lod::LOD_DITHER_WGSL,
         LIGHTING_WGSL,
         SCENE_WGSL,
@@ -459,7 +489,12 @@ fn grass_profile(p: vec3<f32>, seed: f32, gain: f32) -> vec3<f32> {
 @vertex
 fn vs_main(v: VsIn) -> VsOut {
     let model = mat4x4<f32>(v.m0, v.m1, v.m2, v.m3);
-    let world = model * vec4<f32>(v.position, 1.0);
+    var local = v.position;
+    if v.surface3.w > 7.5 && v.surface3.w < 10.5 {
+        let flutter = select(0.0, 1.0, v.surface3.w < 8.5);
+        local = veg_wind(local, v.normal, v.surface2.x, flutter, v.surface2.y, model, u.time, u.wind);
+    }
+    let world = model * vec4<f32>(local, 1.0);
     var out: VsOut;
     out.clip = u.view_proj * world;
     // Assume uniform scale for normals (friendly default).
@@ -476,11 +511,173 @@ fn vs_main(v: VsIn) -> VsOut {
     return out;
 }
 
+// ---- Vegetation (crate::vegetation): leaf cards, bark, far canopy hulls ----
+// surface2 = (wind weight, per-tuft random, crown occlusion, far part kind),
+// surface3.xyz = linear autumn colour, surface4.w = turns in autumn,
+// surface.w = leaf translucency.
+const VEG_ATLAS: vec2<f32> = vec2<f32>(1024.0, 1536.0);
+const VEG_LEAF_V: f32 = 0.6666667;
+const VEG_ALPHA_TEST: f32 = 0.45;
+
+fn veg_hash(p0: vec3<f32>) -> f32 {
+    let p = fract(p0 * 0.3183099 + 0.1) * 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+fn veg_noise(x: vec3<f32>) -> f32 {
+    let i = floor(x);
+    let f0 = fract(x);
+    let f = f0 * f0 * (3.0 - 2.0 * f0);
+    return mix(
+        mix(mix(veg_hash(i), veg_hash(i + vec3<f32>(1.0, 0.0, 0.0)), f.x),
+            mix(veg_hash(i + vec3<f32>(0.0, 1.0, 0.0)), veg_hash(i + vec3<f32>(1.0, 1.0, 0.0)), f.x), f.y),
+        mix(mix(veg_hash(i + vec3<f32>(0.0, 0.0, 1.0)), veg_hash(i + vec3<f32>(1.0, 0.0, 1.0)), f.x),
+            mix(veg_hash(i + vec3<f32>(0.0, 1.0, 1.0)), veg_hash(i + vec3<f32>(1.0, 1.0, 1.0)), f.x), f.y),
+        f.z);
+}
+
+// Leaf coverage 0..1 for alpha-to-coverage: the atlas alpha (boosted in
+// small mips so thin leaves don't vanish), faded where a card is seen
+// edge-on, cut at the alpha test with a one-pixel soft edge.
+fn veg_leaf_coverage(uv: vec2<f32>, world_p: vec3<f32>) -> f32 {
+    let c = textureSample(albedo_tex, albedo_sampler, uv).a;
+    let dx = dpdx(uv * VEG_ATLAS);
+    let dy = dpdy(uv * VEG_ATLAS);
+    let lod = max(0.0, 0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1e-8)));
+    let a = clamp(c * (1.0 + lod * 0.32), 0.0, 1.0);
+    let face_n = normalize(cross(dpdx(world_p), dpdy(world_p)));
+    let edge_on = abs(dot(face_n, normalize(world_p - u.eye)));
+    let alpha = a * (smoothstep(0.04, 0.32, edge_on) * 0.55 + 0.45);
+    return clamp((alpha - VEG_ALPHA_TEST) / max(fwidth(alpha), 1e-4) + 0.5, 0.0, 1.0);
+}
+
+fn veg_far_noise(world_p: vec3<f32>) -> f32 {
+    return veg_noise(world_p * 2.2) * 0.6 + veg_noise(world_p * 5.1) * 0.4;
+}
+
+// Far canopy hulls dissolve towards their silhouette, so the ~150-triangle
+// ball reads as a ragged crown.
+fn veg_far_cut(in: VsOut) -> bool {
+    if in.surface2.w < 0.75 {
+        return false;
+    }
+    let edge = 1.0 - abs(dot(normalize(in.world_n), normalize(u.eye - in.world_p)));
+    return edge * edge * 1.25 > veg_far_noise(in.world_p) + 0.12;
+}
+
+fn veg_sun_through_leaves(base: vec3<f32>, n: vec3<f32>, world_p: vec3<f32>, vis: f32, trans: f32, occ: f32) -> vec3<f32> {
+    let l = normalize(u.light_dir);
+    let to_eye = normalize(u.eye - world_p);
+    let back = pow(clamp(dot(to_eye, -l), 0.0, 1.0), 6.0);
+    let wrap = clamp(0.5 - 0.5 * dot(n, l), 0.0, 1.0);
+    return u.light_color * base * (back * 0.8 + wrap * 0.18) * trans * (1.0 - occ * 0.6) * vis;
+}
+
+fn vegetation_shade(in: VsOut) -> vec4<f32> {
+    let occ = in.surface2.z;
+    let geo_n = normalize(in.world_n);
+    let l = normalize(u.light_dir);
+    if in.surface3.w < 8.5 {
+        // Leaf card: crown normal on both faces (not flipped on the back).
+        let coverage = veg_leaf_coverage(in.uv, in.world_p);
+        if coverage <= 0.0 {
+            discard;
+        }
+        var c = textureSample(albedo_tex, albedo_sampler, in.uv).rgb * in.color.rgb;
+        let tv = in.surface2.y - 0.5;
+        c *= 1.0 + tv * 0.4;
+        c = mix(c, c * vec3<f32>(1.12, 1.06, 0.7), max(tv, 0.0) * 0.5);
+        let lum = dot(c, vec3<f32>(0.3, 0.59, 0.11));
+        let turn = clamp(u.season * 1.6 - in.surface2.y * 0.6, 0.0, 1.0) * in.surface4.w;
+        c = mix(c, in.surface3.xyz * (lum * 3.2 + 0.015), turn);
+        c *= 1.0 - occ * 0.62;
+        let vis = sun_visibility(in.world_p, geo_n, u.eye);
+        let ndl = max(dot(geo_n, l), 0.0);
+        let lit = shade_surface_occluded(c, geo_n, in.world_p, in.surface.x, 0.0, vis, ndl, 1.0 - occ * 0.45)
+            + veg_sun_through_leaves(c, geo_n, in.world_p, vis, in.surface.w, occ)
+            + c * torch_light(in.world_p, geo_n);
+        return vec4<f32>(haze(lit, in.world_p), coverage);
+    }
+    if in.surface3.w < 9.5 {
+        // Bark: uv.x = strip * 16 + u (around), uv.y along; the strip's
+        // column of the bark atlas under the leaves, sampled with the
+        // gradients of the unwrapped uv so the wrap seams stay clean.
+        let strip = floor(in.uv.x / 16.0);
+        let bu = vec2<f32>(in.uv.x - strip * 16.0, in.uv.y);
+        let span = vec2<f32>(0.976 / 8.0, (1.0 - VEG_LEAF_V) * 0.996);
+        let at = vec2<f32>((strip + 0.012 + fract(bu.x) * 0.976) / 8.0,
+            VEG_LEAF_V + (0.002 + fract(bu.y) * 0.996) * (1.0 - VEG_LEAF_V));
+        let gx = dpdx(bu) * span;
+        let gy = dpdy(bu) * span;
+        let tex = textureSampleGrad(albedo_tex, albedo_sampler, at, gx, gy).rgb;
+        var t = textureSampleGrad(normal_tex, albedo_sampler, at, gx, gy).xyz * 2.0 - 1.0;
+        t = vec3<f32>(t.xy * 1.1, t.z);
+        // Cotangent frame from the continuous bark uv (see mapped_normal).
+        let dp1 = dpdx(in.world_p);
+        let dp2 = dpdy(in.world_p);
+        let duv1 = dpdx(bu);
+        let duv2 = dpdy(bu);
+        let dp2perp = cross(dp2, geo_n);
+        let dp1perp = cross(geo_n, dp1);
+        let tangent = -(dp2perp * duv1.x + dp1perp * duv2.x);
+        let bitangent = dp2perp * duv1.y + dp1perp * duv2.y;
+        let scale = max(dot(tangent, tangent), dot(bitangent, bitangent));
+        var n = geo_n;
+        if scale > 1e-20 {
+            let inv = inverseSqrt(scale);
+            n = normalize(tangent * (t.x * inv) + bitangent * (t.y * inv) + geo_n * t.z);
+        }
+        let c = tex * in.color.rgb * (1.0 - occ * 0.6);
+        let vis = sun_visibility(in.world_p, geo_n, u.eye);
+        let ndl = max(dot(n, l), 0.0);
+        let lit = shade_surface_occluded(c, n, in.world_p, in.surface.x, 0.0, vis, ndl, 1.0 - occ * 0.5)
+            + c * torch_light(in.world_p, n);
+        return vec4<f32>(haze(lit, in.world_p), 1.0);
+    }
+    // Far hull: bark prisms (kind 0), palm frond ribbons (0.5), canopy (1).
+    if veg_far_cut(in) {
+        discard;
+    }
+    let kind = in.surface2.w;
+    let nz = veg_far_noise(in.world_p);
+    var c = in.color.rgb;
+    var n = geo_n;
+    let dist = distance(u.eye, in.world_p);
+    if kind < 0.25 {
+        // Far trunks stand in the wood's shade.
+        c *= mix(1.0, 0.25, smoothstep(55.0, 130.0, dist));
+    } else {
+        // Clumps: the hull normal bent by noise, so the crown catches the
+        // light in lumps instead of shading as one smooth ball.
+        let q = in.world_p;
+        let lump1 = vec3<f32>(veg_noise(q * 0.9), veg_noise(q * 0.9 + 17.3), veg_noise(q * 0.9 + 41.7)) - 0.5;
+        let lump2 = vec3<f32>(veg_noise(q * 2.4), veg_noise(q * 2.4 + 17.3), veg_noise(q * 2.4 + 41.7)) - 0.5;
+        n = normalize(geo_n + lump1 * 1.5 + lump2 * 0.7);
+        let tint = veg_noise(floor(q * 0.08) + 0.5);
+        c = c * (0.62 + nz * 0.5) * vec3<f32>(0.84 + tint * 0.3, 0.9 + tint * 0.18, 0.92);
+        c = mix(c, in.surface3.xyz * (0.78 + nz * 0.45), clamp(u.season * 1.4 - nz * 0.4, 0.0, 1.0) * in.surface4.w);
+    }
+    let vis = sun_visibility(in.world_p, geo_n, u.eye);
+    let ndl = max(dot(n, l), 0.0);
+    let lit = shade_surface(c, n, in.world_p, in.surface.x, 0.0, vis, ndl * 0.8 + 0.2 * ndl * ndl);
+    return vec4<f32>(haze(lit, in.world_p), 1.0);
+}
+
 // Depth prepass: only texels the shaded pass will cover on every sample.
 @fragment
 fn fs_depth(in: VsOut) {
     if !lod_dither_keep(in.lod_fade, in.clip.xy) {
         discard;
+    }
+    if in.surface3.w > 7.5 {
+        if in.surface3.w < 8.5 {
+            if veg_leaf_coverage(in.uv, in.world_p) < 0.999 {
+                discard;
+            }
+        } else if in.surface3.w > 9.5 && veg_far_cut(in) {
+            discard;
+        }
+        return;
     }
     let texel = textureSample(albedo_tex, albedo_sampler, in.uv);
     let foliage = in.surface3.w > 5.5 && in.surface3.w < 7.5;
@@ -493,6 +690,9 @@ fn fs_depth(in: VsOut) {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if !lod_dither_keep(in.lod_fade, in.clip.xy) {
         discard;
+    }
+    if in.surface3.w > 7.5 {
+        return vegetation_shade(in);
     }
     // Most world props use the default material. Keep them on the cheap,
     // conventional path; authored wood/dirt/grass/sand/snow/cave profiles

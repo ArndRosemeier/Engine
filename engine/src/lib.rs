@@ -37,6 +37,7 @@ pub mod texture;
 
 pub mod tree;
 pub mod ui;
+pub mod vegetation;
 pub mod vfx;
 pub mod voxel_terrain;
 pub mod water_mesh;

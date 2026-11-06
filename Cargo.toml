@@ -17,6 +17,7 @@ members = [
     "examples/model_viewer",
     "examples/lod_forest",
     "examples/sky_day",
+    "examples/vegetation",
 ]
 default-members = ["engine"]
 
@@ -40,6 +41,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 noise = "0.9"
 pollster = "0.4"
 rayon = "1.10"
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
 rodio = "0.21"
 thiserror = "2"
 wgpu = "25"

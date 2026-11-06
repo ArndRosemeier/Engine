@@ -166,6 +166,8 @@ struct ScenePass {
 struct ShadowDraw {
     id: EntityId,
     submit: MeshSubmit,
+    /// Textured casters go through the alpha-tested shadow pipeline.
+    albedo: Option<TextureId>,
 }
 
 struct ShadowCullSelection {
@@ -471,6 +473,7 @@ impl Renderer {
         let voxel = voxel_terrain::VoxelTerrainGpu::new(&device);
         shadow.set_gi_views(&device, gi.probe_views().clone());
         let pipelines = create_pipelines(&device, &queue, HDR_FORMAT, &shadow);
+        shadow.init_cutout(&device, &pipelines.albedo_layout);
         let terrain = create_terrain_pipelines(&device, HDR_FORMAT, &pipelines.bind_layout);
         let water = create_water_pipelines(&device, HDR_FORMAT, &pipelines.bind_layout);
         let skinned = create_skinned_pipelines(
@@ -1314,7 +1317,7 @@ impl Renderer {
             light_dir: [light_dir.x, light_dir.y, light_dir.z],
             ambient: world.light().ambient,
             light_color: world.light().color.into(),
-            _pad: 0.0,
+            wind: world.wind(),
             eye: [eye.x, eye.y, eye.z],
             time: world.time(),
             haze_color: haze
@@ -1340,7 +1343,7 @@ impl Renderer {
             sky_horizon: sky_light.horizon,
             _horizon_pad: 0.0,
             sky_down: sky_light.down,
-            _down_pad: 0.0,
+            season: world.season(),
         };
         // Destination and live views share one encoder. Queue writes land
         // before that encoder runs, so they cannot share a uniform buffer.
@@ -2317,22 +2320,50 @@ impl Renderer {
                     sample_count: 1,
                     multiview: None,
                 });
-        bundle.set_pipeline(&self.shadow.mesh_pipeline);
         bundle.set_bind_group(0, &self.shadow.cascade_binds[cascade], &[]);
-        for draw in &selection.draws {
-            let gpu = self
-                .gpu_meshes
-                .get(&draw.id)
-                .expect("shadow bundle caster is synced");
-            encode_shadow_bundle_draw(&mut bundle, gpu, draw.submit);
-        }
-        for draw in &selection.batch_draws {
-            let gpu = &self
-                .gpu_instance_batches
-                .get(&draw.id)
-                .expect("shadow bundle batch is synced")
-                .gpu;
-            encode_shadow_bundle_draw(&mut bundle, gpu, draw.submit);
+        // Untextured casters first on the cheap depth-only pipeline, then the
+        // textured ones through the alpha test.
+        for cutout in [false, true] {
+            let pipeline = if cutout {
+                match self.shadow.cutout_pipeline.as_ref() {
+                    Some(p) => p,
+                    None => &self.shadow.mesh_pipeline,
+                }
+            } else {
+                &self.shadow.mesh_pipeline
+            };
+            bundle.set_pipeline(pipeline);
+            let albedo_of =
+                |draw: &ShadowDraw| draw.albedo.and_then(|tid| self.gpu_mesh_albedo.get(&tid));
+            for draw in &selection.draws {
+                let albedo = albedo_of(draw);
+                if albedo.is_some() != cutout {
+                    continue;
+                }
+                if let Some(bind) = albedo {
+                    bundle.set_bind_group(1, bind, &[]);
+                }
+                let gpu = self
+                    .gpu_meshes
+                    .get(&draw.id)
+                    .expect("shadow bundle caster is synced");
+                encode_shadow_bundle_draw(&mut bundle, gpu, draw.submit);
+            }
+            for draw in &selection.batch_draws {
+                let albedo = albedo_of(draw);
+                if albedo.is_some() != cutout {
+                    continue;
+                }
+                if let Some(bind) = albedo {
+                    bundle.set_bind_group(1, bind, &[]);
+                }
+                let gpu = &self
+                    .gpu_instance_batches
+                    .get(&draw.id)
+                    .expect("shadow bundle batch is synced")
+                    .gpu;
+                encode_shadow_bundle_draw(&mut bundle, gpu, draw.submit);
+            }
         }
         self.shadow_bundles[cascade] = Some(bundle.finish(&wgpu::RenderBundleDescriptor {
             label: Some("visible-shadow-casters"),
@@ -2485,6 +2516,7 @@ impl Renderer {
             let Some(bounds) = gpu.bounds else {
                 continue;
             };
+            let albedo = world.entity(id).ok().and_then(|e| e.albedo);
             for (selection, frustum) in selections.iter_mut().zip(light_frustums) {
                 match frustum.classify(bounds) {
                     Visibility::Outside => {}
@@ -2492,6 +2524,7 @@ impl Renderer {
                         selection.draws.push(ShadowDraw {
                             id,
                             submit: MeshSubmit::Direct,
+                            albedo,
                         });
                     }
                 }
@@ -2509,6 +2542,7 @@ impl Renderer {
             let Some(bounds) = gpu.bounds else {
                 continue;
             };
+            let albedo = world.entity(prototype).ok().and_then(|e| e.albedo);
             for (selection, frustum) in selections.iter_mut().zip(light_frustums) {
                 match frustum.classify(bounds) {
                     Visibility::Outside => {}
@@ -2517,6 +2551,7 @@ impl Renderer {
                         selection.batch_draws.push(ShadowDraw {
                             id: prototype,
                             submit: MeshSubmit::Compacted,
+                            albedo,
                         });
                     }
                     Visibility::Inside => {
@@ -2524,6 +2559,7 @@ impl Renderer {
                         selection.batch_draws.push(ShadowDraw {
                             id: prototype,
                             submit: MeshSubmit::Direct,
+                            albedo,
                         });
                     }
                     Visibility::Intersecting => {
@@ -2531,6 +2567,7 @@ impl Renderer {
                         selection.batch_draws.push(ShadowDraw {
                             id: prototype,
                             submit: MeshSubmit::Compacted,
+                            albedo,
                         });
                     }
                 }

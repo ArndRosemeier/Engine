@@ -478,7 +478,12 @@ fn shadow_ground(xz: vec2<f32>) -> f32 {
 "#;
 
 const MESH_DEPTH_WGSL: &str = r#"
-@group(0) @binding(0) var<uniform> cascade: mat4x4<f32>;
+struct Cascade {
+    view_proj: mat4x4<f32>,
+    // Seconds and wind strength, for swaying vegetation.
+    wind: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> cascade: Cascade;
 
 struct VsIn {
     @location(0) position: vec3<f32>,
@@ -494,7 +499,57 @@ struct VsIn {
 @vertex
 fn vs_main(v: VsIn) -> @builtin(position) vec4<f32> {
     let model = mat4x4<f32>(v.m0, v.m1, v.m2, v.m3);
-    return cascade * (model * vec4<f32>(v.position, 1.0));
+    return cascade.view_proj * (model * vec4<f32>(v.position, 1.0));
+}
+
+struct MeshIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(3) uv: vec2<f32>,
+    @location(5) surface2: vec4<f32>,
+    @location(11) surface3: vec4<f32>,
+    @location(6) m0: vec4<f32>,
+    @location(7) m1: vec4<f32>,
+    @location(8) m2: vec4<f32>,
+    @location(9) m3: vec4<f32>,
+};
+
+struct MeshOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) profile: f32,
+};
+
+// Mesh casters: vegetation sways here exactly as in the scene pass.
+@vertex
+fn vs_mesh(v: MeshIn) -> MeshOut {
+    let model = mat4x4<f32>(v.m0, v.m1, v.m2, v.m3);
+    var local = v.position;
+    if v.surface3.w > 7.5 && v.surface3.w < 10.5 {
+        let flutter = select(0.0, 1.0, v.surface3.w < 8.5);
+        local = veg_wind(local, v.normal, v.surface2.x, flutter, v.surface2.y, model,
+            cascade.wind.x, cascade.wind.y);
+    }
+    var out: MeshOut;
+    out.clip = cascade.view_proj * (model * vec4<f32>(local, 1.0));
+    out.uv = v.uv;
+    out.profile = v.surface3.w;
+    return out;
+}
+
+@group(1) @binding(0) var albedo_tex: texture_2d<f32>;
+@group(1) @binding(1) var albedo_sampler: sampler;
+
+// Textured casters: cut-out texels (leaf cards, masked glTF) cast no shadow.
+@fragment
+fn fs_cutout(in: MeshOut) {
+    if in.profile > 8.5 {
+        return;
+    }
+    let a = textureSample(albedo_tex, albedo_sampler, in.uv).a;
+    if a < select(0.5, 0.45, in.profile > 7.5) {
+        discard;
+    }
 }
 "#;
 
@@ -537,6 +592,14 @@ fn vs_main(v: VsIn) -> @builtin(position) vec4<f32> {
     return cascade * world;
 }
 "#;
+
+/// The cascade uniform: view-projection, then (time, wind, 0, 0).
+fn cascade_bytes(m: Mat4, wind: [f32; 4]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(80);
+    out.extend_from_slice(bytemuck::bytes_of(&m.to_cols_array_2d()));
+    out.extend_from_slice(bytemuck::bytes_of(&wind));
+    out
+}
 
 fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 10] {
     [
@@ -752,6 +815,11 @@ pub struct ShadowGpu {
     pub cascade_layout: wgpu::BindGroupLayout,
     pub cascade_binds: [wgpu::BindGroup; CASCADE_COUNT],
     pub mesh_pipeline: wgpu::RenderPipeline,
+    /// Textured mesh casters with an alpha test; built by [`Self::init_cutout`]
+    /// once the mesh material layout exists.
+    pub cutout_pipeline: Option<wgpu::RenderPipeline>,
+    mesh_shader: wgpu::ShaderModule,
+    depth_state: wgpu::DepthStencilState,
     pub voxel_pipeline: wgpu::RenderPipeline,
     pub skinned_pipeline: wgpu::RenderPipeline,
     pub layer_views: [wgpu::TextureView; CASCADE_COUNT],
@@ -951,7 +1019,7 @@ impl ShadowGpu {
                 count: None,
             }],
         });
-        let ident = Mat4::IDENTITY.to_cols_array_2d();
+        let ident = cascade_bytes(Mat4::IDENTITY, [0.0; 4]);
         let cascade_bufs = std::array::from_fn(|i| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(if i == 0 {
@@ -961,7 +1029,7 @@ impl ShadowGpu {
                 } else {
                     "shadow-cascade-2"
                 }),
-                contents: bytemuck::bytes_of(&ident),
+                contents: &ident,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             })
         });
@@ -978,7 +1046,9 @@ impl ShadowGpu {
 
         let mesh_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shadow-mesh-depth"),
-            source: wgpu::ShaderSource::Wgsl(MESH_DEPTH_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}{}", super::pipeline::VEG_WIND_WGSL, MESH_DEPTH_WGSL).into(),
+            ),
         });
         let skinned_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shadow-skinned-depth"),
@@ -1014,7 +1084,7 @@ impl ShadowGpu {
             layout: Some(&mesh_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &mesh_shader,
-                entry_point: Some("vs_main"),
+                entry_point: Some("vs_mesh"),
                 buffers: &[Vertex::LAYOUT, InstanceRaw::LAYOUT],
                 compilation_options: Default::default(),
             },
@@ -1078,7 +1148,7 @@ impl ShadowGpu {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: Some(depth_state),
+            depth_stencil: Some(depth_state.clone()),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
@@ -1091,6 +1161,9 @@ impl ShadowGpu {
             cascade_layout,
             cascade_binds,
             mesh_pipeline,
+            cutout_pipeline: None,
+            mesh_shader,
+            depth_state,
             voxel_pipeline,
             skinned_pipeline,
             layer_views,
@@ -1231,7 +1304,45 @@ impl ShadowGpu {
         ]
     }
 
+    /// Build the alpha-tested caster pipeline over the mesh material layout.
+    pub fn init_cutout(&mut self, device: &wgpu::Device, albedo_layout: &wgpu::BindGroupLayout) {
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow-cutout-layout"),
+            bind_group_layouts: &[&self.cascade_layout, albedo_layout],
+            push_constant_ranges: &[],
+        });
+        self.cutout_pipeline = Some(device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("shadow-cutout-depth"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &self.mesh_shader,
+                    entry_point: Some("vs_mesh"),
+                    buffers: &[Vertex::LAYOUT, InstanceRaw::LAYOUT],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &self.mesh_shader,
+                    entry_point: Some("fs_cutout"),
+                    targets: &[],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(self.depth_state.clone()),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            },
+        ));
+    }
+
     pub fn prepare(&mut self, queue: &wgpu::Queue, world: &World) -> [Mat4; CASCADE_COUNT] {
+        let wind = [world.time(), world.wind(), 0.0, 0.0];
         self.atlas_wrote = false;
         let mut uniforms = ShadowUniforms::zeroed();
         let light = world.light().direction.normalize_or_zero();
@@ -1246,9 +1357,9 @@ impl ShadowGpu {
 
         let Some(settings) = world.shadows() else {
             queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
-            let ident = Mat4::IDENTITY.to_cols_array_2d();
+            let ident = cascade_bytes(Mat4::IDENTITY, wind);
             for buf in &self.cascade_bufs {
-                queue.write_buffer(buf, 0, bytemuck::bytes_of(&ident));
+                queue.write_buffer(buf, 0, &ident);
             }
             return [Mat4::IDENTITY; CASCADE_COUNT];
         };
@@ -1266,7 +1377,7 @@ impl ShadowGpu {
         uniforms.light_vp1 = mats[1].to_cols_array_2d();
         uniforms.light_vp2 = mats[2].to_cols_array_2d();
         for (buf, m) in self.cascade_bufs.iter().zip(mats) {
-            queue.write_buffer(buf, 0, bytemuck::bytes_of(&m.to_cols_array_2d()));
+            queue.write_buffer(buf, 0, &cascade_bytes(m, wind));
         }
 
         if settings.raymarch_height {

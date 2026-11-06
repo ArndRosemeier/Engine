@@ -604,6 +604,11 @@ pub struct World {
     sky: Option<Sky>,
     /// Time of day and weather driving sun, sky, haze and exposure.
     physical_sky: Option<crate::sky::PhysicalSky>,
+    wind: f32,
+    season: f32,
+    /// Albedo textures by content, so meshes that share an atlas (every
+    /// generated tree) share one GPU texture.
+    texture_by_content: HashMap<u64, TextureId>,
     /// Light carried by the viewer (lantern / headlamp), when lit.
     torch: Option<TorchLight>,
     /// Nearby mesh CSM + height raymarch. `None` disables shadows.
@@ -692,6 +697,9 @@ impl Default for World {
             haze: None,
             sky: None,
             physical_sky: None,
+            wind: 0.5,
+            season: 0.0,
+            texture_by_content: HashMap::new(),
             torch: None,
             shadows: Some(ShadowSettings::default()),
             instance_submit: InstanceSubmit::CpuIndexed,
@@ -1570,10 +1578,38 @@ impl World {
             },
             (None, None) => return Ok(()),
         };
-        let tid = self.create_texture_rgba(map.width, map.height, map.rgba)?;
-        if let Some(maps) = maps {
-            self.surface_maps.insert(tid, std::sync::Arc::new(maps));
-        }
+        // Large maps are looked up by content first: generated assets (every
+        // tree) carry the same atlas and should share one GPU texture.
+        let key = (map.rgba.len() >= 1 << 20).then(|| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (map.width, map.height, &map.rgba).hash(&mut h);
+            if let Some(m) = &maps {
+                m.normal.as_ref().map(|n| &n.rgba).hash(&mut h);
+                m.orm.as_ref().map(|n| &n.rgba).hash(&mut h);
+                m.emissive.as_ref().map(|n| &n.rgba).hash(&mut h);
+                m.normal_scale.to_bits().hash(&mut h);
+                m.roughness.to_bits().hash(&mut h);
+                m.metallic.to_bits().hash(&mut h);
+            }
+            h.finish()
+        });
+        let shared = key
+            .and_then(|k| self.texture_by_content.get(&k).copied())
+            .filter(|tid| self.textures.contains_key(tid));
+        let tid = match shared {
+            Some(tid) => tid,
+            None => {
+                let tid = self.create_texture_rgba(map.width, map.height, map.rgba)?;
+                if let Some(maps) = maps {
+                    self.surface_maps.insert(tid, std::sync::Arc::new(maps));
+                }
+                if let Some(k) = key {
+                    self.texture_by_content.insert(k, tid);
+                }
+                tid
+            }
+        };
         self.entities
             .get_mut(&id)
             .expect("entity was just spawned")
@@ -2227,6 +2263,38 @@ impl World {
 
     pub fn physical_sky(&self) -> Option<crate::sky::PhysicalSky> {
         self.physical_sky
+    }
+
+    /// Wind for swaying vegetation (see [`crate::vegetation`]): 0 calm,
+    /// 1 a strong breeze, 2 a storm. Default 0.5.
+    pub fn set_wind(&mut self, strength: f32) -> EngineResult<()> {
+        if !strength.is_finite() || !(0.0..=4.0).contains(&strength) {
+            return Err(EngineError::InvalidValue(format!(
+                "wind {strength} must be within 0..=4"
+            )));
+        }
+        self.wind = strength;
+        Ok(())
+    }
+
+    pub fn wind(&self) -> f32 {
+        self.wind
+    }
+
+    /// Leaf colour season: 0 summer green, 0.5 early autumn, 1 full autumn
+    /// (evergreens ignore it).
+    pub fn set_season(&mut self, season: f32) -> EngineResult<()> {
+        if !season.is_finite() || !(0.0..=1.0).contains(&season) {
+            return Err(EngineError::InvalidValue(format!(
+                "season {season} must be within 0..=1"
+            )));
+        }
+        self.season = season;
+        Ok(())
+    }
+
+    pub fn season(&self) -> f32 {
+        self.season
     }
 
     /// Apply the physical sky's lighting to the world's light, sky, haze
