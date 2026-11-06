@@ -13,6 +13,7 @@ mod skinned;
 mod sky_pipeline;
 mod stencil;
 mod terrain_pipeline;
+mod terrain_shadow;
 mod water_pipeline;
 
 use crate::camera::Camera;
@@ -26,7 +27,7 @@ use crate::world::{Entity, EntityId, InstanceSubmit, ShadowSettings, SurfaceMate
 use clipmap::ClipmapRenderer;
 use frustum::{Bounds, Frustum, Visibility};
 use gpu_mesh::GpuMesh;
-use gpu_profile::GpuProfiler;
+use gpu_profile::{GpuProfiler, Mark};
 use instance_cull::{
     ActiveInstanceRange, CullDraws, CullJob, InstanceCull, OPAQUE_INDIRECT_OFFSET,
     TRANSLUCENT_INDIRECT_OFFSET, WORKGROUP,
@@ -69,6 +70,8 @@ pub struct GpuFrameStats {
     pub skinned_model_uploads: u32,
     pub skinned_pose_writes: u32,
     pub shadow_atlas: bool,
+    /// Terrain horizon-map rebuilds this frame (0 or 1).
+    pub terrain_horizon_rebuilds: u32,
     pub entities: u32,
     pub animated: u32,
     pub instance_submit: InstanceSubmit,
@@ -100,8 +103,9 @@ impl GpuFrameStats {
 
     pub fn draw_line(&self) -> String {
         format!(
-            "shadow_atlas={} submit={} inside={} boundary={} tested={} groups={} indirect={}",
+            "shadow_atlas={} horizon={} submit={} inside={} boundary={} tested={} groups={} indirect={}",
             self.shadow_atlas,
+            self.terrain_horizon_rebuilds,
             self.instance_submit,
             self.direct_inside_batches,
             self.boundary_batches,
@@ -328,6 +332,9 @@ pub struct Renderer {
     joint_out: Vec<glam::Mat4>,
     /// Last frame after overlay passes (egui). For capture_png.
     last_color: Option<wgpu::Texture>,
+    /// Keep a copy of the next presented frame for `capture_png`. Copying the
+    /// whole swapchain image every frame costs bandwidth nobody uses.
+    capture_next_frame: bool,
     particles: ParticleGpu,
     ribbons: RibbonGpu,
     postprocess: Postprocess,
@@ -526,6 +533,7 @@ impl Renderer {
             joint_global: Vec::new(),
             joint_out: Vec::new(),
             last_color: None,
+            capture_next_frame: false,
             particles,
             ribbons,
             postprocess,
@@ -1027,46 +1035,33 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame-encoder"),
             });
-        let profile_gpu = self
-            .gpu_profiler
-            .as_mut()
-            .is_some_and(GpuProfiler::begin_frame);
-        if profile_gpu {
-            self.gpu_profiler
-                .as_ref()
-                .expect("active GPU profiler")
-                .timestamp(&mut encoder, 0);
-        }
+        self.mark_gpu(&mut encoder, Mark::Start);
         let scene_view = self.postprocess.scene_view().clone();
         self.encode_world(&mut encoder, &scene_view, world);
+        self.mark_gpu(&mut encoder, Mark::WorldDone);
         self.postprocess
             .encode(&self.queue, &mut encoder, &view, world.bloom());
-        if profile_gpu {
-            self.gpu_profiler
-                .as_ref()
-                .expect("active GPU profiler")
-                .timestamp(&mut encoder, 1);
-            self.gpu_profiler
-                .as_ref()
-                .expect("active GPU profiler")
-                .timestamp(&mut encoder, 2);
-        }
+        self.mark_gpu(&mut encoder, Mark::PostDone);
         after(&self.device, &self.queue, &mut encoder, &view);
-        self.store_composited(&mut encoder, &frame.texture);
-        if profile_gpu {
-            let profiler = self.gpu_profiler.as_ref().expect("active GPU profiler");
-            profiler.timestamp(&mut encoder, 3);
+        if std::mem::take(&mut self.capture_next_frame) {
+            self.store_composited(&mut encoder, &frame.texture);
+        }
+        self.mark_gpu(&mut encoder, Mark::UiDone);
+        if let Some(profiler) = self.gpu_profiler.as_ref() {
             profiler.resolve(&mut encoder);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
-        if profile_gpu {
-            self.gpu_profiler
-                .as_ref()
-                .expect("active GPU profiler")
-                .read_and_report(&self.device);
+        if let Some(profiler) = self.gpu_profiler.as_mut() {
+            profiler.read_and_report(&self.device);
         }
         frame.present();
         Ok(())
+    }
+
+    fn mark_gpu(&self, encoder: &mut wgpu::CommandEncoder, mark: Mark) {
+        if let Some(profiler) = self.gpu_profiler.as_ref() {
+            profiler.timestamp(encoder, mark);
+        }
     }
 
     pub fn device(&self) -> &wgpu::Device {
@@ -1083,6 +1078,11 @@ impl Renderer {
     }
 
     /// Render the current world to a PNG (for demo QA / automation).
+    /// Ask the next `render_with` to keep the finished frame for `capture_png`.
+    pub fn request_capture(&mut self) {
+        self.capture_next_frame = true;
+    }
+
     pub fn capture_png(
         &mut self,
         _world: &World,
@@ -1109,10 +1109,9 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("capture-encoder"),
             });
-        let src = self
-            .last_color
-            .as_ref()
-            .expect("capture_png must run after render_with so HUD is in the shot");
+        let src = self.last_color.as_ref().expect(
+            "capture_png needs request_capture before render_with so the HUD is in the shot",
+        );
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: src,
@@ -1328,7 +1327,11 @@ impl Renderer {
             self.write_scene_uniforms(world, &scene_camera, None, SceneUniformTarget::Main);
         self.write_shadows(world);
         self.begin_instance_cull_frame(world);
+        if self.shadow.encode_horizon(encoder) {
+            self.gpu_stats.terrain_horizon_rebuilds += 1;
+        }
         self.encode_shadow_pass(encoder, world);
+        self.mark_gpu(encoder, Mark::ShadowDone);
         self.particles
             .encode_compute(encoder, self.pipelines.scene_bind_group(main_uniform_slot));
 
@@ -1597,6 +1600,8 @@ impl Renderer {
         if draw_environment {
             if let Some(clip) = self.clipmap.as_ref() {
                 clip.draw_land(pass, &self.shadow.resource_bind, portal_mask);
+                // The clipmap owns group 0 while it draws; give it back.
+                pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
             }
         }
 

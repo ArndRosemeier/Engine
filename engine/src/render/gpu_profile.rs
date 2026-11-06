@@ -1,5 +1,24 @@
-const QUERY_COUNT: u32 = 4;
+//! Per-phase GPU timings from timestamp queries.
+//!
+//! Enabled with `ENGINE_GPU_PROFILE_EVERY=N`. While enabled every frame is
+//! timed (the readback waits for the GPU, so frame pacing is not
+//! representative), and the average of the last `N` frames is printed:
+//!
+//! `gpu_profile frames=N shadow=… world=… post=… ui=… total=…`
+
+/// Timestamp slots, written in this order during a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    Start = 0,
+    ShadowDone = 1,
+    WorldDone = 2,
+    PostDone = 3,
+    UiDone = 4,
+}
+
+const QUERY_COUNT: u32 = 5;
 const QUERY_BYTES: u64 = QUERY_COUNT as u64 * wgpu::QUERY_SIZE as u64;
+const PHASES: [&str; 4] = ["shadow", "world", "post", "ui"];
 
 pub struct GpuProfiler {
     query_set: wgpu::QuerySet,
@@ -7,7 +26,8 @@ pub struct GpuProfiler {
     read_buffer: wgpu::Buffer,
     timestamp_period_ns: f32,
     every_frames: u32,
-    frame: u64,
+    sums_ms: [f64; 4],
+    frames: u32,
 }
 
 impl GpuProfiler {
@@ -52,23 +72,13 @@ impl GpuProfiler {
             read_buffer,
             timestamp_period_ns,
             every_frames,
-            frame: 0,
+            sums_ms: [0.0; 4],
+            frames: 0,
         }
     }
 
-    pub fn begin_frame(&mut self) -> bool {
-        self.frame = self
-            .frame
-            .checked_add(1)
-            .expect("GPU profile frame overflow");
-        self.frame.is_multiple_of(u64::from(self.every_frames))
-    }
-
-    pub fn timestamp(&self, encoder: &mut wgpu::CommandEncoder, index: u32) {
-        if index >= QUERY_COUNT {
-            panic!("GPU profile query index {index} exceeds {QUERY_COUNT}");
-        }
-        encoder.write_timestamp(&self.query_set, index);
+    pub fn timestamp(&self, encoder: &mut wgpu::CommandEncoder, mark: Mark) {
+        encoder.write_timestamp(&self.query_set, mark as u32);
     }
 
     pub fn resolve(&self, encoder: &mut wgpu::CommandEncoder) {
@@ -76,7 +86,9 @@ impl GpuProfiler {
         encoder.copy_buffer_to_buffer(&self.resolve_buffer, 0, &self.read_buffer, 0, QUERY_BYTES);
     }
 
-    pub fn read_and_report(&self, device: &wgpu::Device) {
+    /// Read this frame's timestamps and print the running average every
+    /// `every_frames` frames. Waits for the GPU.
+    pub fn read_and_report(&mut self, device: &wgpu::Device) {
         let slice = self.read_buffer.slice(..);
         let (send, receive) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -98,21 +110,28 @@ impl GpuProfiler {
                 timestamps.len()
             );
         }
-        let milliseconds = |start: usize, end: usize| -> f64 {
-            let ticks = timestamps[end]
-                .checked_sub(timestamps[start])
-                .expect("GPU profile timestamps are not monotonic");
-            ticks as f64 * f64::from(self.timestamp_period_ns) / 1_000_000.0
-        };
-        eprintln!(
-            "gpu_profile frame={} shadow={:.3}ms main={:.3}ms ui={:.3}ms total={:.3}ms",
-            self.frame,
-            milliseconds(0, 1),
-            milliseconds(1, 2),
-            milliseconds(2, 3),
-            milliseconds(0, 3),
-        );
+        for (phase, sum) in self.sums_ms.iter_mut().enumerate() {
+            // Some drivers report equal or (rarely) reordered stamps for empty
+            // phases; count those as zero instead of failing the frame.
+            let ticks = timestamps[phase + 1].saturating_sub(timestamps[phase]);
+            *sum += ticks as f64 * f64::from(self.timestamp_period_ns) / 1_000_000.0;
+        }
         drop(mapped);
         self.read_buffer.unmap();
+
+        self.frames += 1;
+        if self.frames >= self.every_frames {
+            let n = f64::from(self.frames);
+            let mut line = format!("gpu_profile frames={}", self.frames);
+            let mut total = 0.0;
+            for (name, sum) in PHASES.iter().zip(self.sums_ms) {
+                line.push_str(&format!(" {name}={:.3}ms", sum / n));
+                total += sum / n;
+            }
+            line.push_str(&format!(" total={total:.3}ms"));
+            eprintln!("{line}");
+            self.sums_ms = [0.0; 4];
+            self.frames = 0;
+        }
     }
 }

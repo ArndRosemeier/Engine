@@ -1500,6 +1500,10 @@ impl World {
         self.exit_requested = true;
     }
 
+    pub(crate) fn has_screenshot_queued(&self) -> bool {
+        !self.screenshot_queue.is_empty()
+    }
+
     pub(crate) fn take_screenshot_queue(&mut self) -> Vec<PathBuf> {
         std::mem::take(&mut self.screenshot_queue)
     }
