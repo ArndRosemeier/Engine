@@ -76,7 +76,7 @@ struct VsIn {
 };
 
 struct VsOut {
-    @builtin(position) clip: vec4<f32>,
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) world_n: vec3<f32>,
     @location(1) color: vec4<f32>,
     @location(2) world_p: vec3<f32>,
@@ -132,6 +132,8 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
 pub struct SkinnedPipelines {
     pub opaque: wgpu::RenderPipeline,
     pub opaque_portal: wgpu::RenderPipeline,
+    /// Depth-only twin of `opaque` for the depth prepass.
+    pub depth_prepass: wgpu::RenderPipeline,
     pub joint_bind_layout: wgpu::BindGroupLayout,
 }
 
@@ -182,7 +184,12 @@ pub fn create_skinned_pipelines(
         ],
     };
 
-    let make = |label: &str, depth_stencil: wgpu::DepthStencilState| {
+    let make = |label: &str, depth_stencil: wgpu::DepthStencilState, shaded: bool| {
+        let color_targets = [Some(wgpu::ColorTargetState {
+            format,
+            blend: Some(wgpu::BlendState::REPLACE),
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&pipeline_layout),
@@ -192,14 +199,10 @@ pub fn create_skinned_pipelines(
                 buffers: &[SkinnedVertex::LAYOUT, instance_layout.clone()],
                 compilation_options: Default::default(),
             },
-            fragment: Some(wgpu::FragmentState {
+            fragment: shaded.then(|| wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &color_targets,
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
@@ -218,15 +221,23 @@ pub fn create_skinned_pipelines(
     let opaque = make(
         "skinned-opaque",
         super::stencil::scene_depth_stencil_unmasked(),
+        true,
     );
     let opaque_portal = make(
         "skinned-opaque-portal",
         super::stencil::scene_depth_stencil_masked(),
+        true,
+    );
+    let depth_prepass = make(
+        "skinned-depth-prepass",
+        super::stencil::scene_depth_stencil_unmasked(),
+        false,
     );
 
     SkinnedPipelines {
         opaque,
         opaque_portal,
+        depth_prepass,
         joint_bind_layout,
     }
 }

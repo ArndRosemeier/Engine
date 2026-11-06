@@ -84,7 +84,7 @@ struct VsIn {
 };
 
 struct VsOut {
-    @builtin(position) clip: vec4<f32>,
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) world_n: vec3<f32>,
     @location(1) color: vec4<f32>,
     @location(2) world_p: vec3<f32>,
@@ -285,6 +285,8 @@ impl GpuTerrainMaterial {
 pub struct TerrainPipelines {
     pub opaque: wgpu::RenderPipeline,
     pub opaque_portal: wgpu::RenderPipeline,
+    /// Depth-only twin of `opaque` for the depth prepass.
+    pub depth_prepass: wgpu::RenderPipeline,
     pub mat_bind_layout: wgpu::BindGroupLayout,
     pub sampler: wgpu::Sampler,
 }
@@ -337,7 +339,12 @@ pub fn create_terrain_pipelines(
         push_constant_ranges: &[],
     });
 
-    let make = |label: &str, depth_stencil: wgpu::DepthStencilState| {
+    let make = |label: &str, depth_stencil: wgpu::DepthStencilState, shaded: bool| {
+        let color_targets = [Some(wgpu::ColorTargetState {
+            format,
+            blend: Some(wgpu::BlendState::REPLACE),
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&pipeline_layout),
@@ -347,14 +354,10 @@ pub fn create_terrain_pipelines(
                 buffers: &[Vertex::LAYOUT, InstanceRaw::LAYOUT],
                 compilation_options: Default::default(),
             },
-            fragment: Some(wgpu::FragmentState {
+            fragment: shaded.then(|| wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &color_targets,
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
@@ -373,10 +376,17 @@ pub fn create_terrain_pipelines(
     let opaque = make(
         "terrain-opaque",
         super::stencil::scene_depth_stencil_unmasked(),
+        true,
     );
     let opaque_portal = make(
         "terrain-opaque-portal",
         super::stencil::scene_depth_stencil_masked(),
+        true,
+    );
+    let depth_prepass = make(
+        "terrain-depth-prepass",
+        super::stencil::scene_depth_stencil_unmasked(),
+        false,
     );
 
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -393,6 +403,7 @@ pub fn create_terrain_pipelines(
     TerrainPipelines {
         opaque,
         opaque_portal,
+        depth_prepass,
         mat_bind_layout,
         sampler,
     }

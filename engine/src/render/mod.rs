@@ -11,6 +11,7 @@ mod ribbons_gpu;
 mod shadow;
 mod skinned;
 mod sky_pipeline;
+mod ssao;
 mod stencil;
 mod terrain_pipeline;
 mod terrain_shadow;
@@ -247,12 +248,17 @@ struct BatchSourceState {
     prototype_casts_shadow: bool,
 }
 
-pub(crate) const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::Greater;
+/// Reversed-Z. `GreaterEqual` so the world pass accepts the depth the prepass
+/// laid for the same surface.
+pub(crate) const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::GreaterEqual;
 pub(crate) const DEPTH_CLEAR: f32 = 0.0;
 pub(crate) use stencil::DEPTH_FORMAT;
 
 enum SceneUniformTarget {
+    /// The live camera's view: the one the depth prepass and SSAO see.
     Main,
+    /// Views through portals, where the occlusion texture does not apply.
+    Portal,
 }
 
 pub struct Renderer {
@@ -278,6 +284,10 @@ pub struct Renderer {
     portal: PortalGpu,
     depth_view: wgpu::TextureView,
     depth_texture: wgpu::Texture,
+    /// Ambient occlusion from the depth prepass.
+    ssao: ssao::Ssao,
+    /// This frame ran the depth prepass and SSAO.
+    ao_active: bool,
     gpu_meshes: HashMap<EntityId, GpuMesh>,
     /// GPU-mode instance buffers, one per prototype instead of one per spatial bin.
     gpu_instance_batches: HashMap<EntityId, GpuInstanceBatch>,
@@ -446,7 +456,10 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let joint_layout = joint_bind_layout(&device);
-        let shadow = ShadowGpu::new(&device, &queue, ShadowSettings::default(), &joint_layout);
+        let mut shadow = ShadowGpu::new(&device, &queue, ShadowSettings::default(), &joint_layout);
+        let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
+        let ssao = ssao::Ssao::new(&device, &depth_texture, config.width, config.height);
+        shadow.set_ao_view(&device, ssao.view().clone());
         let pipelines = create_pipelines(&device, &queue, HDR_FORMAT, &shadow);
         let terrain = create_terrain_pipelines(&device, HDR_FORMAT, &pipelines.bind_layout);
         let water = create_water_pipelines(&device, HDR_FORMAT, &pipelines.bind_layout);
@@ -459,7 +472,6 @@ impl Renderer {
         );
         let sky = create_sky_pipelines(&device, HDR_FORMAT);
         let portal = PortalGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
-        let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
         let instance_cull = InstanceCull::new(&device);
         let gpu_profiler = gpu_profile_interval
             .map(|every| GpuProfiler::new(&device, queue.get_timestamp_period(), every));
@@ -486,6 +498,8 @@ impl Renderer {
             portal,
             depth_view,
             depth_texture,
+            ssao,
+            ao_active: false,
             gpu_meshes: HashMap::new(),
             gpu_instance_batches: HashMap::new(),
             gpu_batch_sources: Vec::new(),
@@ -580,6 +594,19 @@ impl Renderer {
             create_depth(&self.device, self.config.width, self.config.height);
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
+        self.ssao.resize(
+            &self.device,
+            &self.depth_texture,
+            self.config.width,
+            self.config.height,
+        );
+        self.shadow
+            .set_ao_view(&self.device, self.ssao.view().clone());
+        self.pipelines
+            .rebuild_scene_bind_groups(&self.device, &self.shadow);
+        // The terrain bundle holds the old scene bind group.
+        self.terrain_bundle_ids.clear();
+        self.terrain_bundle = None;
         self.portal.resize();
         self.postprocess
             .resize(&self.device, self.config.width, self.config.height);
@@ -640,6 +667,11 @@ impl Renderer {
                     torch_radius_m,
                     torch_curve,
                     SkyLight::from_world(world),
+                    if world.ambient_occlusion().is_some() {
+                        1.0
+                    } else {
+                        0.0
+                    },
                     proc,
                 );
             }
@@ -1234,7 +1266,10 @@ impl Renderer {
         clip_plane: Option<(glam::Vec3, glam::Vec3)>,
         target: SceneUniformTarget,
     ) -> usize {
-        let _ = target;
+        let ao_strength = match target {
+            SceneUniformTarget::Main if self.ao_active => 1.0,
+            _ => 0.0,
+        };
         let slot = self.next_scene_uniform_slot;
         self.next_scene_uniform_slot = self
             .next_scene_uniform_slot
@@ -1277,7 +1312,7 @@ impl Renderer {
                 })
                 .unwrap_or([0.0, 0.0, 0.0, 0.0]),
             camera_right: right.into(),
-            _right_pad: 0.0,
+            ao_strength,
             camera_up: up.into(),
             _up_pad: 0.0,
             sky_up: sky_light.up,
@@ -1333,6 +1368,8 @@ impl Renderer {
     ) {
         self.next_scene_uniform_slot = 0;
         let scene_camera = Self::main_scene_camera(world);
+        let ao = world.ambient_occlusion();
+        self.ao_active = ao.is_some();
         let main_uniform_slot =
             self.write_scene_uniforms(world, &scene_camera, None, SceneUniformTarget::Main);
         self.write_shadows(world);
@@ -1361,8 +1398,31 @@ impl Renderer {
             }
         };
 
-        let clear = world.clear_color().to_vec3();
         let depth = self.depth_view.clone();
+        if let Some(ao) = ao {
+            self.encode_depth_prepass(encoder, world, live, &main_cull, main_uniform_slot, &depth);
+            let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+            self.ssao.prepare(
+                &self.queue,
+                ssao::AoFrame {
+                    projection: scene_camera.projection_matrix(aspect),
+                    fov_y_radians: scene_camera.fov_y_degrees().to_radians(),
+                    radius_m: ao.radius_m(),
+                    intensity: ao.intensity(),
+                },
+            );
+            self.ssao.encode(encoder);
+        }
+        self.mark_gpu(encoder, Mark::AoDone);
+        // With a prepass the world pass keeps its depth: hidden fragments
+        // then fail the depth test before any shading runs.
+        let (depth_load, stencil_load) = if self.ao_active {
+            (wgpu::LoadOp::Load, wgpu::LoadOp::Load)
+        } else {
+            (wgpu::LoadOp::Clear(DEPTH_CLEAR), wgpu::LoadOp::Clear(0))
+        };
+
+        let clear = world.clear_color().to_vec3();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("world-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1381,11 +1441,11 @@ impl Renderer {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(DEPTH_CLEAR),
+                    load: depth_load,
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(0),
+                    load: stencil_load,
                     store: wgpu::StoreOp::Store,
                 }),
             }),
@@ -1407,6 +1467,7 @@ impl Renderer {
                 },
             },
             &main_cull,
+            Some(main_uniform_slot),
         );
     }
 
@@ -1417,6 +1478,7 @@ impl Renderer {
         camera: &Camera,
         level: PortalLevel,
         main_cull: &MainCullSelection,
+        level_slot: Option<usize>,
     ) {
         let PortalLevel {
             space,
@@ -1436,16 +1498,27 @@ impl Renderer {
         let portals = world
             .visible_portals(camera.eye(), look, space)
             .expect("portal visibility invariants must hold while rendering");
-        let scene_camera = if let Some(visible) = portals.first() {
-            let plane = world
-                .portal_plane(visible.src)
-                .expect("visible portal source must retain its validated plane");
-            portal_render_camera(camera, plane)
-        } else {
-            camera.clone()
+        // The live view reuses the main uniform slot, which the depth prepass
+        // and the terrain bundle were drawn with: their depths must match.
+        let uniform_slot = match level_slot {
+            Some(slot) => slot,
+            None => {
+                let scene_camera = if let Some(visible) = portals.first() {
+                    let plane = world
+                        .portal_plane(visible.src)
+                        .expect("visible portal source must retain its validated plane");
+                    portal_render_camera(camera, plane)
+                } else {
+                    camera.clone()
+                };
+                self.write_scene_uniforms(
+                    world,
+                    &scene_camera,
+                    clip_plane,
+                    SceneUniformTarget::Portal,
+                )
+            }
         };
-        let uniform_slot =
-            self.write_scene_uniforms(world, &scene_camera, clip_plane, SceneUniformTarget::Main);
         pass.set_stencil_reference(u32::from(level));
 
         self.draw_space_scene(
@@ -1480,8 +1553,12 @@ impl Renderer {
                 .portal_plane(visible.src)
                 .expect("visible portal has a plane");
             let render_cam = portal_render_camera(camera, src_plane);
-            let stencil_uniform_slot =
-                self.write_scene_uniforms(world, &render_cam, clip_plane, SceneUniformTarget::Main);
+            let stencil_uniform_slot = self.write_scene_uniforms(
+                world,
+                &render_cam,
+                clip_plane,
+                SceneUniformTarget::Portal,
+            );
             self.draw_portal_stencil_incr(pass, world, visible.src, level, stencil_uniform_slot);
             pass.set_pipeline(&self.portal.depth_clear);
             pass.set_stencil_reference(u32::from(level + 1));
@@ -1509,9 +1586,10 @@ impl Renderer {
                     },
                 },
                 main_cull,
+                None,
             );
             let restore_uniform_slot =
-                self.write_scene_uniforms(world, camera, clip_plane, SceneUniformTarget::Main);
+                self.write_scene_uniforms(world, camera, clip_plane, SceneUniformTarget::Portal);
             self.collect_draws(world, space, true);
             self.draw_portal_stencil_decr(
                 pass,
@@ -1574,6 +1652,163 @@ impl Renderer {
             OPAQUE_INDIRECT_OFFSET,
             &mut self.gpu_stats.indirect_draws,
         );
+    }
+
+    /// Lay the live view's opaque depth before shading, for SSAO and so the
+    /// world pass shades each pixel once. Foliage cutouts and see-through
+    /// surfaces stay out; they still draw, and test, in the world pass.
+    fn encode_depth_prepass(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        world: &World,
+        space: SpaceId,
+        main_cull: &MainCullSelection,
+        slot: usize,
+        depth: &wgpu::TextureView,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("depth-prepass"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(DEPTH_CLEAR),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(0),
+                    store: wgpu::StoreOp::Store,
+                }),
+            }),
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+        // Prepass draws are not counted in the frame stats.
+        let mut indirect_draws = 0;
+        let scene_bind = self.pipelines.scene_bind_group(slot);
+        pass.set_bind_group(0, scene_bind, &[]);
+        if world.space_draws_environment(space) {
+            if let Some(clip) = self.clipmap.as_ref() {
+                clip.draw_land_depth(&mut pass, &self.shadow.resource_bind);
+                pass.set_bind_group(0, scene_bind, &[]);
+            }
+        }
+
+        pass.set_pipeline(&self.pipelines.depth_prepass);
+        for &id in &self.draw_opaque {
+            if !entity_in_space(world, id, space) {
+                continue;
+            }
+            let entity = world.entity(id).expect("draw list is live");
+            let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
+            let albedo = entity
+                .albedo
+                .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
+                .unwrap_or(&self.pipelines.white_albedo);
+            pass.set_bind_group(1, albedo, &[]);
+            submit_mesh_draw(
+                &mut pass,
+                gpu,
+                mesh_submit(&main_cull.compacted, id),
+                0..gpu.opaque_index_count as u32,
+                OPAQUE_INDIRECT_OFFSET,
+                &mut indirect_draws,
+            );
+        }
+        for &prototype in &self.batch_opaque {
+            if !entity_in_space(world, prototype, space) {
+                continue;
+            }
+            let entity = world
+                .entity(prototype)
+                .expect("batch draw prototype is live");
+            let batch = self
+                .gpu_instance_batches
+                .get(&prototype)
+                .expect("batch draw is synced");
+            let albedo = entity
+                .albedo
+                .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
+                .unwrap_or(&self.pipelines.white_albedo);
+            pass.set_bind_group(1, albedo, &[]);
+            submit_batch_draw(
+                &mut pass,
+                batch,
+                Some(mesh_submit(&main_cull.compacted, prototype)),
+                0..batch.gpu.opaque_index_count as u32,
+                OPAQUE_INDIRECT_OFFSET,
+                &mut indirect_draws,
+            );
+        }
+
+        pass.set_pipeline(&self.terrain.depth_prepass);
+        // The same set the terrain bundle draws.
+        for &id in &self.draw_terrain {
+            let entity = world.entity(id).expect("draw list is live");
+            let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
+            let Some(SurfaceMaterialRef::Terrain(mid)) = entity.material else {
+                panic!("terrain entity {id} lost its terrain material");
+            };
+            let mat = self
+                .gpu_materials
+                .get(&mid)
+                .unwrap_or_else(|| panic!("terrain entity {id} material is not synced"));
+            pass.set_bind_group(1, &mat.bind_group, &[]);
+            submit_mesh_draw(
+                &mut pass,
+                gpu,
+                MeshSubmit::Direct,
+                0..gpu.opaque_index_count as u32,
+                OPAQUE_INDIRECT_OFFSET,
+                &mut indirect_draws,
+            );
+        }
+        for &prototype in &self.batch_terrain {
+            if !entity_in_space(world, prototype, space) {
+                continue;
+            }
+            let entity = world
+                .entity(prototype)
+                .expect("batch draw prototype is live");
+            let batch = self
+                .gpu_instance_batches
+                .get(&prototype)
+                .expect("batch draw is synced");
+            let Some(SurfaceMaterialRef::Terrain(mid)) = entity.material else {
+                panic!("terrain batch {prototype} lost its terrain material");
+            };
+            let mat = self
+                .gpu_materials
+                .get(&mid)
+                .unwrap_or_else(|| panic!("terrain batch {prototype} material is not synced"));
+            pass.set_bind_group(1, &mat.bind_group, &[]);
+            submit_batch_draw(
+                &mut pass,
+                batch,
+                Some(mesh_submit(&main_cull.compacted, prototype)),
+                0..batch.gpu.opaque_index_count as u32,
+                OPAQUE_INDIRECT_OFFSET,
+                &mut indirect_draws,
+            );
+        }
+
+        pass.set_pipeline(&self.skinned.depth_prepass);
+        for (id, anim) in world.animated_entities() {
+            if anim.space() != space {
+                continue;
+            }
+            let Some(gpu) = self.gpu_skinned.get(id) else {
+                continue;
+            };
+            pass.set_bind_group(1, &gpu.joint_bind, &[]);
+            pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
+            for mesh in &gpu.meshes {
+                pass.set_bind_group(2, &mesh.albedo_bind, &[]);
+                pass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
+                pass.set_index_buffer(mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+        }
     }
 
     fn draw_space_scene(
@@ -2734,7 +2969,8 @@ fn create_depth(
         sample_count: stencil::scene_samples(),
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        // Sampled by the SSAO pass after the depth prepass.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

@@ -40,8 +40,8 @@ pub use crate::vfx::{Delivery, EffectHandle, EffectSpec, VfxPalette, VfxSystem, 
 pub use crate::water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use crate::world::AnimatedEntity;
 pub use crate::world::{
-    BloomSettings, EntityId, Frame, Haze, InstanceSubmit, Light, ShadowSettings, Sky, TorchLight,
-    World,
+    AmbientOcclusion, BloomSettings, EntityId, Frame, Haze, InstanceSubmit, Light, ShadowSettings,
+    Sky, TorchLight, World,
 };
 pub use crate::Engine;
 pub use glam::Vec3;
