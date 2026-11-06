@@ -3,7 +3,7 @@
 use crate::error::{EngineError, EngineResult};
 use crate::limits::EngineLimits;
 use crate::mesh::{AlbedoMap, MaterialMaps};
-use crate::model::{image_to_albedo, material_maps, reject_alpha_mode_without_real_alpha};
+use crate::model::{apply_alpha_mode, image_to_albedo, material_maps, morph_deltas};
 use glam::{Mat4, Quat, Vec3, Vec4};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -729,6 +729,12 @@ fn load_animated_document(
             if positions.is_empty() {
                 continue;
             }
+            let morph = morph_deltas(&mesh, &reader, positions.len());
+            if let Some((dp, _)) = &morph {
+                for (p, d) in positions.iter_mut().zip(dp) {
+                    *p = (Vec3::from(*p) + *d).to_array();
+                }
+            }
 
             let (joints, extra_weights) = match reader.read_joints(0) {
                 Some(joints_iter) => {
@@ -813,6 +819,11 @@ fn load_animated_document(
             } else {
                 vec![[0.0, 1.0, 0.0]; positions.len()]
             };
+            if let Some((_, dn)) = &morph {
+                for (n, d) in normals.iter_mut().zip(dn) {
+                    *n = (Vec3::from(*n) + *d).normalize_or_zero().to_array();
+                }
+            }
             if bake_to_joint {
                 let xform = node_global_matrix(document, node.index(), &node_parent);
                 for n in &mut normals {
@@ -936,7 +947,7 @@ fn load_animated_document(
                     "TEXCOORD length mismatch with POSITION".into(),
                 ));
             }
-            let albedo = if let Some(info) = primitive
+            let mut albedo = if let Some(info) = primitive
                 .material()
                 .pbr_metallic_roughness()
                 .base_color_texture()
@@ -951,7 +962,7 @@ fn load_animated_document(
             } else {
                 None
             };
-            reject_alpha_mode_without_real_alpha(primitive.material().alpha_mode(), &albedo)?;
+            apply_alpha_mode(&primitive.material(), &mut albedo);
 
             meshes.push(SkinMesh {
                 positions: out_pos,
@@ -1273,30 +1284,17 @@ mod tests {
     }
 
     #[test]
-    fn blend_rgb_without_real_alpha_is_load_error() {
-        let dir =
-            std::env::temp_dir().join(format!("engine-anim-blend-rgb-{}", std::process::id()));
-        crate::model::write_minimal_skinned_gltf(&dir, "BLEND", true);
-        let err = AnimatedModel::load_with(dir.join("model.gltf"), &dir, &EngineLimits::default())
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("BLEND") && msg.contains("alphaMode"),
-            "expected BLEND hole-body gate, got {msg}"
-        );
-    }
-
-    #[test]
-    fn mask_rgb_without_real_alpha_is_load_error() {
-        let dir = std::env::temp_dir().join(format!("engine-anim-mask-rgb-{}", std::process::id()));
-        crate::model::write_minimal_skinned_gltf(&dir, "MASK", true);
-        let err = AnimatedModel::load_with(dir.join("model.gltf"), &dir, &EngineLimits::default())
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("MASK") && msg.contains("alphaMode"),
-            "expected MASK hole-body gate, got {msg}"
-        );
+    fn blend_or_mask_without_real_alpha_loads_opaque() {
+        for mode in ["BLEND", "MASK"] {
+            let dir =
+                std::env::temp_dir().join(format!("engine-anim-{mode}-rgb-{}", std::process::id()));
+            crate::model::write_minimal_skinned_gltf(&dir, mode, true);
+            let model =
+                AnimatedModel::load_with(dir.join("model.gltf"), &dir, &EngineLimits::default())
+                    .unwrap();
+            let albedo = model.meshes[0].albedo.as_ref().unwrap();
+            assert!(albedo.rgba.chunks_exact(4).all(|px| px[3] == 255), "{mode}");
+        }
     }
 
     #[test]

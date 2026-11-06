@@ -123,6 +123,10 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let vis = sun_visibility(in.world_p, geo_n, u.eye);
     let texel = textureSample(albedo_tex, albedo_sampler, in.uv);
     let base = in.color * texel;
+    // Under MSAA alpha becomes coverage (soft lashes, hair cards); without it, cut at half.
+    if base.a < SKIN_ALPHA_CUT {
+        discard;
+    }
     // Characters keep their full-strength sun (no ambient budget split).
     let sun_diffuse = wrap * wrap / max(1.0 - u.ambient, 0.05);
     let lit = shade_surface_occluded(base.rgb, n, in.world_p, mat.roughness * orm.y,
@@ -130,6 +134,16 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         + base.rgb * torch_light(in.world_p, n)
         + material_emission(in.uv);
     return vec4<f32>(haze(lit, in.world_p), base.a);
+}
+
+// Depth prepass: only texels the shaded pass covers on every sample, so
+// see-through parts (lash cards, hair strands) never hide what is behind.
+@fragment
+fn fs_depth(in: VsOut) {
+    let texel = textureSample(albedo_tex, albedo_sampler, in.uv);
+    if in.color.a * texel.a < 0.999 {
+        discard;
+    }
 }
 "#;
 
@@ -168,7 +182,12 @@ pub fn create_skinned_pipelines(
         label: Some("skinned-shader"),
         source: wgpu::ShaderSource::Wgsl(
             format!(
-                "{}{SKINNED_SHADER}{}",
+                "const SKIN_ALPHA_CUT: f32 = {};\n{}{SKINNED_SHADER}{}",
+                if super::stencil::scene_samples() > 1 {
+                    "0.0"
+                } else {
+                    "0.5"
+                },
                 super::pipeline::scene_shader_prefix(),
                 super::material::material_wgsl(2)
             )
@@ -208,10 +227,10 @@ pub fn create_skinned_pipelines(
                 buffers: &[SkinnedVertex::LAYOUT, instance_layout.clone()],
                 compilation_options: Default::default(),
             },
-            fragment: shaded.then(|| wgpu::FragmentState {
+            fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &color_targets,
+                entry_point: Some(if shaded { "fs_main" } else { "fs_depth" }),
+                targets: if shaded { &color_targets } else { &[] },
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
@@ -221,7 +240,8 @@ pub fn create_skinned_pipelines(
                 ..Default::default()
             },
             depth_stencil: Some(depth_stencil),
-            multisample: super::stencil::scene_multisample(false),
+            // The shaded passes turn alpha into coverage.
+            multisample: super::stencil::scene_multisample(shaded),
             multiview: None,
             cache: None,
         })

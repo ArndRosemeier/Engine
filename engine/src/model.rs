@@ -160,7 +160,7 @@ fn load_gltf_document(
                 continue;
             }
             let reader = primitive.reader(|b| buffers.get(b.index()).map(|d| d.0.as_slice()));
-            let positions: Vec<[f32; 3]> = reader
+            let mut positions: Vec<[f32; 3]> = reader
                 .read_positions()
                 .ok_or_else(|| EngineError::Model("glTF primitive missing POSITION".into()))?
                 .collect();
@@ -168,11 +168,19 @@ fn load_gltf_document(
                 continue;
             }
 
-            let normals: Vec<Vec3> = if let Some(iter) = reader.read_normals() {
+            let mut normals: Vec<Vec3> = if let Some(iter) = reader.read_normals() {
                 iter.map(Vec3::from).collect()
             } else {
                 vec![Vec3::Y; positions.len()]
             };
+            if let Some((dp, dn)) = morph_deltas(&mesh, &reader, positions.len()) {
+                for (p, d) in positions.iter_mut().zip(&dp) {
+                    *p = (Vec3::from(*p) + *d).to_array();
+                }
+                for (v, d) in normals.iter_mut().zip(&dn) {
+                    *v = (*v + *d).normalize_or_zero();
+                }
+            }
 
             let base_color = primitive
                 .material()
@@ -232,8 +240,8 @@ fn load_gltf_document(
             } else {
                 vec![glam::Vec4::new(base.x, base.y, base.z, 1.0); positions.len()]
             };
-            let albedo = primitive_base_color_albedo(&primitive, images)?;
-            reject_alpha_mode_without_real_alpha(primitive.material().alpha_mode(), &albedo)?;
+            let mut albedo = primitive_base_color_albedo(&primitive, images)?;
+            apply_alpha_mode(&primitive.material(), &mut albedo);
 
             let indices: Vec<u32> = if let Some(iter) = reader.read_indices() {
                 iter.into_u32().collect()
@@ -403,38 +411,64 @@ pub(crate) fn image_to_albedo(image: &gltf::image::Data) -> EngineResult<AlbedoM
     })
 }
 
-/// True when some albedo texel has A < 255.
-/// RGB images padded to A=255, and a missing texture, count as no real alpha.
-pub(crate) fn albedo_has_real_alpha(albedo: &Option<AlbedoMap>) -> bool {
-    albedo
-        .as_ref()
-        .is_some_and(|map| map.rgba.chunks_exact(4).any(|px| px[3] < 255))
+/// The mesh's default morph target weights (glTF `mesh.weights`) applied to
+/// one primitive: position and normal offsets per vertex, or `None` when no
+/// target has weight. Exporters store a shaped character (body sliders, a
+/// resting expression) this way; animated weights are not supported.
+pub(crate) fn morph_deltas<'a, 's, F>(
+    mesh: &gltf::Mesh<'_>,
+    reader: &gltf::mesh::Reader<'a, 's, F>,
+    vertex_count: usize,
+) -> Option<(Vec<Vec3>, Vec<Vec3>)>
+where
+    F: Clone + Fn(gltf::Buffer<'a>) -> Option<&'s [u8]>,
+{
+    let weights = mesh.weights()?;
+    if weights.iter().all(|w| *w == 0.0 || !w.is_finite()) {
+        return None;
+    }
+    let mut dp = vec![Vec3::ZERO; vertex_count];
+    let mut dn = vec![Vec3::ZERO; vertex_count];
+    for (w, (pos, nrm, _)) in weights.iter().zip(reader.read_morph_targets()) {
+        if *w == 0.0 || !w.is_finite() {
+            continue;
+        }
+        if let Some(pos) = pos {
+            for (d, p) in dp.iter_mut().zip(pos) {
+                *d += Vec3::from(p) * *w;
+            }
+        }
+        if let Some(nrm) = nrm {
+            for (d, n) in dn.iter_mut().zip(nrm) {
+                *d += Vec3::from(n) * *w;
+            }
+        }
+    }
+    Some((dp, dn))
 }
 
-pub(crate) fn reject_alpha_mode_without_real_alpha(
-    alpha_mode: gltf::material::AlphaMode,
-    albedo: &Option<AlbedoMap>,
-) -> EngineResult<()> {
-    match alpha_mode {
-        gltf::material::AlphaMode::Opaque => Ok(()),
-        gltf::material::AlphaMode::Blend | gltf::material::AlphaMode::Mask => {
-            if albedo_has_real_alpha(albedo) {
-                return Ok(());
+/// Makes the albedo alpha follow the material's `alphaMode`, as glTF says:
+/// OPAQUE ignores alpha (a texture with an alpha channel never cuts holes in
+/// a body), MASK is fully opaque at or above `alphaCutoff` and fully clear
+/// below it, BLEND keeps the alpha. A BLEND or MASK material without real
+/// alpha (exporters mark many uniform materials BLEND) simply draws opaque.
+pub(crate) fn apply_alpha_mode(material: &gltf::Material<'_>, albedo: &mut Option<AlbedoMap>) {
+    let Some(map) = albedo.as_mut() else {
+        return;
+    };
+    match material.alpha_mode() {
+        gltf::material::AlphaMode::Opaque => {
+            for px in map.rgba.chunks_exact_mut(4) {
+                px[3] = 255;
             }
-            let mode = match alpha_mode {
-                gltf::material::AlphaMode::Blend => "BLEND",
-                gltf::material::AlphaMode::Mask => "MASK",
-                gltf::material::AlphaMode::Opaque => unreachable!(),
-            };
-            let why = if albedo.is_none() {
-                "no alpha channel on the baseColor texture"
-            } else {
-                "every albedo alpha byte is 255"
-            };
-            Err(EngineError::Model(format!(
-                "alphaMode {mode} without real alpha ({why})"
-            )))
         }
+        gltf::material::AlphaMode::Mask => {
+            let cutoff = material.alpha_cutoff().unwrap_or(0.5).clamp(0.0, 1.0) * 255.0;
+            for px in map.rgba.chunks_exact_mut(4) {
+                px[3] = if px[3] as f32 >= cutoff { 255 } else { 0 };
+            }
+        }
+        gltf::material::AlphaMode::Blend => {}
     }
 }
 
@@ -605,27 +639,6 @@ pub(crate) fn write_minimal_skinned_gltf(dir: &Path, alpha_mode: &str, with_rgb_
     std::fs::write(dir.join("model.gltf"), json).expect("write gltf");
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::mesh::AlbedoMap;
-
-    #[test]
-    fn albedo_has_real_alpha_treats_padded_rgb_as_none() {
-        assert!(!albedo_has_real_alpha(&None));
-        assert!(!albedo_has_real_alpha(&Some(AlbedoMap {
-            width: 1,
-            height: 1,
-            rgba: vec![10, 20, 30, 255],
-        })));
-        assert!(albedo_has_real_alpha(&Some(AlbedoMap {
-            width: 1,
-            height: 1,
-            rgba: vec![10, 20, 30, 200],
-        })));
-    }
-}
-
 /// `gltf::import` inside the sandbox root and the size limits.
 pub(crate) fn import_limited(
     path: &Path,
@@ -706,16 +719,24 @@ fn load_scene_document(
             let Some(positions) = reader.read_positions() else {
                 return Err(EngineError::Model("glTF primitive missing POSITION".into()));
             };
-            let positions: Vec<Vec3> = positions
-                .map(|p| world.transform_point3(Vec3::from(p)))
-                .collect();
-            if positions.is_empty() {
+            let mut local: Vec<Vec3> = positions.map(Vec3::from).collect();
+            if local.is_empty() {
                 continue;
             }
-            let n = positions.len();
-            let normals: Vec<Vec3> = match reader.read_normals() {
-                Some(iter) => iter
-                    .map(|v| (normal_matrix * Vec3::from(v)).normalize_or_zero())
+            let n = local.len();
+            let mut local_normals: Option<Vec<Vec3>> =
+                reader.read_normals().map(|i| i.map(Vec3::from).collect());
+            if let Some((dp, dn)) = morph_deltas(&mesh, &reader, n) {
+                local.iter_mut().zip(&dp).for_each(|(p, d)| *p += *d);
+                if let Some(ns) = &mut local_normals {
+                    ns.iter_mut().zip(&dn).for_each(|(v, d)| *v += *d);
+                }
+            }
+            let positions: Vec<Vec3> = local.iter().map(|p| world.transform_point3(*p)).collect();
+            let normals: Vec<Vec3> = match local_normals {
+                Some(ns) => ns
+                    .into_iter()
+                    .map(|v| (normal_matrix * v).normalize_or_zero())
                     .collect(),
                 None => vec![Vec3::ZERO; n],
             };
@@ -797,11 +818,11 @@ fn part_to_mesh(
     material: &gltf::Material<'_>,
     images: &[gltf::image::Data],
 ) -> EngineResult<Mesh> {
-    let albedo = match material.pbr_metallic_roughness().base_color_texture() {
+    let mut albedo = match material.pbr_metallic_roughness().base_color_texture() {
         Some(info) => Some(image_to_albedo(texture_image(images, info.texture())?)?),
         None => None,
     };
-    reject_alpha_mode_without_real_alpha(material.alpha_mode(), &albedo)?;
+    apply_alpha_mode(material, &mut albedo);
 
     let mut surface = imported_surface_material(material.name());
     if surface == SurfaceMaterial::DEFAULT {
@@ -858,6 +879,28 @@ fn texture_image<'a>(
 /// Occlusion and metallic-roughness are often one texture (ORM); when they
 /// are separate the occlusion is resampled into the red channel of the
 /// metallic-roughness map, so the shader always reads one packed texture.
+/// Scale and offset of `KHR_texture_transform` on a normal texture (rotation
+/// is not supported and left out).
+fn normal_uv_transform(info: &gltf::material::NormalTexture<'_>) -> [f32; 4] {
+    let mut uv = [1.0, 1.0, 0.0, 0.0];
+    let Some(t) = info.extension_value("KHR_texture_transform") else {
+        return uv;
+    };
+    let pair = |key: &str| -> Option<[f32; 2]> {
+        let a = t.get(key)?.as_array()?;
+        Some([a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32])
+    };
+    if let Some(s) = pair("scale").filter(|s| s.iter().all(|v| v.is_finite())) {
+        uv[0] = s[0];
+        uv[1] = s[1];
+    }
+    if let Some(o) = pair("offset").filter(|o| o.iter().all(|v| v.is_finite())) {
+        uv[2] = o[0];
+        uv[3] = o[1];
+    }
+    uv
+}
+
 pub(crate) fn material_maps(
     material: &gltf::Material<'_>,
     images: &[gltf::image::Data],
@@ -871,6 +914,7 @@ pub(crate) fn material_maps(
     if let Some(info) = material.normal_texture() {
         maps.normal = Some(image_to_albedo(texture_image(images, info.texture())?)?);
         maps.normal_scale = info.scale();
+        maps.normal_uv = normal_uv_transform(&info);
     }
     let mr = pbr.metallic_roughness_texture();
     let occlusion = material.occlusion_texture();
@@ -953,6 +997,8 @@ mod scene_tests {
         for i in [0u16, 1, 2] {
             bin.extend_from_slice(&i.to_le_bytes());
         }
+        bin.extend_from_slice(&[0, 0]); // align the morph target
+        f(&mut bin, &[0.0, 0.0, 2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 2.0]); // 36 morph offsets
         std::fs::write(dir.join("mesh.bin"), &bin).expect("bin");
         write_png(&dir.join("normal.png"), 4, 4, [128, 128, 255]);
         write_png(&dir.join("mr.png"), 4, 4, [9, 200, 50]);
@@ -968,10 +1014,12 @@ mod scene_tests {
   ],
   "meshes":[
     {"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3,"material":0}]},
-    {"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3,"material":1}]}
+    {"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3,"material":1,
+      "targets":[{"POSITION":4}]}],"weights":[0.5]}
   ],
   "materials":[
-    {"normalTexture":{"index":0,"scale":0.5},
+    {"normalTexture":{"index":0,"scale":0.5,
+       "extensions":{"KHR_texture_transform":{"scale":[48,24],"offset":[0.25,0]}}},
      "occlusionTexture":{"index":2,"strength":0.8},
      "pbrMetallicRoughness":{"metallicRoughnessTexture":{"index":1}},
      "emissiveFactor":[1,0.5,0],
@@ -984,15 +1032,17 @@ mod scene_tests {
     {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","max":[1,1,0],"min":[0,0,0]},
     {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
     {"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"},
-    {"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"}
+    {"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"},
+    {"bufferView":4,"componentType":5126,"count":3,"type":"VEC3","max":[0,0,2],"min":[0,0,2]}
   ],
   "bufferViews":[
     {"buffer":0,"byteOffset":0,"byteLength":36},
     {"buffer":0,"byteOffset":36,"byteLength":36},
     {"buffer":0,"byteOffset":72,"byteLength":24},
-    {"buffer":0,"byteOffset":96,"byteLength":6}
+    {"buffer":0,"byteOffset":96,"byteLength":6},
+    {"buffer":0,"byteOffset":104,"byteLength":36}
   ],
-  "buffers":[{"byteLength":102,"uri":"mesh.bin"}]
+  "buffers":[{"byteLength":140,"uri":"mesh.bin"}]
 }"#;
         std::fs::write(dir.join("model.gltf"), json).expect("gltf");
     }
@@ -1013,6 +1063,7 @@ mod scene_tests {
         let maps = moved.material_maps().expect("maps kept");
         assert!(maps.normal.is_some());
         assert_eq!(maps.normal_scale, 0.5);
+        assert_eq!(maps.normal_uv, [48.0, 24.0, 0.25, 0.0], "KHR_texture_transform");
         assert_eq!(maps.occlusion_strength, 0.8);
         let orm = maps.orm.as_ref().expect("orm packed");
         assert_eq!(
@@ -1025,6 +1076,11 @@ mod scene_tests {
         // Part 1: plain factors, mirrored, still facing +z.
         let plain = &scene.parts[1];
         assert!(plain.material_maps().is_none(), "neutral maps dropped");
+        let (lo, hi) = plain.bounds().unwrap();
+        assert!(
+            (lo.z - 1.0).abs() < 1e-5 && (hi.z - 1.0).abs() < 1e-5,
+            "default morph weight 0.5 of a +2 z offset applied: {lo} {hi}"
+        );
         let surface = plain.surface_material();
         assert_eq!((surface.roughness, surface.metallic), (0.3, 0.0));
         let built = plain.build();

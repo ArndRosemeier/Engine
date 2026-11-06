@@ -43,6 +43,9 @@ pub struct MaterialMaps {
     /// Emitted colour, sRGB, multiplied by `emissive_factor`.
     pub emissive: Option<AlbedoMap>,
     pub normal_scale: f32,
+    /// UV scale (xy) and offset (zw) for the normal map, from glTF's
+    /// `KHR_texture_transform`: tiled detail normals (fabric weave, skin pores).
+    pub normal_uv: [f32; 4],
     pub occlusion_strength: f32,
     /// Linear emitted colour; values above 1 glow brighter (emissive strength).
     pub emissive_factor: [f32; 3],
@@ -59,6 +62,7 @@ impl Default for MaterialMaps {
             orm: None,
             emissive: None,
             normal_scale: 1.0,
+            normal_uv: [1.0, 1.0, 0.0, 0.0],
             occlusion_strength: 1.0,
             emissive_factor: [0.0; 3],
             roughness: 0.65,
@@ -99,6 +103,10 @@ impl MaterialMaps {
         let finite = [
             self.normal_scale,
             self.occlusion_strength,
+            self.normal_uv[0],
+            self.normal_uv[1],
+            self.normal_uv[2],
+            self.normal_uv[3],
             self.roughness,
             self.metallic,
         ]

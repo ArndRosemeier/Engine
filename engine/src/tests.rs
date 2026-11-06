@@ -190,27 +190,15 @@ fn glb_bin_space_fourcc_is_unknown_chunk_type() {
 }
 
 #[test]
-fn blend_rgb_without_real_alpha_is_load_error() {
-    let dir = std::env::temp_dir().join(format!("engine-static-blend-rgb-{}", std::process::id()));
-    crate::model::write_minimal_static_gltf(&dir, "BLEND", true);
-    let err = Model::load_with(dir.join("model.gltf"), &dir, &EngineLimits::default()).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("BLEND") && msg.contains("alphaMode"),
-        "expected BLEND hole-body gate, got {msg}"
-    );
-}
-
-#[test]
-fn mask_rgb_without_real_alpha_is_load_error() {
-    let dir = std::env::temp_dir().join(format!("engine-static-mask-rgb-{}", std::process::id()));
-    crate::model::write_minimal_static_gltf(&dir, "MASK", true);
-    let err = Model::load_with(dir.join("model.gltf"), &dir, &EngineLimits::default()).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("MASK") && msg.contains("alphaMode"),
-        "expected MASK hole-body gate, got {msg}"
-    );
+fn blend_or_mask_without_real_alpha_loads_opaque() {
+    for mode in ["BLEND", "MASK"] {
+        let dir =
+            std::env::temp_dir().join(format!("engine-static-{mode}-rgb-{}", std::process::id()));
+        crate::model::write_minimal_static_gltf(&dir, mode, true);
+        let mesh =
+            Model::load_with(dir.join("model.gltf"), &dir, &EngineLimits::default()).unwrap();
+        assert!(mesh.face_count() > 0, "{mode}");
+    }
 }
 
 #[test]

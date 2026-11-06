@@ -4,7 +4,8 @@
 //! (or an AssetGenerator `.fmpk` prop pack: every prop in a row)
 //!
 //! Skinned models (characters exported from Actors, animals) play their
-//! first clip; Space steps to the next one. Static models load one part per
+//! first clip; Space steps to the next one.
+//! `assets/character.glb` is a dressed Actors character with five clips. Static models load one part per
 //! material. Hold the right mouse button to orbit, W/S to zoom.
 use engine::prelude::*;
 use glam::Vec3;
@@ -127,7 +128,11 @@ fn main() -> EngineResult<()> {
             30.0_f32
         });
     let mut pitch = 12.0_f32;
-    let mut distance = (size * scale * 1.4).max(2.5);
+    let env = |key: &str| std::env::var(key).ok().and_then(|v| v.parse::<f32>().ok());
+    // ENGINE_VIEW_DISTANCE (metres) and ENGINE_VIEW_FOCUS (0 = feet, 1 = top)
+    // frame close-ups for screenshots.
+    let mut distance = env("ENGINE_VIEW_DISTANCE").unwrap_or((size * scale * 1.4).max(2.5));
+    let focus = env("ENGINE_VIEW_FOCUS").unwrap_or(0.5);
     let mut clip = 0usize;
     let mut animated = None;
 
@@ -148,10 +153,15 @@ fn main() -> EngineResult<()> {
                 }
                 Loaded::Skinned(model) => {
                     let id = world.spawn_animated(model.clone(), place)?;
-                    if let Some(name) = model.clip_names().next() {
+                    let clips: Vec<String> = model.clip_names().map(String::from).collect();
+                    // ENGINE_VIEW_CLIP picks the starting clip by name.
+                    if let Ok(name) = std::env::var("ENGINE_VIEW_CLIP") {
+                        clip = clips.iter().position(|c| *c == name).unwrap_or(0);
+                    }
+                    if let Some(name) = clips.get(clip) {
                         world.play_animation(id, name)?;
                     }
-                    animated = Some((id, model.clip_names().map(String::from).collect::<Vec<_>>()));
+                    animated = Some((id, clips));
                 }
             }
         }
@@ -171,7 +181,7 @@ fn main() -> EngineResult<()> {
                 }
             }
         }
-        world.look_orbit(Vec3::new(0.0, height * 0.5, 0.0), distance, yaw, pitch);
+        world.look_orbit(Vec3::new(0.0, height * focus, 0.0), distance, yaw, pitch);
         Ok(())
     })
 }
