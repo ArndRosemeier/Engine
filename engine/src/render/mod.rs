@@ -639,6 +639,7 @@ impl Renderer {
                     torch_color,
                     torch_radius_m,
                     torch_curve,
+                    SkyLight::from_world(world),
                     proc,
                 );
             }
@@ -1252,6 +1253,7 @@ impl Renderer {
         let forward = (camera.target() - camera.eye()).normalize_or_zero();
         let right = forward.cross(camera.up()).normalize_or_zero();
         let up = right.cross(forward).normalize_or_zero();
+        let sky_light = SkyLight::from_world(world);
         let uniforms = Uniforms {
             view_proj: vp.to_cols_array_2d(),
             light_dir: [light_dir.x, light_dir.y, light_dir.z],
@@ -1275,9 +1277,15 @@ impl Renderer {
                 })
                 .unwrap_or([0.0, 0.0, 0.0, 0.0]),
             camera_right: right.into(),
+            _right_pad: 0.0,
             camera_up: up.into(),
-            _camera_pad: [0.0; 2],
-            _scene_pad: [0.0; 8],
+            _up_pad: 0.0,
+            sky_up: sky_light.up,
+            env_strength: 1.0,
+            sky_horizon: sky_light.horizon,
+            _horizon_pad: 0.0,
+            sky_down: sky_light.down,
+            _down_pad: 0.0,
         };
         // Destination and live views share one encoder. Queue writes land
         // before that encoder runs, so they cannot share a uniform buffer.
@@ -2770,6 +2778,59 @@ mod active_instance_range_tests {
 /// `supported` must come from `Surface::get_capabilities`. Vsync off on a
 /// surface without Immediate support is a loud error rather than a refresh-
 /// paced Mailbox/FIFO substitution that lies about the setting.
+/// Sky-dome tints for ambient light, scaled so the sky's average is 1 and the
+/// world's `ambient` alone sets how bright the sky light is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SkyLight {
+    pub up: [f32; 3],
+    pub horizon: [f32; 3],
+    pub down: [f32; 3],
+}
+
+impl SkyLight {
+    pub(crate) fn from_world(world: &World) -> Self {
+        let luma = |c: glam::Vec3| c.dot(glam::Vec3::new(0.2126, 0.7152, 0.0722));
+        let (zenith, horizon, ground) = match world.sky() {
+            Some(sky) => (
+                sky.zenith.to_vec3(),
+                sky.horizon.to_vec3(),
+                sky.ground.to_vec3(),
+            ),
+            None => {
+                // Without a sky, lean the dome toward the clear colour when it
+                // reads as sky; a black or dark backdrop leaves neutral light.
+                let clear = world.clear_color().to_vec3();
+                let tint = if luma(clear) > 0.05 {
+                    (clear / luma(clear)).lerp(glam::Vec3::ONE, 0.6)
+                } else {
+                    glam::Vec3::ONE
+                };
+                (tint, glam::Vec3::ONE, glam::Vec3::new(0.62, 0.58, 0.52))
+            }
+        };
+        let sky_luma = luma((zenith + horizon) * 0.5).max(1e-3);
+        let up = zenith / sky_luma;
+        let horizon = horizon / sky_luma;
+        // Bounce light: tinted by the ground but never darker than a third
+        // of the sky, so undersides do not drop to black.
+        let mut down = ground / sky_luma;
+        let down_luma = luma(down);
+        if down_luma < 0.35 {
+            down = if down_luma > 1e-4 {
+                down * (0.35 / down_luma)
+            } else {
+                glam::Vec3::splat(0.35)
+            };
+        }
+        let down = down.min(glam::Vec3::splat(1.0));
+        Self {
+            up: up.into(),
+            horizon: horizon.into(),
+            down: down.into(),
+        }
+    }
+}
+
 /// World-pass MSAA: `ENGINE_MSAA=1` or `4` (default 4). WebGPU guarantees 4x
 /// for both scene formats; other counts would need adapter-specific features.
 fn choose_scene_samples(adapter: &wgpu::Adapter) -> u32 {

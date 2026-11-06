@@ -26,10 +26,22 @@ pub struct Uniforms {
     /// Radius 0 switches it off.
     pub torch_color: [f32; 4],
     pub camera_right: [f32; 3],
+    pub _right_pad: f32,
     pub camera_up: [f32; 3],
-    pub _camera_pad: [f32; 2],
-    pub _scene_pad: [f32; 8],
+    pub _up_pad: f32,
+    /// Sky light from straight above, as a tint whose sky average is 1
+    /// (the brightness itself is `ambient`).
+    pub sky_up: [f32; 3],
+    /// Scales sky reflections on glossy surfaces; 1 is physically balanced.
+    pub env_strength: f32,
+    pub sky_horizon: [f32; 3],
+    pub _horizon_pad: f32,
+    /// Light bounced up from the ground, same scale as `sky_up`.
+    pub sky_down: [f32; 3],
+    pub _down_pad: f32,
 }
+
+const _: () = assert!(std::mem::size_of::<Uniforms>() == 240);
 
 impl Uniforms {
     pub fn empty() -> Self {
@@ -49,9 +61,15 @@ impl Uniforms {
             torch_curve: 2.0,
             torch_color: [0.0, 0.0, 0.0, 0.0],
             camera_right: [1.0, 0.0, 0.0],
+            _right_pad: 0.0,
             camera_up: [0.0, 1.0, 0.0],
-            _camera_pad: [0.0; 2],
-            _scene_pad: [0.0; 8],
+            _up_pad: 0.0,
+            sky_up: [1.0, 1.0, 1.0],
+            env_strength: 1.0,
+            sky_horizon: [1.0, 1.0, 1.0],
+            _horizon_pad: 0.0,
+            sky_down: [1.0, 1.0, 1.0],
+            _down_pad: 0.0,
         }
     }
 }
@@ -78,12 +96,42 @@ struct Uniforms {
     torch_curve: f32,
     torch_color: vec4<f32>,
     camera_right: vec3<f32>,
+    _right_pad: f32,
     camera_up: vec3<f32>,
-    _camera_pad: vec2<f32>,
-    _scene_pad: vec4<f32>,
+    _up_pad: f32,
+    sky_up: vec3<f32>,
+    env_strength: f32,
+    sky_horizon: vec3<f32>,
+    _horizon_pad: f32,
+    sky_down: vec3<f32>,
+    _down_pad: f32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
+
+// Sun plus sky lighting for a surface, with the frame's light and sky.
+// `sun_diffuse` is the caller's diffuse shape for the sun (each surface keeps
+// its own wrap), `vis` the sun shadow term.
+fn shade_surface(
+    base: vec3<f32>,
+    n: vec3<f32>,
+    world_p: vec3<f32>,
+    roughness: f32,
+    metallic: f32,
+    vis: f32,
+    sun_diffuse: f32,
+) -> vec3<f32> {
+    var light: SceneLight;
+    light.dir = normalize(u.light_dir);
+    light.color = u.light_color;
+    light.ambient = u.ambient;
+    light.sky_up = u.sky_up;
+    light.sky_horizon = u.sky_horizon;
+    light.sky_down = u.sky_down;
+    light.env_strength = u.env_strength;
+    let v = normalize(u.eye - world_p);
+    return pbr_shade(base, n, v, light, roughness, metallic, vis, sun_diffuse);
+}
 
 // Light from the viewer's own lantern. A point light at the eye with a
 // distance falloff that stays gentle near the holder and dies at `reach`:
@@ -130,9 +178,98 @@ fn haze(color: vec3<f32>, world_p: vec3<f32>) -> vec3<f32> {
 }
 "#;
 
+/// Physically based sun and sky lighting, independent of any uniform layout.
+///
+/// Sun: GGX specular with Smith visibility and Schlick Fresnel, next to the
+/// caller's diffuse shape. Sky: a three-colour dome (zenith, horizon, ground
+/// bounce) for diffuse light and, sharpened by roughness, for reflections, so
+/// shaded sides pick up blue from above and warm bounce from below and glossy
+/// or metal surfaces reflect the sky instead of going black.
+pub const LIGHTING_WGSL: &str = r#"
+const PI: f32 = 3.14159265;
+
+struct SceneLight {
+    dir: vec3<f32>,
+    color: vec3<f32>,
+    ambient: f32,
+    sky_up: vec3<f32>,
+    sky_horizon: vec3<f32>,
+    sky_down: vec3<f32>,
+    env_strength: f32,
+};
+
+// Cosine-weighted sky light arriving at a surface facing `n`.
+fn sky_irradiance(n: vec3<f32>, light: SceneLight) -> vec3<f32> {
+    let t = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
+    let s = 1.0 - t;
+    return light.sky_down * (s * s) + light.sky_horizon * (2.0 * s * t) + light.sky_up * (t * t);
+}
+
+// Sky seen along `dir`, blurred toward the irradiance as roughness grows.
+fn sky_radiance(dir: vec3<f32>, roughness: f32, light: SceneLight) -> vec3<f32> {
+    let y = clamp(dir.y, -1.0, 1.0);
+    var sharp = mix(light.sky_horizon, light.sky_up, sqrt(max(y, 0.0)));
+    if y < 0.0 {
+        sharp = mix(light.sky_horizon, light.sky_down, sqrt(-y));
+    }
+    return mix(sharp, sky_irradiance(dir, light), roughness * roughness);
+}
+
+fn pbr_shade(
+    base: vec3<f32>,
+    n: vec3<f32>,
+    v: vec3<f32>,
+    light: SceneLight,
+    roughness_in: f32,
+    metallic_in: f32,
+    vis: f32,
+    sun_diffuse: f32,
+) -> vec3<f32> {
+    let roughness = clamp(roughness_in, 0.045, 1.0);
+    let metallic = clamp(metallic_in, 0.0, 1.0);
+    let diffuse_color = base * (1.0 - metallic);
+    let f0 = mix(vec3<f32>(0.04), base, metallic);
+    let nv = max(dot(n, v), 1e-4);
+    let sun = light.color * vis * (1.0 - light.ambient);
+
+    // Sun specular. Radiance from the sun's irradiance E = PI * light.color,
+    // matching the unnormalised diffuse term below.
+    var spec = vec3<f32>(0.0);
+    let nl = dot(n, light.dir);
+    if nl > 0.0 {
+        let h = normalize(light.dir + v);
+        let nh = max(dot(n, h), 0.0);
+        let lh = max(dot(light.dir, h), 0.0);
+        let a = roughness * roughness;
+        let a2 = a * a;
+        let d_den = nh * nh * (a2 - 1.0) + 1.0;
+        let d = a2 / (PI * d_den * d_den);
+        let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+        let g = (nv / (nv * (1.0 - k) + k)) * (nl / (nl * (1.0 - k) + k));
+        let f = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - lh, 5.0);
+        spec = d * g * f / (4.0 * nv) * PI;
+    }
+    let direct = diffuse_color * sun_diffuse * sun + spec * sun;
+
+    // Sky light. Pre-integrated GGX reflectance (Karis' analytic fit of the
+    // split-sum lookup), so rough surfaces do not pick up a grazing sheen.
+    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+    let rr = roughness * c0 + c1;
+    let a004 = min(rr.x * rr.x, exp2(-9.28 * nv)) * rr.x + rr.y;
+    let ab = vec2<f32>(-1.04, 1.04) * a004 + rr.zw;
+    let fr = f0 * ab.x + vec3<f32>(ab.y);
+    let r = reflect(-v, n);
+    let env_spec = fr * sky_radiance(r, roughness, light) * light.env_strength;
+    let env_diffuse = diffuse_color * sky_irradiance(n, light) * (vec3<f32>(1.0) - fr);
+    return direct + (env_diffuse + env_spec) * light.ambient;
+}
+"#;
+
 pub fn scene_shader_prefix() -> String {
     format!(
-        "{}{}{}{}",
+        "{}{}{}{}{}",
+        LIGHTING_WGSL,
         SCENE_WGSL,
         super::shadow::SHADOW_UNIFORMS_WGSL,
         super::shadow::SCENE_SHADOW_WGSL,
@@ -310,7 +447,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let wrap = ndl * 0.65 + 0.35;
         let base = in.color * textureSample(albedo_tex, albedo_sampler, in.uv);
         let vis = sun_visibility(in.world_p, n, u.eye);
-        let lit = base.rgb * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis)
+        let lit = shade_surface(base.rgb, n, in.world_p, in.surface.x, in.surface.y, vis, wrap * wrap)
             + base.rgb * torch_light(in.world_p, n)
             + base.rgb * in.surface.z * 3.0;
         return vec4<f32>(haze(lit, in.world_p), base.a);
@@ -369,7 +506,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let transmission = max(-ndl, 0.0) * select(0.10, 0.24, is_broadleaf);
         let wrap = front * 0.55 + 0.45;
         let vis = sun_visibility(in.world_p, n, u.eye);
-        let light = u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis + transmission;
+        var sky: SceneLight;
+        sky.sky_up = u.sky_up;
+        sky.sky_horizon = u.sky_horizon;
+        sky.sky_down = u.sky_down;
+        // Cards stand in for leaves facing every way: light them with the
+        // sky's average rather than the card's own normal.
+        let sky_fill = (sky_irradiance(n, sky) + sky_irradiance(vec3<f32>(0.0, 1.0, 0.0), sky)) * 0.5;
+        let light = u.ambient * sky_fill + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis + transmission;
         return vec4<f32>(haze(leaf_base * light, in.world_p), coverage);
     }
 
@@ -468,13 +612,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ndl = max(dot(n, l), 0.0);
     let texel = textureSample(albedo_tex, albedo_sampler, in.uv);
     let layer = 1.0 + (material_strata * in.surface2.x * medium_visibility + (ridge - 0.5) * 0.55) * 0.32;
-    let base = in.color * texel * layer * wood_tone * fine_color;
+    // Tone and layering shade the colour only. Scaling alpha with them made
+    // opaque surfaces partly transparent once alpha-to-coverage was enabled.
+    let base = vec4<f32>(in.color.rgb * texel.rgb * layer * wood_tone * fine_color, in.color.a * texel.a);
     // Soft wrap lighting ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â enough contrast for smooth heightfields to read as
     // hills. Sky and sun share one budget, so raising ambient fills the shadows
     // instead of blowing out everything the sun already reaches.
     let wrap = ndl * 0.65 + 0.35;
     let vis = sun_visibility(in.world_p, n, u.eye);
-    var lit = base.rgb * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis);
+    var lit = shade_surface(base.rgb, n, in.world_p, in.surface.x, in.surface.y, vis, wrap * wrap);
     lit += base.rgb * torch_light(in.world_p, n);
     let glint = smoothstep(0.92, 0.99, material_grain) * in.surface.z
         + smoothstep(0.72, 0.98, wood_fine) * select(0.0, 0.025, profile == 1);
@@ -518,7 +664,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     let overlay_color = vec3<f32>(0.78 + snow_fine * 0.12, 0.84 + snow_fine * 0.10, 0.94 + snow_fine * 0.06);
     let overlay_base = mix(base.rgb, overlay_color, overlay_mix);
-    let overlay_lit = overlay_base * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis);
+    let overlay_lit = shade_surface(overlay_base, n, in.world_p, in.surface5.z, in.surface5.w, vis, wrap * wrap);
     let snow_bump = snow_fine * overlay_mix * select(0.0, 0.055, in.surface3.w > 4.5);
     let snow_sparkle = snow_bump * smoothstep(0.55, 0.95, dot(n, normalize(u.light_dir)))
         * vec3<f32>(0.32, 0.48, 0.72);
