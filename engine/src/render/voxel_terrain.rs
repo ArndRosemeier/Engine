@@ -1184,7 +1184,8 @@ mod tests {
         assert!(a.alloc(40).is_none());
         a.release(x);
         a.release(y);
-        assert_eq!(a.free, [0..100]);
+        assert_eq!(a.free.first(), Some(&(0..100)));
+        assert_eq!(a.free.len(), 1);
         a.grow(200);
         assert_eq!(a.alloc(200), Some(0..200));
     }

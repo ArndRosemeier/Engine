@@ -9,6 +9,7 @@ pub use crate::collision::{
 };
 pub use crate::color::{rgb, rgba, Color};
 pub use crate::contact::{ContactGrid, ContactSnapshot};
+pub use crate::debris::Shatter;
 pub use crate::error::{EngineError, EngineResult};
 pub use crate::input::{Input, Key, MouseButton};
 pub use crate::landscape::Landscape;

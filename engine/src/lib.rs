@@ -10,7 +10,9 @@ pub mod chunk_stream;
 pub mod collision;
 pub mod color;
 pub mod contact;
+pub mod debris;
 pub mod error;
+pub mod fracture;
 pub mod gpu_field;
 pub mod input;
 pub mod landscape;
@@ -57,6 +59,7 @@ pub use collision::{
 };
 pub use color::{rgb, rgba, Color};
 pub use contact::{ContactGrid, ContactSnapshot};
+pub use debris::Shatter;
 pub use error::{EngineError, EngineResult};
 pub use gpu_field::{
     demo_sphere_density, extract_mesh_cpu, gpu_tests_enabled, CustomFieldKernel, DensityMirror,
