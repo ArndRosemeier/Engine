@@ -305,33 +305,65 @@ fn height_visibility(world_p: vec3<f32>) -> f32 {
     return mix(vis, 1.0, smoothstep(0.45, 0.5, edge));
 }
 
-fn csm_visibility(world_p: vec3<f32>, n: vec3<f32>, eye: vec3<f32>) -> f32 {
-    let d = distance(world_p, eye);
-    var layer = 0i;
-    var vp = shadow.light_vp0;
-    if d >= shadow.cascade_end.z && shadow.cascade_end.z > 0.0 {
-        return 1.0;
-    } else if d >= shadow.cascade_end.y {
-        layer = 2i;
-        vp = shadow.light_vp2;
-    } else if d >= shadow.cascade_end.x {
-        layer = 1i;
-        vp = shadow.light_vp1;
+fn cascade_vp(layer: i32) -> mat4x4<f32> {
+    if layer == 0 {
+        return shadow.light_vp0;
     }
-    let bias_p = world_p + n * max(shadow.map_texel * 4.0, 0.04);
-    let clip = vp * vec4(bias_p, 1.0);
+    if layer == 1 {
+        return shadow.light_vp1;
+    }
+    return shadow.light_vp2;
+}
+
+// Sun visibility from one cascade: a 3x3 grid of bilinear depth compares
+// spread over about six texels, so penumbrae are soft and free of the
+// stair-steps and noise that fewer taps or random rotations give.
+fn cascade_visibility(layer: i32, world_p: vec3<f32>, n: vec3<f32>) -> f32 {
+    let bias_p = world_p + n * max(shadow.map_texel * 4.0, 0.04) * f32(layer + 1);
+    let clip = cascade_vp(layer) * vec4(bias_p, 1.0);
     let ndc = clip.xyz / max(clip.w, 1e-6);
     let uv = vec2(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
     if uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0 {
         return 1.0;
     }
-    let texel = shadow.map_texel;
+    let step = shadow.map_texel * 1.5;
     var s = 0.0;
-    s += textureSampleCompare(shadow_map, shadow_samp, uv + vec2(-texel, -texel), layer, ndc.z);
-    s += textureSampleCompare(shadow_map, shadow_samp, uv + vec2( texel, -texel), layer, ndc.z);
-    s += textureSampleCompare(shadow_map, shadow_samp, uv + vec2(-texel,  texel), layer, ndc.z);
-    s += textureSampleCompare(shadow_map, shadow_samp, uv + vec2( texel,  texel), layer, ndc.z);
-    return s * 0.25;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let offset = vec2<f32>(f32(x), f32(y)) * step;
+            s += textureSampleCompareLevel(shadow_map, shadow_samp, uv + offset, layer, ndc.z);
+        }
+    }
+    return s / 9.0;
+}
+
+// Cascaded shadow lookup. The last tenth of each cascade blends into the
+// next, and the last cascade fades out, so no boundary shows as a line.
+fn csm_visibility(world_p: vec3<f32>, n: vec3<f32>, eye: vec3<f32>) -> f32 {
+    let d = distance(world_p, eye);
+    let ends = shadow.cascade_end.xyz;
+    if ends.z > 0.0 && d >= ends.z {
+        return 1.0;
+    }
+    var layer = 2;
+    if d < ends.x {
+        layer = 0;
+    } else if d < ends.y {
+        layer = 1;
+    }
+    let end = ends[layer];
+    let start = select(ends[max(layer - 1, 0)], 0.0, layer == 0);
+    let blend_from = end - (end - start) * 0.1;
+    var vis = cascade_visibility(layer, world_p, n);
+    if d > blend_from {
+        let t = smoothstep(blend_from, end, d);
+        var next = 1.0;
+        if layer < 2 {
+            next = cascade_visibility(layer + 1, world_p, n);
+        }
+        vis = mix(vis, next, t);
+    }
+    return vis;
 }
 
 fn sun_visibility(world_p: vec3<f32>, n: vec3<f32>, eye: vec3<f32>) -> f32 {
