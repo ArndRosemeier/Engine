@@ -205,7 +205,7 @@ impl PropModel {
     }
 }
 
-/// A surface for an AssetGenerator material name: metals shine, wood gets
+/// A surface for an AssetGenerator material name: metals get a sheen, wood gets
 /// its grain, stone its strata, cloth and leather go matte.
 pub fn default_slot_material(name: &str) -> SurfaceMaterial {
     let name = name.to_ascii_lowercase();
@@ -213,9 +213,12 @@ pub fn default_slot_material(name: &str) -> SurfaceMaterial {
     if has(&[
         "iron", "steel", "metal", "gold", "silver", "bronze", "copper", "brass",
     ]) {
+        // The pack's colours are what the metal should look like (they were
+        // made for engines without reflections), so only part metallic:
+        // fully metallic dark iron would go black.
         return SurfaceMaterial {
             roughness: 0.4,
-            metallic: 1.0,
+            metallic: 0.35,
             ..SurfaceMaterial::DEFAULT
         };
     }
@@ -419,7 +422,7 @@ pub(crate) mod tests {
         );
         let pack = PropPack::decode(&bytes).unwrap();
         let built = pack.models[0].to_mesh().unwrap().build();
-        assert!(built.surface_overrides.iter().any(|s| s.metallic == 1.0));
+        assert!(built.surface_overrides.iter().any(|s| s.metallic > 0.0));
         assert!(built.surface_overrides.contains(&SurfaceMaterial::WOOD));
 
         assert!(PropPack::decode(b"NOPE").is_err());
