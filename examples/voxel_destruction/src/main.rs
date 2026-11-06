@@ -85,6 +85,8 @@ fn main() -> EngineResult<()> {
     let mut shots = 0u32;
 
     Engine::run("voxel_destruction", move |world, frame| {
+        // Uncapped so the title bar shows the real frame rate.
+        world.set_vsync(false);
         if frame.first {
             let noise = Noise::new(11);
             let started = std::time::Instant::now();
