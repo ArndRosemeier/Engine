@@ -290,6 +290,12 @@ impl ApplicationHandler for App {
                     renderer.sync_world(&mut self.world);
                     let sync_ms = elapsed_ms(sync_t);
                     let ui_backend = self.ui_backend.as_mut().expect("ui backend");
+                    let fixed_shot_due = !self.screenshot_wait
+                        && self.screenshot_path.is_some()
+                        && self.frame_index + 1 >= self.screenshot_frame;
+                    if fixed_shot_due || self.world.has_screenshot_queued() {
+                        renderer.request_capture();
+                    }
                     let render_t = Instant::now();
                     match renderer.render_with(&self.world, |device, queue, encoder, view| {
                         ui_backend.paint(

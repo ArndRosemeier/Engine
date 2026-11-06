@@ -387,75 +387,87 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         fbm3(warped * 0.17 + vec3<f32>(2.0, 17.0, 5.0), in.surface2.w),
         fbm3(warped * 0.17 + vec3<f32>(7.0, 5.0, 19.0), in.surface2.w));
     let sample_p = warped + (warp - vec3<f32>(0.5)) * in.surface2.z * 3.0;
-    let grain = fbm3(sample_p * 1.7, in.surface2.w);
     let ridge = ridged3(sample_p * 0.65, in.surface2.w);
-    let strata = sin(in.world_p.y * 1.35 + ridge * 4.2 + seed);
-    let axis_coord = dot(in.world_p, axis);
-    let cross_coord = in.world_p - axis * axis_coord;
-    let wood_bands = 0.5 + 0.5 * sin(axis_coord * in.surface.w * 2.6
-        + fbm3(cross_coord * 0.75 + vec3<f32>(seed, 4.0, 9.0), in.surface2.w) * 3.8);
-    let wood_grain = pow(clamp(wood_bands, 0.0, 1.0), 1.7);
-    let sand_plane_a = select(in.world_p.yz, in.world_p.xy, abs(axis.z) > 0.5);
-    let sand_plane = select(sand_plane_a, in.world_p.xz, abs(axis.y) > 0.5);
-    let sand_base = sand_plane * in.surface.w * 0.22 + vec2<f32>(seed * 0.031, seed * 0.071);
-    let sand_a = sand_layer(sand_base, seed);
-    let sand_b = sand_layer(rotate2(sand_base, 0.19) * 1.27, seed + 19.0);
-    let sand_pattern = mix(sand_a, sand_b, smoothstep(0.18, 0.82,
-        fbm3(vec3<f32>(sand_base * 1.8, seed + 41.0), 0.5)));
-    let sand_grit = musgrave3(vec3<f32>(sand_plane * in.surface.w * 7.5, seed + 67.0), 0.52, 2.35);
-    let dirt = dirt_profile(oriented_p * 0.75, seed, in.surface2.w);
-    let grass = grass_profile(oriented_p * 0.62, seed, in.surface2.w);
     let material_dx = dpdx(oriented_p * in.surface.w);
     let material_dy = dpdy(oriented_p * in.surface.w);
     let footprint = max(length(material_dx), length(material_dy));
     let lod = log2(max(footprint, 0.0001));
     let fine_visibility = 1.0 - smoothstep(-4.0, -0.35, lod);
     let medium_visibility = 1.0 - smoothstep(-1.4, 1.8, lod);
-    let is_dirt = in.surface3.w > 2.5 && in.surface3.w < 3.5;
-    let is_grass = in.surface3.w > 3.5;
-    // A separate, much finer directional fiber field. Narrow valleys darken the
-    // wood and also perturb the normal, so grain remains readable at distance.
-    let wood_fine_signed = musgrave3(
-        axis * axis_coord * in.surface.w * 18.0
-            + cross_coord * vec3<f32>(7.0, 3.0, 11.0)
-            + vec3<f32>(seed * 2.3, seed * 0.37, seed * 1.71),
-        0.52,
-        2.5);
-    let wood_fine = smoothstep(-0.18, 0.42, wood_fine_signed);
-    let base_grain = select(grain, sand_pattern, in.surface3.w > 1.5);
-    var material_grain = select(base_grain, dirt.x * 0.62 + dirt.y * 0.38, is_dirt);
-    material_grain = select(material_grain,
-        grass.x * 0.52 + grass.y * 0.30 + grass.z * 0.18, is_grass);
-    material_grain = select(material_grain,
-        wood_grain * 0.72 + wood_fine * 0.28,
-        in.surface3.w > 0.5 && in.surface3.w < 1.5);
-    let base_strata = select(strata, sand_pattern - 0.5, in.surface3.w > 1.5);
-    var material_strata = select(base_strata, dirt.y - 0.5, is_dirt);
-    material_strata = select(material_strata, grass.y - 0.5, is_grass);
-    material_strata = select(material_strata, wood_grain - 0.5,
-        in.surface3.w > 0.5 && in.surface3.w < 1.5);
-    let base_detail = select(grain - 0.5, sand_grit, in.surface3.w > 1.5);
-    var fine_detail = select(base_detail, dirt.z, is_dirt);
-    fine_detail = select(fine_detail, grass.z - 0.5, is_grass);
-    fine_detail = select(fine_detail, wood_fine - 0.5,
-        in.surface3.w > 0.5 && in.surface3.w < 1.5);
-    fine_detail *= fine_visibility;
-    let detail = (in.surface.x * 0.13 + select(0.0, 0.045, in.surface3.w > 0.5)) * fine_detail;
+
+    // Evaluate only the profile this surface uses. Profiles are per material,
+    // so neighbouring pixels take the same branch and the GPU skips the rest.
+    // 1 wood, 2 sand, 3 dirt, 4 grass, 5 snow (grass base under a snow cover).
+    let profile = i32(round(in.surface3.w));
+    var material_grain = 0.0;
+    var material_strata = 0.0;
+    var fine_detail = 0.0;
+    var wood_tone = 1.0;
+    var fine_color = 1.0;
+    var wood_fine = 0.0;
+    switch profile {
+        case 1: {
+            // A separate, much finer directional fiber field. Narrow valleys
+            // darken the wood and also perturb the normal, so grain remains
+            // readable at distance.
+            let axis_coord = dot(in.world_p, axis);
+            let cross_coord = in.world_p - axis * axis_coord;
+            let wood_bands = 0.5 + 0.5 * sin(axis_coord * in.surface.w * 2.6
+                + fbm3(cross_coord * 0.75 + vec3<f32>(seed, 4.0, 9.0), in.surface2.w) * 3.8);
+            let wood_grain = pow(clamp(wood_bands, 0.0, 1.0), 1.7);
+            let wood_fine_signed = musgrave3(
+                axis * axis_coord * in.surface.w * 18.0
+                    + cross_coord * vec3<f32>(7.0, 3.0, 11.0)
+                    + vec3<f32>(seed * 2.3, seed * 0.37, seed * 1.71),
+                0.52,
+                2.5);
+            wood_fine = smoothstep(-0.18, 0.42, wood_fine_signed);
+            material_grain = wood_grain * 0.72 + wood_fine * 0.28;
+            material_strata = wood_grain - 0.5;
+            fine_detail = (wood_fine - 0.5) * fine_visibility;
+            wood_tone = 0.56 + material_grain * 0.78;
+            fine_color = 0.82 + wood_fine * 0.34;
+        }
+        case 2: {
+            let sand_plane_a = select(in.world_p.yz, in.world_p.xy, abs(axis.z) > 0.5);
+            let sand_plane = select(sand_plane_a, in.world_p.xz, abs(axis.y) > 0.5);
+            let sand_base = sand_plane * in.surface.w * 0.22 + vec2<f32>(seed * 0.031, seed * 0.071);
+            let sand_a = sand_layer(sand_base, seed);
+            let sand_b = sand_layer(rotate2(sand_base, 0.19) * 1.27, seed + 19.0);
+            let sand_pattern = mix(sand_a, sand_b, smoothstep(0.18, 0.82,
+                fbm3(vec3<f32>(sand_base * 1.8, seed + 41.0), 0.5)));
+            var sand_grit = 0.0;
+            if fine_visibility > 0.0 {
+                sand_grit = musgrave3(vec3<f32>(sand_plane * in.surface.w * 7.5, seed + 67.0), 0.52, 2.35);
+            }
+            material_grain = sand_pattern;
+            material_strata = sand_pattern - 0.5;
+            fine_detail = sand_grit * fine_visibility;
+            wood_tone = 0.72 + material_grain * 0.55;
+        }
+        case 3: {
+            let dirt = dirt_profile(oriented_p * 0.75, seed, in.surface2.w);
+            material_grain = dirt.x * 0.62 + dirt.y * 0.38;
+            material_strata = dirt.y - 0.5;
+            fine_detail = dirt.z * fine_visibility;
+            wood_tone = 0.72 + material_grain * 0.45;
+            fine_color = 0.82 + fine_detail * 0.25;
+        }
+        default: {
+            let grass = grass_profile(oriented_p * 0.62, seed, in.surface2.w);
+            material_grain = grass.x * 0.52 + grass.y * 0.30 + grass.z * 0.18;
+            material_strata = grass.y - 0.5;
+            fine_detail = (grass.z - 0.5) * fine_visibility;
+            wood_tone = 0.74 + material_grain * 0.48;
+            fine_color = 0.78 + fine_detail * 0.38;
+        }
+    }
+    let detail = (in.surface.x * 0.13 + 0.045) * fine_detail;
     let n = normalize(in.world_n + vec3<f32>(detail, detail * 0.35, -detail));
     let l = normalize(u.light_dir);
     let ndl = max(dot(n, l), 0.0);
     let texel = textureSample(albedo_tex, albedo_sampler, in.uv);
     let layer = 1.0 + (material_strata * in.surface2.x * medium_visibility + (ridge - 0.5) * 0.55) * 0.32;
-    let base_tone = select(1.0, 0.72 + material_grain * 0.55, in.surface3.w > 1.5);
-    var wood_tone = select(base_tone, 0.72 + material_grain * 0.45, is_dirt);
-    wood_tone = select(wood_tone, 0.74 + material_grain * 0.48, is_grass);
-    wood_tone = select(wood_tone, 0.56 + material_grain * 0.78,
-        in.surface3.w > 0.5 && in.surface3.w < 1.5);
-    let base_fine_color = select(0.92 + fine_detail * 0.18, 1.0, in.surface3.w > 1.5);
-    var fine_color = select(base_fine_color, 0.82 + fine_detail * 0.25, is_dirt);
-    fine_color = select(fine_color, 0.78 + fine_detail * 0.38, is_grass);
-    fine_color = select(fine_color, 0.82 + wood_fine * 0.34,
-        in.surface3.w > 0.5 && in.surface3.w < 1.5);
     let base = in.color * texel * layer * wood_tone * fine_color;
     // Soft wrap lighting ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â enough contrast for smooth heightfields to read as
     // hills. Sky and sun share one budget, so raising ambient fills the shadows
@@ -465,7 +477,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var lit = base.rgb * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis);
     lit += base.rgb * torch_light(in.world_p, n);
     let glint = smoothstep(0.92, 0.99, material_grain) * in.surface.z
-        + smoothstep(0.72, 0.98, wood_fine) * select(0.0, 0.025, in.surface3.w > 0.5);
+        + smoothstep(0.72, 0.98, wood_fine) * select(0.0, 0.025, profile == 1);
     lit += vec3<f32>(1.0, 0.86, 0.62) * glint * 0.08;
     // Cave formations carry restrained mineral emission: pale calcite and
     // green/blue bioluminescent polish remain readable beyond the headlamp's
@@ -489,15 +501,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let directional = smoothstep(in.surface4.w - in.surface5.x,
         in.surface4.w + in.surface5.x, facing);
     // Normal-weighted triplanar breakup keeps deposits natural on arbitrary
-    // rocks and avoids privileging the XZ plane on walls or overhangs.
-    let tri_weights = abs(n) / max(dot(abs(n), vec3<f32>(1.0)), 0.001);
-    let tri_noise = fbm3(in.world_p.yzx * 0.55 + vec3<f32>(seed, 37.0, 11.0), 0.5) * tri_weights.x
-        + fbm3(in.world_p.zxy * 0.55 + vec3<f32>(seed + 17.0, 7.0, 19.0), 0.5) * tri_weights.y
-        + fbm3(in.world_p.xyz * 0.55 + vec3<f32>(seed + 31.0, 13.0, 5.0), 0.5) * tri_weights.z;
-    let breakup = smoothstep(0.30, 0.72, tri_noise);
-    let snow_fine = musgrave3(in.world_p * in.surface.w * 4.5 + vec3<f32>(seed, 61.0, 23.0), 0.52, 2.25);
-    let overlay = directional * breakup * in.surface5.y;
-    let overlay_mix = clamp(overlay, 0.0, 1.0);
+    // rocks and avoids privileging the XZ plane on walls or overhangs. Skipped
+    // entirely where no cover can land (most surfaces, and every downward face).
+    var overlay_mix = 0.0;
+    var snow_fine = 0.0;
+    if in.surface5.y > 0.0 && directional > 0.0 {
+        let tri_weights = abs(n) / max(dot(abs(n), vec3<f32>(1.0)), 0.001);
+        let tri_noise = fbm3(in.world_p.yzx * 0.55 + vec3<f32>(seed, 37.0, 11.0), 0.5) * tri_weights.x
+            + fbm3(in.world_p.zxy * 0.55 + vec3<f32>(seed + 17.0, 7.0, 19.0), 0.5) * tri_weights.y
+            + fbm3(in.world_p.xyz * 0.55 + vec3<f32>(seed + 31.0, 13.0, 5.0), 0.5) * tri_weights.z;
+        let breakup = smoothstep(0.30, 0.72, tri_noise);
+        overlay_mix = clamp(directional * breakup * in.surface5.y, 0.0, 1.0);
+        if overlay_mix > 0.0 {
+            snow_fine = musgrave3(in.world_p * in.surface.w * 4.5 + vec3<f32>(seed, 61.0, 23.0), 0.52, 2.25);
+        }
+    }
     let overlay_color = vec3<f32>(0.78 + snow_fine * 0.12, 0.84 + snow_fine * 0.10, 0.94 + snow_fine * 0.06);
     let overlay_base = mix(base.rgb, overlay_color, overlay_mix);
     let overlay_lit = overlay_base * (u.ambient + wrap * wrap * (1.0 - u.ambient) * u.light_color * vis);

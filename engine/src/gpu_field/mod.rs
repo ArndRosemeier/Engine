@@ -10,7 +10,7 @@ mod field;
 mod grid;
 mod kernel;
 mod mirror;
-mod verify;
+pub(crate) mod verify;
 
 pub mod shaders {
     pub const FIELD_COMMON_WGSL: &str = include_str!("shaders/field_common.wgsl");

@@ -34,9 +34,13 @@ struct FrameUniform {
     /// Metres at which the torch contribution reaches zero.
     torch_radius_m: f32,
     torch_curve: f32,
+    /// WGSL aligns the following vec4 to 16 bytes.
+    _pad_torch: [f32; 3],
     /// Viewer-carried point light (rgb + unused); radius 0 switches it off.
     torch_color: [f32; 4],
 }
+
+const _: () = assert!(std::mem::size_of::<FrameUniform>() == 144);
 
 const SHADER: &str = r#"
 struct TerrainParams {
@@ -63,6 +67,9 @@ struct FrameUniform {
     eye: vec3<f32>,
     torch_radius_m: f32,
     torch_curve: f32,
+    _pad_t0: f32,
+    _pad_t1: f32,
+    _pad_t2: f32,
     torch_color: vec4<f32>,
 };
 
@@ -555,6 +562,7 @@ impl ClipmapRenderer {
             eye: [eye.x, eye.y, eye.z],
             torch_radius_m,
             torch_curve,
+            _pad_torch: [0.0; 3],
             torch_color: [torch_color.x, torch_color.y, torch_color.z, 0.0],
         };
         if self.last_frame.as_ref().map(bytemuck::bytes_of) != Some(bytemuck::bytes_of(&frame)) {

@@ -14,6 +14,7 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use super::skinned::SkinnedVertex;
+use super::terrain_shadow::{GroundSource, HorizonMap};
 
 const _: () = assert!(MAX_JOINTS == 128);
 
@@ -22,6 +23,8 @@ pub const CASCADE_COUNT: usize = 3;
 const FLAG_CSM: u32 = 1;
 const FLAG_ATLAS: u32 = 2;
 const FLAG_FORMULA: u32 = 4;
+/// The horizon-height map (`terrain_shadow`) covers `atlas_origin_xz`/`atlas_extent`.
+const FLAG_HORIZON: u32 = 8;
 const MISSING_HEIGHT: f32 = -10_000.0;
 
 #[repr(C)]
@@ -115,7 +118,9 @@ pub fn material_casts_shadow(material: Option<SurfaceMaterialRef>) -> bool {
     )
 }
 
-pub const SHADOW_UNIFORMS_WGSL: &str = r#"
+macro_rules! shadow_uniforms_wgsl {
+    () => {
+        r#"
 struct ShadowUniforms {
     light_vp0: mat4x4<f32>,
     light_vp1: mat4x4<f32>,
@@ -135,15 +140,16 @@ struct ShadowUniforms {
     lake_threshold: f32,
     water_level: f32,
 };
-"#;
+"#
+    };
+}
+pub(crate) use shadow_uniforms_wgsl;
 
-pub const SCENE_SHADOW_WGSL: &str = r#"
-@group(0) @binding(1) var<uniform> shadow: ShadowUniforms;
-@group(0) @binding(2) var shadow_map: texture_depth_2d_array;
-@group(0) @binding(3) var shadow_samp: sampler_comparison;
-@group(0) @binding(4) var height_atlas: texture_2d<f32>;
-@group(0) @binding(5) var height_samp: sampler;
+pub const SHADOW_UNIFORMS_WGSL: &str = shadow_uniforms_wgsl!();
 
+macro_rules! terrain_formula_wgsl {
+    () => {
+        r#"
 fn hash21(ix: i32, iy: i32, seed: u32) -> f32 {
     var n = u32(ix) * 1597334677u + u32(iy) * 3812015801u + seed * 2747636419u;
     n = n ^ (n >> 16u);
@@ -210,6 +216,22 @@ fn formula_ground(xz: vec2<f32>) -> f32 {
     return ground;
 }
 
+"#
+    };
+}
+pub(crate) use terrain_formula_wgsl;
+
+pub const SCENE_SHADOW_WGSL: &str = concat!(
+    r#"
+@group(0) @binding(1) var<uniform> shadow: ShadowUniforms;
+@group(0) @binding(2) var shadow_map: texture_depth_2d_array;
+@group(0) @binding(3) var shadow_samp: sampler_comparison;
+@group(0) @binding(4) var height_atlas: texture_2d<f32>;
+@group(0) @binding(5) var height_samp: sampler;
+
+"#,
+    terrain_formula_wgsl!(),
+    r#"
 fn atlas_ground(xz: vec2<f32>) -> f32 {
     if shadow.atlas_extent <= 0.0 {
         return -10000.0;
@@ -230,38 +252,39 @@ fn shadow_ground(xz: vec2<f32>) -> f32 {
     }
     return -10000.0;
 }
-"#;
+"#
+);
 
 pub const SHADOW_EVAL_WGSL: &str = r#"
+fn horizon_at(texel: vec2<i32>, dims: vec2<i32>) -> f32 {
+    return textureLoad(height_atlas, clamp(texel, vec2<i32>(0), dims - vec2<i32>(1)), 0).r;
+}
+
+// Terrain shadow from the precomputed horizon-height map: lit above H(xz).
+// Bilinear by hand because R32Float is not filterable everywhere.
 fn height_visibility(world_p: vec3<f32>) -> f32 {
-    let l = normalize(shadow.light_dir);
-    let xz_len = length(l.xz);
-    if xz_len < 1e-4 {
+    if (shadow.flags & 8u) == 0u || shadow.atlas_extent <= 0.0 {
         return 1.0;
     }
-    let dir_xz = l.xz / xz_len;
-    let rise = l.y / xz_len;
-    let max_dist = max(shadow.cascade_end.z, 56.0);
-    let fade_m = 12.0;
-    let base = max(shadow.atlas_extent * shadow.map_texel, 0.45);
-    var t = base;
-    var hit_t = -1.0;
-    for (var i = 0u; i < 10u; i++) {
-        // Slope-scaled: a low sun (small rise) still covers distance in 10 taps.
-        let step = base * (1.0 + 0.35 * f32(i)) / max(abs(rise), 0.18);
-        t += step;
-        let h = world_p.y + rise * t;
-        let g = shadow_ground(world_p.xz + dir_xz * t);
-        if g > -9999.0 && h + 0.12 < g {
-            hit_t = t;
-            break;
-        }
-    }
-    if hit_t < 0.0 {
+    let uv = (world_p.xz - shadow.atlas_origin_xz) / shadow.atlas_extent;
+    let edge = max(abs(uv.x - 0.5), abs(uv.y - 0.5));
+    if edge >= 0.5 {
         return 1.0;
     }
-    let fade = clamp((max_dist - hit_t) / fade_m, 0.0, 1.0);
-    return mix(1.0, 0.42, fade);
+    let dims = vec2<i32>(textureDimensions(height_atlas));
+    let p = uv * vec2<f32>(dims) - vec2<f32>(0.5);
+    let i = vec2<i32>(floor(p));
+    let f = p - floor(p);
+    let h00 = horizon_at(i, dims);
+    let h10 = horizon_at(i + vec2<i32>(1, 0), dims);
+    let h01 = horizon_at(i + vec2<i32>(0, 1), dims);
+    let h11 = horizon_at(i + vec2<i32>(1, 1), dims);
+    let h = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+    let lit = smoothstep(-0.25, 0.25, world_p.y + 0.12 - h);
+    // Terrain self-shadow keeps some sun, as the old march did; fade out at
+    // the region edge so the boundary never shows as a line.
+    let vis = mix(0.42, 1.0, lit);
+    return mix(vis, 1.0, smoothstep(0.45, 0.5, edge));
 }
 
 fn csm_visibility(world_p: vec3<f32>, n: vec3<f32>, eye: vec3<f32>) -> f32 {
@@ -298,7 +321,7 @@ fn sun_visibility(world_p: vec3<f32>, n: vec3<f32>, eye: vec3<f32>) -> f32 {
     if (shadow.flags & 1u) != 0u {
         vis = min(vis, csm_visibility(world_p, n, eye));
     }
-    if (shadow.flags & 6u) != 0u {
+    if (shadow.flags & 8u) != 0u {
         vis = min(vis, height_visibility(world_p));
     }
     return vis;
@@ -475,7 +498,23 @@ fn upload_atlas(queue: &wgpu::Queue, texture: &wgpu::Texture, pixels: &[f32], si
     queue.write_texture(dest, &padded, layout, extent);
 }
 
-fn apply_terrain_rules(u: &mut ShadowUniforms, rules: &TerrainRules) {
+/// Identity of the terrain formula, so the horizon map rebuilds when it changes.
+fn formula_epoch(u: &ShadowUniforms) -> u64 {
+    let words = [
+        u.seed,
+        u.base_height.to_bits(),
+        u.hill_height.to_bits(),
+        u.hill_scale.to_bits(),
+        u.lake_scale.to_bits(),
+        u.lake_threshold.to_bits(),
+        u.water_level.to_bits(),
+    ];
+    words.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, w| {
+        (h ^ u64::from(*w)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+pub(crate) fn apply_terrain_rules(u: &mut ShadowUniforms, rules: &TerrainRules) {
     u.seed = rules.seed;
     u.base_height = rules.base_height;
     u.hill_height = rules.hill_height;
@@ -500,8 +539,7 @@ pub struct ShadowGpu {
     #[allow(dead_code)]
     cascade_bufs: [wgpu::Buffer; CASCADE_COUNT],
     map_array_view: wgpu::TextureView,
-    atlas_texture: wgpu::Texture,
-    atlas_view: wgpu::TextureView,
+    horizon: HorizonMap,
     comparison_sampler: wgpu::Sampler,
     atlas_sampler: wgpu::Sampler,
     map_size: u32,
@@ -513,6 +551,9 @@ pub struct ShadowGpu {
     last_origin: RenderOrigin,
     last_focus_xz: [f32; 2],
     atlas_wrote: bool,
+    /// Bumped on every atlas refill so the horizon map knows to rebuild.
+    atlas_generation: u64,
+    atlas_max_ground: f32,
 }
 
 impl ShadowGpu {
@@ -564,33 +605,7 @@ impl ShadowGpu {
             })
         });
 
-        let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shadow-height-atlas"),
-            size: wgpu::Extent3d {
-                width: atlas_size,
-                height: atlas_size,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("shadow-height-atlas-view"),
-            format: Some(wgpu::TextureFormat::R32Float),
-            dimension: Some(wgpu::TextureViewDimension::D2),
-            aspect: wgpu::TextureAspect::All,
-            base_mip_level: 0,
-            mip_level_count: None,
-            base_array_layer: 0,
-            array_layer_count: Some(1),
-            usage: None,
-        });
         let atlas_pixels = vec![MISSING_HEIGHT; atlas_size as usize * atlas_size as usize];
-        upload_atlas(queue, &atlas_texture, &atlas_pixels, atlas_size);
 
         let comparison_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow-comparison"),
@@ -621,6 +636,9 @@ impl ShadowGpu {
             contents: bytemuck::bytes_of(&uniforms),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let horizon = HorizonMap::new(device, &uniform_buf, atlas_size);
+        upload_atlas(queue, &horizon.ground_texture, &atlas_pixels, atlas_size);
+        let atlas_view = &horizon.view;
 
         let resource_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow-resource-layout"),
@@ -644,7 +662,7 @@ impl ShadowGpu {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                    resource: wgpu::BindingResource::TextureView(atlas_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
@@ -790,8 +808,7 @@ impl ShadowGpu {
             depth_texture,
             cascade_bufs,
             map_array_view,
-            atlas_texture,
-            atlas_view,
+            horizon,
             comparison_sampler,
             atlas_sampler,
             map_size,
@@ -803,7 +820,15 @@ impl ShadowGpu {
             last_origin: RenderOrigin::default(),
             last_focus_xz: [f32::MAX, f32::MAX],
             atlas_wrote: false,
+            atlas_generation: 0,
+            atlas_max_ground: MISSING_HEIGHT,
         }
+    }
+
+    /// Rebuild the terrain horizon map if the sun, region or terrain changed.
+    /// Returns whether a rebuild was encoded.
+    pub fn encode_horizon(&mut self, encoder: &mut wgpu::CommandEncoder) -> bool {
+        self.horizon.encode(encoder)
     }
 
     pub fn atlas_wrote(&self) -> bool {
@@ -848,7 +873,7 @@ impl ShadowGpu {
             },
             wgpu::BindGroupEntry {
                 binding: 4,
-                resource: wgpu::BindingResource::TextureView(&self.atlas_view),
+                resource: wgpu::BindingResource::TextureView(&self.horizon.view),
             },
             wgpu::BindGroupEntry {
                 binding: 5,
@@ -895,10 +920,22 @@ impl ShadowGpu {
                 .map(|p| &p.rules)
                 .or_else(|| world.height_field().map(|h| h.rules()))
             {
-                uniforms.flags |= FLAG_FORMULA;
+                uniforms.flags |= FLAG_FORMULA | FLAG_HORIZON;
                 apply_terrain_rules(&mut uniforms, rules);
+                let max_ground =
+                    (rules.base_height + rules.hill_height.abs()).max(rules.water_level);
+                self.horizon.prepare(
+                    queue,
+                    focus,
+                    settings.atlas_extent_m,
+                    None,
+                    light,
+                    GroundSource::Formula,
+                    formula_epoch(&uniforms),
+                    max_ground,
+                );
             } else if !world.shadow_contact().is_empty() {
-                uniforms.flags |= FLAG_ATLAS;
+                uniforms.flags |= FLAG_ATLAS | FLAG_HORIZON;
                 let extent = settings.atlas_extent_m.max(1.0);
                 let focus_xz = [focus.x, focus.z];
                 let origin = world.render_origin();
@@ -911,6 +948,7 @@ impl ShadowGpu {
                     || (self.atlas_extent - extent).abs() > 1e-3;
                 if refresh {
                     self.atlas_wrote = true;
+                    self.atlas_generation += 1;
                     let origin_xz = [focus.x - extent * 0.5, focus.z - extent * 0.5];
                     fill_height_atlas(
                         &mut self.atlas_pixels,
@@ -922,19 +960,35 @@ impl ShadowGpu {
                     );
                     upload_atlas(
                         queue,
-                        &self.atlas_texture,
+                        &self.horizon.ground_texture,
                         &self.atlas_pixels,
                         self.atlas_size,
                     );
+                    self.atlas_max_ground = self
+                        .atlas_pixels
+                        .iter()
+                        .copied()
+                        .fold(MISSING_HEIGHT, f32::max);
                     self.atlas_origin_xz = origin_xz;
                     self.atlas_extent = extent;
                     self.last_contact_epoch = epoch;
                     self.last_origin = origin;
                     self.last_focus_xz = focus_xz;
                 }
-                uniforms.atlas_origin_xz = self.atlas_origin_xz;
-                uniforms.atlas_extent = self.atlas_extent;
+                self.horizon.prepare(
+                    queue,
+                    focus,
+                    self.atlas_extent,
+                    Some(self.atlas_origin_xz),
+                    light,
+                    GroundSource::Atlas,
+                    self.atlas_generation,
+                    self.atlas_max_ground,
+                );
             }
+            let (origin_xz, extent) = self.horizon.region();
+            uniforms.atlas_origin_xz = origin_xz;
+            uniforms.atlas_extent = extent;
         }
 
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
