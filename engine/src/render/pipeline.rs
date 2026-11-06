@@ -699,7 +699,8 @@ pub fn create_pipelines(
                 depth_write: bool,
                 cull: Option<wgpu::Face>,
                 depth_stencil: wgpu::DepthStencilState| {
-        let _ = depth_write;
+        // Opaque draws (the only ones writing depth) turn foliage alpha into coverage.
+        let alpha_to_coverage = depth_write;
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&pipeline_layout),
@@ -726,7 +727,7 @@ pub fn create_pipelines(
                 ..Default::default()
             },
             depth_stencil: Some(depth_stencil),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: super::stencil::scene_multisample(alpha_to_coverage),
             multiview: None,
             cache: None,
         })

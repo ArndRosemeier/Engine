@@ -210,7 +210,7 @@ impl ParticleGpu {
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
-            multisample: Default::default(),
+            multisample: super::stencil::scene_multisample(false),
             multiview: None,
             cache: None,
         });
@@ -245,7 +245,7 @@ impl ParticleGpu {
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
-            multisample: Default::default(),
+            multisample: super::stencil::scene_multisample(false),
             multiview: None,
             cache: None,
         });

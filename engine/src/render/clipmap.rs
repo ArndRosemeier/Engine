@@ -419,7 +419,7 @@ impl ClipmapRenderer {
                     ..Default::default()
                 },
                 depth_stencil: Some(depth_stencil),
-                multisample: wgpu::MultisampleState::default(),
+                multisample: super::stencil::scene_multisample(false),
                 multiview: None,
                 cache: None,
             })
@@ -465,7 +465,7 @@ impl ClipmapRenderer {
                     ..Default::default()
                 },
                 depth_stencil: Some(depth_stencil),
-                multisample: wgpu::MultisampleState::default(),
+                multisample: super::stencil::scene_multisample(false),
                 multiview: None,
                 cache: None,
             })
