@@ -93,8 +93,8 @@ pub use vfx::{Delivery, EffectHandle, EffectSpec, VfxPalette, VfxSystem, VisualK
 
 pub use water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use world::{
-    AmbientOcclusion, AnimatedEntity, BloomSettings, EntityId, Frame, Haze, HitchSpan,
-    InstanceSubmit, Light, ShadowSettings, Sky, TorchLight, World,
+    AmbientOcclusion, AnimatedEntity, BloomSettings, EntityId, Frame, GlobalIllumination, Haze,
+    HitchSpan, InstanceSubmit, Light, ShadowSettings, Sky, TorchLight, World,
 };
 
 /// Entry point matching the planned `Engine::run` shape.

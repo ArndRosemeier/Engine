@@ -29,7 +29,8 @@ pub struct Uniforms {
     /// Strength of screen-space AO for this view; 0 where it does not apply.
     pub ao_strength: f32,
     pub camera_up: [f32; 3],
-    pub _up_pad: f32,
+    /// 1 where the GI probes describe this view, 0 for views through portals.
+    pub gi_strength: f32,
     /// Sky light from straight above, as a tint whose sky average is 1
     /// (the brightness itself is `ambient`).
     pub sky_up: [f32; 3],
@@ -64,7 +65,7 @@ impl Uniforms {
             camera_right: [1.0, 0.0, 0.0],
             ao_strength: 0.0,
             camera_up: [0.0, 1.0, 0.0],
-            _up_pad: 0.0,
+            gi_strength: 0.0,
             sky_up: [1.0, 1.0, 1.0],
             env_strength: 1.0,
             sky_horizon: [1.0, 1.0, 1.0],
@@ -99,7 +100,7 @@ struct Uniforms {
     camera_right: vec3<f32>,
     ao_strength: f32,
     camera_up: vec3<f32>,
-    _up_pad: f32,
+    gi_strength: f32,
     sky_up: vec3<f32>,
     env_strength: f32,
     sky_horizon: vec3<f32>,
@@ -131,6 +132,8 @@ fn shade_surface(
     light.sky_down = u.sky_down;
     light.env_strength = u.env_strength;
     light.ao = screen_ao(u.view_proj * vec4<f32>(world_p, 1.0), u.ao_strength);
+    light.gi = gi_irradiance(world_p, n);
+    light.gi.a *= u.gi_strength;
     let v = normalize(u.eye - world_p);
     return pbr_shade(base, n, v, light, roughness, metallic, vis, sun_diffuse);
 }
@@ -200,6 +203,9 @@ struct SceneLight {
     env_strength: f32,
     // Screen-space ambient occlusion, 1 = open sky. Sky light only.
     ao: f32,
+    // Probe light (rgb, same units as sky_irradiance * ambient) and how much
+    // of it to use (a); see gi_irradiance.
+    gi: vec4<f32>,
 };
 
 // Cosine-weighted sky light arriving at a surface facing `n`.
@@ -264,9 +270,21 @@ fn pbr_shade(
     let ab = vec2<f32>(-1.04, 1.04) * a004 + rr.zw;
     let fr = f0 * ab.x + vec3<f32>(ab.y);
     let r = reflect(-v, n);
-    let env_spec = fr * sky_radiance(r, roughness, light) * light.env_strength;
-    let env_diffuse = diffuse_color * sky_irradiance(n, light) * (vec3<f32>(1.0) - fr);
-    return direct + (env_diffuse + env_spec) * (light.ambient * light.ao);
+    // Open-sky light, replaced by the probes' where they cover the point:
+    // they know about walls, roofs and caves, and carry light bounced off
+    // nearby surfaces. Reflections dim by the same amount the sky is hidden.
+    let open_sky = sky_irradiance(n, light) * light.ambient;
+    var sky_e = open_sky;
+    var reflect_scale = light.ambient;
+    if light.gi.a > 0.0 {
+        sky_e = mix(open_sky, light.gi.rgb, light.gi.a);
+        let lum = vec3<f32>(0.2126, 0.7152, 0.0722);
+        let seen = clamp(dot(sky_e, lum) / max(dot(open_sky, lum), 1e-4), 0.0, 1.0);
+        reflect_scale = light.ambient * seen;
+    }
+    let env_spec = fr * sky_radiance(r, roughness, light) * light.env_strength * reflect_scale;
+    let env_diffuse = diffuse_color * sky_e * (vec3<f32>(1.0) - fr);
+    return direct + (env_diffuse + env_spec) * light.ao;
 }
 "#;
 

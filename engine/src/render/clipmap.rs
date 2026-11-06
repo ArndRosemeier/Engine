@@ -89,6 +89,7 @@ fn frame_light() -> SceneLight {
     light.sky_down = frame.sky_down.rgb;
     light.env_strength = 1.0;
     light.ao = 1.0;
+    light.gi = vec4<f32>(0.0);
     return light;
 }
 
@@ -269,6 +270,7 @@ fn fs_land(in: VsOut) -> @location(0) vec4<f32> {
     var light = frame_light();
     // sky_up.w carries this view's AO strength.
     light.ao = screen_ao(frame.view_proj * vec4(in.world_p, 1.0), frame.sky_up.w);
+    light.gi = gi_irradiance(in.world_p, n);
     let lit = pbr_shade(in.color.rgb, n, v, light, 0.92, 0.0, vis, sun_diffuse)
         + in.color.rgb * torch_light(in.world_p, n);
     return vec4(lit, 1.0);

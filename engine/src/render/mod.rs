@@ -1,5 +1,6 @@
 mod clipmap;
 pub(crate) mod frustum;
+mod gi;
 mod gpu_mesh;
 mod gpu_profile;
 mod instance_cull;
@@ -288,6 +289,8 @@ pub struct Renderer {
     ssao: ssao::Ssao,
     /// This frame ran the depth prepass and SSAO.
     ao_active: bool,
+    /// Voxel scene and light probes for global illumination.
+    gi: gi::GiVolume,
     gpu_meshes: HashMap<EntityId, GpuMesh>,
     /// GPU-mode instance buffers, one per prototype instead of one per spatial bin.
     gpu_instance_batches: HashMap<EntityId, GpuInstanceBatch>,
@@ -460,6 +463,8 @@ impl Renderer {
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
         let ssao = ssao::Ssao::new(&device, &depth_texture, config.width, config.height);
         shadow.set_ao_view(&device, ssao.view().clone());
+        let gi = gi::GiVolume::new(&device, &shadow.resource_layout);
+        shadow.set_gi_views(&device, gi.probe_views().clone());
         let pipelines = create_pipelines(&device, &queue, HDR_FORMAT, &shadow);
         let terrain = create_terrain_pipelines(&device, HDR_FORMAT, &pipelines.bind_layout);
         let water = create_water_pipelines(&device, HDR_FORMAT, &pipelines.bind_layout);
@@ -500,6 +505,7 @@ impl Renderer {
             depth_texture,
             ssao,
             ao_active: false,
+            gi,
             gpu_meshes: HashMap::new(),
             gpu_instance_batches: HashMap::new(),
             gpu_batch_sources: Vec::new(),
@@ -1270,6 +1276,10 @@ impl Renderer {
             SceneUniformTarget::Main if self.ao_active => 1.0,
             _ => 0.0,
         };
+        let gi_strength = match target {
+            SceneUniformTarget::Main if world.global_illumination().is_some() => 1.0,
+            _ => 0.0,
+        };
         let slot = self.next_scene_uniform_slot;
         self.next_scene_uniform_slot = self
             .next_scene_uniform_slot
@@ -1314,7 +1324,7 @@ impl Renderer {
             camera_right: right.into(),
             ao_strength,
             camera_up: up.into(),
-            _up_pad: 0.0,
+            gi_strength,
             sky_up: sky_light.up,
             env_strength: 1.0,
             sky_horizon: sky_light.horizon,
@@ -1372,6 +1382,10 @@ impl Renderer {
         self.ao_active = ao.is_some();
         let main_uniform_slot =
             self.write_scene_uniforms(world, &scene_camera, None, SceneUniformTarget::Main);
+        let gi_placement = world
+            .global_illumination()
+            .map(|gi| gi::GiPlacement::around(scene_camera.eye(), gi.probe_spacing_m()));
+        self.shadow.set_gi(gi_placement);
         self.write_shadows(world);
         self.begin_instance_cull_frame(world);
         if self.shadow.encode_horizon(encoder) {
@@ -1379,6 +1393,10 @@ impl Renderer {
         }
         self.encode_shadow_pass(encoder, world);
         self.mark_gpu(encoder, Mark::ShadowDone);
+        if let Some(placement) = gi_placement {
+            self.encode_gi(encoder, world, placement, &scene_camera);
+        }
+        self.mark_gpu(encoder, Mark::GiDone);
         self.particles
             .encode_compute(encoder, self.pipelines.scene_bind_group(main_uniform_slot));
 
@@ -1652,6 +1670,102 @@ impl Renderer {
             OPAQUE_INDIRECT_OFFSET,
             &mut self.gpu_stats.indirect_draws,
         );
+    }
+
+    /// Rebuild the GI voxels when needed and update the light probes.
+    fn encode_gi(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        world: &World,
+        placement: gi::GiPlacement,
+        camera: &Camera,
+    ) {
+        let light_color: [f32; 3] = world.light().color.into();
+        let frame = gi::GiFrame {
+            placement,
+            eye: camera.eye(),
+            light_dir: world.light().direction,
+            light_color: glam::Vec3::from(light_color),
+            ambient: world.light().ambient,
+            sky: SkyLight::from_world(world),
+        };
+        if self.gi.prepare(&self.queue, &frame, world.render_epoch()) {
+            self.gi.encode_fill(encoder, &self.shadow.resource_bind);
+            self.voxelize_scene(encoder, world, placement);
+        }
+        self.gi.encode_update(encoder, &self.shadow.resource_bind);
+    }
+
+    /// Rasterise every opaque mesh inside the GI box into its voxels, once
+    /// along each axis.
+    fn voxelize_scene(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        world: &World,
+        placement: gi::GiPlacement,
+    ) {
+        if self.draw_source_epoch != world.render_epoch() {
+            self.rebuild_draw_sources(world);
+            self.draw_source_epoch = world.render_epoch();
+        }
+        let space = world.living_in();
+        let half = placement.dims.as_vec3() * placement.spacing * 0.5;
+        let box_centre = placement.origin + half;
+        let near_box = |bounds: Option<Bounds>| {
+            bounds.is_none_or(|b| {
+                let d = (b.centre - box_centre).abs() - half;
+                d.max(glam::Vec3::ZERO).length() <= b.radius
+            })
+        };
+        let meshes: Vec<EntityId> = self
+            .source_opaque
+            .iter()
+            .chain(&self.source_terrain)
+            .copied()
+            .filter(|&id| {
+                entity_in_space(world, id, space)
+                    && self.gpu_meshes.get(&id).is_some_and(|g| near_box(g.bounds))
+            })
+            .collect();
+        let batches: Vec<EntityId> = self
+            .batch_source_opaque
+            .iter()
+            .chain(&self.batch_source_terrain)
+            .copied()
+            .filter(|&id| {
+                entity_in_space(world, id, space)
+                    && self
+                        .gpu_instance_batches
+                        .get(&id)
+                        .is_some_and(|b| near_box(b.gpu.bounds))
+            })
+            .collect();
+        let mut draws = 0;
+        for axis in 0..3 {
+            let mut pass = self.gi.begin_voxelize(encoder, axis);
+            for id in &meshes {
+                let gpu = &self.gpu_meshes[id];
+                submit_mesh_draw(
+                    &mut pass,
+                    gpu,
+                    MeshSubmit::Direct,
+                    0..gpu.opaque_index_count as u32,
+                    OPAQUE_INDIRECT_OFFSET,
+                    &mut draws,
+                );
+            }
+            for id in &batches {
+                let batch = &self.gpu_instance_batches[id];
+                submit_batch_draw(
+                    &mut pass,
+                    batch,
+                    None,
+                    0..batch.gpu.opaque_index_count as u32,
+                    OPAQUE_INDIRECT_OFFSET,
+                    &mut draws,
+                );
+            }
+        }
     }
 
     /// Lay the live view's opaque depth before shading, for SSAO and so the
