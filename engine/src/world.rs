@@ -601,6 +601,10 @@ pub struct World {
     bloom: BloomSettings,
     ambient_occlusion: Option<AmbientOcclusion>,
     global_illumination: Option<GlobalIllumination>,
+    /// Smooth destructible terrain, meshed by the renderer on the GPU.
+    voxel_terrain: Option<crate::voxel_terrain::VoxelTerrain>,
+    /// Pieces of shattered meshes still flying or lying around.
+    debris: Vec<crate::debris::Piece>,
     /// Surface presentation sync. Engine default stays on so demos never tear;
     /// the renderer applies it at every present.
     vsync: bool,
@@ -675,6 +679,8 @@ impl Default for World {
             bloom: BloomSettings::default(),
             ambient_occlusion: Some(AmbientOcclusion::default()),
             global_illumination: Some(GlobalIllumination::default()),
+            voxel_terrain: None,
+            debris: Vec::new(),
             vsync: true,
             shadow_contact: ContactSnapshot::default(),
             shadow_contact_epoch: 0,
@@ -1835,6 +1841,139 @@ impl World {
         self.global_illumination = gi;
     }
 
+    /// Smooth destructible terrain drawn in the default space.
+    pub fn voxel_terrain(&self) -> Option<&crate::voxel_terrain::VoxelTerrain> {
+        self.voxel_terrain.as_ref()
+    }
+
+    /// Edit the voxel terrain; the renderer re-meshes the changed chunks.
+    pub fn voxel_terrain_mut(&mut self) -> Option<&mut crate::voxel_terrain::VoxelTerrain> {
+        self.voxel_terrain.as_mut()
+    }
+
+    pub fn set_voxel_terrain(&mut self, terrain: Option<crate::voxel_terrain::VoxelTerrain>) {
+        self.voxel_terrain = terrain;
+    }
+
+    /// Break a mesh entity into solid pieces that fly away from `impact`
+    /// (world space), fall, bounce off the ground and settle. Works on any
+    /// ordinary mesh (props, rocks, walls, buildings); the original entity is
+    /// removed. Returns the pieces' entity ids.
+    pub fn shatter(
+        &mut self,
+        id: EntityId,
+        impact: impl Into<Vec3>,
+        settings: crate::debris::Shatter,
+    ) -> EngineResult<Vec<EntityId>> {
+        settings.validate()?;
+        let impact = impact.into();
+        crate::place::ensure_finite3(impact, "shatter impact")?;
+        let entity = self.entities.get(&id).ok_or(EngineError::UnknownEntity)?;
+        if entity.instanced || entity.instance_of.is_some() {
+            return Err(EngineError::InvalidValue(
+                "shatter works on single (non-instanced) mesh entities".into(),
+            ));
+        }
+        let fragments = crate::fracture::fracture(
+            &entity.mesh,
+            entity.transform,
+            impact,
+            settings.fracture_settings(),
+        );
+        let (material, albedo, casts_shadow, space) = (
+            entity.material,
+            entity.albedo,
+            entity.casts_shadow,
+            entity.space,
+        );
+        self.despawn(id);
+        let prev_space = self.spawn_space;
+        self.spawn_space = space;
+        let mut rng = settings.seed.wrapping_mul(2_654_435_761) | 1;
+        let mut rand = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            (rng >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0
+        };
+        let reach = fragments
+            .iter()
+            .map(|f| f.centroid.distance(impact))
+            .fold(0.0_f32, f32::max)
+            .max(0.5);
+        let mut ids = Vec::with_capacity(fragments.len());
+        for fragment in fragments {
+            let support = crate::debris::support_points(&fragment.mesh.positions);
+            let piece_id =
+                self.spawn_built(fragment.mesh, Mat4::from_translation(fragment.centroid));
+            if let Some(e) = self.entities.get_mut(&piece_id) {
+                e.material = material;
+                e.albedo = albedo;
+                e.casts_shadow = casts_shadow;
+            }
+            let away = (fragment.centroid - impact)
+                .try_normalize()
+                .unwrap_or(Vec3::Y);
+            let falloff = 1.0 - 0.6 * (fragment.centroid.distance(impact) / reach);
+            let velocity = (away
+                + Vec3::new(rand() * 0.3, 0.35 + rand().abs() * 0.3, rand() * 0.3))
+                * settings.speed
+                * falloff;
+            let spin = Vec3::new(rand(), rand(), rand()) * settings.speed
+                / fragment.radius.max(0.15)
+                * 0.4;
+            self.debris.push(crate::debris::Piece {
+                id: piece_id,
+                position: fragment.centroid,
+                rotation: glam::Quat::IDENTITY,
+                velocity,
+                spin,
+                support,
+                age: 0.0,
+                keep: settings.keep_seconds,
+                still_for: 0.0,
+                asleep: false,
+            });
+            ids.push(piece_id);
+        }
+        self.spawn_space = prev_space;
+        Ok(ids)
+    }
+
+    /// Debris pieces still in the world (flying or resting).
+    pub fn debris_count(&self) -> usize {
+        self.debris.len()
+    }
+
+    /// Move shattered pieces. The engine calls this every frame.
+    pub fn tick_debris(&mut self, dt: f32) {
+        if self.debris.is_empty() || !dt.is_finite() || dt <= 0.0 {
+            return;
+        }
+        self.debris.retain(|p| self.entities.contains_key(&p.id));
+        let ground = DebrisGround {
+            voxels: self.voxel_terrain.as_ref(),
+            heights: self.height_field.as_ref(),
+        };
+        let (moved, expired) = crate::debris::step(&mut self.debris, dt, &ground);
+        if moved {
+            for piece in &self.debris {
+                if let Some(e) = self.entities.get_mut(&piece.id) {
+                    let m = piece.matrix();
+                    if e.transform != m {
+                        e.transform = m;
+                        e.bump_xform();
+                    }
+                }
+            }
+            self.bump_render_epoch();
+        }
+        for id in expired {
+            self.despawn(id);
+        }
+        self.debris.retain(|p| self.entities.contains_key(&p.id));
+    }
+
     pub fn bloom(&self) -> BloomSettings {
         self.bloom
     }
@@ -2344,5 +2483,30 @@ mod vsync_tests {
         assert!(!world.vsync());
         world.set_vsync(true);
         assert!(world.vsync());
+    }
+}
+
+/// What debris lands on: voxel terrain where it has data, else the height
+/// terrain (or y = 0 without one).
+struct DebrisGround<'a> {
+    voxels: Option<&'a crate::voxel_terrain::VoxelTerrain>,
+    heights: Option<&'a HeightField>,
+}
+
+impl crate::debris::Ground for DebrisGround<'_> {
+    fn depth(&self, p: Vec3) -> Option<(f32, Vec3)> {
+        if let Some(t) = self.voxels {
+            let d = t.volume().sample(p);
+            if d > 0.0 {
+                // Density is about distance in voxels near the surface.
+                let depth = (d * t.volume().voxel_size()).min(t.volume().voxel_size() * 2.0);
+                return Some((depth, t.normal_at(p)));
+            }
+            if t.volume().chunk_keys().next().is_some() {
+                return Some((d * t.volume().voxel_size(), Vec3::Y));
+            }
+        }
+        let h = self.heights.map_or(0.0, |f| f.height_at(p.x, p.z));
+        Some((h - p.y, Vec3::Y))
     }
 }

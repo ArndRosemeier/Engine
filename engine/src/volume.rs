@@ -8,6 +8,18 @@ use glam::{IVec3, Vec3};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 
+/// Sample material: surface uncovered or built by an edit (bare earth/rock).
+pub const MATERIAL_EXPOSED: u8 = 1;
+
+/// Blend width (in density units, about voxels) of smooth dig/add edits.
+const SMOOTH_EDIT: f32 = 1.5;
+
+/// Polynomial smooth minimum: like `a.min(b)` but rounded within `k`.
+fn smooth_min(a: f32, b: f32, k: f32) -> f32 {
+    let h = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
+    b + (a - b) * h - k * h * (1.0 - h)
+}
+
 /// Number of voxels along one axis of a chunk (exclusive upper bound of cell grid).
 pub const CHUNK_SIZE: i32 = 32;
 
@@ -16,7 +28,12 @@ struct Chunk {
     /// Density samples at cell corners: (CHUNK_SIZE+1)^3
     /// Positive = solid, negative = empty. Surface at 0.
     samples: Vec<f32>,
+    /// Per-sample surface material (0 natural, 1 exposed by an edit),
+    /// allocated on the first edit.
+    materials: Option<Vec<u8>>,
     dirty: bool,
+    /// `Volume::rev` at this chunk's last change.
+    rev: u64,
 }
 
 impl Chunk {
@@ -24,7 +41,9 @@ impl Chunk {
         let n = (CHUNK_SIZE + 1) as usize;
         Self {
             samples: vec![-1.0; n * n * n],
+            materials: None,
             dirty: true,
+            rev: 0,
         }
     }
 
@@ -49,6 +68,10 @@ impl Chunk {
 pub struct Volume {
     voxel_size: f32,
     chunks: HashMap<IVec3, Chunk>,
+    /// Bumped on every change; chunks remember the value of their last one.
+    rev: u64,
+    /// Revision of the last chunk removal (removals leave no chunk to stamp).
+    removed_rev: u64,
 }
 
 impl Default for Volume {
@@ -74,6 +97,8 @@ impl Volume {
         Ok(Self {
             voxel_size,
             chunks: HashMap::new(),
+            rev: 1,
+            removed_rev: 0,
         })
     }
 
@@ -112,7 +137,10 @@ impl Volume {
     }
 
     pub fn remove_chunk_data(&mut self, key: IVec3) {
-        self.chunks.remove(&key);
+        if self.chunks.remove(&key).is_some() {
+            self.rev += 1;
+            self.removed_rev = self.rev;
+        }
     }
 
     pub fn dirty_chunk_keys(&self) -> Vec<IVec3> {
@@ -142,7 +170,11 @@ impl Volume {
     }
 
     fn ensure_chunk(&mut self, key: IVec3) -> &mut Chunk {
-        self.chunks.entry(key).or_insert_with(Chunk::new)
+        self.rev += 1;
+        let rev = self.rev;
+        let chunk = self.chunks.entry(key).or_insert_with(Chunk::new);
+        chunk.rev = rev;
+        chunk
     }
 
     /// Set density at a world-space point (snapped to voxel grid).
@@ -376,6 +408,10 @@ impl Volume {
             }
             keep
         });
+        if !removed.is_empty() {
+            self.rev += 1;
+            self.removed_rev = self.rev;
+        }
         removed
     }
 
@@ -401,6 +437,255 @@ impl Volume {
     pub fn mark_all_dirty(&mut self) {
         for c in self.chunks.values_mut() {
             c.dirty = true;
+        }
+    }
+
+    /// Edge length of one chunk in world units.
+    pub fn chunk_world_size(&self) -> f32 {
+        CHUNK_SIZE as f32 * self.voxel_size
+    }
+
+    /// Change counter: every edit, new chunk or removal raises it.
+    pub fn rev(&self) -> u64 {
+        self.rev
+    }
+
+    /// Chunks changed after revision `since`, and whether any chunk was removed
+    /// since then (a removal leaves no key behind to report).
+    pub fn changed_since(&self, since: u64) -> (Vec<IVec3>, bool) {
+        let keys = self
+            .chunks
+            .iter()
+            .filter(|(_, c)| c.rev > since)
+            .map(|(k, _)| *k)
+            .collect();
+        (keys, self.removed_rev > since)
+    }
+
+    /// Fill whole chunks from a density function, in parallel.
+    ///
+    /// `f` gets world positions of grid corners. Samples shared by
+    /// neighbouring chunks are evaluated at the same position, so seams stay
+    /// consistent. Existing chunks with these keys are replaced.
+    pub fn generate_chunks(&mut self, keys: &[IVec3], f: impl Fn(Vec3) -> f32 + Sync) {
+        let n = CHUNK_SIZE + 1;
+        let vs = self.voxel_size;
+        let built: Vec<(IVec3, Vec<f32>)> = keys
+            .par_iter()
+            .map(|&key| {
+                let base = key * CHUNK_SIZE;
+                let mut samples = Vec::with_capacity((n * n * n) as usize);
+                for y in 0..n {
+                    for z in 0..n {
+                        for x in 0..n {
+                            let g = base + IVec3::new(x, y, z);
+                            let d = f(g.as_vec3() * vs);
+                            samples.push(if d.is_finite() { d } else { -1.0 });
+                        }
+                    }
+                }
+                (key, samples)
+            })
+            .collect();
+        self.rev += 1;
+        for (key, samples) in built {
+            self.chunks.insert(
+                key,
+                Chunk {
+                    samples,
+                    materials: None,
+                    dirty: true,
+                    rev: self.rev,
+                },
+            );
+        }
+    }
+
+    /// Smoothly dig a sphere out of the volume (the surface follows the
+    /// sphere, not the voxel grid). Returns how many chunks changed.
+    pub fn dig_sphere(&mut self, center: impl Into<Vec3>, radius: f32) -> usize {
+        let center = center.into();
+        let vs = self.voxel_size;
+        self.paint_smooth(center, radius, false, |p| {
+            (p.distance(center) - radius) / vs
+        })
+    }
+
+    /// Smoothly add a solid sphere. Returns how many chunks changed.
+    pub fn add_sphere(&mut self, center: impl Into<Vec3>, radius: f32) -> usize {
+        let center = center.into();
+        let vs = self.voxel_size;
+        self.paint_smooth(center, radius, true, |p| (radius - p.distance(center)) / vs)
+    }
+
+    /// Combine a signed distance (in voxels) into every sample near a sphere:
+    /// `max` when adding solid, `min` when digging.
+    fn paint_smooth(
+        &mut self,
+        center: Vec3,
+        radius: f32,
+        add: bool,
+        sdf: impl Fn(Vec3) -> f32,
+    ) -> usize {
+        if !center.is_finite() || !radius.is_finite() || radius <= 0.0 {
+            return 0;
+        }
+        let vs = self.voxel_size;
+        let reach = radius + 3.0 * vs;
+        let lo = ((center - Vec3::splat(reach)) / vs).floor().as_ivec3();
+        let hi = ((center + Vec3::splat(reach)) / vs).ceil().as_ivec3();
+        // Each chunk owns local corners 0..=CHUNK_SIZE; the last one is the
+        // next chunk's first, so the same global corner is painted in both.
+        let ck_lo = (lo - IVec3::ONE).div_euclid(IVec3::splat(CHUNK_SIZE));
+        let ck_hi = hi.div_euclid(IVec3::splat(CHUNK_SIZE));
+        let mut changed = 0;
+        for cy in ck_lo.y..=ck_hi.y {
+            for cz in ck_lo.z..=ck_hi.z {
+                for cx in ck_lo.x..=ck_hi.x {
+                    let key = IVec3::new(cx, cy, cz);
+                    if !add && !self.chunks.contains_key(&key) {
+                        continue; // missing chunks are already empty
+                    }
+                    let base = key * CHUNK_SIZE;
+                    let from = (lo - base).max(IVec3::ZERO);
+                    let to = (hi - base).min(IVec3::splat(CHUNK_SIZE));
+                    if from.cmpgt(to).any() {
+                        continue;
+                    }
+                    let mut touched = false;
+                    let chunk = self.chunks.entry(key).or_insert_with(Chunk::new);
+                    for y in from.y..=to.y {
+                        for z in from.z..=to.z {
+                            for x in from.x..=to.x {
+                                let p = (base + IVec3::new(x, y, z)).as_vec3() * vs;
+                                let d = sdf(p).clamp(-3.0, 3.0);
+                                let i = Chunk::index(x, y, z);
+                                let old = chunk.samples[i];
+                                // Smooth union / subtraction rounds the rim
+                                // where the sphere meets the old surface, so
+                                // no paper-thin slivers are left behind.
+                                let new = if add {
+                                    -smooth_min(-old, -d, SMOOTH_EDIT)
+                                } else {
+                                    smooth_min(old, d, SMOOTH_EDIT)
+                                };
+                                if new != old {
+                                    chunk.samples[i] = new;
+                                    touched = true;
+                                    if new > -2.0 && new < 2.0 {
+                                        let len = chunk.samples.len();
+                                        chunk.materials.get_or_insert_with(|| vec![0; len])[i] =
+                                            MATERIAL_EXPOSED;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if touched {
+                        self.rev += 1;
+                        chunk.rev = self.rev;
+                        chunk.dirty = true;
+                        changed += 1;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    /// Density at a global grid corner (outside any chunk: empty, -1).
+    pub fn corner(&self, g: IVec3) -> f32 {
+        let key = g.div_euclid(IVec3::splat(CHUNK_SIZE));
+        let local = g.rem_euclid(IVec3::splat(CHUNK_SIZE));
+        self.chunks
+            .get(&key)
+            .map_or(-1.0, |c| c.get(local.x, local.y, local.z))
+    }
+
+    /// Trilinear density at a world position.
+    pub fn sample(&self, p: Vec3) -> f32 {
+        let g = p / self.voxel_size;
+        let base = g.floor();
+        let f = g - base;
+        let b = base.as_ivec3();
+        let c = |x: i32, y: i32, z: i32| self.corner(b + IVec3::new(x, y, z));
+        let x00 = c(0, 0, 0) + (c(1, 0, 0) - c(0, 0, 0)) * f.x;
+        let x10 = c(0, 1, 0) + (c(1, 1, 0) - c(0, 1, 0)) * f.x;
+        let x01 = c(0, 0, 1) + (c(1, 0, 1) - c(0, 0, 1)) * f.x;
+        let x11 = c(0, 1, 1) + (c(1, 1, 1) - c(0, 1, 1)) * f.x;
+        let y0 = x00 + (x10 - x00) * f.y;
+        let y1 = x01 + (x11 - x01) * f.y;
+        y0 + (y1 - y0) * f.z
+    }
+
+    /// Whether a world position is inside solid material.
+    pub fn is_solid(&self, p: Vec3) -> bool {
+        self.sample(p) > 0.0
+    }
+
+    /// First point along a ray where the volume turns solid.
+    pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<Vec3> {
+        let dir = dir.try_normalize()?;
+        let step = self.voxel_size * 0.5;
+        let mut t = 0.0;
+        let mut prev_t = 0.0;
+        if self.sample(origin) > 0.0 {
+            return Some(origin);
+        }
+        while t < max_dist {
+            t = (t + step).min(max_dist);
+            let d = self.sample(origin + dir * t);
+            if d > 0.0 {
+                // Refine between the last empty and the first solid sample.
+                let (mut a, mut b) = (prev_t, t);
+                for _ in 0..8 {
+                    let m = (a + b) * 0.5;
+                    if self.sample(origin + dir * m) > 0.0 {
+                        b = m;
+                    } else {
+                        a = m;
+                    }
+                }
+                return Some(origin + dir * b);
+            }
+            prev_t = t;
+        }
+        None
+    }
+
+    /// Copy an `n`³ block of corners starting at global grid corner `origin`,
+    /// taking every `stride`-th corner, x fastest then y then z. Each value
+    /// carries its material in the two lowest mantissa bits (see
+    /// [`pack_material`]); the sign, and so the surface, is unchanged.
+    pub(crate) fn gather(&self, origin: IVec3, stride: i32, n: i32, out: &mut Vec<f32>) {
+        out.clear();
+        out.reserve((n * n * n) as usize);
+        let cs = IVec3::splat(CHUNK_SIZE);
+        let mut cached_key = IVec3::splat(i32::MIN);
+        let mut cached: Option<&Chunk> = None;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let g = origin + IVec3::new(x, y, z) * stride;
+                    let key = g.div_euclid(cs);
+                    if key != cached_key {
+                        cached_key = key;
+                        cached = self.chunks.get(&key);
+                    }
+                    out.push(match cached {
+                        Some(c) => {
+                            let l = g - key * cs;
+                            let i = Chunk::index(l.x, l.y, l.z);
+                            let d = c.samples[i];
+                            match &c.materials {
+                                Some(m) => pack_material(d, m[i]),
+                                None => pack_material(d, 0),
+                            }
+                        }
+                        None => pack_material(-1.0, 0),
+                    });
+                }
+            }
         }
     }
 
@@ -559,4 +844,16 @@ impl ChunkStreamer {
     pub fn is_loaded(&self, key: IVec3) -> bool {
         self.loaded.contains(&key)
     }
+}
+
+/// Store a 2-bit material in the lowest mantissa bits of a density. The
+/// change is below 1e-6 relative and never touches the sign; exact zero is
+/// nudged to a tiny negative value first so it stays "empty".
+pub(crate) fn pack_material(density: f32, material: u8) -> f32 {
+    let d = if density == 0.0 {
+        -f32::MIN_POSITIVE
+    } else {
+        density
+    };
+    f32::from_bits((d.to_bits() & !3) | u32::from(material & 3))
 }

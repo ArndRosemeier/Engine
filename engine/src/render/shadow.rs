@@ -752,6 +752,7 @@ pub struct ShadowGpu {
     pub cascade_layout: wgpu::BindGroupLayout,
     pub cascade_binds: [wgpu::BindGroup; CASCADE_COUNT],
     pub mesh_pipeline: wgpu::RenderPipeline,
+    pub voxel_pipeline: wgpu::RenderPipeline,
     pub skinned_pipeline: wgpu::RenderPipeline,
     pub layer_views: [wgpu::TextureView; CASCADE_COUNT],
     #[allow(dead_code)]
@@ -1029,6 +1030,27 @@ impl ShadowGpu {
             multiview: None,
             cache: None,
         });
+        let voxel_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow-voxel-depth"),
+            layout: Some(&mesh_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &mesh_shader,
+                entry_point: Some("vs_main"),
+                buffers: &super::voxel_terrain::VOXEL_BUFFERS,
+                compilation_options: Default::default(),
+            },
+            fragment: None,
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(depth_state.clone()),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
 
         let skinned_instance = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
@@ -1069,6 +1091,7 @@ impl ShadowGpu {
             cascade_layout,
             cascade_binds,
             mesh_pipeline,
+            voxel_pipeline,
             skinned_pipeline,
             layer_views,
             depth_texture,

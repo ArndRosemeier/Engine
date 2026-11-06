@@ -13,6 +13,7 @@ members = [
     "examples/portal_pair",
     "examples/material_showcase",
     "examples/vfx_showcase",
+    "examples/voxel_destruction",
 ]
 default-members = ["engine"]
 

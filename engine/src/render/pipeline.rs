@@ -705,6 +705,41 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let emission = base.rgb * in.surface.z * 3.0;
     return vec4<f32>(haze(mix(lit, overlay_lit, overlay_mix) + overlay_specular + snow_sparkle + emission, in.world_p), alpha);
 }
+
+// Voxel terrain: grass on flat ground, earth on moderate slopes, layered rock
+// on steep faces, overhangs and cave walls. Everything is sampled in world
+// space, so crater sides and tunnels never show stretched texture.
+@fragment
+fn fs_voxel(in: VsOut) -> @location(0) vec4<f32> {
+    let n0 = normalize(in.world_n);
+    let p = in.world_p;
+    let seed = in.surface2.y;
+    let broad = fbm3(p * 0.11 + vec3<f32>(seed, 5.0, 9.0), 0.5);
+    let fine = fbm3(p * 1.7 + vec3<f32>(3.0, seed, 1.0), 0.5);
+    let strata = fbm3(vec3<f32>(p.x * 0.04, p.y * 0.85, p.z * 0.04) + vec3<f32>(seed * 0.3), 0.55);
+    let n = normalize(n0 + (vec3<f32>(fine, fbm3(p * 1.7 + 11.0, 0.5), fbm3(p * 1.7 + 23.0, 0.5)) - 0.5) * 0.18);
+
+    let rock = in.color.rgb * (0.62 + 0.5 * strata) * (0.86 + 0.28 * fine);
+    let earth = vec3<f32>(0.33, 0.25, 0.17) * (0.8 + 0.35 * broad) * (0.9 + 0.2 * fine);
+    let grass = mix(vec3<f32>(0.20, 0.33, 0.10), vec3<f32>(0.36, 0.42, 0.16), broad)
+        * (0.85 + 0.3 * fine);
+    let up = n0.y + (broad - 0.5) * 0.3;
+    let grass_w = smoothstep(0.72, 0.84, up);
+    let earth_w = smoothstep(0.42, 0.62, up);
+    // Surfaces opened up by digging (or built) show bare earth and rock.
+    let bare = mix(rock, earth * 0.85, smoothstep(0.35, 0.8, up));
+    let natural = mix(mix(rock, earth, earth_w), grass, grass_w);
+    let base = mix(natural, bare, clamp(in.uv.y, 0.0, 1.0));
+    let roughness = mix(in.surface.x, 0.95, grass_w * (1.0 - in.uv.y));
+
+    let l = normalize(u.light_dir);
+    let ndl = max(dot(n, l), 0.0);
+    let wrap = ndl * 0.65 + 0.35;
+    let vis = sun_visibility(p, n0, u.eye);
+    let lit = shade_surface(base, n, p, roughness, in.surface.y, vis, wrap * wrap)
+        + base * torch_light(p, n);
+    return vec4<f32>(haze(lit, p), 1.0);
+}
 "#;
 
 pub const SCENE_UNIFORM_SLOTS: usize = 64;
@@ -727,8 +762,13 @@ impl SceneUniformSlots {
     }
 }
 
+const MESH_BUFFERS: [wgpu::VertexBufferLayout<'static>; 2] = [Vertex::LAYOUT, InstanceRaw::LAYOUT];
+
 pub struct Pipelines {
     pub opaque: wgpu::RenderPipeline,
+    /// Voxel terrain through the same lit shader (compact vertex layout).
+    pub voxel_opaque: wgpu::RenderPipeline,
+    pub voxel_depth_prepass: wgpu::RenderPipeline,
     pub transparent: wgpu::RenderPipeline,
     pub opaque_portal: wgpu::RenderPipeline,
     pub transparent_portal: wgpu::RenderPipeline,
@@ -907,7 +947,9 @@ pub fn create_pipelines(
                 blend: wgpu::BlendState,
                 depth_write: bool,
                 cull: Option<wgpu::Face>,
-                depth_stencil: wgpu::DepthStencilState| {
+                depth_stencil: wgpu::DepthStencilState,
+                buffers: &[wgpu::VertexBufferLayout<'static>],
+                fs_entry: &str| {
         // Opaque draws (the only ones writing depth) turn foliage alpha into coverage.
         let alpha_to_coverage = depth_write;
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -916,12 +958,12 @@ pub fn create_pipelines(
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[Vertex::LAYOUT, InstanceRaw::LAYOUT],
+                buffers,
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(fs_entry),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(blend),
@@ -956,6 +998,8 @@ pub fn create_pipelines(
         true,
         Some(wgpu::Face::Back),
         super::stencil::scene_depth_stencil_unmasked_write(true),
+        &MESH_BUFFERS,
+        "fs_main",
     );
     let transparent = make(
         "transparent-pipeline",
@@ -963,6 +1007,8 @@ pub fn create_pipelines(
         false,
         None, // water/glass readable from both sides
         super::stencil::scene_depth_stencil_unmasked_write(false),
+        &MESH_BUFFERS,
+        "fs_main",
     );
     let opaque_portal = make(
         "opaque-portal-pipeline",
@@ -970,6 +1016,8 @@ pub fn create_pipelines(
         true,
         Some(wgpu::Face::Back),
         super::stencil::scene_depth_stencil_masked_write(true),
+        &MESH_BUFFERS,
+        "fs_main",
     );
     let transparent_portal = make(
         "transparent-portal-pipeline",
@@ -977,37 +1025,55 @@ pub fn create_pipelines(
         false,
         None,
         super::stencil::scene_depth_stencil_masked_write(false),
+        &MESH_BUFFERS,
+        "fs_main",
     );
 
-    let depth_prepass = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("opaque-depth-prepass"),
-        layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: &[Vertex::LAYOUT, InstanceRaw::LAYOUT],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_depth"),
-            targets: &[],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
-            ..Default::default()
-        },
-        depth_stencil: Some(super::stencil::scene_depth_stencil_unmasked_write(true)),
-        multisample: super::stencil::scene_multisample(false),
-        multiview: None,
-        cache: None,
-    });
+    let voxel_opaque = make(
+        "voxel-opaque-pipeline",
+        wgpu::BlendState::REPLACE,
+        true,
+        Some(wgpu::Face::Back),
+        super::stencil::scene_depth_stencil_unmasked_write(true),
+        &super::voxel_terrain::VOXEL_BUFFERS,
+        "fs_voxel",
+    );
+    let depth_prepass_for = |label: &str, buffers: &[wgpu::VertexBufferLayout<'static>]| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_depth"),
+                targets: &[],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(super::stencil::scene_depth_stencil_unmasked_write(true)),
+            multisample: super::stencil::scene_multisample(false),
+            multiview: None,
+            cache: None,
+        })
+    };
+    let depth_prepass = depth_prepass_for("opaque-depth-prepass", &MESH_BUFFERS);
+    let voxel_depth_prepass =
+        depth_prepass_for("voxel-depth-prepass", &super::voxel_terrain::VOXEL_BUFFERS);
 
     Pipelines {
         opaque,
+        voxel_opaque,
+        voxel_depth_prepass,
         transparent,
         opaque_portal,
         transparent_portal,

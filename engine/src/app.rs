@@ -278,6 +278,7 @@ impl ApplicationHandler for App {
                 if self.fatal_error.is_none() {
                     self.world.set_time(time);
                     self.world.tick_animations(dt);
+                    self.world.tick_debris(dt);
                 }
                 let anim_ms = elapsed_ms(anim_t);
 

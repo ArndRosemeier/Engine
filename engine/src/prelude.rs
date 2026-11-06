@@ -9,6 +9,7 @@ pub use crate::collision::{
 };
 pub use crate::color::{rgb, rgba, Color};
 pub use crate::contact::{ContactGrid, ContactSnapshot};
+pub use crate::debris::Shatter;
 pub use crate::error::{EngineError, EngineResult};
 pub use crate::input::{Input, Key, MouseButton};
 pub use crate::landscape::Landscape;
@@ -37,6 +38,7 @@ pub use crate::texture::{
 };
 pub use crate::ui::{UiFrame, UiPanel};
 pub use crate::vfx::{Delivery, EffectHandle, EffectSpec, VfxPalette, VfxSystem, VisualKind};
+pub use crate::voxel_terrain::VoxelTerrain;
 pub use crate::water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use crate::world::AnimatedEntity;
 pub use crate::world::{
