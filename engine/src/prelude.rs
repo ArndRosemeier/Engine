@@ -15,7 +15,7 @@ pub use crate::input::{Input, Key, MouseButton};
 pub use crate::landscape::Landscape;
 pub use crate::limits::EngineLimits;
 pub use crate::mesh::{Mesh, PointId, Shape, SurfaceMaterial};
-pub use crate::model::{scatter_places, Model};
+pub use crate::model::{scatter_places, Model, ModelScene};
 pub use crate::particles::{
     EmitterId, ParticleBlend, ParticleEmitter, ParticleForce, ParticleMode, ParticleShape,
     ParticleSilhouette, ParticleWorld, SizeOverLife,

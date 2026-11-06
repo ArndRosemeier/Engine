@@ -28,6 +28,92 @@ pub struct AlbedoMap {
     pub rgba: Vec<u8>,
 }
 
+/// Texture maps that go with an albedo, in glTF's metallic-roughness model.
+///
+/// Every map is optional and sampled with the same UVs as the albedo. Missing
+/// maps fall back to neutral texels (flat normal, full occlusion, the
+/// per-vertex roughness and metallic, no emission).
+#[derive(Clone, Debug)]
+pub struct MaterialMaps {
+    /// Tangent-space normal map, linear RGB, +Y up (glTF convention).
+    pub normal: Option<AlbedoMap>,
+    /// Packed occlusion (R), roughness (G) and metallic (B), linear. Roughness
+    /// and metallic multiply the per-vertex [`SurfaceMaterial`] values.
+    pub orm: Option<AlbedoMap>,
+    /// Emitted colour, sRGB, multiplied by `emissive_factor`.
+    pub emissive: Option<AlbedoMap>,
+    pub normal_scale: f32,
+    pub occlusion_strength: f32,
+    /// Linear emitted colour; values above 1 glow brighter (emissive strength).
+    pub emissive_factor: [f32; 3],
+    /// Roughness and metallic for meshes that carry no per-vertex material
+    /// (skinned characters). Static meshes use their [`SurfaceMaterial`].
+    pub roughness: f32,
+    pub metallic: f32,
+}
+
+impl Default for MaterialMaps {
+    fn default() -> Self {
+        Self {
+            normal: None,
+            orm: None,
+            emissive: None,
+            normal_scale: 1.0,
+            occlusion_strength: 1.0,
+            emissive_factor: [0.0; 3],
+            roughness: 0.65,
+            metallic: 0.0,
+        }
+    }
+}
+
+impl MaterialMaps {
+    /// True when nothing here would change how the surface looks.
+    pub fn is_neutral(&self) -> bool {
+        self.normal.is_none()
+            && self.orm.is_none()
+            && self.emissive.is_none()
+            && self.emissive_factor == [0.0; 3]
+    }
+
+    pub fn validate(&self) -> EngineResult<()> {
+        for (name, map) in [
+            ("normal", &self.normal),
+            ("orm", &self.orm),
+            ("emissive", &self.emissive),
+        ] {
+            if let Some(m) = map {
+                if m.width == 0
+                    || m.height == 0
+                    || m.rgba.len() != m.width as usize * m.height as usize * 4
+                {
+                    return Err(EngineError::InvalidMesh(format!(
+                        "{name} map is {}x{} with {} bytes",
+                        m.width,
+                        m.height,
+                        m.rgba.len()
+                    )));
+                }
+            }
+        }
+        let finite = [
+            self.normal_scale,
+            self.occlusion_strength,
+            self.roughness,
+            self.metallic,
+        ]
+        .into_iter()
+        .chain(self.emissive_factor)
+        .all(f32::is_finite);
+        if !finite {
+            return Err(EngineError::InvalidMesh(
+                "material map factors must be finite".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Compact material controls carried by generated mesh vertices.
 ///
 /// The shared renderer uses these values for every surface type: authored
@@ -386,7 +472,11 @@ pub struct Mesh {
     colors: Vec<Vec4>,
     uvs: Vec<[f32; 2]>,
     faces: Vec<Vec<PointId>>,
+    /// Authored per-point normals (zero = not set). Empty when none were set:
+    /// such meshes keep flat facets.
+    normals: Vec<Vec3>,
     albedo: Option<AlbedoMap>,
+    maps: Option<MaterialMaps>,
     surface: SurfaceMaterial,
     surface_overrides: Vec<SurfaceMaterial>,
 }
@@ -449,7 +539,48 @@ impl Mesh {
         self.colors.push(Color::rgb(191, 191, 191).to_vec4());
         self.uvs.push([0.0, 0.0]);
         self.surface_overrides.push(self.surface);
+        if !self.normals.is_empty() {
+            self.normals.push(Vec3::ZERO);
+        }
         Ok(id)
+    }
+
+    /// Set the shading normal of an existing point (`NORMAL` from glTF).
+    ///
+    /// A mesh with authored normals is drawn smooth and indexed, one GPU
+    /// vertex per point, like an imported model; points left without one get
+    /// the average of their faces.
+    pub fn set_point_normal(&mut self, id: PointId, normal: impl Into<Vec3>) -> EngineResult<()> {
+        let normal = normal.into();
+        ensure_finite3(normal, "point normal")?;
+        let idx = id.0 as usize;
+        if idx >= self.points.len() {
+            return Err(EngineError::InvalidMesh(format!(
+                "point {} out of range (have {})",
+                id.0,
+                self.points.len()
+            )));
+        }
+        if self.normals.is_empty() {
+            self.normals = vec![Vec3::ZERO; self.points.len()];
+        }
+        self.normals[idx] = normal.normalize_or_zero();
+        Ok(())
+    }
+
+    /// Smallest box around every point, or `None` for an empty mesh.
+    pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
+        let first = *self.points.first()?;
+        Some(
+            self.points
+                .iter()
+                .fold((first, first), |(lo, hi), &p| (lo.min(p), hi.max(p))),
+        )
+    }
+
+    /// Whether this mesh carries authored normals (see [`Self::set_point_normal`]).
+    pub fn has_normals(&self) -> bool {
+        !self.normals.is_empty()
     }
 
     /// Set the display color of an existing point (alpha < 1 draws in the transparent pass).
@@ -506,6 +637,19 @@ impl Mesh {
     /// Baked albedo, if this mesh carries one. Sampled with the point UVs.
     pub fn albedo(&self) -> Option<&AlbedoMap> {
         self.albedo.as_ref()
+    }
+
+    /// Attach normal, occlusion-roughness-metallic and emissive maps.
+    /// Neutral maps are dropped, so plain meshes keep the cheap path.
+    pub fn set_material_maps(&mut self, maps: MaterialMaps) -> EngineResult<()> {
+        maps.validate()?;
+        self.maps = (!maps.is_neutral()).then_some(maps);
+        Ok(())
+    }
+
+    /// Texture maps that go with the albedo, if any.
+    pub fn material_maps(&self) -> Option<&MaterialMaps> {
+        self.maps.as_ref()
     }
 
     /// Apply deterministic UV projection for the eight-cell cave material atlas.
@@ -658,6 +802,12 @@ impl Mesh {
         let n = self.points.len() - ids.len();
         self.colors[n..].copy_from_slice(&other.colors);
         self.uvs[n..].copy_from_slice(&other.uvs);
+        if other.has_normals() {
+            if self.normals.is_empty() {
+                self.normals = vec![Vec3::ZERO; self.points.len()];
+            }
+            self.normals[n..].copy_from_slice(&other.normals);
+        }
         for face in &other.faces {
             let mapped: Vec<PointId> = face.iter().map(|p| ids[p.0 as usize]).collect();
             self.add_face(&mapped)?;
@@ -674,7 +824,13 @@ impl Mesh {
     ///
     /// Opaque faces are packed first; [`BuiltMesh::opaque_index_count`] marks the split
     /// so the renderer can draw transparent triangles in a second pass.
+    ///
+    /// Meshes with authored normals (imported models) are built smooth and
+    /// indexed instead, keeping those normals.
     pub fn build(&self) -> BuiltMesh {
+        if self.has_normals() {
+            return self.build_indexed_smooth();
+        }
         self.build_flat()
     }
     /// Like [`Self::build`], but averages face normals at shared authoring points
@@ -839,7 +995,10 @@ impl Mesh {
                         if remap[pi] == u32::MAX {
                             remap[pi] = positions.len() as u32;
                             positions.push(self.points[pi]);
-                            let mut n = smooth_normals[pi];
+                            let mut n = match self.normals.get(pi) {
+                                Some(&a) if a != Vec3::ZERO => a,
+                                _ => smooth_normals[pi],
+                            };
                             if n.length_squared() < 1e-10 {
                                 n = face_n;
                             }

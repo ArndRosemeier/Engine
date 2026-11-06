@@ -123,6 +123,21 @@ fn shade_surface(
     vis: f32,
     sun_diffuse: f32,
 ) -> vec3<f32> {
+    return shade_surface_occluded(base, n, world_p, roughness, metallic, vis, sun_diffuse, 1.0);
+}
+
+// `shade_surface` with baked ambient occlusion (an occlusion map), which
+// dims sky and probe light but not the sun.
+fn shade_surface_occluded(
+    base: vec3<f32>,
+    n: vec3<f32>,
+    world_p: vec3<f32>,
+    roughness: f32,
+    metallic: f32,
+    vis: f32,
+    sun_diffuse: f32,
+    occlusion: f32,
+) -> vec3<f32> {
     var light: SceneLight;
     light.dir = normalize(u.light_dir);
     light.color = u.light_color;
@@ -131,7 +146,7 @@ fn shade_surface(
     light.sky_horizon = u.sky_horizon;
     light.sky_down = u.sky_down;
     light.env_strength = u.env_strength;
-    light.ao = screen_ao(u.view_proj * vec4<f32>(world_p, 1.0), u.ao_strength);
+    light.ao = screen_ao(u.view_proj * vec4<f32>(world_p, 1.0), u.ao_strength) * occlusion;
     light.gi = gi_irradiance(world_p, n);
     light.gi.a *= u.gi_strength;
     let v = normalize(u.eye - world_p);
@@ -473,15 +488,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // conventional path; authored wood/dirt/grass/sand/snow/cave profiles
     // continue through the full procedural material evaluation below.
     if in.surface3.w < 0.001 {
-        let n = normalize(in.world_n);
+        let geo_n = normalize(in.world_n);
+        // Normal, occlusion-roughness-metallic and emissive maps; neutral
+        // 1x1 texels for meshes without them.
+        let n = mapped_normal(geo_n, in.world_p, in.uv);
+        let orm = material_orm(in.uv);
         let l = normalize(u.light_dir);
         let ndl = max(dot(n, l), 0.0);
         let wrap = ndl * 0.65 + 0.35;
         let base = in.color * textureSample(albedo_tex, albedo_sampler, in.uv);
-        let vis = sun_visibility(in.world_p, n, u.eye);
-        let lit = shade_surface(base.rgb, n, in.world_p, in.surface.x, in.surface.y, vis, wrap * wrap)
+        let vis = sun_visibility(in.world_p, geo_n, u.eye);
+        let lit = shade_surface_occluded(base.rgb, n, in.world_p, in.surface.x * orm.y,
+                in.surface.y * orm.z, vis, wrap * wrap, orm.x)
             + base.rgb * torch_light(in.world_p, n)
-            + base.rgb * in.surface.z * 3.0;
+            + base.rgb * in.surface.z * 3.0
+            + material_emission(in.uv);
         return vec4<f32>(haze(lit, in.world_p), base.a);
     }
 
@@ -777,11 +798,13 @@ pub struct Pipelines {
     pub depth_prepass: wgpu::RenderPipeline,
     pub scene_uniforms: SceneUniformSlots,
     pub bind_layout: wgpu::BindGroupLayout,
+    /// Mesh material group: albedo, sampler, normal, ORM, emissive, factors.
     pub albedo_layout: wgpu::BindGroupLayout,
+    /// Clamped sampler for plain baked albedos.
     pub albedo_sampler: wgpu::Sampler,
-    /// Keeps the 1ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â1 white texel alive for `white_albedo`.
-    #[allow(dead_code)]
-    pub white_texture: wgpu::Texture,
+    /// Repeating anisotropic sampler for imported material sets.
+    pub material_sampler: wgpu::Sampler,
+    pub neutral_maps: super::material::NeutralMaps,
     pub white_albedo: wgpu::BindGroup,
 }
 
@@ -832,7 +855,14 @@ pub fn create_pipelines(
 ) -> Pipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("lit-shader"),
-        source: wgpu::ShaderSource::Wgsl(format!("{}{SHADER}", scene_shader_prefix()).into()),
+        source: wgpu::ShaderSource::Wgsl(
+            format!(
+                "{}{SHADER}{}",
+                scene_shader_prefix(),
+                super::material::material_wgsl(1)
+            )
+            .into(),
+        ),
     });
 
     let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -857,27 +887,7 @@ pub fn create_pipelines(
         }
     };
 
-    let albedo_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("mesh-albedo-layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
-    });
+    let albedo_layout = super::material::material_layout(device);
     let albedo_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("mesh-albedo-sampler"),
         address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -888,54 +898,18 @@ pub fn create_pipelines(
         mipmap_filter: wgpu::FilterMode::Linear,
         ..Default::default()
     });
-    let white_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("mesh-albedo-white-tex"),
-        size: wgpu::Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &white_texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &[255, 255, 255, 255],
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(4),
-            rows_per_image: Some(1),
-        },
-        wgpu::Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
-    );
-    let white_view = white_texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let white_albedo = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("mesh-albedo-white"),
-        layout: &albedo_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&white_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&albedo_sampler),
-            },
-        ],
-    });
+    let material_sampler = super::material::material_sampler(device);
+    let neutral_maps = super::material::NeutralMaps::new(device, queue);
+    let white_albedo = super::material::GpuMaterial::new(
+        device,
+        queue,
+        &albedo_layout,
+        &albedo_sampler,
+        &neutral_maps,
+        None,
+        None,
+    )
+    .bind;
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("pipeline-layout"),
@@ -1082,7 +1056,8 @@ pub fn create_pipelines(
         bind_layout,
         albedo_layout,
         albedo_sampler,
-        white_texture,
+        material_sampler,
+        neutral_maps,
         white_albedo,
     }
 }

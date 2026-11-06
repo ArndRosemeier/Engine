@@ -2,7 +2,7 @@
 
 use crate::anim::{SkinMesh, MAX_JOINTS};
 use crate::mesh::InstanceRaw;
-use crate::render::terrain_pipeline::upload_texture;
+use crate::render::material::{upload_map, GpuMaterial, MapKind, NeutralMaps};
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 use wgpu::util::DeviceExt;
@@ -111,20 +111,24 @@ fn vs_main(v: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    var n = normalize(in.world_n);
+    var geo_n = normalize(in.world_n);
     if (!front) {
-        n = -n;
+        geo_n = -geo_n;
     }
+    let n = mapped_normal(geo_n, in.world_p, in.uv);
+    let orm = material_orm(in.uv);
     let l = normalize(u.light_dir);
     let ndl = max(dot(n, l), 0.0);
     let wrap = ndl * 0.5 + 0.5;
-    let vis = sun_visibility(in.world_p, n, u.eye);
+    let vis = sun_visibility(in.world_p, geo_n, u.eye);
     let texel = textureSample(albedo_tex, albedo_sampler, in.uv);
     let base = in.color * texel;
     // Characters keep their full-strength sun (no ambient budget split).
     let sun_diffuse = wrap * wrap / max(1.0 - u.ambient, 0.05);
-    let lit = shade_surface(base.rgb, n, in.world_p, 0.65, 0.0, vis, sun_diffuse)
-        + base.rgb * torch_light(in.world_p, n);
+    let lit = shade_surface_occluded(base.rgb, n, in.world_p, mat.roughness * orm.y,
+            mat.metallic * orm.z, vis, sun_diffuse, orm.x)
+        + base.rgb * torch_light(in.world_p, n)
+        + material_emission(in.uv);
     return vec4<f32>(haze(lit, in.world_p), base.a);
 }
 "#;
@@ -163,7 +167,12 @@ pub fn create_skinned_pipelines(
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("skinned-shader"),
         source: wgpu::ShaderSource::Wgsl(
-            format!("{}{SKINNED_SHADER}", super::pipeline::scene_shader_prefix()).into(),
+            format!(
+                "{}{SKINNED_SHADER}{}",
+                super::pipeline::scene_shader_prefix(),
+                super::material::material_wgsl(2)
+            )
+            .into(),
         ),
     });
 
@@ -248,8 +257,6 @@ pub struct GpuSkinnedMesh {
     pub index_buf: wgpu::Buffer,
     pub index_count: u32,
     pub albedo_bind: wgpu::BindGroup,
-    /// Keeps the uploaded albedo texture alive for `albedo_bind`.
-    _albedo_tex: Option<super::terrain_pipeline::GpuTexture>,
 }
 
 impl GpuSkinnedMesh {
@@ -257,8 +264,8 @@ impl GpuSkinnedMesh {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         albedo_layout: &wgpu::BindGroupLayout,
-        albedo_sampler: &wgpu::Sampler,
-        white_albedo: &wgpu::BindGroup,
+        material_sampler: &wgpu::Sampler,
+        neutral: &NeutralMaps,
         mesh: &SkinMesh,
     ) -> Self {
         let mut vertices = Vec::with_capacity(mesh.positions.len());
@@ -282,32 +289,24 @@ impl GpuSkinnedMesh {
             contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let (albedo_bind, _albedo_tex) = if let Some(map) = &mesh.albedo {
-            let gpu = upload_texture(device, queue, map.width, map.height, &map.rgba);
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("skinned-albedo"),
-                layout: albedo_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&gpu.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(albedo_sampler),
-                    },
-                ],
-            });
-            (bind, Some(gpu))
-        } else {
-            (white_albedo.clone(), None)
-        };
+        let albedo = mesh.albedo.as_ref().map(|map| {
+            upload_map(device, queue, map, MapKind::Color).create_view(&Default::default())
+        });
+        let albedo_bind = GpuMaterial::new(
+            device,
+            queue,
+            albedo_layout,
+            material_sampler,
+            neutral,
+            albedo.as_ref(),
+            Some(&mesh.maps),
+        )
+        .bind;
         Self {
             vertex_buf,
             index_buf,
             index_count: mesh.indices.len() as u32,
             albedo_bind,
-            _albedo_tex,
         }
     }
 }

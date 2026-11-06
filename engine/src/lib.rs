@@ -70,8 +70,8 @@ pub use gpu_field::{
 pub use input::{Input, Key, MouseButton};
 pub use landscape::Landscape;
 pub use limits::EngineLimits;
-pub use mesh::{BuiltMesh, Mesh, PointId, Shape, SurfaceMaterial};
-pub use model::{scatter_places, Model};
+pub use mesh::{AlbedoMap, BuiltMesh, MaterialMaps, Mesh, PointId, Shape, SurfaceMaterial};
+pub use model::{scatter_places, Model, ModelScene};
 pub use particles::{
     EmitterId, ParticleBlend, ParticleEmitter, ParticleForce, ParticleMode, ParticleShape,
     ParticleSilhouette, ParticleWorld, SizeOverLife,

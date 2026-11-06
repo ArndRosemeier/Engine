@@ -14,6 +14,7 @@ members = [
     "examples/material_showcase",
     "examples/vfx_showcase",
     "examples/voxel_destruction",
+    "examples/model_viewer",
 ]
 default-members = ["engine"]
 
@@ -32,7 +33,7 @@ egui = "0.32.3"
 egui-wgpu = "0.32.3"
 egui-winit = "0.32.3"
 glam = { version = "0.30", features = ["bytemuck"] }
-gltf = { version = "1.4", default-features = true, features = ["utils"] }
+gltf = { version = "1.4", default-features = true, features = ["utils", "KHR_materials_emissive_strength"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 noise = "0.9"
 pollster = "0.4"

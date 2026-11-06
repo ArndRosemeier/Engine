@@ -6,7 +6,7 @@ use crate::contact::ContactSnapshot;
 use crate::error::{EngineError, EngineResult};
 use crate::input::Input;
 use crate::limits::EngineLimits;
-use crate::mesh::{AlbedoMap, BuiltMesh, Mesh};
+use crate::mesh::{AlbedoMap, BuiltMesh, MaterialMaps, Mesh};
 use crate::particles::ParticleWorld;
 use crate::place::{GlobalPlace, MeshInstance, Place};
 use crate::portal::{
@@ -570,6 +570,8 @@ pub struct World {
     /// CPU sampler matching the GPU formula (for feet / gameplay).
     pub(crate) height_field: Option<HeightField>,
     pub(crate) textures: HashMap<TextureId, CpuTexture>,
+    /// Normal / ORM / emissive maps that go with an albedo texture.
+    pub(crate) surface_maps: HashMap<TextureId, std::sync::Arc<MaterialMaps>>,
     pub(crate) materials: HashMap<MaterialId, TerrainMaterial>,
     next_texture_id: u64,
     next_material_id: u64,
@@ -660,6 +662,7 @@ impl Default for World {
             proc_terrain: None,
             height_field: None,
             textures: HashMap::new(),
+            surface_maps: HashMap::new(),
             materials: HashMap::new(),
             next_texture_id: 1,
             next_material_id: 1,
@@ -923,6 +926,20 @@ impl World {
             "unknown space {}",
             space.raw()
         )))
+    }
+
+    /// Spawn every part of a model (one entity per material) at `place`.
+    /// Move them together by giving each the same place.
+    pub fn spawn_model(
+        &mut self,
+        model: &crate::model::ModelScene,
+        place: Place,
+    ) -> EngineResult<Vec<EntityId>> {
+        model
+            .parts
+            .iter()
+            .map(|part| self.place(part.clone(), place))
+            .collect()
     }
 
     /// Spawn a mesh at the origin.
@@ -1231,7 +1248,7 @@ impl World {
 
     /// Spawn a mesh at a friendly [`Place`].
     pub fn place(&mut self, mesh: Mesh, place: Place) -> EngineResult<EntityId> {
-        let albedo = mesh.albedo().cloned();
+        let albedo = (mesh.albedo().cloned(), mesh.material_maps().cloned());
         let id = self.spawn_built(mesh.build(), place.to_matrix());
         self.attach_albedo(id, albedo)?;
         Ok(id)
@@ -1252,7 +1269,7 @@ impl World {
             )));
         }
         let instances: Vec<MeshInstance> = places.into_iter().map(Place::to_instance).collect();
-        let albedo = mesh.albedo().cloned();
+        let albedo = (mesh.albedo().cloned(), mesh.material_maps().cloned());
         let id = self.spawn_built_instanced(mesh.build(), instances);
         self.attach_albedo(id, albedo)?;
         Ok(id)
@@ -1263,7 +1280,7 @@ impl World {
     /// The mesh is uploaded once; [`Self::set_instances`] then drives where it
     /// appears.
     pub fn spawn_instanced(&mut self, mesh: Mesh) -> EntityId {
-        let albedo = mesh.albedo().cloned();
+        let albedo = (mesh.albedo().cloned(), mesh.material_maps().cloned());
         let id = self.spawn_built_instanced(mesh.build(), Vec::new());
         self.attach_albedo(id, albedo)
             .expect("albedo upload at spawn_instanced");
@@ -1382,11 +1399,25 @@ impl World {
         Ok(())
     }
 
-    fn attach_albedo(&mut self, id: EntityId, albedo: Option<AlbedoMap>) -> EngineResult<()> {
-        let Some(map) = albedo else {
-            return Ok(());
+    fn attach_albedo(
+        &mut self,
+        id: EntityId,
+        (albedo, maps): (Option<AlbedoMap>, Option<MaterialMaps>),
+    ) -> EngineResult<()> {
+        let map = match (albedo, &maps) {
+            (Some(map), _) => map,
+            // Maps need an albedo to ride along with: a white texel.
+            (None, Some(_)) => AlbedoMap {
+                width: 1,
+                height: 1,
+                rgba: vec![255; 4],
+            },
+            (None, None) => return Ok(()),
         };
         let tid = self.create_texture_rgba(map.width, map.height, map.rgba)?;
+        if let Some(maps) = maps {
+            self.surface_maps.insert(tid, std::sync::Arc::new(maps));
+        }
         self.entities
             .get_mut(&id)
             .expect("entity was just spawned")
@@ -1467,7 +1498,7 @@ impl World {
     /// Spawn a mesh anchored in absolute world metres (survives rebasing).
     pub fn spawn_anchored(&mut self, mesh: Mesh, place: GlobalPlace) -> EngineResult<EntityId> {
         let local = place.to_place(self.render_origin)?;
-        let albedo = mesh.albedo().cloned();
+        let albedo = (mesh.albedo().cloned(), mesh.material_maps().cloned());
         let id = self.spawn_built(mesh.build(), local.to_matrix());
         self.attach_albedo(id, albedo)?;
         self.anchored_entities.insert(id, place);
@@ -2300,6 +2331,10 @@ impl World {
 
     pub(crate) fn textures(&self) -> &HashMap<TextureId, CpuTexture> {
         &self.textures
+    }
+
+    pub(crate) fn surface_maps(&self, id: TextureId) -> Option<&std::sync::Arc<MaterialMaps>> {
+        self.surface_maps.get(&id)
     }
 
     pub(crate) fn materials(&self) -> &HashMap<MaterialId, TerrainMaterial> {
