@@ -1382,3 +1382,31 @@ fn physical_sky_drives_light_and_sky() {
         "night is much darker than noon"
     );
 }
+
+#[test]
+fn wind_and_season_are_validated() {
+    let mut world = crate::world::World::new();
+    assert_eq!(world.wind(), 0.5);
+    world.set_wind(1.5).expect("breeze");
+    assert_eq!(world.wind(), 1.5);
+    assert!(world.set_wind(-1.0).is_err());
+    assert!(world.set_wind(f32::NAN).is_err());
+    world.set_season(0.7).expect("autumn");
+    assert!(world.set_season(1.5).is_err());
+}
+
+#[test]
+fn trees_share_one_atlas_texture() {
+    use crate::vegetation::{tree_model, TreeSpecies};
+    let mut world = crate::world::World::new();
+    let oak = tree_model(TreeSpecies::Oak, 0).expect("oak");
+    let birch = tree_model(TreeSpecies::Birch, 0).expect("birch");
+    let a = world.spawn_lod(oak.lod_levels()).expect("oak lod");
+    let b = world.spawn_lod(birch.lod_levels()).expect("birch lod");
+    let tex = |w: &crate::world::World, id| {
+        let level = w.lod_levels(id).expect("levels")[0];
+        w.entity(level).expect("entity").albedo
+    };
+    assert!(tex(&world, a).is_some());
+    assert_eq!(tex(&world, a), tex(&world, b));
+}
