@@ -1320,3 +1320,45 @@ fn looking_down_a_hatch_sees_the_destination() {
     assert_eq!(visible.dst, inside);
     assert_eq!(visible.dest_space, dungeon);
 }
+
+#[test]
+fn lod_set_moves_instances_between_levels_with_the_camera() {
+    use crate::mesh::Shape;
+    use crate::world::World;
+    let mut world = World::new();
+    let cube = || Shape::box_at((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), rgb(200, 200, 200)).unwrap();
+    let id = world
+        .spawn_lod(vec![
+            crate::lod::LodLevel::new(cube(), 20.0),
+            crate::lod::LodLevel::new(cube(), 100.0),
+        ])
+        .unwrap();
+    let places: Vec<Place> = [5.0, 50.0, 150.0]
+        .iter()
+        .map(|x| Place::new(*x, 0.0, 0.0))
+        .collect();
+    world.set_lod_places(id, &places).unwrap();
+    let levels = world.lod_levels(id).unwrap();
+    let counts = |w: &World| -> Vec<usize> {
+        levels
+            .iter()
+            .map(|e| w.entity(*e).unwrap().instances.len())
+            .collect()
+    };
+
+    world.look_first_person((0.0, 0.0, 0.0), 90.0, 0.0);
+    world.tick_lods();
+    assert_eq!(counts(&world), vec![1, 1], "150 m is past the last level");
+    let epoch = world.render_epoch();
+
+    // Walk to x = 55: the far tree comes in, the near one moves to level 1;
+    // only instance lists change, so the scene epoch stays.
+    world.look_first_person((55.0, 0.0, 0.0), 90.0, 0.0);
+    world.tick_lods();
+    assert_eq!(counts(&world), vec![1, 2]);
+    assert_eq!(world.render_epoch(), epoch);
+
+    assert!(world.set_lod_bias(0.0).is_err());
+    world.despawn_lod(id);
+    assert!(world.entity(levels[0]).is_err());
+}

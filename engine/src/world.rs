@@ -6,6 +6,7 @@ use crate::contact::ContactSnapshot;
 use crate::error::{EngineError, EngineResult};
 use crate::input::Input;
 use crate::limits::EngineLimits;
+use crate::lod::{LodId, LodLevel, LodSet};
 use crate::mesh::{AlbedoMap, BuiltMesh, MaterialMaps, Mesh};
 use crate::particles::ParticleWorld;
 use crate::place::{GlobalPlace, MeshInstance, Place};
@@ -578,6 +579,13 @@ pub struct World {
     pub(crate) water_materials: HashMap<WaterMaterialId, WaterMaterial>,
     /// Changes whenever textures or material resources are added.
     resource_epoch: u64,
+    /// Changes when only instance lists changed (LOD swaps): the renderer
+    /// re-uploads instances without rebuilding GI or shadow sources.
+    instance_epoch: u64,
+    lods: std::collections::BTreeMap<LodId, LodSet>,
+    next_lod: u64,
+    lod_bias: f32,
+    lod_fade: f32,
     /// Applied to fully-opaque `set_chunk_built` uploads when set.
     pub(crate) default_terrain_material: Option<MaterialId>,
     /// Applied to fully-translucent chunk layers when set.
@@ -668,6 +676,11 @@ impl Default for World {
             next_material_id: 1,
             water_materials: HashMap::new(),
             resource_epoch: 1,
+            instance_epoch: 1,
+            lods: std::collections::BTreeMap::new(),
+            next_lod: 1,
+            lod_bias: 1.0,
+            lod_fade: 0.1,
             default_terrain_material: None,
             default_water_material: None,
             pointer_lock: false,
@@ -776,6 +789,146 @@ impl World {
 
     pub(crate) fn render_epoch(&self) -> u64 {
         self.render_epoch
+    }
+
+    pub(crate) fn instance_epoch(&self) -> u64 {
+        self.instance_epoch
+    }
+
+    /// Spawn a LOD set: one placement list drawn with `levels` (detailed
+    /// first), each instance at the level its camera distance falls in, with
+    /// a dithered cross-fade between levels. See [`crate::lod`].
+    pub fn spawn_lod(&mut self, levels: Vec<LodLevel>) -> EngineResult<LodId> {
+        LodSet::validate_levels(&levels)?;
+        let mut ids = Vec::with_capacity(levels.len());
+        for level in levels {
+            let id = self.spawn_instanced(level.mesh);
+            ids.push((id, level.max_distance));
+        }
+        let id = LodId(self.next_lod);
+        self.next_lod += 1;
+        self.lods.insert(
+            id,
+            LodSet {
+                levels: ids,
+                places: Vec::new(),
+                assigned_for: None,
+            },
+        );
+        Ok(id)
+    }
+
+    /// Where a LOD set's instances stand.
+    pub fn set_lod_places(&mut self, id: LodId, places: &[Place]) -> EngineResult<()> {
+        if places.len() as u64 > self.limits.max_instances_per_spawn {
+            return Err(EngineError::ResourceLimit(format!(
+                "set_lod_places has {} instances (limit {})",
+                places.len(),
+                self.limits.max_instances_per_spawn
+            )));
+        }
+        let set = self.lods.get_mut(&id).ok_or(EngineError::UnknownEntity)?;
+        set.places = crate::lod::instances_from(places);
+        set.assigned_for = None;
+        Ok(())
+    }
+
+    /// The instanced entities drawing each level, detailed first (to change
+    /// their shadow casting, say).
+    pub fn lod_levels(&self, id: LodId) -> EngineResult<Vec<EntityId>> {
+        let set = self.lods.get(&id).ok_or(EngineError::UnknownEntity)?;
+        Ok(set.levels.iter().map(|(e, _)| *e).collect())
+    }
+
+    pub fn despawn_lod(&mut self, id: LodId) {
+        if let Some(set) = self.lods.remove(&id) {
+            for (entity, _) in set.levels {
+                self.despawn(entity);
+            }
+        }
+    }
+
+    /// Scales every LOD distance: above 1 keeps detail further out, below 1
+    /// trades it for speed. The quality knob for automatic tuning.
+    pub fn set_lod_bias(&mut self, bias: f32) -> EngineResult<()> {
+        if !bias.is_finite() || bias <= 0.0 {
+            return Err(EngineError::InvalidValue(format!(
+                "LOD bias {bias} must be positive"
+            )));
+        }
+        self.lod_bias = bias;
+        Ok(())
+    }
+
+    pub fn lod_bias(&self) -> f32 {
+        self.lod_bias
+    }
+
+    /// Width of the cross-fade band as a fraction of each level's end
+    /// distance (default 0.1; 0 swaps without fading).
+    pub fn set_lod_fade(&mut self, fraction: f32) -> EngineResult<()> {
+        if !(0.0..=0.5).contains(&fraction) {
+            return Err(EngineError::InvalidValue(format!(
+                "LOD fade {fraction} must be within 0..=0.5"
+            )));
+        }
+        self.lod_fade = fraction;
+        for set in self.lods.values_mut() {
+            set.assigned_for = None;
+        }
+        Ok(())
+    }
+
+    /// Reassign LOD levels for the current camera. Runs once per frame
+    /// before rendering; cheap while the camera stands still.
+    pub(crate) fn tick_lods(&mut self) {
+        if self.lods.is_empty() {
+            return;
+        }
+        let eye = self.camera.eye();
+        let (bias, fade) = (self.lod_bias, self.lod_fade);
+        let mut updates = Vec::new();
+        for set in self.lods.values_mut() {
+            let stale = match set.assigned_for {
+                None => true,
+                Some((at, b)) => b != bias || at.distance(eye) >= set.move_threshold(bias, fade),
+            };
+            if !stale {
+                continue;
+            }
+            set.assigned_for = Some((eye, bias));
+            let ends: Vec<f32> = set.levels.iter().map(|(_, d)| *d).collect();
+            let lists = crate::lod::assign(&set.places, &ends, eye, bias, fade);
+            for ((entity, _), list) in set.levels.iter().zip(lists) {
+                updates.push((*entity, list));
+            }
+        }
+        for (entity, list) in updates {
+            self.replace_instances(entity, list);
+        }
+    }
+
+    /// Swap an instanced entity's list. Only an empty/non-empty change needs
+    /// a scene resync (draw and shadow source lists skip empty entities).
+    fn replace_instances(&mut self, id: EntityId, instances: Vec<MeshInstance>) {
+        let Some(e) = self.entities.get_mut(&id) else {
+            return;
+        };
+        let was_empty = e.instances.is_empty();
+        let now_empty = instances.is_empty();
+        if was_empty && now_empty {
+            return;
+        }
+        e.instances = instances;
+        e.bump_xform();
+        if was_empty != now_empty {
+            self.bump_render_epoch();
+        } else {
+            self.instance_epoch = self
+                .instance_epoch
+                .checked_add(1)
+                .expect("world instance epoch overflow");
+        }
     }
 
     pub(crate) fn resource_epoch(&self) -> u64 {

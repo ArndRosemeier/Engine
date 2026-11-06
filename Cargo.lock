@@ -1381,6 +1381,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lod_forest"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "glam",
+]
+
+[[package]]
 name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"

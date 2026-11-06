@@ -305,7 +305,8 @@ fn pbr_shade(
 
 pub fn scene_shader_prefix() -> String {
     format!(
-        "{}{}{}{}{}",
+        "{}{}{}{}{}{}",
+        crate::lod::LOD_DITHER_WGSL,
         LIGHTING_WGSL,
         SCENE_WGSL,
         super::shadow::SHADOW_UNIFORMS_WGSL,
@@ -346,6 +347,8 @@ struct VsOut {
     @location(11) surface3: vec4<f32>,
     @location(12) surface4: vec4<f32>,
     @location(13) surface5: vec4<f32>,
+    // Instance tint alpha: below 0 it is a LOD cross-fade code (crate::lod).
+    @location(14) @interpolate(flat) lod_fade: f32,
 };
 
 fn hash31(p: vec3<f32>) -> f32 {
@@ -461,7 +464,8 @@ fn vs_main(v: VsIn) -> VsOut {
     out.clip = u.view_proj * world;
     // Assume uniform scale for normals (friendly default).
     out.world_n = normalize((model * vec4<f32>(v.normal, 0.0)).xyz);
-    out.color = v.color * v.tint;
+    out.color = v.color * vec4<f32>(v.tint.rgb, select(v.tint.a, 1.0, v.tint.a < 0.0));
+    out.lod_fade = v.tint.a;
     out.world_p = world.xyz;
     out.uv = v.uv;
     out.surface = v.surface;
@@ -475,6 +479,9 @@ fn vs_main(v: VsIn) -> VsOut {
 // Depth prepass: only texels the shaded pass will cover on every sample.
 @fragment
 fn fs_depth(in: VsOut) {
+    if !lod_dither_keep(in.lod_fade, in.clip.xy) {
+        discard;
+    }
     let texel = textureSample(albedo_tex, albedo_sampler, in.uv);
     let foliage = in.surface3.w > 5.5 && in.surface3.w < 7.5;
     if foliage || in.color.a * texel.a < 0.999 {
@@ -484,6 +491,9 @@ fn fs_depth(in: VsOut) {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    if !lod_dither_keep(in.lod_fade, in.clip.xy) {
+        discard;
+    }
     // Most world props use the default material. Keep them on the cheap,
     // conventional path; authored wood/dirt/grass/sand/snow/cave profiles
     // continue through the full procedural material evaluation below.

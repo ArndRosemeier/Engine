@@ -15,6 +15,7 @@ members = [
     "examples/vfx_showcase",
     "examples/voxel_destruction",
     "examples/model_viewer",
+    "examples/lod_forest",
 ]
 default-members = ["engine"]
 

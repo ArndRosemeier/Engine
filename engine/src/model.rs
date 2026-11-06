@@ -1063,7 +1063,11 @@ mod scene_tests {
         let maps = moved.material_maps().expect("maps kept");
         assert!(maps.normal.is_some());
         assert_eq!(maps.normal_scale, 0.5);
-        assert_eq!(maps.normal_uv, [48.0, 24.0, 0.25, 0.0], "KHR_texture_transform");
+        assert_eq!(
+            maps.normal_uv,
+            [48.0, 24.0, 0.25, 0.0],
+            "KHR_texture_transform"
+        );
         assert_eq!(maps.occlusion_strength, 0.8);
         let orm = maps.orm.as_ref().expect("orm packed");
         assert_eq!(

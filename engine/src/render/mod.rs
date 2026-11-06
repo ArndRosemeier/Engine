@@ -307,6 +307,7 @@ pub struct Renderer {
     gpu_materials: HashMap<MaterialId, GpuTerrainMaterial>,
     gpu_water_materials: HashMap<WaterMaterialId, GpuWaterMaterial>,
     synced_render_epoch: u64,
+    synced_instance_epoch: u64,
     synced_resource_epoch: u64,
     /// Origin the terrain material phases were last written for.
     terrain_origin: crate::space::RenderOrigin,
@@ -522,6 +523,7 @@ impl Renderer {
             gpu_materials: HashMap::new(),
             gpu_water_materials: HashMap::new(),
             synced_render_epoch: 0,
+            synced_instance_epoch: 0,
             synced_resource_epoch: 0,
             terrain_origin: crate::space::RenderOrigin::default(),
             frustum: Frustum::default(),
@@ -690,7 +692,9 @@ impl Renderer {
             self.clipmap = None;
         }
 
-        if self.synced_render_epoch != world.render_epoch() {
+        if self.synced_render_epoch != world.render_epoch()
+            || self.synced_instance_epoch != world.instance_epoch()
+        {
             self.gpu_meshes.retain(|id, _| world.contains_entity(*id));
 
             // Prototypes first so like-entities can share their GPU vertex buffers.
@@ -712,6 +716,7 @@ impl Renderer {
                 }
             }
             self.synced_render_epoch = world.render_epoch();
+            self.synced_instance_epoch = world.instance_epoch();
         } else {
             self.gpu_stats.instance_batches = u32::try_from(self.gpu_instance_batches.len())
                 .expect("GPU instance batch count exceeds u32");
