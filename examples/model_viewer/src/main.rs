@@ -73,6 +73,7 @@ fn main() -> EngineResult<()> {
             x += width + 0.3;
             parts.push(mesh);
         }
+        eprintln!("props: {}", pack.names().collect::<Vec<_>>().join(", "));
         Loaded::Props(ModelScene { parts })
     } else {
         match AnimatedModel::load_with(&path, &root, &limits) {
@@ -105,18 +106,28 @@ fn main() -> EngineResult<()> {
         started.elapsed().as_secs_f32() * 1000.0
     );
     let (lo, hi) = bounds.unwrap_or((Vec3::splat(-1.0), Vec3::splat(1.0)));
-    // Stand the model on the ground at the origin, about 2 m across.
+    // Stand the model on the ground at the origin (single models about 2 m across).
     let size = (hi - lo).max_element().max(1e-3);
-    let scale = 2.0 / size;
+    // Packs are already in real metres: keep them that size.
+    let scale = if matches!(loaded, Loaded::Props(_)) {
+        1.0
+    } else {
+        2.0 / size
+    };
     let offset = Vec3::new(-(lo.x + hi.x) * 0.5, -lo.y, -(lo.z + hi.z) * 0.5) * scale;
     let height = (hi.y - lo.y) * scale;
 
     let mut yaw = std::env::var("ENGINE_VIEW_YAW")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(30.0_f32);
+        // A pack's row reads best from the front.
+        .unwrap_or(if matches!(loaded, Loaded::Props(_)) {
+            70.0
+        } else {
+            30.0_f32
+        });
     let mut pitch = 12.0_f32;
-    let mut distance = 4.2_f32;
+    let mut distance = (size * scale * 1.4).max(2.5);
     let mut clip = 0usize;
     let mut animated = None;
 
