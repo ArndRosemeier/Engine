@@ -141,6 +141,8 @@ fn main() -> EngineResult<()> {
     let mut pitch = -4.0_f32;
 
     Engine::run("material_showcase", move |world, frame| {
+        // Uncapped so the title bar shows the real frame rate.
+        world.set_vsync(false);
         if frame.first {
             world.set_clear_color(rgb(10, 12, 18));
             world.set_sun((-0.4, -1.0, -0.25), 0.65);

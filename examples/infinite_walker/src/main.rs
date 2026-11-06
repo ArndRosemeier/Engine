@@ -55,6 +55,8 @@ fn main() -> EngineResult<()> {
     }
 
     Engine::run("infinite_walker", move |world, frame| {
+        // Uncapped so the title bar shows the real frame rate.
+        world.set_vsync(false);
         if frame.first {
             world.set_clear_color(rgb(145, 195, 235));
             world.set_sun((0.45, 1.0, 0.25), 0.28);

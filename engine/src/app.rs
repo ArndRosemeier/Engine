@@ -179,7 +179,7 @@ impl ApplicationHandler for App {
                     self.fps_accum_s = 0.0;
                     self.fps_frames = 0;
                     if let Some(window) = &self.window {
-                        window.set_title(&format!("{} â€” {:.0} FPS", self.title, self.fps));
+                        window.set_title(&format!("{} - {:.0} FPS", self.title, self.fps));
                     }
                 }
 
