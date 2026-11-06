@@ -1,6 +1,7 @@
 //! Look at any glTF / GLB file with its full PBR materials.
 //!
 //! `cargo run --release -p model_viewer -- path/to/model.glb`
+//! (or an AssetGenerator `.fmpk` prop pack: every prop in a row)
 //!
 //! Skinned models (characters exported from Actors, animals) play their
 //! first clip; Space steps to the next one. Static models load one part per
@@ -11,6 +12,8 @@ use std::path::PathBuf;
 
 enum Loaded {
     Static(ModelScene),
+    /// An AssetGenerator prop pack: every prop, side by side.
+    Props(ModelScene),
     Skinned(AnimatedModel),
 }
 
@@ -56,12 +59,29 @@ fn main() -> EngineResult<()> {
         ..EngineLimits::default()
     };
     let started = std::time::Instant::now();
-    let loaded = match AnimatedModel::load_with(&path, &root, &limits) {
-        Ok(model) => Loaded::Skinned(model),
-        Err(_) => Loaded::Static(Model::load_scene_with(&path, &root, &limits)?),
+    let is_pack = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("fmpk"));
+    let loaded = if is_pack {
+        let pack = PropPack::load(&path)?;
+        let mut parts = Vec::new();
+        let mut x = 0.0;
+        for model in &pack.models {
+            let mut mesh = Mesh::new();
+            let width = model.max.x - model.min.x;
+            mesh.append_translated(&model.to_mesh()?, Vec3::new(x - model.min.x, 0.0, 0.0))?;
+            x += width + 0.3;
+            parts.push(mesh);
+        }
+        Loaded::Props(ModelScene { parts })
+    } else {
+        match AnimatedModel::load_with(&path, &root, &limits) {
+            Ok(model) => Loaded::Skinned(model),
+            Err(_) => Loaded::Static(Model::load_scene_with(&path, &root, &limits)?),
+        }
     };
     let (bounds, what) = match &loaded {
-        Loaded::Static(scene) => (
+        Loaded::Static(scene) | Loaded::Props(scene) => (
             scene.bounds(),
             format!(
                 "{} parts, {} triangles",
@@ -112,7 +132,7 @@ fn main() -> EngineResult<()> {
             )?);
             let place = Place::at(offset.x, offset.y, offset.z)?.scale(scale)?;
             match &loaded {
-                Loaded::Static(scene) => {
+                Loaded::Static(scene) | Loaded::Props(scene) => {
                     world.spawn_model(scene, place)?;
                 }
                 Loaded::Skinned(model) => {
