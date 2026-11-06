@@ -235,6 +235,50 @@ impl BloomSettings {
     }
 }
 
+/// Screen-space ambient occlusion: contact shadows in creases, under props
+/// and where walls meet the ground. It darkens sky light only; the sun has
+/// its own shadows. On by default; `World::set_ambient_occlusion(None)`
+/// switches it off and skips the depth prepass it needs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AmbientOcclusion {
+    radius_m: f32,
+    intensity: f32,
+}
+
+impl Default for AmbientOcclusion {
+    fn default() -> Self {
+        Self {
+            radius_m: 1.0,
+            intensity: 1.0,
+        }
+    }
+}
+
+impl AmbientOcclusion {
+    /// `radius_m`: how far, in metres, geometry still occludes a point.
+    /// `intensity`: 0 none, 1 the default, higher darkens creases more.
+    pub fn new(radius_m: f32, intensity: f32) -> EngineResult<Self> {
+        if !radius_m.is_finite() || radius_m <= 0.0 {
+            return Err(EngineError::InvalidValue(
+                "ambient occlusion radius must be finite and > 0".into(),
+            ));
+        }
+        require_finite_non_negative("ambient occlusion intensity", intensity)?;
+        Ok(Self {
+            radius_m,
+            intensity,
+        })
+    }
+
+    pub fn radius_m(self) -> f32 {
+        self.radius_m
+    }
+
+    pub fn intensity(self) -> f32 {
+        self.intensity
+    }
+}
+
 fn require_finite_non_negative(name: &str, value: f32) -> EngineResult<()> {
     if !value.is_finite() || value < 0.0 {
         return Err(EngineError::InvalidValue(format!(
@@ -519,6 +563,7 @@ pub struct World {
     /// Instanced mesh submit path. Default stays CPU so Engine demos match today.
     instance_submit: InstanceSubmit,
     bloom: BloomSettings,
+    ambient_occlusion: Option<AmbientOcclusion>,
     /// Surface presentation sync. Engine default stays on so demos never tear;
     /// the renderer applies it at every present.
     vsync: bool,
@@ -591,6 +636,7 @@ impl Default for World {
             shadows: Some(ShadowSettings::default()),
             instance_submit: InstanceSubmit::CpuIndexed,
             bloom: BloomSettings::default(),
+            ambient_occlusion: Some(AmbientOcclusion::default()),
             vsync: true,
             shadow_contact: ContactSnapshot::default(),
             shadow_contact_epoch: 0,
@@ -1733,6 +1779,14 @@ impl World {
 
     pub fn instance_submit(&self) -> InstanceSubmit {
         self.instance_submit
+    }
+
+    pub fn ambient_occlusion(&self) -> Option<AmbientOcclusion> {
+        self.ambient_occlusion
+    }
+
+    pub fn set_ambient_occlusion(&mut self, ao: Option<AmbientOcclusion>) {
+        self.ambient_occlusion = ao;
     }
 
     pub fn bloom(&self) -> BloomSettings {

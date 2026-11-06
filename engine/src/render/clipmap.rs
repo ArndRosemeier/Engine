@@ -88,6 +88,7 @@ fn frame_light() -> SceneLight {
     light.sky_horizon = frame.sky_horizon.rgb;
     light.sky_down = frame.sky_down.rgb;
     light.env_strength = 1.0;
+    light.ao = 1.0;
     return light;
 }
 
@@ -120,7 +121,7 @@ struct VsIn {
 };
 
 struct VsOut {
-    @builtin(position) clip: vec4<f32>,
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) world_p: vec3<f32>,
     @location(1) world_n: vec3<f32>,
     @location(2) color: vec4<f32>,
@@ -265,7 +266,10 @@ fn fs_land(in: VsOut) -> @location(0) vec4<f32> {
     let v = normalize(frame.eye - in.world_p);
     // Full-strength sun as before; the sky dome now tints the shade.
     let sun_diffuse = wrap * wrap / max(1.0 - frame.ambient, 0.05);
-    let lit = pbr_shade(in.color.rgb, n, v, frame_light(), 0.92, 0.0, vis, sun_diffuse)
+    var light = frame_light();
+    // sky_up.w carries this view's AO strength.
+    light.ao = screen_ao(frame.view_proj * vec4(in.world_p, 1.0), frame.sky_up.w);
+    let lit = pbr_shade(in.color.rgb, n, v, light, 0.92, 0.0, vis, sun_diffuse)
         + in.color.rgb * torch_light(in.world_p, n);
     return vec4(lit, 1.0);
 }
@@ -327,6 +331,7 @@ struct RingGpu {
 pub struct ClipmapRenderer {
     land_pipeline: wgpu::RenderPipeline,
     land_pipeline_portal: wgpu::RenderPipeline,
+    land_depth_prepass: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
     water_pipeline_portal: wgpu::RenderPipeline,
     frame_buf: wgpu::Buffer,
@@ -410,7 +415,12 @@ impl ClipmapRenderer {
             shader_location: 0,
         }];
 
-        let make_land = |label: &str, depth_stencil: wgpu::DepthStencilState| {
+        let make_land = |label: &str, depth_stencil: wgpu::DepthStencilState, shaded: bool| {
+            let color_targets = [Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })];
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
@@ -424,14 +434,10 @@ impl ClipmapRenderer {
                     }],
                     compilation_options: Default::default(),
                 },
-                fragment: Some(wgpu::FragmentState {
+                fragment: shaded.then(|| wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some("fs_land"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+                    targets: &color_targets,
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
@@ -450,10 +456,17 @@ impl ClipmapRenderer {
         let land_pipeline = make_land(
             "clipmap-land",
             super::stencil::scene_depth_stencil_unmasked(),
+            true,
         );
         let land_pipeline_portal = make_land(
             "clipmap-land-portal",
             super::stencil::scene_depth_stencil_masked(),
+            true,
+        );
+        let land_depth_prepass = make_land(
+            "clipmap-land-depth-prepass",
+            super::stencil::scene_depth_stencil_unmasked(),
+            false,
         );
 
         let make_water = |label: &str, depth_stencil: wgpu::DepthStencilState| {
@@ -531,6 +544,7 @@ impl ClipmapRenderer {
         Self {
             land_pipeline,
             land_pipeline_portal,
+            land_depth_prepass,
             water_pipeline,
             water_pipeline_portal,
             frame_buf,
@@ -574,6 +588,7 @@ impl ClipmapRenderer {
         torch_radius_m: f32,
         torch_curve: f32,
         sky: super::SkyLight,
+        ao_strength: f32,
         proc: &ProcTerrain,
     ) {
         let pad = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
@@ -588,7 +603,7 @@ impl ClipmapRenderer {
             torch_curve,
             _pad_torch: [0.0; 3],
             torch_color: [torch_color.x, torch_color.y, torch_color.z, 0.0],
-            sky_up: pad(sky.up),
+            sky_up: [sky.up[0], sky.up[1], sky.up[2], ao_strength],
             sky_horizon: pad(sky.horizon),
             sky_down: pad(sky.down),
         };
@@ -629,11 +644,29 @@ impl ClipmapRenderer {
         shadow_bind: &wgpu::BindGroup,
         portal_mask: bool,
     ) {
-        pass.set_pipeline(if portal_mask {
-            &self.land_pipeline_portal
-        } else {
-            &self.land_pipeline
-        });
+        self.draw_land_with(
+            pass,
+            shadow_bind,
+            if portal_mask {
+                &self.land_pipeline_portal
+            } else {
+                &self.land_pipeline
+            },
+        );
+    }
+
+    /// Lay the land's depth for the depth prepass.
+    pub fn draw_land_depth(&self, pass: &mut wgpu::RenderPass<'_>, shadow_bind: &wgpu::BindGroup) {
+        self.draw_land_with(pass, shadow_bind, &self.land_depth_prepass);
+    }
+
+    fn draw_land_with(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        shadow_bind: &wgpu::BindGroup,
+        pipeline: &wgpu::RenderPipeline,
+    ) {
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(1, shadow_bind, &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);

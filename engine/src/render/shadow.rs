@@ -228,6 +228,8 @@ pub const SCENE_SHADOW_WGSL: &str = concat!(
 @group(0) @binding(3) var shadow_samp: sampler_comparison;
 @group(0) @binding(4) var height_atlas: texture_2d<f32>;
 @group(0) @binding(5) var height_samp: sampler;
+@group(0) @binding(6) var ao_tex: texture_2d<f32>;
+@group(0) @binding(7) var ao_samp: sampler;
 
 "#,
     terrain_formula_wgsl!(),
@@ -256,6 +258,22 @@ fn shadow_ground(xz: vec2<f32>) -> f32 {
 );
 
 pub const SHADOW_EVAL_WGSL: &str = r#"
+// Pipelines drawing over surfaces they do not occlude (glass, water) set
+// this false: the occlusion texture describes what lies behind them.
+override SCENE_AO: bool = true;
+
+// Ambient occlusion where `clip` lands on screen; `strength` 0 switches it
+// off for views the occlusion was not computed from.
+fn screen_ao(clip: vec4<f32>, strength: f32) -> f32 {
+    if !SCENE_AO || strength <= 0.0 || clip.w <= 0.0 {
+        return 1.0;
+    }
+    let ndc = clip.xy / clip.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let ao = textureSampleLevel(ao_tex, ao_samp, uv, 0.0).r;
+    return mix(1.0, ao, strength);
+}
+
 fn horizon_at(texel: vec2<i32>, dims: vec2<i32>) -> f32 {
     return textureLoad(height_atlas, clamp(texel, vec2<i32>(0), dims - vec2<i32>(1)), 0).r;
 }
@@ -287,33 +305,65 @@ fn height_visibility(world_p: vec3<f32>) -> f32 {
     return mix(vis, 1.0, smoothstep(0.45, 0.5, edge));
 }
 
-fn csm_visibility(world_p: vec3<f32>, n: vec3<f32>, eye: vec3<f32>) -> f32 {
-    let d = distance(world_p, eye);
-    var layer = 0i;
-    var vp = shadow.light_vp0;
-    if d >= shadow.cascade_end.z && shadow.cascade_end.z > 0.0 {
-        return 1.0;
-    } else if d >= shadow.cascade_end.y {
-        layer = 2i;
-        vp = shadow.light_vp2;
-    } else if d >= shadow.cascade_end.x {
-        layer = 1i;
-        vp = shadow.light_vp1;
+fn cascade_vp(layer: i32) -> mat4x4<f32> {
+    if layer == 0 {
+        return shadow.light_vp0;
     }
-    let bias_p = world_p + n * max(shadow.map_texel * 4.0, 0.04);
-    let clip = vp * vec4(bias_p, 1.0);
+    if layer == 1 {
+        return shadow.light_vp1;
+    }
+    return shadow.light_vp2;
+}
+
+// Sun visibility from one cascade: a 3x3 grid of bilinear depth compares
+// spread over about six texels, so penumbrae are soft and free of the
+// stair-steps and noise that fewer taps or random rotations give.
+fn cascade_visibility(layer: i32, world_p: vec3<f32>, n: vec3<f32>) -> f32 {
+    let bias_p = world_p + n * max(shadow.map_texel * 4.0, 0.04) * f32(layer + 1);
+    let clip = cascade_vp(layer) * vec4(bias_p, 1.0);
     let ndc = clip.xyz / max(clip.w, 1e-6);
     let uv = vec2(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
     if uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0 {
         return 1.0;
     }
-    let texel = shadow.map_texel;
+    let step = shadow.map_texel * 1.5;
     var s = 0.0;
-    s += textureSampleCompare(shadow_map, shadow_samp, uv + vec2(-texel, -texel), layer, ndc.z);
-    s += textureSampleCompare(shadow_map, shadow_samp, uv + vec2( texel, -texel), layer, ndc.z);
-    s += textureSampleCompare(shadow_map, shadow_samp, uv + vec2(-texel,  texel), layer, ndc.z);
-    s += textureSampleCompare(shadow_map, shadow_samp, uv + vec2( texel,  texel), layer, ndc.z);
-    return s * 0.25;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let offset = vec2<f32>(f32(x), f32(y)) * step;
+            s += textureSampleCompareLevel(shadow_map, shadow_samp, uv + offset, layer, ndc.z);
+        }
+    }
+    return s / 9.0;
+}
+
+// Cascaded shadow lookup. The last tenth of each cascade blends into the
+// next, and the last cascade fades out, so no boundary shows as a line.
+fn csm_visibility(world_p: vec3<f32>, n: vec3<f32>, eye: vec3<f32>) -> f32 {
+    let d = distance(world_p, eye);
+    let ends = shadow.cascade_end.xyz;
+    if ends.z > 0.0 && d >= ends.z {
+        return 1.0;
+    }
+    var layer = 2;
+    if d < ends.x {
+        layer = 0;
+    } else if d < ends.y {
+        layer = 1;
+    }
+    let end = ends[layer];
+    let start = select(ends[max(layer - 1, 0)], 0.0, layer == 0);
+    let blend_from = end - (end - start) * 0.1;
+    var vis = cascade_visibility(layer, world_p, n);
+    if d > blend_from {
+        let t = smoothstep(blend_from, end, d);
+        var next = 1.0;
+        if layer < 2 {
+            next = cascade_visibility(layer + 1, world_p, n);
+        }
+        vis = mix(vis, next, t);
+    }
+    return vis;
 }
 
 fn sun_visibility(world_p: vec3<f32>, n: vec3<f32>, eye: vec3<f32>) -> f32 {
@@ -334,6 +384,8 @@ pub const CLIPMAP_SHADOW_WGSL: &str = r#"
 @group(1) @binding(2) var shadow_samp: sampler_comparison;
 @group(1) @binding(3) var height_atlas: texture_2d<f32>;
 @group(1) @binding(4) var height_samp: sampler;
+@group(1) @binding(5) var ao_tex: texture_2d<f32>;
+@group(1) @binding(6) var ao_samp: sampler;
 
 fn atlas_ground(xz: vec2<f32>) -> f32 {
     if shadow.atlas_extent <= 0.0 {
@@ -418,7 +470,7 @@ fn vs_main(v: VsIn) -> @builtin(position) vec4<f32> {
 }
 "#;
 
-fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 5] {
+fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 7] {
     [
         wgpu::BindGroupLayoutEntry {
             binding: base,
@@ -460,6 +512,23 @@ fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 5] {
             binding: base + 4,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+            count: None,
+        },
+        // Screen-space ambient occlusion (see `ssao.rs`).
+        wgpu::BindGroupLayoutEntry {
+            binding: base + 5,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: base + 6,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
             count: None,
         },
     ]
@@ -524,6 +593,57 @@ pub(crate) fn apply_terrain_rules(u: &mut ShadowUniforms, rules: &TerrainRules) 
     u.water_level = rules.water_level;
 }
 
+struct ResourceViews<'a> {
+    uniform: &'a wgpu::Buffer,
+    map: &'a wgpu::TextureView,
+    comparison: &'a wgpu::Sampler,
+    atlas: &'a wgpu::TextureView,
+    atlas_sampler: &'a wgpu::Sampler,
+    ao: &'a wgpu::TextureView,
+    ao_sampler: &'a wgpu::Sampler,
+}
+
+fn create_resource_bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    v: ResourceViews<'_>,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("shadow-resource-bind"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: v.uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(v.map),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(v.comparison),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(v.atlas),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::Sampler(v.atlas_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(v.ao),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::Sampler(v.ao_sampler),
+            },
+        ],
+    })
+}
+
 pub struct ShadowGpu {
     pub uniform_buf: wgpu::Buffer,
     pub resource_layout: wgpu::BindGroupLayout,
@@ -542,6 +662,8 @@ pub struct ShadowGpu {
     horizon: HorizonMap,
     comparison_sampler: wgpu::Sampler,
     atlas_sampler: wgpu::Sampler,
+    ao_view: wgpu::TextureView,
+    ao_sampler: wgpu::Sampler,
     map_size: u32,
     atlas_size: u32,
     atlas_pixels: Vec<f32>,
@@ -640,36 +762,56 @@ impl ShadowGpu {
         upload_atlas(queue, &horizon.ground_texture, &atlas_pixels, atlas_size);
         let atlas_view = &horizon.view;
 
+        // No occlusion until the renderer hands over its SSAO target.
+        let ao_view = device
+            .create_texture_with_data(
+                queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("ssao-none"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                &[255, 255, 255, 255],
+            )
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let ao_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ssao-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
         let resource_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow-resource-layout"),
             entries: &resource_layout_entries(0),
         });
-        let resource_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shadow-resource-bind"),
-            layout: &resource_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&map_array_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&comparison_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
-                },
-            ],
-        });
+        let resource_bind = create_resource_bind(
+            device,
+            &resource_layout,
+            ResourceViews {
+                uniform: &uniform_buf,
+                map: &map_array_view,
+                comparison: &comparison_sampler,
+                atlas: atlas_view,
+                atlas_sampler: &atlas_sampler,
+                ao: &ao_view,
+                ao_sampler: &ao_sampler,
+            },
+        );
 
         let cascade_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow-cascade-layout"),
@@ -811,6 +953,8 @@ impl ShadowGpu {
             horizon,
             comparison_sampler,
             atlas_sampler,
+            ao_view,
+            ao_sampler,
             map_size,
             atlas_size,
             atlas_pixels,
@@ -850,10 +994,29 @@ impl ShadowGpu {
         entries
     }
 
+    /// Point the lit shaders at a new occlusion texture. Bind groups made from
+    /// [`Self::scene_bind_entries`] must be rebuilt afterwards.
+    pub fn set_ao_view(&mut self, device: &wgpu::Device, view: wgpu::TextureView) {
+        self.ao_view = view;
+        self.resource_bind = create_resource_bind(
+            device,
+            &self.resource_layout,
+            ResourceViews {
+                uniform: &self.uniform_buf,
+                map: &self.map_array_view,
+                comparison: &self.comparison_sampler,
+                atlas: &self.horizon.view,
+                atlas_sampler: &self.atlas_sampler,
+                ao: &self.ao_view,
+                ao_sampler: &self.ao_sampler,
+            },
+        );
+    }
+
     pub fn scene_bind_entries<'a>(
         &'a self,
         scene_uniforms: wgpu::BindingResource<'a>,
-    ) -> [wgpu::BindGroupEntry<'a>; 6] {
+    ) -> [wgpu::BindGroupEntry<'a>; 8] {
         [
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -878,6 +1041,14 @@ impl ShadowGpu {
             wgpu::BindGroupEntry {
                 binding: 5,
                 resource: wgpu::BindingResource::Sampler(&self.atlas_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(&self.ao_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::Sampler(&self.ao_sampler),
             },
         ]
     }

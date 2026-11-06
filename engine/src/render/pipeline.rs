@@ -26,7 +26,8 @@ pub struct Uniforms {
     /// Radius 0 switches it off.
     pub torch_color: [f32; 4],
     pub camera_right: [f32; 3],
-    pub _right_pad: f32,
+    /// Strength of screen-space AO for this view; 0 where it does not apply.
+    pub ao_strength: f32,
     pub camera_up: [f32; 3],
     pub _up_pad: f32,
     /// Sky light from straight above, as a tint whose sky average is 1
@@ -61,7 +62,7 @@ impl Uniforms {
             torch_curve: 2.0,
             torch_color: [0.0, 0.0, 0.0, 0.0],
             camera_right: [1.0, 0.0, 0.0],
-            _right_pad: 0.0,
+            ao_strength: 0.0,
             camera_up: [0.0, 1.0, 0.0],
             _up_pad: 0.0,
             sky_up: [1.0, 1.0, 1.0],
@@ -96,7 +97,7 @@ struct Uniforms {
     torch_curve: f32,
     torch_color: vec4<f32>,
     camera_right: vec3<f32>,
-    _right_pad: f32,
+    ao_strength: f32,
     camera_up: vec3<f32>,
     _up_pad: f32,
     sky_up: vec3<f32>,
@@ -129,6 +130,7 @@ fn shade_surface(
     light.sky_horizon = u.sky_horizon;
     light.sky_down = u.sky_down;
     light.env_strength = u.env_strength;
+    light.ao = screen_ao(u.view_proj * vec4<f32>(world_p, 1.0), u.ao_strength);
     let v = normalize(u.eye - world_p);
     return pbr_shade(base, n, v, light, roughness, metallic, vis, sun_diffuse);
 }
@@ -196,6 +198,8 @@ struct SceneLight {
     sky_horizon: vec3<f32>,
     sky_down: vec3<f32>,
     env_strength: f32,
+    // Screen-space ambient occlusion, 1 = open sky. Sky light only.
+    ao: f32,
 };
 
 // Cosine-weighted sky light arriving at a surface facing `n`.
@@ -262,7 +266,7 @@ fn pbr_shade(
     let r = reflect(-v, n);
     let env_spec = fr * sky_radiance(r, roughness, light) * light.env_strength;
     let env_diffuse = diffuse_color * sky_irradiance(n, light) * (vec3<f32>(1.0) - fr);
-    return direct + (env_diffuse + env_spec) * light.ambient;
+    return direct + (env_diffuse + env_spec) * (light.ambient * light.ao);
 }
 "#;
 
@@ -299,7 +303,7 @@ struct VsIn {
 };
 
 struct VsOut {
-    @builtin(position) clip: vec4<f32>,
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) world_n: vec3<f32>,
     @location(1) color: vec4<f32>,
     @location(2) world_p: vec3<f32>,
@@ -433,6 +437,16 @@ fn vs_main(v: VsIn) -> VsOut {
     out.surface4 = v.surface4;
     out.surface5 = v.surface5;
     return out;
+}
+
+// Depth prepass: only texels the shaded pass will cover on every sample.
+@fragment
+fn fs_depth(in: VsOut) {
+    let texel = textureSample(albedo_tex, albedo_sampler, in.uv);
+    let foliage = in.surface3.w > 5.5 && in.surface3.w < 7.5;
+    if foliage || in.color.a * texel.a < 0.999 {
+        discard;
+    }
 }
 
 @fragment
@@ -700,6 +714,9 @@ pub struct Pipelines {
     pub transparent: wgpu::RenderPipeline,
     pub opaque_portal: wgpu::RenderPipeline,
     pub transparent_portal: wgpu::RenderPipeline,
+    /// Depth-only pass over fully opaque texels (foliage cutouts stay out:
+    /// their soft alpha-to-coverage edges must not hide what is behind them).
+    pub depth_prepass: wgpu::RenderPipeline,
     pub scene_uniforms: SceneUniformSlots,
     pub bind_layout: wgpu::BindGroupLayout,
     pub albedo_layout: wgpu::BindGroupLayout,
@@ -714,6 +731,39 @@ impl Pipelines {
     pub fn scene_bind_group(&self, slot: usize) -> &wgpu::BindGroup {
         self.scene_uniforms.get(slot).1
     }
+
+    /// Rebuild the scene bind groups after a shadow resource (the AO
+    /// target) changed.
+    pub fn rebuild_scene_bind_groups(
+        &mut self,
+        device: &wgpu::Device,
+        shadow: &super::shadow::ShadowGpu,
+    ) {
+        self.scene_uniforms.bind_groups = std::array::from_fn(|slot| {
+            create_scene_bind_group(
+                device,
+                &self.bind_layout,
+                shadow,
+                &self.scene_uniforms.buffers[slot],
+                slot,
+            )
+        });
+    }
+}
+
+fn create_scene_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    shadow: &super::shadow::ShadowGpu,
+    buffer: &wgpu::Buffer,
+    slot: usize,
+) -> wgpu::BindGroup {
+    let entries = shadow.scene_bind_entries(buffer.as_entire_binding());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(&format!("uniform-bind-{slot}")),
+        layout,
+        entries: &entries,
+    })
 }
 
 pub fn create_pipelines(
@@ -741,12 +791,7 @@ pub fn create_pipelines(
             })
         });
         let bind_groups = std::array::from_fn(|slot| {
-            let entries = shadow.scene_bind_entries(buffers[slot].as_entire_binding());
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&format!("uniform-bind-{slot}")),
-                layout: &bind_layout,
-                entries: &entries,
-            })
+            create_scene_bind_group(device, &bind_layout, shadow, &buffers[slot], slot)
         });
         SceneUniformSlots {
             buffers,
@@ -864,7 +909,15 @@ pub fn create_pipelines(
                     blend: Some(blend),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
-                compilation_options: Default::default(),
+                // See-through surfaces are not in the depth the AO came from.
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: if depth_write {
+                        &[]
+                    } else {
+                        &[("SCENE_AO", 0.0)]
+                    },
+                    ..Default::default()
+                },
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -908,11 +961,39 @@ pub fn create_pipelines(
         super::stencil::scene_depth_stencil_masked_write(false),
     );
 
+    let depth_prepass = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("opaque-depth-prepass"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[Vertex::LAYOUT, InstanceRaw::LAYOUT],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_depth"),
+            targets: &[],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(super::stencil::scene_depth_stencil_unmasked_write(true)),
+        multisample: super::stencil::scene_multisample(false),
+        multiview: None,
+        cache: None,
+    });
+
     Pipelines {
         opaque,
         transparent,
         opaque_portal,
         transparent_portal,
+        depth_prepass,
         scene_uniforms,
         bind_layout,
         albedo_layout,
