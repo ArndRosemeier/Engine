@@ -386,6 +386,7 @@ impl Renderer {
             .expect("failed to create device");
 
         let hdr_features = adapter.get_texture_format_features(HDR_FORMAT);
+        stencil::init_scene_samples(choose_scene_samples(&adapter));
         let hdr_usages =
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
         if !hdr_features.allowed_usages.contains(hdr_usages)
@@ -1036,8 +1037,8 @@ impl Renderer {
                 label: Some("frame-encoder"),
             });
         self.mark_gpu(&mut encoder, Mark::Start);
-        let scene_view = self.postprocess.scene_view().clone();
-        self.encode_world(&mut encoder, &scene_view, world);
+        let (scene_view, scene_resolve) = self.postprocess.scene_attachment();
+        self.encode_world(&mut encoder, &scene_view, scene_resolve.as_ref(), world);
         self.mark_gpu(&mut encoder, Mark::WorldDone);
         self.postprocess
             .encode(&self.queue, &mut encoder, &view, world.bloom());
@@ -1319,6 +1320,7 @@ impl Renderer {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         color: &wgpu::TextureView,
+        resolve: Option<&wgpu::TextureView>,
         world: &World,
     ) {
         self.next_scene_uniform_slot = 0;
@@ -1357,7 +1359,7 @@ impl Renderer {
             label: Some("world-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: color,
-                resolve_target: None,
+                resolve_target: resolve,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: clear.x as f64,
@@ -2252,7 +2254,7 @@ impl Renderer {
                         depth_read_only: false,
                         stencil_read_only: true,
                     }),
-                    sample_count: 1,
+                    sample_count: stencil::scene_samples(),
                     multiview: None,
                 });
         bundle.set_bind_group(0, self.pipelines.scene_bind_group(0), &[]);
@@ -2721,7 +2723,7 @@ fn create_depth(
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
-        sample_count: 1,
+        sample_count: stencil::scene_samples(),
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -2768,6 +2770,26 @@ mod active_instance_range_tests {
 /// `supported` must come from `Surface::get_capabilities`. Vsync off on a
 /// surface without Immediate support is a loud error rather than a refresh-
 /// paced Mailbox/FIFO substitution that lies about the setting.
+/// World-pass MSAA: `ENGINE_MSAA=1` or `4` (default 4). WebGPU guarantees 4x
+/// for both scene formats; other counts would need adapter-specific features.
+fn choose_scene_samples(adapter: &wgpu::Adapter) -> u32 {
+    let requested = match std::env::var("ENGINE_MSAA") {
+        Ok(raw) => match raw.parse::<u32>() {
+            Ok(n @ (1 | 4)) => n,
+            _ => panic!("ENGINE_MSAA must be 1 or 4, got {raw:?}"),
+        },
+        Err(std::env::VarError::NotPresent) => 4,
+        Err(std::env::VarError::NotUnicode(_)) => panic!("ENGINE_MSAA must be valid Unicode"),
+    };
+    let color = adapter.get_texture_format_features(HDR_FORMAT).flags;
+    let depth = adapter.get_texture_format_features(DEPTH_FORMAT).flags;
+    if requested == 4 && color.sample_count_supported(4) && depth.sample_count_supported(4) {
+        4
+    } else {
+        1
+    }
+}
+
 fn resolve_present_mode(vsync: bool, supported: &[wgpu::PresentMode]) -> wgpu::PresentMode {
     let requested = if vsync {
         wgpu::PresentMode::Fifo

@@ -23,6 +23,21 @@ struct Target {
 
 impl Target {
     fn new(device: &wgpu::Device, label: &str, width: u32, height: u32) -> Self {
+        Self::with_samples(device, label, width, height, 1)
+    }
+
+    fn with_samples(
+        device: &wgpu::Device,
+        label: &str,
+        width: u32,
+        height: u32,
+        samples: u32,
+    ) -> Self {
+        let usage = if samples > 1 {
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+        } else {
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
+        };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d {
@@ -31,10 +46,10 @@ impl Target {
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
-            sample_count: 1,
+            sample_count: samples,
             dimension: wgpu::TextureDimension::D2,
             format: HDR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -47,6 +62,8 @@ impl Target {
 
 pub struct Postprocess {
     scene: Target,
+    /// Multisampled world-pass colour, resolved into `scene`. None without MSAA.
+    scene_msaa: Option<Target>,
     bloom_a: Target,
     bloom_b: Target,
     sampler: wgpu::Sampler,
@@ -159,6 +176,7 @@ impl Postprocess {
         );
         Self {
             scene,
+            scene_msaa: create_msaa_target(device, width, height),
             bloom_a,
             bloom_b,
             sampler,
@@ -180,6 +198,7 @@ impl Postprocess {
             return;
         }
         (self.scene, self.bloom_a, self.bloom_b) = create_targets(device, width, height);
+        self.scene_msaa = create_msaa_target(device, width, height);
         self.binds = create_binds(
             device,
             &self.layout,
@@ -193,8 +212,12 @@ impl Postprocess {
         self.height = height;
     }
 
-    pub fn scene_view(&self) -> &wgpu::TextureView {
-        &self.scene.view
+    /// Colour attachment for the world pass: `(view, resolve_target)`.
+    pub fn scene_attachment(&self) -> (wgpu::TextureView, Option<wgpu::TextureView>) {
+        match &self.scene_msaa {
+            Some(msaa) => (msaa.view.clone(), Some(self.scene.view.clone())),
+            None => (self.scene.view.clone(), None),
+        }
     }
 
     pub fn encode(
@@ -275,6 +298,12 @@ fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         },
         count: None,
     }
+}
+
+fn create_msaa_target(device: &wgpu::Device, width: u32, height: u32) -> Option<Target> {
+    let samples = super::stencil::scene_samples();
+    (samples > 1)
+        .then(|| Target::with_samples(device, "hdr-scene-color-msaa", width, height, samples))
 }
 
 fn create_targets(device: &wgpu::Device, width: u32, height: u32) -> (Target, Target, Target) {

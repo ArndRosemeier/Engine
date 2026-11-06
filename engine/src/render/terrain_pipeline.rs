@@ -365,7 +365,7 @@ pub fn create_terrain_pipelines(
                 ..Default::default()
             },
             depth_stencil: Some(depth_stencil),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: super::stencil::scene_multisample(false),
             multiview: None,
             cache: None,
         })

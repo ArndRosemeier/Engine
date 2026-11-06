@@ -4,6 +4,36 @@ use wgpu::{CompareFunction, DepthStencilState, StencilFaceState, StencilOperatio
 
 pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32FloatStencil8;
 
+/// MSAA sample count of the world pass, fixed once when the renderer starts.
+static SCENE_SAMPLES: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+/// Fix the world-pass sample count. Must run before any scene pipeline exists.
+pub(crate) fn init_scene_samples(samples: u32) {
+    let stored = *SCENE_SAMPLES.get_or_init(|| samples);
+    if stored != samples {
+        panic!("scene MSAA already fixed at {stored}x, cannot switch to {samples}x");
+    }
+}
+
+pub(crate) fn scene_samples() -> u32 {
+    *SCENE_SAMPLES
+        .get()
+        .expect("scene MSAA sample count is set when the renderer starts")
+}
+
+/// Multisample state for pipelines drawing into the world pass.
+///
+/// `alpha_to_coverage` turns fragment alpha into MSAA coverage, which gives
+/// cut-out foliage soft, stable edges instead of a stair-stepped discard.
+pub(crate) fn scene_multisample(alpha_to_coverage: bool) -> wgpu::MultisampleState {
+    let count = scene_samples();
+    wgpu::MultisampleState {
+        count,
+        mask: !0,
+        alpha_to_coverage_enabled: alpha_to_coverage && count > 1,
+    }
+}
+
 fn face_always_keep() -> StencilFaceState {
     StencilFaceState {
         compare: CompareFunction::Always,
