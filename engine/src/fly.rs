@@ -88,19 +88,25 @@ impl FlyCamera {
 
     fn step(&mut self, world: &World, frame: &Frame) {
         let input = &frame.input;
-        if input.mouse_down(MouseButton::Right) || world.pointer_lock() {
-            let d = input.mouse_delta();
-            self.yaw_deg = (self.yaw_deg + d.x * self.look_sensitivity).rem_euclid(360.0);
-            self.pitch_deg = (self.pitch_deg - d.y * self.look_sensitivity).clamp(-89.0, 89.0);
-        }
         let dt = frame.dt.clamp(0.0, 0.1);
+        if input.mouse_down(MouseButton::Right) || world.pointer_lock() {
+            let (yaw, pitch) = input.look_delta(self.look_sensitivity);
+            self.yaw_deg = (self.yaw_deg + yaw).rem_euclid(360.0);
+            self.pitch_deg = (self.pitch_deg + pitch).clamp(-89.0, 89.0);
+        }
         let speed = self.speed
             * if input.down(Key::Shift) {
                 self.fast
             } else {
                 1.0
             };
-        let wish = input.move_xz();
+        let mut wish = input.move_xz();
+        if autopilot() {
+            // ENGINE_AUTOFLY=1: fly ahead in a slow curve (smoothness and
+            // performance checks without anyone at the controls).
+            wish = glam::Vec2::new(0.0, 1.0);
+            self.yaw_deg = (self.yaw_deg - 6.0 * dt).rem_euclid(360.0);
+        }
         let up = f32::from(input.down(Key::Space) || input.down(Key::E))
             - f32::from(input.down(Key::Ctrl) || input.down(Key::Q));
         let mv = self.forward() * wish.y + Camera::right_xz(self.yaw_deg) * wish.x + Vec3::Y * up;
@@ -108,5 +114,23 @@ impl FlyCamera {
         if step.is_finite() {
             self.position += step;
         }
+    }
+}
+
+fn autopilot() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ENGINE_AUTOFLY").is_ok_and(|v| v.trim() != "0"))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::camera::Camera;
+
+    #[test]
+    fn turning_right_lowers_yaw() {
+        // Facing +Z, the screen's right is -X (right-handed, Y up), and yaw
+        // 90 faces +X: so a right turn must make yaw smaller.
+        assert!(Camera::right_xz(0.0).x < -0.99);
+        assert!(Camera::direction(-90.0, 0.0).x < -0.99);
     }
 }

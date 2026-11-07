@@ -148,7 +148,7 @@ solid pieces.
 ```rust
 world.set_quality(Quality::Medium);   // Low, Medium, High (default), Ultra
 world.set_target_fps(Some(60.0))?;    // keep 60 FPS: pull LOD and grass in, then drop GI, then AO
-world.set_vsync(false);               // uncapped frame rate (title bar shows FPS)
+world.set_vsync(false);               // uncapped frame rate (the title bar always shows FPS)
 ```
 
 Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_global_illumination`,
@@ -206,7 +206,10 @@ Every program built on the engine understands these:
 | `ENGINE_MSAA=1` | Turn MSAA off (default 4) |
 | `ENGINE_TONEMAP=aces` | Tone-map with ACES instead of AgX (`world.set_tone_map(ToneMap::Aces)` in code) |
 | `ENGINE_TAA=0` | Turn temporal anti-aliasing off (`world.set_taa(false)` in code) |
-| `ENGINE_PRESENT_MODE` | `fifo` (default), `fifo-relaxed`, `mailbox` or `immediate` |
+| `ENGINE_PRESENT_MODE` | `fifo` (default, vsync), `fifo-relaxed`, `mailbox` or `immediate` (uncapped, to see the real frame rate) |
+| `ENGINE_FRAME_STATS=1` | Print frame-time statistics every 2 s (average, worst, spread: judges smoothness) |
+| `ENGINE_SMOOTH_DT=0` | Hand the raw frame time to `frame.dt` (by default it is smoothed so motion does not shake) |
+| `ENGINE_AUTOFLY=1` | `FlyCamera` flies ahead in a slow curve by itself (for smoothness and speed checks) |
 | `ENGINE_GPU_PROFILE_EVERY=N` | Print GPU pass timings every N frames |
 | `ENGINE_HITCH_MS` | Log frames slower than this (default 33) |
 

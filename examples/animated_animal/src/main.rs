@@ -24,8 +24,6 @@ fn main() -> EngineResult<()> {
     let clips = ["Idle", "Walk", "Gallop"];
 
     Engine::run("animated_animal", move |world, frame| {
-        // Uncapped so the title bar shows the real frame rate.
-        world.set_vsync(false);
         if frame.first {
             world.set_clear_color(engine::Color::rgb(140, 190, 230));
             world.spawn(

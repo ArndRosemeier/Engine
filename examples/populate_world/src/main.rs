@@ -29,8 +29,6 @@ fn main() -> EngineResult<()> {
     let mut yaw = 20.0_f32;
 
     Engine::run("populate_world", move |world, frame| {
-        // Uncapped so the title bar shows the real frame rate.
-        world.set_vsync(false);
         if frame.first {
             world.spawn(
                 Shape::box_at((0.0, -0.05, 0.0), (60.0, 0.1, 60.0), rgb(84, 133, 71)).unwrap(),

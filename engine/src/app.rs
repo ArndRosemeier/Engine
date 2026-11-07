@@ -35,6 +35,8 @@ struct App {
     fps_frames: u32,
     pointer_locked: bool,
     hitch_ms: f32,
+    clock: crate::frame_clock::FrameClock,
+    frame_stats: Option<crate::frame_clock::FrameStats>,
     fatal_error: Option<String>,
 }
 
@@ -64,6 +66,8 @@ impl App {
             fps_frames: 0,
             pointer_locked: false,
             hitch_ms: hitch_threshold_ms()?,
+            clock: crate::frame_clock::FrameClock::from_env(),
+            frame_stats: crate::frame_clock::FrameStats::from_env(),
             fatal_error: None,
         })
     }
@@ -149,6 +153,11 @@ impl ApplicationHandler for App {
                     self.input.set_key(event.physical_key, pressed);
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.input
+                    .set_cursor(Some((position.x as f32, position.y as f32)));
+            }
+            WindowEvent::CursorLeft { .. } => self.input.set_cursor(None),
             WindowEvent::MouseInput { state, button, .. } => {
                 self.input
                     .set_mouse_button(button, state == ElementState::Pressed);
@@ -168,11 +177,16 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
-                let dt = (now - self.last).as_secs_f32();
+                let raw_dt = (now - self.last).as_secs_f32();
                 self.last = now;
                 let time = (now - self.start).as_secs_f32();
+                // Movement uses a steady step; the raw one only counts FPS.
+                let dt = self.clock.tick(raw_dt);
+                if let Some(stats) = self.frame_stats.as_mut() {
+                    stats.add(raw_dt);
+                }
 
-                self.fps_accum_s += dt.max(0.0);
+                self.fps_accum_s += raw_dt.max(0.0);
                 self.fps_frames += 1;
                 if self.fps_accum_s >= 0.5 {
                     self.fps = self.fps_frames as f32 / self.fps_accum_s;
@@ -348,7 +362,7 @@ impl ApplicationHandler for App {
                                 path,
                                 self.frame_index,
                                 fps,
-                                dt * 1000.0,
+                                raw_dt * 1000.0,
                                 phases,
                                 &notes,
                                 &gpu,

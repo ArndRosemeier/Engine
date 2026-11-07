@@ -5,8 +5,6 @@ fn main() -> EngineResult<()> {
     let mut yaw = 48.0_f32;
 
     Engine::run("procedural_caves", move |world, frame| {
-        // Uncapped so the title bar shows the real frame rate.
-        world.set_vsync(false);
         if frame.first {
             world.spawn(
                 Landscape::new(7)
