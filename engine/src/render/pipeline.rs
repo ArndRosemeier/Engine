@@ -810,8 +810,26 @@ fn triplanar_surface(in: VsOut, geo_n: vec3<f32>) -> TriSurface {
     return out;
 }
 
+// Without MSAA there is no alpha-to-coverage: opaque pipelines then turn
+// partial coverage (leaf edges, cut-out texels) into a per-pixel dither that
+// changes every frame, and TAA blends it back into a soft edge.
+override SCENE_ALPHA_DITHER: f32 = 0.0;
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    var c = shade_main(in);
+    if SCENE_ALPHA_DITHER > 0.5 {
+        let q = floor(in.clip.xy) + vec2<f32>(5.588238 * u.dither_frame);
+        let h = fract(52.9829189 * fract(dot(q, vec2<f32>(0.06711056, 0.00583715))));
+        if c.a <= h * 0.98 + 0.01 {
+            discard;
+        }
+        c.a = 1.0;
+    }
+    return c;
+}
+
+fn shade_main(in: VsOut) -> vec4<f32> {
     if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) {
         discard;
     }
@@ -1316,7 +1334,11 @@ pub fn create_pipelines(
                 // See-through surfaces are not in the depth the AO came from.
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants: if blend == wgpu::BlendState::REPLACE {
-                        &[]
+                        if super::stencil::scene_samples() == 1 && fs_entry == "fs_main" {
+                            &[("SCENE_ALPHA_DITHER", 1.0)]
+                        } else {
+                            &[]
+                        }
                     } else {
                         &[("SCENE_AO", 0.0)]
                     },
