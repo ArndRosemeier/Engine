@@ -84,7 +84,7 @@ impl RibbonGpu {
             }),
             multisample: super::stencil::scene_multisample(false),
             multiview: None,
-            cache: None,
+            cache: crate::render::pipeline_cache::get(device).as_ref(),
         });
         Self {
             buffer,

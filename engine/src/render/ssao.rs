@@ -160,7 +160,7 @@ impl Ssao {
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
-                cache: None,
+                cache: crate::render::pipeline_cache::get(device).as_ref(),
             })
         };
         let ao_pipeline = make("ssao", &ao_shader, &ao_layout, "fs_ao");

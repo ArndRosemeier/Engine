@@ -596,13 +596,21 @@ struct RingGpu {
     index_count: u32,
 }
 
-pub struct ClipmapRenderer {
+/// The ground's shaders and pipelines. They do not depend on the clipmap
+/// size, so they are built once (on a worker thread at startup) and shared.
+pub struct ClipmapPipelines {
     land_pipeline: wgpu::RenderPipeline,
     land_pipeline_portal: wgpu::RenderPipeline,
     land_depth_prepass: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
     water_pipeline_portal: wgpu::RenderPipeline,
     grass_pipeline: wgpu::RenderPipeline,
+    bind_layout: wgpu::BindGroupLayout,
+    layer_layout: wgpu::BindGroupLayout,
+}
+
+pub struct ClipmapRenderer {
+    pipes: std::sync::Arc<ClipmapPipelines>,
     grass_buf: wgpu::Buffer,
     /// Blades to draw this frame (0: no grass).
     grass_blades: u32,
@@ -616,8 +624,6 @@ pub struct ClipmapRenderer {
     last_frame: Option<FrameUniform>,
     last_params: Option<TerrainParamsUniform>,
     last_ring_center: Option<[f32; 2]>,
-    shadow_layout: wgpu::BindGroupLayout,
-    layer_layout: wgpu::BindGroupLayout,
     layer_bind: wgpu::BindGroup,
     /// Which layers `layer_bind` holds (`None` until the first `ensure_layers`).
     layers_for: Option<Option<TerrainLayers>>,
@@ -826,12 +832,10 @@ fn build_layer_bind(
     })
 }
 
-impl ClipmapRenderer {
+impl ClipmapPipelines {
     pub fn new(
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
-        config: ClipmapConfig,
         shadow_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -944,7 +948,7 @@ impl ClipmapRenderer {
                 depth_stencil: Some(depth_stencil),
                 multisample: super::stencil::scene_multisample(false),
                 multiview: None,
-                cache: None,
+                cache: crate::render::pipeline_cache::get(device).as_ref(),
             })
         };
 
@@ -997,7 +1001,7 @@ impl ClipmapRenderer {
                 depth_stencil: Some(depth_stencil),
                 multisample: super::stencil::scene_multisample(false),
                 multiview: None,
-                cache: None,
+                cache: crate::render::pipeline_cache::get(device).as_ref(),
             })
         };
 
@@ -1037,8 +1041,28 @@ impl ClipmapRenderer {
             depth_stencil: Some(super::stencil::scene_depth_stencil_unmasked()),
             multisample: super::stencil::scene_multisample(false),
             multiview: None,
-            cache: None,
+            cache: crate::render::pipeline_cache::get(device).as_ref(),
         });
+        Self {
+            land_pipeline,
+            land_pipeline_portal,
+            land_depth_prepass,
+            water_pipeline,
+            water_pipeline_portal,
+            grass_pipeline,
+            bind_layout,
+            layer_layout,
+        }
+    }
+}
+
+impl ClipmapRenderer {
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipes: std::sync::Arc<ClipmapPipelines>,
+        config: ClipmapConfig,
+    ) -> Self {
         let grass_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("clipmap-grass"),
             size: std::mem::size_of::<GrassUniform>() as u64,
@@ -1064,7 +1088,7 @@ impl ClipmapRenderer {
 
         let rings = build_rings(
             device,
-            &bind_layout,
+            &pipes.bind_layout,
             &frame_buf,
             &terrain_buf,
             &grass_buf,
@@ -1073,13 +1097,9 @@ impl ClipmapRenderer {
             annulus_range,
         );
 
+        let layer_bind = build_layer_bind(device, queue, &pipes.layer_layout, None);
         Self {
-            land_pipeline,
-            land_pipeline_portal,
-            land_depth_prepass,
-            water_pipeline,
-            water_pipeline_portal,
-            grass_pipeline,
+            pipes,
             grass_buf,
             grass_blades: 0,
             last_grass: None,
@@ -1092,9 +1112,7 @@ impl ClipmapRenderer {
             last_frame: None,
             last_params: None,
             last_ring_center: None,
-            shadow_layout: shadow_layout.clone(),
-            layer_bind: build_layer_bind(device, queue, &layer_layout, None),
-            layer_layout,
+            layer_bind,
             layers_for: None,
         }
     }
@@ -1109,7 +1127,7 @@ impl ClipmapRenderer {
         if self.layers_for == Some(layers) {
             return;
         }
-        self.layer_bind = build_layer_bind(device, queue, &self.layer_layout, layers);
+        self.layer_bind = build_layer_bind(device, queue, &self.pipes.layer_layout, layers);
         self.layers_for = Some(layers);
     }
 
@@ -1117,7 +1135,6 @@ impl ClipmapRenderer {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        format: wgpu::TextureFormat,
         config: &ClipmapConfig,
     ) {
         if config.rings == self.config.rings
@@ -1126,13 +1143,12 @@ impl ClipmapRenderer {
         {
             return;
         }
-        *self = Self::new(
-            device,
-            queue,
-            format,
-            config.clone(),
-            &self.shadow_layout.clone(),
-        );
+        // Same pipelines, new grid: no shader compile on a size change.
+        let layers = self.layers_for;
+        *self = Self::new(device, queue, self.pipes.clone(), config.clone());
+        if let Some(layers) = layers {
+            self.ensure_layers(device, queue, layers);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1218,16 +1234,16 @@ impl ClipmapRenderer {
             pass,
             shadow_bind,
             if portal_mask {
-                &self.land_pipeline_portal
+                &self.pipes.land_pipeline_portal
             } else {
-                &self.land_pipeline
+                &self.pipes.land_pipeline
             },
         );
     }
 
     /// Lay the land's depth for the depth prepass.
     pub fn draw_land_depth(&self, pass: &mut wgpu::RenderPass<'_>, shadow_bind: &wgpu::BindGroup) {
-        self.draw_land_with(pass, shadow_bind, &self.land_depth_prepass);
+        self.draw_land_with(pass, shadow_bind, &self.pipes.land_depth_prepass);
     }
 
     fn draw_land_with(
@@ -1257,7 +1273,7 @@ impl ClipmapRenderer {
         if self.grass_blades == 0 {
             return;
         }
-        pass.set_pipeline(&self.grass_pipeline);
+        pass.set_pipeline(&self.pipes.grass_pipeline);
         pass.set_bind_group(0, &ring.bind_group, &[]);
         pass.set_bind_group(1, shadow_bind, &[]);
         pass.set_bind_group(2, &self.layer_bind, &[]);
@@ -1271,9 +1287,9 @@ impl ClipmapRenderer {
         portal_mask: bool,
     ) {
         pass.set_pipeline(if portal_mask {
-            &self.water_pipeline_portal
+            &self.pipes.water_pipeline_portal
         } else {
-            &self.water_pipeline
+            &self.pipes.water_pipeline
         });
         pass.set_bind_group(1, shadow_bind, &[]);
         pass.set_bind_group(2, &self.layer_bind, &[]);

@@ -705,7 +705,7 @@ pub fn create_sky_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) 
             depth_stencil: Some(depth_stencil),
             multisample: super::stencil::scene_multisample(false),
             multiview: None,
-            cache: None,
+            cache: crate::render::pipeline_cache::get(device).as_ref(),
         })
     };
 

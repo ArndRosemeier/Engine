@@ -283,7 +283,7 @@ impl ParticleGpu {
                 module: &compute_module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
-                cache: None,
+                cache: crate::render::pipeline_cache::get(device).as_ref(),
             })
         };
         let emit = compute("cs_emit", &main_only);
@@ -324,7 +324,7 @@ impl ParticleGpu {
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
-                cache: None,
+                cache: crate::render::pipeline_cache::get(device).as_ref(),
             })
         };
         let chunk_render = render("particle-chunks", "vs_chunk", "fs_chunk", None);

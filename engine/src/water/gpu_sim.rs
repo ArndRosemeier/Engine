@@ -325,7 +325,7 @@ impl GpuWaterSim {
                 module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
-                cache: None,
+                cache: crate::render::pipeline_cache::get(device).as_ref(),
             })
         };
         let pipeline_layout = |layout: &wgpu::BindGroupLayout, label: &str| {

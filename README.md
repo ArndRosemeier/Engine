@@ -418,6 +418,14 @@ world.set_vsync(false);               // uncapped frame rate (the title bar alwa
 Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_global_illumination`,
 `set_bloom`, `set_tone_map`, `set_haze`, `set_lod_bias`, `set_view_distance`.
 
+Shaders never compile mid-game. Every render and compute pipeline is built
+before the first frame, on all CPU cores at once; parts only some games use
+(the clipmap ground, the GPU water simulation) build on worker threads at
+launch and are ready by the time they show up. On Vulkan the compiled
+pipelines are also saved to disk (`%LOCALAPPDATA%\Engine\pipelines` on
+Windows, `~/.cache/engine/pipelines` on Linux), so the next launch skips the
+driver compile. Nothing to call: it is automatic.
+
 ## Generators
 
 | Module | Makes |
@@ -501,6 +509,8 @@ Every program built on the engine understands these:
 | `ENGINE_GPU_PROFILE_EVERY=N` | Print GPU timings every N frames: shadow, AO, scene, water, TAA, post; plus a split of the scene pass (sky, land, grass, voxel, meshes, ...) where the GPU supports it |
 | `ENGINE_HITCH_MS` | Log frames slower than this (default 33) |
 | `ENGINE_CPU_TRACE=1` | Print every 2 s where the CPU time of a frame went: game update, each world tick, renderer sync and drawing (average and worst ms) |
+| `ENGINE_LOG_PIPELINES=1` | Print how long pipeline building took, whether the disk pipeline cache was used, and the work time of the first 5 frames |
+| `ENGINE_PIPELINE_CACHE=0` | Do not keep a pipeline cache on disk (`ENGINE_PIPELINE_CACHE_DIR=<dir>` moves it) |
 | `ENGINE_WHATS_NEW=1` | Keep the "What's new" button in screenshot runs (`open` also opens the list) |
 | `ENGINE_ZFIGHT=1` | Find z-fighting around the camera (250 m; a number sets the radius, `all` scans everything), mark it with magenta posts and print where it is |
 

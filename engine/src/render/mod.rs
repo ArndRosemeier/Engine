@@ -11,6 +11,7 @@ mod lights;
 mod material;
 mod particles_gpu;
 mod pipeline;
+pub(crate) mod pipeline_cache;
 mod portal;
 mod postprocess;
 mod reflect;
@@ -360,6 +361,12 @@ pub struct Renderer {
     shadow: ShadowGpu,
     shadow_vp: [glam::Mat4; 3],
     clipmap: Option<ClipmapRenderer>,
+    /// Ground pipelines, built on a worker thread at startup.
+    clipmap_pipelines: pipeline_cache::Prewarm<std::sync::Arc<clipmap::ClipmapPipelines>>,
+    /// Compiled pipelines saved to disk (Vulkan); `None` where unsupported.
+    pipeline_cache: Option<pipeline_cache::DiskCache>,
+    /// Set once every startup worker finished and the cache was saved.
+    pipeline_cache_settled: bool,
     portal: PortalGpu,
     depth_view: wgpu::TextureView,
     depth_texture: wgpu::Texture,
@@ -470,7 +477,7 @@ impl Renderer {
         if !adapter.features().contains(portal_depth) {
             panic!("GPU adapter does not support DEPTH32FLOAT_STENCIL8 (required for portals)");
         }
-        let mut required_features = portal_depth;
+        let mut required_features = portal_depth | pipeline_cache::wanted_features(&adapter);
         if gpu_profile_interval.is_some() {
             let timestamp_features =
                 wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
@@ -562,43 +569,110 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
+        // Every pipeline is built here, before the first frame, so no frame
+        // stalls on a shader compile. The disk cache makes later launches skip
+        // the driver compile too.
+        let pipelines_started = std::time::Instant::now();
+        let pipeline_cache = pipeline_cache::DiskCache::open(&adapter, &device);
         let joint_layout = joint_bind_layout(&device);
         let mut shadow = ShadowGpu::new(&device, &queue, ShadowSettings::default(), &joint_layout);
+        // Parts only some apps use are built on worker threads meanwhile.
+        let clipmap_pipelines = {
+            let device = device.clone();
+            let shadow_layout = shadow.resource_layout.clone();
+            pipeline_cache::Prewarm::spawn("clipmap", move || {
+                std::sync::Arc::new(clipmap::ClipmapPipelines::new(
+                    &device,
+                    HDR_FORMAT,
+                    &shadow_layout,
+                ))
+            })
+        };
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
-        let ssao = ssao::Ssao::new(&device, &depth_texture, config.width, config.height);
+        // Independent parts compile on worker threads at once: startup
+        // costs about the slowest part instead of the sum of all of them.
+        let (ssao, reflect, gi, voxel, sky, instance_cull, postprocess, taa) =
+            std::thread::scope(|s| {
+                let (device, queue, depth) = (&device, &queue, &depth_texture);
+                let (w, h) = (config.width, config.height);
+                let resource_layout = &shadow.resource_layout;
+                let ssao = s.spawn(move || ssao::Ssao::new(device, depth, w, h));
+                let reflect = s.spawn(move || reflect::Reflect::new(device, queue, depth, w, h));
+                let gi = s.spawn(move || gi::GiVolume::new(device, resource_layout));
+                let voxel = s.spawn(move || voxel_terrain::VoxelTerrainGpu::new(device));
+                let sky = s.spawn(move || create_sky_pipelines(device, HDR_FORMAT));
+                let cull = s.spawn(move || InstanceCull::new(device));
+                let post = s.spawn(move || Postprocess::new(device, format, w, h));
+                let taa = taa::Taa::new(device, depth, w, h);
+                (
+                    join_worker(ssao),
+                    join_worker(reflect),
+                    join_worker(gi),
+                    join_worker(voxel),
+                    join_worker(sky),
+                    join_worker(cull),
+                    join_worker(post),
+                    taa,
+                )
+            });
         shadow.set_ao_view(&device, ssao.view().clone());
-        let reflect =
-            reflect::Reflect::new(&device, &queue, &depth_texture, config.width, config.height);
         shadow.set_reflection_views(
             &device,
             reflect.ssr_view().clone(),
             reflect.probe_view().clone(),
         );
-        let gi = gi::GiVolume::new(&device, &shadow.resource_layout);
-        let voxel = voxel_terrain::VoxelTerrainGpu::new(&device);
         shadow.set_gi_views(&device, gi.probe_views().clone());
         let pipelines = create_pipelines(&device, &queue, HDR_FORMAT, &shadow);
+        let (terrain, water, skinned, crowd, portal, particles, ribbons, water_gpu) =
+            std::thread::scope(|s| {
+                let (device, depth) = (&device, &depth_texture);
+                let (bind_layout, albedo_layout) =
+                    (&pipelines.bind_layout, &pipelines.albedo_layout);
+                let terrain =
+                    s.spawn(move || create_terrain_pipelines(device, HDR_FORMAT, bind_layout));
+                let water =
+                    s.spawn(move || create_water_pipelines(device, HDR_FORMAT, bind_layout));
+                let skinned = s.spawn(move || {
+                    create_skinned_pipelines(
+                        device,
+                        HDR_FORMAT,
+                        bind_layout,
+                        joint_layout,
+                        albedo_layout,
+                    )
+                });
+                let crowd = {
+                    let cascade_layout = &shadow.cascade_layout;
+                    let depth_state = shadow.depth_state.clone();
+                    s.spawn(move || {
+                        crowd::CrowdGpu::new(
+                            device,
+                            HDR_FORMAT,
+                            bind_layout,
+                            albedo_layout,
+                            cascade_layout,
+                            depth_state,
+                        )
+                    })
+                };
+                let portal = s.spawn(move || PortalGpu::new(device, HDR_FORMAT, bind_layout));
+                let particles =
+                    s.spawn(move || ParticleGpu::new(device, HDR_FORMAT, bind_layout, depth));
+                let ribbons = s.spawn(move || RibbonGpu::new(device, HDR_FORMAT, bind_layout));
+                let water_gpu =
+                    water_gpu::WaterGpu::new(device, bind_layout, depth.sample_count() > 1);
+                (
+                    join_worker(terrain),
+                    join_worker(water),
+                    join_worker(skinned),
+                    join_worker(crowd),
+                    join_worker(portal),
+                    join_worker(particles),
+                    join_worker(ribbons),
+                    water_gpu,
+                )
+            });
         shadow.init_cutout(&device, &pipelines.albedo_layout);
-        let terrain = create_terrain_pipelines(&device, HDR_FORMAT, &pipelines.bind_layout);
-        let water = create_water_pipelines(&device, HDR_FORMAT, &pipelines.bind_layout);
-        let skinned = create_skinned_pipelines(
-            &device,
-            HDR_FORMAT,
-            &pipelines.bind_layout,
-            joint_layout,
-            &pipelines.albedo_layout,
-        );
-        let crowd = crowd::CrowdGpu::new(
-            &device,
-            HDR_FORMAT,
-            &pipelines.bind_layout,
-            &pipelines.albedo_layout,
-            &shadow.cascade_layout,
-            shadow.depth_state.clone(),
-        );
-        let sky = create_sky_pipelines(&device, HDR_FORMAT);
-        let portal = PortalGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
-        let instance_cull = InstanceCull::new(&device);
         let gpu_profiler = gpu_profile_interval.map(|every| {
             GpuProfiler::new(
                 &device,
@@ -609,18 +683,24 @@ impl Renderer {
                     .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
             )
         });
-
-        let particles =
-            ParticleGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout, &depth_texture);
-        let ribbons = RibbonGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
-        let postprocess = Postprocess::new(&device, format, config.width, config.height);
-        let taa = taa::Taa::new(&device, &depth_texture, config.width, config.height);
-        let water_gpu = water_gpu::WaterGpu::new(
-            &device,
-            &pipelines.bind_layout,
-            depth_texture.sample_count() > 1,
-        );
+        if pipeline_cache::log_enabled() {
+            let info = adapter.get_info();
+            eprintln!(
+                "[engine] pipelines: built in {:.1} ms on {} ({:?}), disk cache {}",
+                pipelines_started.elapsed().as_secs_f64() * 1000.0,
+                info.name,
+                info.backend,
+                if pipeline_cache.is_some() {
+                    "on"
+                } else {
+                    "unavailable"
+                },
+            );
+        }
         Self {
+            pipeline_cache,
+            pipeline_cache_settled: false,
+            clipmap_pipelines,
             surface,
             device,
             queue,
@@ -822,14 +902,21 @@ impl Renderer {
         if let Some(proc) = world.proc_terrain() {
             let format = HDR_FORMAT;
             match self.clipmap.as_mut() {
-                Some(clip) => clip.ensure_config(&self.device, &self.queue, format, &proc.config),
+                Some(clip) => clip.ensure_config(&self.device, &self.queue, &proc.config),
                 None => {
+                    let pipes = match self.clipmap_pipelines.get() {
+                        Some(pipes) => pipes.clone(),
+                        None => std::sync::Arc::new(clipmap::ClipmapPipelines::new(
+                            &self.device,
+                            format,
+                            &self.shadow.resource_layout,
+                        )),
+                    };
                     self.clipmap = Some(ClipmapRenderer::new(
                         &self.device,
                         &self.queue,
-                        format,
+                        pipes,
                         proc.config.clone(),
-                        &self.shadow.resource_layout,
                     ));
                 }
             }
@@ -1469,7 +1556,23 @@ impl Renderer {
         }
         frame.present();
         self.cpu_spans.mark("render.present", &mut t);
+        self.settle_pipeline_cache();
         Ok(())
+    }
+
+    /// Once every startup worker has finished, save the pipeline cache so
+    /// the next launch starts with all pipelines already compiled.
+    fn settle_pipeline_cache(&mut self) {
+        if self.pipeline_cache_settled
+            || !self.clipmap_pipelines.is_ready()
+            || !self.water_gpu.prewarm_ready()
+        {
+            return;
+        }
+        self.pipeline_cache_settled = true;
+        if let Some(cache) = self.pipeline_cache.as_mut() {
+            cache.save();
+        }
     }
 
     /// Stamp a part of the main scene pass (only the top level, not portals).
@@ -3775,6 +3878,13 @@ fn mesh_submit(compacted: &HashSet<EntityId>, id: EntityId) -> MeshSubmit {
 
 /// `ENGINE_TAA=0` switches temporal anti-aliasing off for comparisons.
 /// `ENGINE_TONEMAP=agx|aces` overrides the world's choice (for comparisons).
+/// Finish a startup worker, passing its panic on unchanged.
+pub(super) fn join_worker<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    handle
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
 fn tone_map_env() -> Option<crate::world::ToneMap> {
     static MODE: std::sync::OnceLock<Option<crate::world::ToneMap>> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| {

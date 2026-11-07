@@ -1380,74 +1380,10 @@ pub fn create_pipelines(
             depth_stencil: Some(depth_stencil),
             multisample: super::stencil::scene_multisample(alpha_to_coverage),
             multiview: None,
-            cache: None,
+            cache: crate::render::pipeline_cache::get(device).as_ref(),
         })
     };
 
-    let opaque = make(
-        "opaque-pipeline",
-        wgpu::BlendState::REPLACE,
-        true,
-        Some(wgpu::Face::Back),
-        super::stencil::scene_depth_stencil_unmasked_write(true),
-        &MESH_BUFFERS,
-        "fs_main",
-    );
-    let transparent = make(
-        "transparent-pipeline",
-        wgpu::BlendState::ALPHA_BLENDING,
-        false,
-        None, // water/glass readable from both sides
-        super::stencil::scene_depth_stencil_unmasked_write(false),
-        &MESH_BUFFERS,
-        "fs_main",
-    );
-    let opaque_portal = make(
-        "opaque-portal-pipeline",
-        wgpu::BlendState::REPLACE,
-        true,
-        Some(wgpu::Face::Back),
-        super::stencil::scene_depth_stencil_masked_write(true),
-        &MESH_BUFFERS,
-        "fs_main",
-    );
-    let transparent_portal = make(
-        "transparent-portal-pipeline",
-        wgpu::BlendState::ALPHA_BLENDING,
-        false,
-        None,
-        super::stencil::scene_depth_stencil_masked_write(false),
-        &MESH_BUFFERS,
-        "fs_main",
-    );
-
-    let voxel_opaque = make(
-        "voxel-opaque-pipeline",
-        wgpu::BlendState::REPLACE,
-        true,
-        Some(wgpu::Face::Back),
-        super::stencil::scene_depth_stencil_unmasked_write(true),
-        &super::voxel_terrain::VOXEL_BUFFERS,
-        "fs_voxel",
-    );
-    let opaque_nowrite = make(
-        "opaque-nowrite-pipeline",
-        wgpu::BlendState::REPLACE,
-        false,
-        Some(wgpu::Face::Back),
-        super::stencil::scene_depth_stencil_unmasked_write(false),
-        &MESH_BUFFERS,
-        "fs_main",
-    );
-    let voxel_nowrite = make(
-        "voxel-nowrite-pipeline",
-        wgpu::BlendState::REPLACE,
-        false,
-        Some(wgpu::Face::Back),
-        super::stencil::scene_depth_stencil_unmasked_write(false),
-        &super::voxel_terrain::VOXEL_BUFFERS,
-        "fs_voxel",
-    );
     let depth_prepass_for = |label: &str, buffers: &[wgpu::VertexBufferLayout<'static>]| {
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
@@ -1473,12 +1409,117 @@ pub fn create_pipelines(
             depth_stencil: Some(super::stencil::scene_depth_stencil_unmasked_write(true)),
             multisample: super::stencil::scene_multisample(false),
             multiview: None,
-            cache: None,
+            cache: crate::render::pipeline_cache::get(device).as_ref(),
         })
     };
-    let depth_prepass = depth_prepass_for("opaque-depth-prepass", &MESH_BUFFERS);
-    let voxel_depth_prepass =
-        depth_prepass_for("voxel-depth-prepass", &super::voxel_terrain::VOXEL_BUFFERS);
+
+    // The scene shader is large and each variant compiles it again, so
+    // the variants compile on worker threads at once.
+    let (
+        opaque,
+        transparent,
+        opaque_portal,
+        transparent_portal,
+        voxel_opaque,
+        opaque_nowrite,
+        voxel_nowrite,
+        depth_prepass,
+        voxel_depth_prepass,
+    ) = std::thread::scope(|s| {
+        let opaque = s.spawn(|| {
+            make(
+                "opaque-pipeline",
+                wgpu::BlendState::REPLACE,
+                true,
+                Some(wgpu::Face::Back),
+                super::stencil::scene_depth_stencil_unmasked_write(true),
+                &MESH_BUFFERS,
+                "fs_main",
+            )
+        });
+        let transparent = s.spawn(|| {
+            make(
+                "transparent-pipeline",
+                wgpu::BlendState::ALPHA_BLENDING,
+                false,
+                None, // water/glass readable from both sides
+                super::stencil::scene_depth_stencil_unmasked_write(false),
+                &MESH_BUFFERS,
+                "fs_main",
+            )
+        });
+        let opaque_portal = s.spawn(|| {
+            make(
+                "opaque-portal-pipeline",
+                wgpu::BlendState::REPLACE,
+                true,
+                Some(wgpu::Face::Back),
+                super::stencil::scene_depth_stencil_masked_write(true),
+                &MESH_BUFFERS,
+                "fs_main",
+            )
+        });
+        let transparent_portal = s.spawn(|| {
+            make(
+                "transparent-portal-pipeline",
+                wgpu::BlendState::ALPHA_BLENDING,
+                false,
+                None,
+                super::stencil::scene_depth_stencil_masked_write(false),
+                &MESH_BUFFERS,
+                "fs_main",
+            )
+        });
+
+        let voxel_opaque = s.spawn(|| {
+            make(
+                "voxel-opaque-pipeline",
+                wgpu::BlendState::REPLACE,
+                true,
+                Some(wgpu::Face::Back),
+                super::stencil::scene_depth_stencil_unmasked_write(true),
+                &super::voxel_terrain::VOXEL_BUFFERS,
+                "fs_voxel",
+            )
+        });
+        let opaque_nowrite = s.spawn(|| {
+            make(
+                "opaque-nowrite-pipeline",
+                wgpu::BlendState::REPLACE,
+                false,
+                Some(wgpu::Face::Back),
+                super::stencil::scene_depth_stencil_unmasked_write(false),
+                &MESH_BUFFERS,
+                "fs_main",
+            )
+        });
+        let voxel_nowrite = s.spawn(|| {
+            make(
+                "voxel-nowrite-pipeline",
+                wgpu::BlendState::REPLACE,
+                false,
+                Some(wgpu::Face::Back),
+                super::stencil::scene_depth_stencil_unmasked_write(false),
+                &super::voxel_terrain::VOXEL_BUFFERS,
+                "fs_voxel",
+            )
+        });
+        let depth_prepass = s.spawn(|| depth_prepass_for("opaque-depth-prepass", &MESH_BUFFERS));
+        let voxel_depth_prepass = s.spawn(|| {
+            depth_prepass_for("voxel-depth-prepass", &super::voxel_terrain::VOXEL_BUFFERS)
+        });
+        (
+            super::join_worker(opaque),
+            super::join_worker(transparent),
+            super::join_worker(opaque_portal),
+            super::join_worker(transparent_portal),
+            super::join_worker(voxel_opaque),
+            super::join_worker(opaque_nowrite),
+            super::join_worker(voxel_nowrite),
+            super::join_worker(depth_prepass),
+            super::join_worker(voxel_depth_prepass),
+        )
+    });
 
     Pipelines {
         opaque,

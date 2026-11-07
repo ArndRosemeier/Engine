@@ -243,7 +243,7 @@ impl HorizonMap {
             module: &shader,
             entry_point: Some("cs_horizon"),
             compilation_options: Default::default(),
-            cache: None,
+            cache: crate::render::pipeline_cache::get(device).as_ref(),
         });
         Self {
             size,

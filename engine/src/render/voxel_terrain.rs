@@ -613,7 +613,7 @@ impl VoxelTerrainGpu {
                 module: &shader,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
-                cache: None,
+                cache: crate::render::pipeline_cache::get(device).as_ref(),
             })
         };
         let buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| {

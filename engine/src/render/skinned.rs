@@ -243,7 +243,7 @@ pub fn create_skinned_pipelines(
             // The shaded passes turn alpha into coverage.
             multisample: super::stencil::scene_multisample(shaded),
             multiview: None,
-            cache: None,
+            cache: crate::render::pipeline_cache::get(device).as_ref(),
         })
     };
 
