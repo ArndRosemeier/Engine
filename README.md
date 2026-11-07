@@ -176,6 +176,23 @@ calls `world.set_sim_poses(id, prev, cur)` instead. `Headless::new()` runs the
 same update closure with no window or GPU (`frame(dt, update)` for one frame,
 `run(HeadlessRun { .. }, update)` for a server loop). See `examples/fixed_tick`.
 
+**Breakable buildings:** a building is a list of elements (wall panels per
+bay per floor, slab tiles, columns, roof pieces, inner walls), each a box with
+a strength. `BuildingPlan::tower(&TowerSpec { .. })` makes a generic one, or
+add your own elements and their meshes with `BuildingPlan::add`. Share the
+plan (`Arc`) and `world.spawn_building(plan, place)?`. Then
+`hit_building(id, point, radius, power)`, `hit_buildings(..)`,
+`break_building_elements(..)` and `cast_ray_buildings(..)`. Broken elements are
+one bit each and the shaders hide them (no mesh upload). A storey that loses
+half its support, or a whole side, fails: even damage pancakes the floors
+above, one-sided damage topples them around a hinge; the falling part sheds
+pre-fractured debris (a bounded pool that freezes into static rubble) and
+leaves rubble mounds. `engine::building::Building` is the same state without
+a window for the server: send `building.broken()` (`to_bytes()`), and
+`world.apply_building_state(id, &bits, animate)` on a client gives the same
+building and the same mounds. `PhysicsWorld::add_building` gives a server the
+element colliders. See `examples/buildings`.
+
 **Lamps:** `world.add_lamp(Lamp::fire(pos))?`, `Lamp::street_lamp(pos)`, or
 `Lamp::point(pos, color, intensity, range)` and
 `Lamp::spot(pos, direction, angle_deg, color, intensity, range)` for your own;
@@ -295,6 +312,7 @@ cargo run --release -p <name>
 | `characters` | Walk, run and idle blending into each other, speed-matched; feet planted on stone steps by foot IK (I toggles IK, B blending) |
 | `navigation` | Villagers find their own way around houses, walls, a fountain and crates and up stairs to a terrace; click sends everyone there, N shows the walkable area |
 | `prefabs` | Carts built from parts driving with spinning wheels, a windmill turning its sails, a lantern carried in a hand; C drops carts that tumble whole, X removes them |
+| `buildings` | A block of breakable towers: punch panels (click), blast (F), topple (T), pancake (P), rebuild (R) |
 | `fixed_tick` | A 30 Hz simulation drawn smoothly at any frame rate, next to the raw steps; I toggles interpolation, 1/2/3 change the rate |
 | `physics` | Crates, a brick wall, dominoes, rolling boulders and a sweeper; throw balls (click), blow things up (F), shatter (X) |
 | `model_viewer` | Any glTF/GLB or `.fmpk` file: `-- path/to/model.glb` |

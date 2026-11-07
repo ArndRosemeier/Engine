@@ -526,6 +526,7 @@ struct MeshIn {
     @location(7) m1: vec4<f32>,
     @location(8) m2: vec4<f32>,
     @location(9) m3: vec4<f32>,
+    @location(14) element: u32,
 };
 
 struct MeshOut {
@@ -537,6 +538,11 @@ struct MeshOut {
 // Mesh casters: vegetation sways here exactly as in the scene pass.
 @vertex
 fn vs_mesh(v: MeshIn) -> MeshOut {
+    var out: MeshOut;
+    if element_dead(v.element) {
+        out.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        return out;
+    }
     let model = mat4x4<f32>(v.m0, v.m1, v.m2, v.m3);
     var local = v.position;
     if v.surface3.w > 7.5 && v.surface3.w < 10.5 {
@@ -544,7 +550,6 @@ fn vs_mesh(v: MeshIn) -> MeshOut {
         local = veg_wind(local, v.normal, v.surface2.x, flutter, v.surface2.y, model,
             cascade.wind.x, cascade.wind.y);
     }
-    var out: MeshOut;
     out.clip = cascade.view_proj * (model * vec4<f32>(local, 1.0));
     out.uv = v.uv;
     out.profile = v.surface3.w;
@@ -628,7 +633,7 @@ fn lamp_storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 14] {
+fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 15] {
     [
         wgpu::BindGroupLayoutEntry {
             binding: base,
@@ -709,7 +714,43 @@ fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 14] {
             },
             count: None,
         },
+        element_state_entry(base + 14),
     ]
+}
+
+/// Words in the element state buffer: one bit per breakable element
+/// (see `crate::building`), set when the element is gone.
+pub const ELEMENT_STATE_WORDS: usize = 1 << 17;
+
+/// The element state bits, readable by vertex shaders so dead elements
+/// collapse to nothing without touching the mesh.
+pub(crate) fn element_state_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX
+            | wgpu::ShaderStages::FRAGMENT
+            | wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+/// WGSL: is element `e` (1-based; 0 = not an element) gone?
+pub(crate) fn element_dead_wgsl(group: u32, binding: u32) -> String {
+    format!(
+        "@group({group}) @binding({binding}) var<storage, read> element_dead_bits: array<u32>;
+fn element_dead(e: u32) -> bool {{
+    if e == 0u {{ return false; }}
+    let w = e >> 5u;
+    if w >= arrayLength(&element_dead_bits) {{ return false; }}
+    return (element_dead_bits[w] & (1u << (e & 31u))) != 0u;
+}}
+"
+    )
 }
 
 fn gi_probe_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -794,6 +835,7 @@ struct ResourceViews<'a> {
     ao: &'a wgpu::TextureView,
     ao_sampler: &'a wgpu::Sampler,
     lamps: &'a super::lights::LampResources,
+    elements: &'a wgpu::Buffer,
 }
 
 fn create_resource_bind(
@@ -861,12 +903,18 @@ fn create_resource_bind(
                 binding: 13,
                 resource: wgpu::BindingResource::TextureView(&v.lamps.array_view),
             },
+            wgpu::BindGroupEntry {
+                binding: 14,
+                resource: v.elements.as_entire_binding(),
+            },
         ],
     })
 }
 
 pub struct ShadowGpu {
     pub uniform_buf: wgpu::Buffer,
+    /// One bit per breakable element, set when it is gone.
+    pub element_states: wgpu::Buffer,
     pub resource_layout: wgpu::BindGroupLayout,
     pub resource_bind: wgpu::BindGroup,
     #[allow(dead_code)]
@@ -1046,20 +1094,29 @@ impl ShadowGpu {
                 .create_view(&wgpu::TextureViewDescriptor::default())
         });
 
+        let element_states = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("element-states"),
+            size: (ELEMENT_STATE_WORDS * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let cascade_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow-cascade-layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                element_state_entry(1),
+            ],
         });
-        let lamps = super::lights::LampResources::new(device, &cascade_layout);
+        let lamps = super::lights::LampResources::new(device, &cascade_layout, &element_states);
         let resource_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow-resource-layout"),
             entries: &resource_layout_entries(0),
@@ -1077,6 +1134,7 @@ impl ShadowGpu {
                 ao_sampler: &ao_sampler,
                 gi: &gi_views,
                 lamps: &lamps,
+                elements: &element_states,
             },
         );
 
@@ -1098,17 +1156,29 @@ impl ShadowGpu {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("shadow-cascade-bind"),
                 layout: &cascade_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: cascade_bufs[i].as_entire_binding(),
-                }],
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: cascade_bufs[i].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: element_states.as_entire_binding(),
+                    },
+                ],
             })
         });
 
         let mesh_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shadow-mesh-depth"),
             source: wgpu::ShaderSource::Wgsl(
-                format!("{}{}", super::pipeline::VEG_WIND_WGSL, MESH_DEPTH_WGSL).into(),
+                format!(
+                    "{}{}{}",
+                    super::pipeline::VEG_WIND_WGSL,
+                    element_dead_wgsl(0, 1),
+                    MESH_DEPTH_WGSL
+                )
+                .into(),
             ),
         });
         let skinned_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1217,6 +1287,7 @@ impl ShadowGpu {
 
         Self {
             uniform_buf,
+            element_states,
             resource_layout,
             resource_bind,
             cascade_layout,
@@ -1311,6 +1382,7 @@ impl ShadowGpu {
                 ao_sampler: &self.ao_sampler,
                 gi: &self.gi_views,
                 lamps: &self.lamps,
+                elements: &self.element_states,
             },
         );
     }
@@ -1318,7 +1390,7 @@ impl ShadowGpu {
     pub fn scene_bind_entries<'a>(
         &'a self,
         scene_uniforms: wgpu::BindingResource<'a>,
-    ) -> [wgpu::BindGroupEntry<'a>; 15] {
+    ) -> [wgpu::BindGroupEntry<'a>; 16] {
         [
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -1379,6 +1451,10 @@ impl ShadowGpu {
             wgpu::BindGroupEntry {
                 binding: 14,
                 resource: wgpu::BindingResource::TextureView(&self.lamps.array_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 15,
+                resource: self.element_states.as_entire_binding(),
             },
         ]
     }

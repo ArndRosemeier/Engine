@@ -92,6 +92,8 @@ pub const VOXEL_INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::Verte
         attr(144, 11, wgpu::VertexFormat::Float32x4),
         attr(160, 12, wgpu::VertexFormat::Float32x4),
         attr(176, 13, wgpu::VertexFormat::Float32x4),
+        // The padding after uv: always 0, voxels are never breakable elements.
+        attr(104, 14, wgpu::VertexFormat::Uint32),
     ],
 };
 

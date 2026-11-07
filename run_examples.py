@@ -79,6 +79,8 @@ VARIANTS: list[Launch] = [
     Launch("navigation: walkable area shown", "navigation", {"ENGINE_NAV_OVERLAY": "1"}),
     Launch("navigation: stairs to the terrace", "navigation", {"ENGINE_NAV_VIEW": "terrace"}),
     Launch("physics: demo (a throw, dominoes, a blast)", "physics", {"ENGINE_PHYSICS_DEMO": "1"}),
+    Launch("buildings: demo (a topple and a pancake)", "buildings", {"ENGINE_BUILDINGS_DEMO": "1"}),
+    Launch("fixed_tick: 10 Hz simulation", "fixed_tick", {"ENGINE_SIM_HZ": "10"}),
     Launch("starter with ACES tone mapping (compare)", "starter", {"ENGINE_TONEMAP": "aces"}),
 ]
 

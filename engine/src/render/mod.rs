@@ -261,6 +261,7 @@ struct BatchSourceState {
 /// laid for the same surface.
 pub(crate) const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::GreaterEqual;
 pub(crate) const DEPTH_CLEAR: f32 = 0.0;
+pub(crate) use shadow::ELEMENT_STATE_WORDS;
 pub(crate) use stencil::DEPTH_FORMAT;
 
 enum SceneUniformTarget {
@@ -690,6 +691,16 @@ impl Renderer {
 
     pub fn sync_world(&mut self, world: &mut World) {
         self.apply_present_mode(world.vsync());
+        if let Some((start, words)) = world.take_element_upload() {
+            let words = &words[..words.len().min(ELEMENT_STATE_WORDS.saturating_sub(start))];
+            if !words.is_empty() {
+                self.queue.write_buffer(
+                    &self.shadow.element_states,
+                    (start * 4) as u64,
+                    bytemuck::cast_slice(words),
+                );
+            }
+        }
         self.ribbons.sync(&self.queue, world.ribbon_frame());
         let (particle_commands, particle_dt, particle_time) = world.particles_frame();
         self.particles

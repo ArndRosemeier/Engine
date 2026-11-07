@@ -403,7 +403,11 @@ pub struct LampResources {
 }
 
 impl LampResources {
-    pub fn new(device: &wgpu::Device, cascade_layout: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        cascade_layout: &wgpu::BindGroupLayout,
+        element_states: &wgpu::Buffer,
+    ) -> Self {
         use wgpu::util::DeviceExt;
         let storage = |label: &str, size: usize| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -463,10 +467,16 @@ impl LampResources {
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("lamp-shadow-layer-bind"),
                     layout: cascade_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buf.as_entire_binding(),
-                    }],
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: element_states.as_entire_binding(),
+                        },
+                    ],
                 })
             })
             .collect();
