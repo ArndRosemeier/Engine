@@ -16,6 +16,7 @@ mod reflect;
 mod ribbons_gpu;
 mod shadow;
 mod skinned;
+mod crowd;
 mod sky_pipeline;
 mod ssao;
 mod stencil;
@@ -295,6 +296,7 @@ pub struct Renderer {
     terrain: TerrainPipelines,
     water: WaterPipelines,
     skinned: SkinnedPipelines,
+    crowd: crowd::CrowdGpu,
     sky: SkyPipelines,
     shadow: ShadowGpu,
     shadow_vp: [glam::Mat4; 3],
@@ -524,6 +526,14 @@ impl Renderer {
             joint_layout,
             &pipelines.albedo_layout,
         );
+        let crowd = crowd::CrowdGpu::new(
+            &device,
+            HDR_FORMAT,
+            &pipelines.bind_layout,
+            &pipelines.albedo_layout,
+            &shadow.cascade_layout,
+            shadow.depth_state.clone(),
+        );
         let sky = create_sky_pipelines(&device, HDR_FORMAT);
         let portal = PortalGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
         let instance_cull = InstanceCull::new(&device);
@@ -561,6 +571,7 @@ impl Renderer {
             terrain,
             water,
             skinned,
+            crowd,
             sky,
             shadow,
             shadow_vp: [glam::Mat4::IDENTITY; 3],
@@ -1590,6 +1601,19 @@ impl Renderer {
         let main_uniform_slot =
             self.write_scene_uniforms(world, &scene_camera, None, SceneUniformTarget::Main);
         self.main_uniform_slot = main_uniform_slot;
+        {
+            let (device, queue, p) = (&self.device, &self.queue, &self.pipelines);
+            self.crowd.prepare(device, queue, world, &self.frustum, scene_camera.eye(), |m| {
+                GpuSkinnedMesh::upload(
+                    device,
+                    queue,
+                    &p.albedo_layout,
+                    &p.material_sampler,
+                    &p.neutral_maps,
+                    m,
+                )
+            });
+        }
         let gi_placement = world
             .global_illumination()
             .map(|gi| gi::GiPlacement::around(scene_camera.eye(), gi.probe_spacing_m()));
@@ -2486,6 +2510,9 @@ impl Renderer {
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
         }
+        if space == SpaceId::DEFAULT {
+            self.crowd.draw(pass, portal_mask);
+        }
         pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
 
         self.mark_scene(pass, stamp, SceneMark::Skinned);
@@ -2806,6 +2833,9 @@ impl Renderer {
                     pass.set_index_buffer(mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                 }
+            }
+            if slot < 3 && world.living_in() == SpaceId::DEFAULT {
+                self.crowd.draw_shadow(&mut pass, view_bind);
             }
         }
     }

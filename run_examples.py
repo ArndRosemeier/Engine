@@ -84,6 +84,8 @@ VARIANTS: list[Launch] = [
     Launch("ragdolls: demo (knocks people over by itself)", "ragdolls", {"ENGINE_RAGDOLLS_DEMO": "1"}),
     Launch("interiors: culling off (compare)", "interiors", {"ENGINE_INTERIORS_CULL": "0"}),
     Launch("interiors: no interiors (compare)", "interiors", {"ENGINE_INTERIORS_FURNISH": "0"}),
+    Launch("crowds: seen from above", "crowds", {"ENGINE_CROWD_VIEW": "above"}),
+    Launch("crowds: 3,000 people", "crowds", {"ENGINE_CROWD_COUNT": "3000"}),
     Launch("fog_volumes: parked in the smog", "fog_volumes", {"ENGINE_FOG_AT": "smog"}),
     Launch("decals: without automatic spraying", "decals", {"ENGINE_DECALS_SPRAY": "0"}),
     Launch("reflections: in the hall", "reflections", {"ENGINE_REFLECTIONS_VIEW": "hall"}),

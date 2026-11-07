@@ -40,6 +40,8 @@ mod nav;
 mod world_buildings;
 #[path = "world_decals.rs"]
 mod world_decals;
+#[path = "world_crowds.rs"]
+mod world_crowds;
 #[path = "world_grading.rs"]
 mod world_grading;
 #[path = "world_ragdolls.rs"]
@@ -757,6 +759,7 @@ pub struct World {
     reflection_probes: crate::reflections::ReflectionProbes,
     decals: world_decals::DecalPool,
     grading: crate::grading::Grading,
+    crowds: Vec<Option<crate::crowd::Crowd>>,
     ssr: Option<crate::reflections::ScreenSpaceReflections>,
     entity_rooms: HashMap<EntityId, crate::rooms::RoomId>,
     /// Surface presentation sync. Engine default stays on so demos never tear;
@@ -873,6 +876,7 @@ impl Default for World {
             reflection_probes: Default::default(),
             decals: Default::default(),
             grading: Default::default(),
+            crowds: Vec::new(),
             ssr: Some(Default::default()),
             entity_rooms: HashMap::new(),
             vsync: true,

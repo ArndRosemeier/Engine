@@ -28,3 +28,4 @@ serde_json = { workspace = true }
 flate2 = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }
+meshopt = { workspace = true }
