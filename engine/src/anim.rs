@@ -25,6 +25,25 @@ pub struct Skeleton {
     pub root_transforms: Vec<Mat4>,
 }
 
+impl Skeleton {
+    /// Index of the joint called `name`. Exact names first, then a forgiving
+    /// match that ignores case, `_`, `.`, `-` and spaces (`"hand_r"` finds
+    /// `"Hand.R"` and `"mixamorig:RightHand"` finds itself).
+    pub fn joint_index(&self, name: &str) -> Option<usize> {
+        if let Some(i) = self.joint_names.iter().position(|n| n == name) {
+            return Some(i);
+        }
+        let squash = |s: &str| {
+            s.chars()
+                .filter(|c| !matches!(c, '_' | '.' | '-' | ' '))
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        };
+        let want = squash(name);
+        self.joint_names.iter().position(|n| squash(n) == want)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SkinMesh {
     pub positions: Vec<Vec3>,
@@ -397,6 +416,23 @@ impl Animator {
                     .expect("validated animation resume state");
             }
         }
+    }
+
+    /// Where each joint is in model space this frame (for holding things in
+    /// a hand, say). Index with [`Skeleton::joint_index`].
+    pub fn joint_globals(&self) -> Vec<Mat4> {
+        let mut locals = Vec::new();
+        let mut global = Vec::new();
+        let mut out = Vec::new();
+        write_joint_matrices(
+            &self.model,
+            self.clip_index,
+            self.time,
+            &mut locals,
+            &mut global,
+            &mut out,
+        );
+        global
     }
 
     /// Skinning matrices: `global * inverse_bind` per joint.

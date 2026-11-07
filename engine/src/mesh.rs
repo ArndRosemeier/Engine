@@ -553,6 +553,77 @@ impl Mesh {
         Ok(mesh)
     }
 
+    /// A closed cylinder (wheels, posts, logs, barrels) around `axis` through
+    /// `center`, `length` long, with `sides` facets (3 to 128).
+    pub fn cylinder(
+        center: impl Into<Vec3>,
+        axis: impl Into<Vec3>,
+        radius: f32,
+        length: f32,
+        sides: u32,
+        color: Color,
+    ) -> EngineResult<Self> {
+        let (center, axis) = (center.into(), axis.into());
+        ensure_finite3(center, "cylinder center")?;
+        ensure_finite3(axis, "cylinder axis")?;
+        if axis.length_squared() < 1e-12 {
+            return Err(EngineError::InvalidMesh(
+                "cylinder axis must not be zero".into(),
+            ));
+        }
+        if !(radius.is_finite() && radius > 0.0 && length.is_finite() && length > 0.0) {
+            return Err(EngineError::InvalidMesh(
+                "cylinder radius and length must be > 0".into(),
+            ));
+        }
+        if !(3..=128).contains(&sides) {
+            return Err(EngineError::InvalidMesh(
+                "cylinder sides must be 3..=128".into(),
+            ));
+        }
+        let a = axis.normalize();
+        let p = a.any_orthonormal_vector();
+        let q = a.cross(p);
+        let half = a * (length * 0.5);
+        let ring = |i: u32| {
+            let t = i as f32 / sides as f32 * std::f32::consts::TAU;
+            p * t.cos() + q * t.sin()
+        };
+        let mut mesh = Self::new();
+        let point = |mesh: &mut Self, at: Vec3, n: Vec3| -> EngineResult<PointId> {
+            let id = mesh.add_point(at)?;
+            mesh.set_point_color(id, color)?;
+            mesh.set_point_normal(id, n)?;
+            Ok(id)
+        };
+        // Sides: smooth normals.
+        let mut bottom = Vec::new();
+        let mut top = Vec::new();
+        for i in 0..=sides {
+            let r = ring(i);
+            bottom.push(point(&mut mesh, center - half + r * radius, r)?);
+            top.push(point(&mut mesh, center + half + r * radius, r)?);
+        }
+        for i in 0..sides as usize {
+            mesh.add_face(&[bottom[i], bottom[i + 1], top[i + 1], top[i]])?;
+        }
+        // Caps: flat.
+        let mut cap_top = Vec::new();
+        let mut cap_bottom = Vec::new();
+        for i in 0..sides {
+            let r = ring(i) * radius;
+            cap_top.push(point(&mut mesh, center + half + r, a)?);
+            cap_bottom.push(point(&mut mesh, center - half + r, -a)?);
+        }
+        cap_bottom.reverse();
+        for cap in [cap_top, cap_bottom] {
+            for i in 1..cap.len() - 1 {
+                mesh.add_face(&[cap[0], cap[i], cap[i + 1]])?;
+            }
+        }
+        Ok(mesh)
+    }
+
     /// A doorway, dungeon mouth, or teleport surface: a quad on the XY plane
     /// facing `+Z`. Pair two of these with [`crate::world::World::link`].
     pub fn opening(width: f32, height: f32) -> EngineResult<Self> {

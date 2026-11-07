@@ -1673,3 +1673,330 @@ mod lamps_world {
         assert!((dt - 0.1).abs() < 1e-6, "{dt}");
     }
 }
+
+mod hierarchy_world {
+    use crate::anim::AnimatedModel;
+    use crate::color::{rgb, Color};
+    use crate::lamps::{Lamp, LampShape};
+    use crate::mesh::Mesh;
+    use crate::physics::{Body, PhysicsGround, PhysicsSettings};
+    use crate::place::Place;
+    use crate::prefab::Prefab;
+    use crate::world::{EntityId, World};
+    use glam::Vec3;
+    use std::sync::Arc;
+
+    fn cube() -> Mesh {
+        Mesh::box_at(Vec3::ZERO, Vec3::splat(0.5), rgb(120, 120, 120)).unwrap()
+    }
+
+    fn pos(world: &World, id: EntityId) -> Vec3 {
+        world.world_transform(id).unwrap().w_axis.truncate()
+    }
+
+    fn close(a: Vec3, b: Vec3) -> bool {
+        a.distance(b) < 1e-4
+    }
+
+    #[test]
+    fn children_follow_parents_and_places_are_relative() {
+        let mut world = World::default();
+        let cart = world.spawn(cube());
+        let wheel = world.spawn(cube());
+        let hub = world.spawn(cube());
+        world
+            .attach(wheel, cart, Place::new(1.0, 0.0, 0.0))
+            .unwrap();
+        world.attach(hub, wheel, Place::new(0.0, 0.5, 0.0)).unwrap();
+        assert!(close(pos(&world, hub), Vec3::new(1.0, 0.5, 0.0)));
+
+        // Moving and turning the parent carries the whole chain along.
+        world
+            .set_place(cart, Place::new(10.0, 0.0, 0.0).with_yaw_deg(90.0))
+            .unwrap();
+        assert!(
+            close(pos(&world, wheel), Vec3::new(10.0, 0.0, -1.0)),
+            "{}",
+            pos(&world, wheel)
+        );
+        assert!(close(pos(&world, hub), Vec3::new(10.0, 0.5, -1.0)));
+
+        // A child's own place is relative to its parent.
+        world.set_place(wheel, Place::new(2.0, 0.0, 0.0)).unwrap();
+        assert!(close(pos(&world, wheel), Vec3::new(10.0, 0.0, -2.0)));
+        assert_eq!(world.parent(hub), Some(wheel));
+        assert_eq!(world.children(cart), &[wheel]);
+
+        // No loops.
+        assert!(world.attach(cart, hub, Place::default()).is_err());
+        assert!(world.attach(cart, cart, Place::default()).is_err());
+
+        // Letting go keeps the place on screen.
+        world.detach(wheel).unwrap();
+        assert!(close(pos(&world, wheel), Vec3::new(10.0, 0.0, -2.0)));
+        world.set_place(cart, Place::new(0.0, 0.0, 0.0)).unwrap();
+        assert!(close(pos(&world, wheel), Vec3::new(10.0, 0.0, -2.0)));
+
+        // ... and a new parent keeps it too.
+        world.set_parent(wheel, Some(cart)).unwrap();
+        assert!(close(pos(&world, wheel), Vec3::new(10.0, 0.0, -2.0)));
+
+        // Despawning a parent removes its children.
+        world.despawn(cart);
+        assert!(world.world_transform(wheel).is_err());
+        assert!(world.world_transform(hub).is_err());
+    }
+
+    #[test]
+    fn pivots_group_things_and_lamps_ride_along() {
+        let mut world = World::default();
+        let car = world.spawn_pivot(Place::new(0.0, 0.0, 0.0));
+        let body = world.spawn(cube());
+        world.attach(body, car, Place::new(0.0, 0.5, 0.0)).unwrap();
+        let light = world
+            .add_lamp(Lamp::spot(
+                Vec3::ZERO,
+                Vec3::Z,
+                40.0,
+                Color::WHITE,
+                20.0,
+                30.0,
+            ))
+            .unwrap();
+        world.attach_lamp(light, car, (0.0, 0.8, 2.0)).unwrap();
+        assert!(close(
+            world.lamp(light).unwrap().position,
+            Vec3::new(0.0, 0.8, 2.0)
+        ));
+
+        // Turn the car to face +X: the headlight turns with it.
+        world
+            .set_place(car, Place::new(5.0, 0.0, 5.0).with_yaw_deg(90.0))
+            .unwrap();
+        world.tick_hierarchy();
+        let lamp = world.lamp(light).unwrap();
+        assert!(
+            close(lamp.position, Vec3::new(7.0, 0.8, 5.0)),
+            "{}",
+            lamp.position
+        );
+        let LampShape::Spot { direction, .. } = lamp.shape else {
+            panic!("spot")
+        };
+        assert!(close(direction, Vec3::X), "{direction}");
+        assert!(close(pos(&world, body), Vec3::new(5.0, 0.5, 5.0)));
+
+        world.despawn(car);
+        assert!(world.lamp(light).is_none());
+        assert!(world.world_transform(body).is_err());
+    }
+
+    fn cart() -> Prefab {
+        let mut cart = Prefab::new("cart");
+        let body = cart.mesh("body", cube(), Place::new(0.0, 0.6, 0.0));
+        cart.mesh_on(body, "wheel_l", cube(), Place::new(-0.7, -0.3, 0.0));
+        cart.mesh_on(body, "wheel_r", cube(), Place::new(0.7, -0.3, 0.0));
+        cart.lamp_on(body, Lamp::point((0.0, 0.5, 1.0), Color::WHITE, 3.0, 8.0));
+        cart
+    }
+
+    #[test]
+    fn prefabs_place_parts_and_despawn_as_one() {
+        let mut world = World::default();
+        let a = world
+            .spawn_prefab(&cart(), Place::new(10.0, 0.0, 0.0))
+            .unwrap();
+        let b = world
+            .spawn_prefab(&cart(), Place::new(-10.0, 0.0, 0.0))
+            .unwrap();
+        assert!(close(
+            pos(&world, a.part("wheel_r").unwrap()),
+            Vec3::new(10.7, 0.3, 0.0)
+        ));
+        assert!(close(
+            pos(&world, b.part("wheel_l").unwrap()),
+            Vec3::new(-10.7, 0.3, 0.0)
+        ));
+        assert!(close(
+            world.lamp(a.lamps[0]).unwrap().position,
+            Vec3::new(10.0, 1.1, 1.0)
+        ));
+        assert_eq!(a.parts().count(), 3);
+        assert_eq!(world.prefab_of(a.root), Some("cart"));
+
+        world.set_place(a.root, Place::new(20.0, 0.0, 0.0)).unwrap();
+        assert!(close(
+            pos(&world, a.part("body").unwrap()),
+            Vec3::new(20.0, 0.6, 0.0)
+        ));
+
+        world.despawn(a.root);
+        for (_, id) in a.parts() {
+            assert!(world.world_transform(id).is_err());
+        }
+        assert!(world.lamp(a.lamps[0]).is_none());
+        assert!(world.world_transform(b.root).is_ok());
+        assert_eq!(world.lamps().count(), 1);
+
+        // By name, once registered.
+        assert!(world.spawn_named("cart", Place::default()).is_err());
+        world.register_prefab(cart()).unwrap();
+        let c = world
+            .spawn_named("cart", Place::new(0.0, 0.0, 5.0))
+            .unwrap();
+        assert!(close(
+            pos(&world, c.part("body").unwrap()),
+            Vec3::new(0.0, 0.6, 5.0)
+        ));
+
+        // Broken prefabs are refused up front.
+        let mut bad = Prefab::new("bad");
+        let pivot = bad.pivot("hinge", Place::default());
+        bad.body(pivot, Body::dynamic());
+        assert!(world.spawn_prefab(&bad, Place::default()).is_err());
+        assert!(world
+            .spawn_prefab(&Prefab::new("empty"), Place::default())
+            .is_err());
+    }
+
+    #[test]
+    fn a_dynamic_part_falls_with_its_children_and_still_despawns_with_the_root() {
+        let mut world = World::default();
+        world
+            .set_physics_settings(PhysicsSettings {
+                ground: PhysicsGround::Plane(0.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut falling = cart();
+        let body = falling.find("body").unwrap();
+        falling.body(body, Body::dynamic());
+        let s = world
+            .spawn_prefab(&falling, Place::new(0.0, 3.0, 0.0))
+            .unwrap();
+        let (body, wheel) = (s.part("body").unwrap(), s.part("wheel_l").unwrap());
+        assert_eq!(world.parent(body), None, "physics owns the body now");
+        for _ in 0..120 {
+            world.tick_physics(1.0 / 60.0);
+            world.tick_hierarchy();
+        }
+        let b = pos(&world, body);
+        assert!(b.y < 1.0, "fell: {b}");
+        // The wheel stays where it hangs on the body.
+        let expected = world
+            .world_transform(body)
+            .unwrap()
+            .transform_point3(Vec3::new(-0.7, -0.3, 0.0));
+        assert!(close(pos(&world, wheel), expected));
+        world.despawn(s.root);
+        assert!(world.world_transform(body).is_err());
+        assert!(world.world_transform(wheel).is_err());
+        assert_eq!(world.body_count().0, 0);
+    }
+
+    #[test]
+    fn things_can_be_held_in_a_hand() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../examples/model_viewer/assets/character.glb"
+        );
+        let examples = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples");
+        let limits = crate::limits::EngineLimits::default();
+        let model = match AnimatedModel::load_with(path, examples, &limits) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("skipped: no character at {path}: {e}");
+                return;
+            }
+        };
+        let mut world = World::default();
+        let walker = world
+            .spawn_animated_shared(Arc::new(model), Place::new(3.0, 0.0, 0.0))
+            .unwrap();
+        world.play_animation(walker, "walk").unwrap();
+        let sword = world.spawn(cube());
+        world
+            .attach_to_bone(sword, walker, "Hand_R", Place::default())
+            .unwrap();
+        assert!(world
+            .attach_to_bone(sword, walker, "tail", Place::default())
+            .is_err());
+        let lantern = world
+            .add_lamp(Lamp::point(Vec3::ZERO, Color::WHITE, 2.0, 8.0))
+            .unwrap();
+        world
+            .attach_lamp_to_bone(lantern, walker, "hand_l", Vec3::ZERO)
+            .unwrap();
+
+        let hand = world
+            .bone_transform(walker, "hand_r")
+            .unwrap()
+            .w_axis
+            .truncate();
+        assert!(close(pos(&world, sword), hand));
+        assert!(
+            hand.y > 0.4 && hand.y < 1.6,
+            "a hand is at hand height: {hand}"
+        );
+
+        // The hand swings as the walk plays, and the sword goes with it.
+        let before = pos(&world, sword);
+        world.tick_animations(0.4);
+        world.tick_hierarchy();
+        let after = pos(&world, sword);
+        assert!(before.distance(after) > 0.02, "{before} {after}");
+        let hand = world
+            .bone_transform(walker, "hand_r")
+            .unwrap()
+            .w_axis
+            .truncate();
+        assert!(close(after, hand));
+        let left = world
+            .bone_transform(walker, "hand_l")
+            .unwrap()
+            .w_axis
+            .truncate();
+        assert!(close(world.lamp(lantern).unwrap().position, left));
+    }
+}
+
+mod shapes_and_roll {
+    use crate::color::rgb;
+    use crate::mesh::Mesh;
+    use crate::place::Place;
+    use glam::Vec3;
+
+    #[test]
+    fn cylinders_are_closed_and_face_outwards() {
+        let m = Mesh::cylinder(Vec3::ZERO, Vec3::X, 0.5, 2.0, 16, rgb(1, 2, 3))
+            .unwrap()
+            .build();
+        let (lo, hi) = m
+            .positions
+            .iter()
+            .fold((Vec3::MAX, Vec3::MIN), |(a, b), p| (a.min(*p), b.max(*p)));
+        assert!((hi.x - lo.x - 2.0).abs() < 1e-4 && (hi.y - 0.5).abs() < 1e-3);
+        // Every triangle's winding agrees with its outward direction.
+        for t in m.indices.chunks_exact(3) {
+            let [a, b, c] = [0, 1, 2].map(|k| m.positions[t[k] as usize]);
+            let n = (b - a).cross(c - a);
+            let mid = (a + b + c) / 3.0;
+            let out = if (mid.x.abs() - 1.0).abs() < 1e-4 {
+                Vec3::X * mid.x
+            } else {
+                Vec3::new(0.0, mid.y, mid.z)
+            };
+            assert!(n.dot(out) > 0.0, "inward triangle at {mid}");
+        }
+        assert!(Mesh::cylinder(Vec3::ZERO, Vec3::ZERO, 1.0, 1.0, 8, rgb(0, 0, 0)).is_err());
+        assert!(Mesh::cylinder(Vec3::ZERO, Vec3::Y, 1.0, 1.0, 2, rgb(0, 0, 0)).is_err());
+    }
+
+    #[test]
+    fn roll_turns_around_forward() {
+        let m = Place::new(0.0, 0.0, 0.0).with_roll_deg(90.0).to_matrix();
+        assert!(m.transform_vector3(Vec3::X).abs_diff_eq(Vec3::Y, 1e-5));
+        assert!(m.transform_vector3(Vec3::Z).abs_diff_eq(Vec3::Z, 1e-5));
+        assert!(Place::new(0.0, 0.0, 0.0).roll_deg(f32::NAN).is_err());
+    }
+}

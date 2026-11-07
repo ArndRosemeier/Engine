@@ -70,6 +70,9 @@ VARIANTS: list[Launch] = [
     Launch("lamps: by the fire", "lamps", {"ENGINE_LAMPS_VIEW": "fire"}),
     Launch("lamps: from above", "lamps", {"ENGINE_LAMPS_VIEW": "above"}),
     Launch("lamps: at dusk", "lamps", {"ENGINE_SKY_HOUR": "19.6"}),
+    Launch("prefabs: windmill", "prefabs", {"ENGINE_PREFABS_VIEW": "mill"}),
+    Launch("prefabs: lantern in hand", "prefabs", {"ENGINE_PREFABS_VIEW": "walker"}),
+    Launch("prefabs: carts dropped from the sky", "prefabs", {"ENGINE_PREFABS_DROP": "1"}),
     Launch("physics: demo (a throw, dominoes, a blast)", "physics", {"ENGINE_PHYSICS_DEMO": "1"}),
     Launch("starter with ACES tone mapping (compare)", "starter", {"ENGINE_TONEMAP": "aces"}),
 ]

@@ -21,6 +21,9 @@ pub struct Place {
     pub position: Vec3,
     pub yaw_degrees: f32,
     pub pitch_degrees: f32,
+    /// Turn around the forward (+Z) axis, applied after pitch: a wheel
+    /// seen from the side, a windmill's sails, a plane banking.
+    pub roll_degrees: f32,
     pub scale: f32,
     pub stretch: Vec3,
     pub tint: Color,
@@ -32,6 +35,7 @@ impl Default for Place {
             position: Vec3::ZERO,
             yaw_degrees: 0.0,
             pitch_degrees: 0.0,
+            roll_degrees: 0.0,
             scale: 1.0,
             stretch: Vec3::ONE,
             tint: Color::WHITE,
@@ -89,6 +93,19 @@ impl Place {
         self
     }
 
+    pub fn roll_deg(mut self, degrees: f32) -> EngineResult<Self> {
+        if !degrees.is_finite() {
+            return Err(EngineError::InvalidValue("roll must be finite".into()));
+        }
+        self.roll_degrees = degrees;
+        Ok(self)
+    }
+
+    pub fn with_roll_deg(mut self, degrees: f32) -> Self {
+        self.roll_degrees = degrees;
+        self
+    }
+
     pub fn with_scale(mut self, scale: f32) -> Self {
         self.scale = scale;
         self
@@ -127,7 +144,8 @@ impl Place {
     pub fn to_matrix(self) -> Mat4 {
         let t = Mat4::from_translation(self.position);
         let r = Mat4::from_rotation_y(self.yaw_degrees.to_radians())
-            * Mat4::from_rotation_x(self.pitch_degrees.to_radians());
+            * Mat4::from_rotation_x(self.pitch_degrees.to_radians())
+            * Mat4::from_rotation_z(self.roll_degrees.to_radians());
         let s = Mat4::from_scale(self.stretch * self.scale);
         t * r * s
     }
@@ -241,6 +259,7 @@ impl GlobalPlace {
             position: self.position.to_render(origin)?.vec3(),
             yaw_degrees: self.yaw_degrees,
             pitch_degrees: self.pitch_degrees,
+            roll_degrees: 0.0,
             scale: self.scale,
             stretch: self.stretch,
             tint: self.tint,
