@@ -3482,15 +3482,26 @@ impl SkyLight {
     }
 }
 
-/// World-pass MSAA: `ENGINE_MSAA=1` or `4` (default 4). WebGPU guarantees 4x
-/// for both scene formats; other counts would need adapter-specific features.
+/// World-pass MSAA: `ENGINE_MSAA=1` or `4`. WebGPU guarantees 4x for both
+/// scene formats; other counts would need adapter-specific features.
+///
+/// Default 1 while TAA is on: TAA already smooths edges, and leaf cut-outs
+/// dither their coverage for it, which looks the same as 4x MSAA in stills at
+/// 10-15% more frame rate at 4K (RTX 5070). With `ENGINE_TAA=0` the default
+/// is 4x so edges stay smooth.
 fn choose_scene_samples(adapter: &wgpu::Adapter) -> u32 {
     let requested = match std::env::var("ENGINE_MSAA") {
         Ok(raw) => match raw.parse::<u32>() {
             Ok(n @ (1 | 4)) => n,
             _ => panic!("ENGINE_MSAA must be 1 or 4, got {raw:?}"),
         },
-        Err(std::env::VarError::NotPresent) => 4,
+        Err(std::env::VarError::NotPresent) => {
+            if taa_env_enabled() {
+                1
+            } else {
+                4
+            }
+        }
         Err(std::env::VarError::NotUnicode(_)) => panic!("ENGINE_MSAA must be valid Unicode"),
     };
     let color = adapter.get_texture_format_features(HDR_FORMAT).flags;

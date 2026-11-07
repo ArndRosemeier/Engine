@@ -9,7 +9,7 @@ render loop.
 
 **What you get**
 
-- **Rendering:** HDR with AgX tone mapping (ACES on request) and wide multi-level bloom, 4x MSAA plus temporal anti-aliasing, PBR materials
+- **Rendering:** HDR with AgX tone mapping (ACES on request) and wide multi-level bloom, temporal anti-aliasing (4x MSAA optional), PBR materials
   (glTF metallic-roughness, normal, occlusion and emissive maps), three shadow
   cascades with soft filtering, SSAO, voxel-probe global illumination, a
   physical sky with day/night, clouds and weather, distance haze.
@@ -204,7 +204,7 @@ Every program built on the engine understands these:
 | `ENGINE_WIDTH`, `ENGINE_HEIGHT` | Window size (default 1920 x 1080) |
 | `ENGINE_SCREENSHOT=out.png` | Save frame `ENGINE_SCREENSHOT_FRAME` (default 3) to a PNG and exit |
 | `ENGINE_SCREENSHOT_WAIT=1` | Wait for `world.mark_ready()` before counting screenshot frames |
-| `ENGINE_MSAA=1` | Turn MSAA off (default 4) |
+| `ENGINE_MSAA=4` | 4x MSAA on top of TAA (default 1 while TAA is on: TAA smooths edges and costs 10-15% less at 4K; 4 when `ENGINE_TAA=0`) |
 | `ENGINE_TONEMAP=aces` | Tone-map with ACES instead of AgX (`world.set_tone_map(ToneMap::Aces)` in code) |
 | `ENGINE_TAA=0` | Turn temporal anti-aliasing off (`world.set_taa(false)` in code) |
 | `ENGINE_PRESENT_MODE` | `fifo` (default, vsync), `fifo-relaxed`, `mailbox` or `immediate` (uncapped, to see the real frame rate) |

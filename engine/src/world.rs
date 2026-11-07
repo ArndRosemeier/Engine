@@ -1008,7 +1008,9 @@ impl World {
 
     /// Temporal anti-aliasing (on by default): smooths edges, shimmer and
     /// the LOD cross-fade by blending each frame with the last ones.
-    /// `ENGINE_TAA=0` also switches it off.
+    /// `ENGINE_TAA=0` also switches it off. TAA is the engine's main
+    /// anti-aliasing (MSAA defaults to off while it runs): turning it off in
+    /// code leaves edges jagged unless the app starts with `ENGINE_MSAA=4`.
     pub fn set_taa(&mut self, on: bool) {
         self.taa = on;
     }
