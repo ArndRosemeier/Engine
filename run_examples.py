@@ -33,6 +33,7 @@ VARIANTS: list[Launch] = [
     Launch("starter (low quality, 60 FPS target)", "starter",
            {"ENGINE_QUALITY": "low", "ENGINE_TARGET_FPS": "60"}),
     Launch("starter (morning)", "starter", {"ENGINE_SKY_HOUR": "8.5"}),
+    Launch("starter without grass (compare)", "starter", {"ENGINE_GRASS": "0"}),
     Launch("texgen: town ground", "texgen", {"ENGINE_TEXGEN_FAMILY": "ground"}),
     Launch("texgen: facades", "texgen", {"ENGINE_TEXGEN_FAMILY": "facade"}),
     Launch("texgen: roofs", "texgen", {"ENGINE_TEXGEN_FAMILY": "roof"}),
