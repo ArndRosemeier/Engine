@@ -526,7 +526,9 @@ impl Renderer {
         // keeps normal presentation stable across GPUs and window compositors.
         // Uncapped modes remain available explicitly for rendering stress tests.
         let env_present_mode = match std::env::var("ENGINE_PRESENT_MODE") {
-            Ok(value) => Some(match value.as_str() {
+            // Empty counts as unset.
+            Ok(value) if value.trim().is_empty() => None,
+            Ok(value) => Some(match value.trim() {
                 "immediate" => wgpu::PresentMode::Immediate,
                 "mailbox" => wgpu::PresentMode::Mailbox,
                 "fifo-relaxed" => wgpu::PresentMode::FifoRelaxed,
