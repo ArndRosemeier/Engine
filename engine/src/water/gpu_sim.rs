@@ -1198,6 +1198,45 @@ fn links_before(r: Rows) -> u32 {
     return n;
 }
 
+// The cells (or links) of a workgroup's rows as one run of n elements, so
+// all 64 threads stay busy: element n is first[k] + n - before[k] for the
+// row k with before[k] <= n < before[k + 1].
+struct Spans {
+    first: array<u32, 4>,
+    before: array<u32, 5>,
+};
+
+fn spans(r: Rows, of_links: bool) -> Spans {
+    var sp: Spans;
+    var total = 0u;
+    for (var k = 0u; k < ROWS; k++) {
+        sp.before[k] = total;
+        sp.first[k] = 0u;
+        let z = r.z0 + k;
+        if z < r.z1 {
+            let row = z * P.grid.x;
+            var s = col_start(row + r.x0);
+            var e = col_start(row + r.x1);
+            if of_links {
+                s = group_start(row + r.x0);
+                e = group_start(row + r.x1);
+            }
+            sp.first[k] = s;
+            total += e - s;
+        }
+    }
+    sp.before[ROWS] = total;
+    return sp;
+}
+
+fn span_at(sp: Spans, n: u32) -> u32 {
+    var k = 0u;
+    while k + 1u < ROWS && n >= sp.before[k + 1u] {
+        k++;
+    }
+    return sp.first[k] + n - sp.before[k];
+}
+
 // Read-back slot of running tile k (after the flags and the list).
 fn slot_at(k: u32) -> u32 {
     return 2u * P.slots.z + k * (P.slots.x + P.slots.y);
@@ -1211,25 +1250,17 @@ fn k_heads(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
     if sim.dt <= 0.0 {
         return;
     }
-    let r = rows_of(listed(wg.y), wg.x);
-    for (var z = r.z0; z < r.z1; z++) {
-        let row = z * P.grid.x;
-        let e = col_start(row + r.x1);
-        for (var i = col_start(row + r.x0) + lid; i < e; i += 64u) {
-            heads_cell(i);
-        }
+    let sp = spans(rows_of(listed(wg.y), wg.x), false);
+    for (var n = lid; n < sp.before[ROWS]; n += 64u) {
+        heads_cell(span_at(sp, n));
     }
 }
 
 @compute @workgroup_size(64)
 fn k_links(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
-    let r = rows_of(listed(wg.y), wg.x);
-    for (var z = r.z0; z < r.z1; z++) {
-        let row = z * P.grid.x;
-        let e = group_start(row + r.x1);
-        for (var i = group_start(row + r.x0) + lid; i < e; i += 64u) {
-            link_flow(i);
-        }
+    let sp = spans(rows_of(listed(wg.y), wg.x), true);
+    for (var n = lid; n < sp.before[ROWS]; n += 64u) {
+        link_flow(span_at(sp, n));
     }
 }
 
@@ -1238,13 +1269,9 @@ fn k_scale(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
     if sim.dt <= 0.0 {
         return;
     }
-    let r = rows_of(listed(wg.y), wg.x);
-    for (var z = r.z0; z < r.z1; z++) {
-        let row = z * P.grid.x;
-        let e = col_start(row + r.x1);
-        for (var i = col_start(row + r.x0) + lid; i < e; i += 64u) {
-            scale_cell(i);
-        }
+    let sp = spans(rows_of(listed(wg.y), wg.x), false);
+    for (var n = lid; n < sp.before[ROWS]; n += 64u) {
+        scale_cell(span_at(sp, n));
     }
 }
 
@@ -1253,13 +1280,9 @@ fn k_limit(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
     if sim.dt <= 0.0 {
         return;
     }
-    let r = rows_of(listed(wg.y), wg.x);
-    for (var z = r.z0; z < r.z1; z++) {
-        let row = z * P.grid.x;
-        let e = group_start(row + r.x1);
-        for (var i = group_start(row + r.x0) + lid; i < e; i += 64u) {
-            limit_link(i);
-        }
+    let sp = spans(rows_of(listed(wg.y), wg.x), true);
+    for (var n = lid; n < sp.before[ROWS]; n += 64u) {
+        limit_link(span_at(sp, n));
     }
 }
 
@@ -1268,13 +1291,9 @@ fn k_depth(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
     if sim.dt <= 0.0 {
         return;
     }
-    let r = rows_of(listed(wg.y), wg.x);
-    for (var z = r.z0; z < r.z1; z++) {
-        let row = z * P.grid.x;
-        let e = col_start(row + r.x1);
-        for (var i = col_start(row + r.x0) + lid; i < e; i += 64u) {
-            depth_cell(i);
-        }
+    let sp = spans(rows_of(listed(wg.y), wg.x), false);
+    for (var n = lid; n < sp.before[ROWS]; n += 64u) {
+        depth_cell(span_at(sp, n));
     }
 }
 "#;
@@ -1707,24 +1726,19 @@ fn level_differs(l: Link) -> bool {
 fn k_settle(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
     let t = listed(wg.y);
     let r = rows_of(t, wg.x);
-    let base = slot_at(wg.y) + P.slots.x;
-    var j = links_before(r);
+    let base = slot_at(wg.y) + P.slots.x + links_before(r);
+    let sp = spans(r, true);
     var flowing = false;
-    for (var z = r.z0; z < r.z1; z++) {
-        let row = z * P.grid.x;
-        let s = group_start(row + r.x0);
-        let e = group_start(row + r.x1);
-        for (var i = s + lid; i < e; i += 64u) {
-            let qv = q_old[i];
-            atomicStore(&sim.w[base + j + i - s], bitcast<u32>(qv));
-            flowing = flowing || abs(qv) > STILL;
-            let l = links[i];
-            let tb = cell_tile(l.b);
-            if tb != t && !runs(tb) && level_differs(l) {
-                atomicOr(&sim.w[tb], WAKE);
-            }
+    for (var n = lid; n < sp.before[ROWS]; n += 64u) {
+        let i = span_at(sp, n);
+        let qv = q_old[i];
+        atomicStore(&sim.w[base + n], bitcast<u32>(qv));
+        flowing = flowing || abs(qv) > STILL;
+        let l = links[i];
+        let tb = cell_tile(l.b);
+        if tb != t && !runs(tb) && level_differs(l) {
+            atomicOr(&sim.w[tb], WAKE);
         }
-        j += e - s;
     }
     if flowing {
         atomicOr(&sim.w[t], WAKE);
@@ -1911,17 +1925,12 @@ const DRAW_DEPTH: f32 = 0.004;
 @compute @workgroup_size(64)
 fn k_marks(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
     let r = rows_of(listed(wg.y), wg.x);
-    let base = slot_at(wg.y);
-    var j = cells_before(r);
-    for (var z = r.z0; z < r.z1; z++) {
-        let row = z * P.grid.x;
-        let s = col_start(row + r.x0);
-        let e = col_start(row + r.x1);
-        for (var i = s + lid; i < e; i += 64u) {
-            mark_cell(i);
-            sim.w[base + j + i - s] = bitcast<u32>(dyn_state[i].x);
-        }
-        j += e - s;
+    let base = slot_at(wg.y) + cells_before(r);
+    let sp = spans(r, false);
+    for (var n = lid; n < sp.before[ROWS]; n += 64u) {
+        let i = span_at(sp, n);
+        mark_cell(i);
+        sim.w[base + n] = bitcast<u32>(dyn_state[i].x);
     }
 }
 
