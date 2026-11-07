@@ -67,5 +67,6 @@ pub use crate::world::{
     AmbientOcclusion, BloomSettings, EntityId, Frame, GlobalIllumination, Haze, InstanceSubmit,
     Light, ShadowSettings, Sky, ToneMap, TorchLight, World,
 };
+pub use crate::world::{NavAgent, NavSettings, NavStats, NavStatus};
 pub use crate::Engine;
 pub use glam::Vec3;

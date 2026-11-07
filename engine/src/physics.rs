@@ -796,6 +796,71 @@ impl Physics {
         })
     }
 
+    /// Bring ray queries up to date with bodies added or moved since the
+    /// last step (navigation reads them before the first step).
+    pub(crate) fn refresh_queries(&mut self) {
+        self.world.detect_collisions(&(), &());
+    }
+
+    /// When `p` is inside fixed bodies: the lowest underside straight below
+    /// it (`lo - 1` when one reaches below `lo`). `None` when `p` is free.
+    pub fn fixed_underside(&self, p: Vec3, lo: f32) -> Option<f32> {
+        let fixed_only = |_: ColliderHandle, c: &rapier3d::prelude::Collider| {
+            c.user_data != GROUND_TAG
+                && self
+                    .bodies
+                    .get(&EntityId::from_raw(c.user_data as u64))
+                    .is_some_and(|t| t.kind == BodyKind::Fixed)
+        };
+        let filter = QueryFilter::default().predicate(&fixed_only);
+        let start = lo - 1.0;
+        let ray = Ray::new(Vec3::new(p.x, start, p.z), Vec3::Y);
+        self.world
+            .intersect_point(p, filter)
+            .map(|(_, c)| {
+                c.shape()
+                    .cast_ray(c.position(), &ray, p.y - start, true)
+                    .map_or(start, |t| start + t)
+            })
+            .reduce(f32::min)
+    }
+
+    /// A ray against fixed bodies only (walls, floors, buildings): what
+    /// navigation treats as ground. `solid = false` lets a ray that starts
+    /// inside a shape find its far side.
+    pub fn cast_ray_fixed(&self, origin: Vec3, dir: Vec3, max: f32, solid: bool) -> Option<RayHit> {
+        let dir = dir.try_normalize()?;
+        let ray = Ray::new(origin, dir);
+        let fixed_only = |_: ColliderHandle, c: &rapier3d::prelude::Collider| {
+            c.user_data != GROUND_TAG
+                && self
+                    .bodies
+                    .get(&EntityId::from_raw(c.user_data as u64))
+                    .is_some_and(|t| t.kind == BodyKind::Fixed)
+        };
+        let filter = QueryFilter::default().predicate(&fixed_only);
+        let (handle, hit) = self
+            .world
+            .cast_ray_and_get_normal(&ray, max, solid, filter)?;
+        let c = self.world.colliders.get(handle)?;
+        // A triangle mesh reports every face as facing the ray, and marks a
+        // hit on a face's back as `Face(1)`. Turn those round, so the inside
+        // of a closed mesh (a wall's underside seen from within) is not
+        // taken for a floor.
+        let mut normal = hit.normal;
+        if c.shape().as_trimesh().is_some()
+            && hit.feature == rapier3d::parry::shape::FeatureId::Face(1)
+        {
+            normal = -normal;
+        }
+        Some(RayHit {
+            entity: Some(EntityId::from_raw(c.user_data as u64)),
+            point: origin + dir * hit.time_of_impact,
+            normal,
+            distance: hit.time_of_impact,
+        })
+    }
+
     /// Advance by `dt`. `transform_of` reads an entity's current transform
     /// (to notice when the game moved it). Returns new transforms to write,
     /// rubble to despawn, and splashes.
