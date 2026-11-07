@@ -53,6 +53,7 @@ pub use crate::ui::{UiFrame, UiPanel};
 pub use crate::vegetation::{shrub_model, tree_model, TreeModel, TreeSpecies};
 pub use crate::vfx::{Delivery, EffectHandle, EffectSpec, VfxPalette, VfxSystem, VisualKind};
 pub use crate::voxel_terrain::VoxelTerrain;
+pub use crate::water::{Water, WaterRegion, WaterSample, WaterSource};
 pub use crate::water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use crate::world::AnimatedEntity;
 pub use crate::world::{
