@@ -73,10 +73,12 @@ pub use crate::water::{Water, WaterRegion, WaterSample, WaterSource};
 pub use crate::water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use crate::world::AnimatedEntity;
 pub use crate::world::Loaded;
+pub use crate::world::WorldScan;
 pub use crate::world::{
     AmbientOcclusion, BloomSettings, EntityId, Frame, GlobalIllumination, Haze, InstanceSubmit,
     Light, ShadowSettings, Sky, ToneMap, TorchLight, World,
 };
 pub use crate::world::{NavAgent, NavSettings, NavStats, NavStatus};
+pub use crate::zfight::{ZFightCheck, ZFightReport};
 pub use crate::Engine;
 pub use glam::{Mat4, Quat, Vec3};

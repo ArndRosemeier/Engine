@@ -36,6 +36,7 @@ members = [
     "examples/reflections",
     "examples/buildings",
     "examples/navigation",
+    "examples/zfight",
 ]
 default-members = ["engine"]
 

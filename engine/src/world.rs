@@ -48,7 +48,10 @@ mod world_grading;
 mod world_ragdolls;
 #[path = "world_rooms.rs"]
 mod world_rooms;
+#[path = "world_zfight.rs"]
+mod world_zfight;
 pub use nav::{NavAgent, NavSettings, NavStats, NavStatus};
+pub use world_zfight::WorldScan;
 
 /// Opaque handle to a spawned entity. Saves can hold it; after loading,
 /// map it to the new one with [`Loaded::entity`].
@@ -762,6 +765,10 @@ pub struct World {
     crowds: Vec<Option<crate::crowd::Crowd>>,
     ssr: Option<crate::reflections::ScreenSpaceReflections>,
     entity_rooms: HashMap<EntityId, crate::rooms::RoomId>,
+    /// Z-fighting markers and the `ENGINE_ZFIGHT` watcher.
+    zfight: world_zfight::ZFightState,
+    /// Debug names (see [`World::set_name`]).
+    entity_names: HashMap<EntityId, String>,
     /// Surface presentation sync. Engine default stays on so demos never tear;
     /// the renderer applies it at every present.
     vsync: bool,
@@ -879,6 +886,8 @@ impl Default for World {
             crowds: Vec::new(),
             ssr: Some(Default::default()),
             entity_rooms: HashMap::new(),
+            zfight: Default::default(),
+            entity_names: HashMap::new(),
             vsync: true,
             shadow_contact: ContactSnapshot::default(),
             shadow_contact_epoch: 0,
@@ -1933,6 +1942,7 @@ impl World {
     /// them. [`Self::detach`] a child first to keep it.
     pub fn despawn(&mut self, id: EntityId) {
         self.sim_poses.remove(&id);
+        self.entity_names.remove(&id);
         self.forget_ragdoll(id);
         self.entity_rooms.remove(&id);
         if self.buildings.contains_key(&id) || self.falling.iter().any(|p| p.building == id) {

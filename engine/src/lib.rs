@@ -31,6 +31,7 @@
 //!   [`proc_terrain`], [`landscape`], [`voxel_terrain`].
 //! - [`quality`]: presets and the frame-rate auto-tuner.
 //! - [`fly::FlyCamera`], [`input::Input`], [`ui`], [`audio`], [`collision`].
+//! - [`zfight`]: find flickering, overlapping faces (`ENGINE_ZFIGHT=1`).
 //!
 //! Coordinates are metres with Y up; yaw is in degrees, 0 facing +Z.
 
@@ -94,6 +95,7 @@ pub mod voxel_terrain;
 pub mod water;
 pub mod water_mesh;
 pub mod world;
+pub mod zfight;
 
 pub(crate) mod app;
 pub(crate) mod marching_cubes;
