@@ -25,7 +25,8 @@ pub use crate::particles::{
     ParticleSilhouette, ParticleWorld, SizeOverLife,
 };
 pub use crate::physics::{
-    Body, BodyKind, BodyShape, Impact, PhysicsGround, PhysicsSettings, RayHit,
+    Body, BodyHit, BodyId, BodyImpact, BodyKind, BodyShape, Impact, PhysicsGround, PhysicsSettings,
+    PhysicsWorld, RayHit,
 };
 pub use crate::place::{GlobalPlace, MeshInstance, Place};
 pub use crate::portal::{Portal, PortalId, PortalSettings, SpaceId};
@@ -39,6 +40,7 @@ pub use crate::quality::Quality;
 pub use crate::ribbons::{RibbonId, RibbonProfile, RibbonStyle, RibbonWorld};
 pub use crate::rocks::{rock_model, rock_model_with, RockModel, RockShape};
 pub use crate::scatter::Scatter;
+pub use crate::sim::{Headless, HeadlessRun, SimClock, SimSteps};
 pub use crate::sky::{PhysicalSky, SkyWeather};
 pub use crate::space::{
     ChunkCoord, ChunkId, ChunkLayer, ChunkLevel, ChunkSpan, GlobalPosition, GlobalXZ, RenderOrigin,
@@ -69,4 +71,4 @@ pub use crate::world::{
 };
 pub use crate::world::{NavAgent, NavSettings, NavStats, NavStatus};
 pub use crate::Engine;
-pub use glam::Vec3;
+pub use glam::{Mat4, Quat, Vec3};

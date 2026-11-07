@@ -267,6 +267,14 @@ impl GlobalPlace {
     }
 }
 
+pub(crate) fn ensure_finite_mat(m: glam::Mat4) -> EngineResult<()> {
+    if m.is_finite() {
+        Ok(())
+    } else {
+        Err(EngineError::InvalidValue("transform must be finite".into()))
+    }
+}
+
 pub(crate) fn ensure_finite3(v: Vec3, what: &str) -> EngineResult<()> {
     if !v.is_finite() {
         return Err(EngineError::InvalidValue(format!("{what} must be finite")));

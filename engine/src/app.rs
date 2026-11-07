@@ -205,6 +205,11 @@ impl App {
             );
         }
 
+        let sim = if self.fatal_error.is_none() {
+            self.world.advance_sim(dt)
+        } else {
+            Default::default()
+        };
         let update = &mut self.update;
         let world = &mut self.world;
         let fps = self.fps;
@@ -222,6 +227,7 @@ impl App {
                     first,
                     input: input.clone(),
                     ui: ui.clone(),
+                    sim,
                 };
                 if let Some(message) = self.fatal_error.as_ref() {
                     egui::CentralPanel::default().show(ui.ctx(), |panel| {
@@ -274,6 +280,7 @@ impl App {
             self.world.tick_nav(dt);
             self.world.tick_animations(dt);
             self.world.tick_physics(dt);
+            self.world.tick_interpolation();
             self.world.tick_hierarchy();
             self.world.tick_effects(dt);
             self.world.tick_water(dt);
