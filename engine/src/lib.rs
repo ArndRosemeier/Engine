@@ -1,6 +1,38 @@
-//! Minimal procedural 3D engine built on wgpu.
+//! A procedural 3D engine built on wgpu.
 //!
-//! Prefer [`prelude`] for everyday use. Power users can open [`advanced`].
+//! You write one closure that runs every frame; [`Engine::run`] owns the
+//! window, the GPU and the loop. Import [`prelude`] for everyday work; power
+//! users can open [`advanced`].
+//!
+//! ```no_run
+//! use engine::prelude::*;
+//!
+//! fn main() -> EngineResult<()> {
+//!     let mut camera = FlyCamera::new((0.0, 3.0, -12.0), 0.0, -8.0);
+//!     Engine::run("hello", move |world, frame| {
+//!         if frame.first {
+//!             world.spawn(Shape::box_at((0.0, -0.05, 0.0), (60.0, 0.1, 60.0), rgb(90, 120, 70))?);
+//!             world.set_physical_sky(Some(PhysicalSky::at_hour(15.0)));
+//!             let places = Scatter::new(1).rect(-25.0, 5.0, 25.0, 30.0).spacing(8.0).places()?;
+//!             world.spawn_lod_at(tree_model(TreeSpecies::Birch, 0)?.lod_levels(), &places)?;
+//!         }
+//!         camera.update(world, frame);
+//!         Ok(())
+//!     })
+//! }
+//! ```
+//!
+//! Where to look next:
+//!
+//! - [`world::World`]: the scene and every setting (camera, sky, lights, LOD,
+//!   quality, terrain, portals).
+//! - [`mesh::Mesh`] and [`mesh::Shape`]: build geometry; [`model::Model`] loads glTF.
+//! - Generators: [`vegetation`], [`rocks`], [`texgen`], [`scatter`],
+//!   [`proc_terrain`], [`landscape`], [`voxel_terrain`].
+//! - [`quality`]: presets and the frame-rate auto-tuner.
+//! - [`fly::FlyCamera`], [`input::Input`], [`ui`], [`audio`], [`collision`].
+//!
+//! Coordinates are metres with Y up; yaw is in degrees, 0 facing +Z.
 
 pub mod advanced;
 pub mod anim;
@@ -12,6 +44,7 @@ pub mod color;
 pub mod contact;
 pub mod debris;
 pub mod error;
+pub mod fly;
 pub mod fracture;
 pub mod gpu_field;
 pub mod input;
@@ -27,8 +60,10 @@ pub mod prelude;
 pub mod proc;
 pub mod proc_terrain;
 pub mod props;
+pub mod quality;
 pub mod ribbons;
 pub mod rocks;
+pub mod scatter;
 pub mod sky;
 pub mod space;
 pub mod surface;

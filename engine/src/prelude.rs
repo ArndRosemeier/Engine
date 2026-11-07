@@ -11,6 +11,7 @@ pub use crate::color::{rgb, rgba, Color};
 pub use crate::contact::{ContactGrid, ContactSnapshot};
 pub use crate::debris::Shatter;
 pub use crate::error::{EngineError, EngineResult};
+pub use crate::fly::FlyCamera;
 pub use crate::input::{Input, Key, MouseButton};
 pub use crate::landscape::Landscape;
 pub use crate::limits::EngineLimits;
@@ -26,8 +27,10 @@ pub use crate::portal::{Portal, PortalId, PortalSettings, SpaceId};
 pub use crate::proc::{scatter_on_xz, Noise};
 pub use crate::proc_terrain::{demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain};
 pub use crate::props::{PropModel, PropPack};
+pub use crate::quality::Quality;
 pub use crate::ribbons::{RibbonId, RibbonProfile, RibbonStyle, RibbonWorld};
 pub use crate::rocks::{rock_model, rock_model_with, RockModel, RockShape};
+pub use crate::scatter::Scatter;
 pub use crate::sky::{PhysicalSky, SkyWeather};
 pub use crate::space::{
     ChunkCoord, ChunkId, ChunkLayer, ChunkLevel, ChunkSpan, GlobalPosition, GlobalXZ, RenderOrigin,
