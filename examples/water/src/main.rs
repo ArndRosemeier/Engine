@@ -1,17 +1,20 @@
 //! Water: a valley with a lake, a spring that finds its own way down the
 //! hills, and a sealed cave beside the lake. Everything is one simulation.
 //!
-//! Fly: right mouse + move to look, WASD, Space/E up, Ctrl/Q down, Shift fast.
+//! Right mouse + move to look, WASD to move, Shift faster. G switches between
+//! flying (Space/E up, Ctrl/Q down) and a body that walks, swims and dives
+//! (Space jumps or rises, Ctrl dives; look down to dive while swimming).
 //! Left click digs where the crosshair points (dig from the lake toward the
 //! cave and watch it flood), F builds rock, R pours a big bucket of water,
-//! T toggles a storm of rain.
+//! B drops a wooden crate that breaks into floating planks, T toggles rain.
 //!
 //! `ENGINE_WATER_VIEW=lake|shore|under|bed|river|cave` picks a starting view
 //! (for screenshots), `ENGINE_WATER_LOOK=lake|ocean|tropical|river|swamp`
-//! the water colour.
+//! the water colour, `ENGINE_WATER_BODY=1` starts as the swimming body and
+//! `ENGINE_WATER_CRATE=x,y,z` drops a crate there on the third frame.
 use engine::advanced::Volume;
 use engine::prelude::*;
-use engine::water::WaterLook;
+use engine::water::{SwimState, Swimmer, WaterLook};
 use glam::{Vec2, Vec3};
 
 const SIZE: f32 = 256.0;
@@ -80,11 +83,35 @@ fn view(noise: &Noise, name: &str) -> (Vec3, f32, f32) {
     }
 }
 
+/// "x,y,z" from an environment variable.
+#[derive(Clone, Copy)]
+struct Vec3Text(Vec3);
+
+impl std::str::FromStr for Vec3Text {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        let v: Vec<f32> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        (v.len() == 3)
+            .then(|| Vec3Text(Vec3::new(v[0], v[1], v[2])))
+            .ok_or(())
+    }
+}
+
 fn main() -> EngineResult<()> {
     let view_name = std::env::var("ENGINE_WATER_VIEW").unwrap_or_default();
     let (eye, yaw, pitch) = view(&Noise::new(5), &view_name);
     let mut camera = FlyCamera::new(eye, yaw, pitch).with_speed(12.0);
+    let mut body: Option<Swimmer> = std::env::var_os("ENGINE_WATER_BODY").map(|_| {
+        let mut b = Swimmer::new(eye - Vec3::Y * 1.65, yaw);
+        b.pitch_deg = pitch;
+        b
+    });
+    let drop_crate_at = std::env::var("ENGINE_WATER_CRATE")
+        .ok()
+        .and_then(|v| v.parse::<Vec3Text>().ok());
+    let mut frame_no = 0u32;
     let mut raining = false;
+    let mut crates = 0u32;
 
     Engine::run("water", move |world, frame| {
         if frame.first {
@@ -130,12 +157,35 @@ fn main() -> EngineResult<()> {
             world.set_view_distance(700.0)?;
         }
 
-        camera.update(world, frame);
+        if frame.input.pressed(Key::G) {
+            body = match body.take() {
+                Some(b) => {
+                    camera.position = b.eye();
+                    camera.yaw_deg = b.yaw_deg;
+                    camera.pitch_deg = b.pitch_deg;
+                    None
+                }
+                None => {
+                    let mut b = Swimmer::new(camera.position - Vec3::Y * 1.65, camera.yaw_deg);
+                    b.pitch_deg = camera.pitch_deg;
+                    Some(b)
+                }
+            };
+        }
+        let (eye, aim) = match body.as_mut() {
+            Some(b) => {
+                b.update(world, frame);
+                (b.eye(), Camera::direction(b.yaw_deg, b.pitch_deg))
+            }
+            None => {
+                camera.update(world, frame);
+                (camera.position, camera.forward())
+            }
+        };
         let input = &frame.input;
-        let aim = camera.forward();
         let hit = world
             .voxel_terrain()
-            .and_then(|t| t.raycast(camera.position, aim, 300.0));
+            .and_then(|t| t.raycast(eye, aim, 300.0));
         if let Some(hit) = hit {
             if input.mouse_clicked(MouseButton::Left) {
                 world
@@ -155,6 +205,27 @@ fn main() -> EngineResult<()> {
                 }
             }
         }
+        frame_no += 1;
+        let scripted_crate = drop_crate_at.filter(|_| frame_no == 3).map(|t| t.0);
+        if input.pressed(Key::B) || scripted_crate.is_some() {
+            // A crate high above the aim point, broken into light planks.
+            let target = scripted_crate.or(hit).unwrap_or(eye + aim * 20.0);
+            let at = Vec3::new(target.x, target.y.max(LAKE_LEVEL) + 8.0, target.z);
+            let crate_id = world.spawn(Mesh::box_at(at, Vec3::splat(1.6), rgb(150, 110, 70))?);
+            crates += 1;
+            world.shatter(
+                crate_id,
+                at + Vec3::Y,
+                Shatter {
+                    pieces: 10,
+                    speed: 2.0,
+                    keep_seconds: Some(90.0),
+                    seed: crates,
+                    density: 0.55,
+                    ..Shatter::default()
+                },
+            )?;
+        }
         if input.pressed(Key::T) {
             raining = !raining;
         }
@@ -163,6 +234,27 @@ fn main() -> EngineResult<()> {
                 // 60 mm per minute: a cloudburst.
                 water.rain(0.001 * frame.dt);
             }
+        }
+        if let Some(b) = body.as_ref() {
+            let state = match b.state() {
+                SwimState::OnGround => "walking",
+                SwimState::InAir => "in the air",
+                SwimState::Wading => "wading",
+                SwimState::Swimming => "swimming",
+                SwimState::Diving => "diving",
+            };
+            engine::egui::Window::new("body")
+                .title_bar(false)
+                .resizable(false)
+                .anchor(engine::egui::Align2::LEFT_BOTTOM, [12.0, -12.0])
+                .show(frame.ui.ctx(), |ui| {
+                    ui.label(state);
+                    ui.add(
+                        engine::egui::ProgressBar::new(b.breath_fraction())
+                            .desired_width(160.0)
+                            .text(format!("air {:.0} s", b.breath())),
+                    );
+                });
         }
         Ok(())
     })

@@ -447,6 +447,64 @@ impl Water {
         }
     }
 
+    /// Push water outward from `at`, as something falling in or a blast
+    /// would: a dip that fills back in and a ring of waves running away.
+    /// `strength` is the outward flow speed (m/s) at the centre, fading to
+    /// zero at `radius`. Mass is untouched; only the flow changes.
+    pub fn disturb(&mut self, at: Vec3, radius: f32, strength: f32) {
+        if !(radius > 0.0 && strength.is_finite() && at.is_finite()) {
+            return;
+        }
+        let r = self.region;
+        let cs = r.cell_size;
+        let lo = ((Vec2::new(at.x, at.z) - Vec2::splat(radius) - r.min_xz) / cs).floor();
+        let hi = ((Vec2::new(at.x, at.z) + Vec2::splat(radius) - r.min_xz) / cs).ceil();
+        let (nx, nz) = (r.cells_x as i64, r.cells_z as i64);
+        for z in (lo.y as i64).clamp(0, nz)..(hi.y as i64).clamp(0, nz) {
+            for x in (lo.x as i64).clamp(0, nx)..(hi.x as i64).clamp(0, nx) {
+                let c = (z * nx + x) as usize;
+                for cell in self.col_start[c] as usize..self.col_start[c + 1] as usize {
+                    let head = self.cell_head(cell);
+                    if self.depth[cell] <= DRY
+                        || self.floor[cell] > at.y + radius
+                        || head.min(self.ceil[cell]) < at.y - radius
+                    {
+                        continue;
+                    }
+                    let (from, to) = (
+                        self.cell_link_start[cell] as usize,
+                        self.cell_link_start[cell + 1] as usize,
+                    );
+                    for k in from..to {
+                        let entry = self.cell_links[k];
+                        if entry & B_SIDE != 0 {
+                            continue; // each link once, from its low side
+                        }
+                        let id = entry as usize;
+                        let link = self.links[id];
+                        // Centre of the face between the two columns.
+                        let centre = r.column_centre(x as u32, z as u32);
+                        let face = if link.axis == 0 {
+                            centre + Vec2::new(cs * 0.5, 0.0)
+                        } else {
+                            centre + Vec2::new(0.0, cs * 0.5)
+                        };
+                        let d = face - Vec2::new(at.x, at.z);
+                        let dist = d.length();
+                        if dist >= radius {
+                            continue;
+                        }
+                        let w = (1.0 - dist / radius).powi(2);
+                        let along = d[link.axis as usize];
+                        let h = (head.min(link.hi) - link.lo).max(0.0);
+                        self.q[id] += along.signum() * strength * w * h;
+                    }
+                }
+            }
+        }
+        self.time_step_reset();
+    }
+
     /// Remove all water.
     pub fn clear(&mut self) {
         self.depth.iter_mut().for_each(|d| *d = 0.0);
