@@ -1260,6 +1260,7 @@ impl Renderer {
             &mut encoder,
             &view,
             world.bloom(),
+            world.screen_grade(),
             tone_map_env().unwrap_or(world.tone_map()),
         );
         self.mark_gpu(&mut encoder, Mark::PostDone);
@@ -1488,7 +1489,7 @@ impl Renderer {
         self.frustum = Frustum::from_view_projection(vp);
         let light_dir = world.light().direction.normalize_or_zero();
         let eye = camera.eye();
-        let haze = world.haze();
+        let haze = world.screen_haze();
         let torch = world.torch();
         let forward = (camera.target() - camera.eye()).normalize_or_zero();
         let right = forward.cross(camera.up()).normalize_or_zero();

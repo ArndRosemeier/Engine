@@ -289,6 +289,7 @@ impl App {
             self.world.tick_auto_quality(dt);
             self.world.tick_lods();
             self.world.tick_sky();
+            self.world.tick_grading(dt);
         }
         let anim_ms = elapsed_ms(anim_t);
 

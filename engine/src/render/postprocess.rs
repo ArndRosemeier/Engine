@@ -8,6 +8,7 @@
 //! filter. Each level spreads the light twice as far, so the sum is a soft,
 //! wide glow instead of one tight halo.
 
+use crate::grading::ColorGrade;
 use crate::world::{BloomSettings, ToneMap};
 use wgpu::util::DeviceExt;
 
@@ -29,6 +30,13 @@ struct PostprocessUniform {
     /// 0 = ACES, 1 = AgX.
     tone_map: f32,
     _pad: f32,
+    /// White balance multiplier (from temperature and tint).
+    balance: [f32; 3],
+    contrast: f32,
+    shadows: [f32; 3],
+    saturation: f32,
+    highlights: [f32; 3],
+    vignette: f32,
 }
 
 struct Target {
@@ -309,6 +317,7 @@ impl Postprocess {
         encoder: &mut wgpu::CommandEncoder,
         output: &wgpu::TextureView,
         settings: BloomSettings,
+        grade: ColorGrade,
         tone_map: ToneMap,
     ) {
         let levels = self.bloom.levels();
@@ -324,13 +333,19 @@ impl Postprocess {
             } else {
                 0.0
             },
-            exposure: settings.exposure(),
+            exposure: settings.exposure() * grade.exposure.exp2(),
             texel_size: [0.0, 0.0],
             tone_map: match tone_map {
                 ToneMap::Aces => 0.0,
                 ToneMap::Agx => 1.0,
             },
             _pad: 0.0,
+            balance: white_balance(grade.temperature, grade.tint).to_array(),
+            contrast: grade.contrast,
+            shadows: grade.shadows.to_array(),
+            saturation: grade.saturation,
+            highlights: grade.highlights.to_array(),
+            vignette: grade.vignette,
         };
         let write = |pass: &Pass, texel_size: [f32; 2]| {
             let uniform = PostprocessUniform { texel_size, ..base };
@@ -388,6 +403,19 @@ impl Postprocess {
     }
 }
 
+/// A colour multiplier for white balance: temperature warms (red up, blue
+/// down) or cools, tint greens or magentas; overall brightness is kept.
+pub(crate) fn white_balance(temperature: f32, tint: f32) -> glam::Vec3 {
+    let c = glam::Vec3::new(
+        1.0 + 0.22 * temperature - 0.08 * tint,
+        1.0 + 0.16 * tint,
+        1.0 - 0.22 * temperature - 0.08 * tint,
+    )
+    .max(glam::Vec3::splat(0.05));
+    let luma = c.dot(glam::Vec3::new(0.2126, 0.7152, 0.0722));
+    c / luma
+}
+
 fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -426,6 +454,12 @@ fn create_passes(
                 texel_size: [1.0, 1.0],
                 tone_map: 1.0,
                 _pad: 0.0,
+                balance: [1.0; 3],
+                contrast: 1.0,
+                shadows: [1.0; 3],
+                saturation: 1.0,
+                highlights: [1.0; 3],
+                vignette: 0.0,
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -570,7 +604,8 @@ fn agx_look(v: glam::Vec3) -> glam::Vec3 {
 
 const SHADER: &str = r#"
 const AGX_EXPOSURE:f32=1.25;
-struct Params { threshold:f32, knee:f32, intensity:f32, exposure:f32, texel_size:vec2<f32>, tone_map:f32, pad:f32 };
+struct Params { threshold:f32, knee:f32, intensity:f32, exposure:f32, texel_size:vec2<f32>, tone_map:f32, pad:f32,
+    balance:vec3<f32>, contrast:f32, shadows:vec3<f32>, saturation:f32, highlights:vec3<f32>, vignette:f32 };
 @group(0) @binding(0) var primary_tex:texture_2d<f32>;
 @group(0) @binding(1) var secondary_tex:texture_2d<f32>;
 @group(0) @binding(2) var linear_sampler:sampler;
@@ -663,9 +698,23 @@ fn agx(color:vec3<f32>)->vec3<f32> {
 @fragment fn fs_composite(v:VOut)->@location(0) vec4<f32> {
     let scene=textureSampleLevel(primary_tex,linear_sampler,v.uv,0.0).rgb;
     let bloom=textureSampleLevel(secondary_tex,linear_sampler,v.uv,0.0).rgb;
-    let hdr=(scene+bloom*p.intensity)*p.exposure;
-    if p.tone_map>0.5 { return vec4(agx(hdr*AGX_EXPOSURE),1.0); }
-    return vec4(aces(hdr),1.0);
+    let hdr=(scene+bloom*p.intensity)*p.exposure*p.balance;
+    var c:vec3<f32>;
+    if p.tone_map>0.5 { c=agx(hdr*AGX_EXPOSURE); } else { c=aces(hdr); }
+    return vec4(grade(c,v.uv),1.0);
+}
+// The look after tone mapping (linear 0..1): contrast around mid grey,
+// saturation, shadow and highlight tints, vignette. Neutral leaves c as is.
+fn grade(c_in:vec3<f32>, uv:vec2<f32>)->vec3<f32> {
+    var c=max(c_in,vec3(0.0));
+    c=0.18*pow(c/0.18,vec3(p.contrast));
+    let l=dot(c,vec3(0.2126,0.7152,0.0722));
+    c=max(mix(vec3(l),c,p.saturation),vec3(0.0));
+    let w=smoothstep(0.05,0.6,l);
+    c=c*mix(p.shadows,p.highlights,w);
+    let d=length((uv-0.5)*vec2(1.0,0.75))*1.6;
+    c=c*(1.0-p.vignette*smoothstep(0.35,1.0,d));
+    return clamp(c,vec3(0.0),vec3(1.0));
 }
 "#;
 
@@ -718,5 +767,19 @@ mod tests {
         assert_eq!(sizes[1], (480, 270));
         assert_eq!(bloom_sizes(3, 3), vec![(1, 1)]);
         assert_eq!(bloom_sizes(20, 20).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod grade_tests {
+    #[test]
+    fn white_balance_is_neutral_at_zero_and_keeps_brightness() {
+        let n = super::white_balance(0.0, 0.0);
+        assert!((n - glam::Vec3::ONE).length() < 1e-5);
+        let warm = super::white_balance(0.8, 0.2);
+        assert!(warm.x > warm.z);
+        let luma = warm.dot(glam::Vec3::new(0.2126, 0.7152, 0.0722));
+        assert!((luma - 1.0).abs() < 1e-5);
+        assert_eq!(std::mem::size_of::<super::PostprocessUniform>(), 80);
     }
 }
