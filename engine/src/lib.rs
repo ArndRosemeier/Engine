@@ -49,6 +49,7 @@ pub mod fracture;
 mod frame_clock;
 pub mod gpu_field;
 pub mod input;
+pub mod lamps;
 pub mod landscape;
 pub mod limits;
 pub mod lod;
@@ -113,6 +114,7 @@ pub use gpu_field::{
     FIELD_CHUNK_SIZE, MAX_FIELD_UNIFORM_BYTES,
 };
 pub use input::{Input, Key, MouseButton};
+pub use lamps::{Lamp, LampId, LampShape};
 pub use landscape::Landscape;
 pub use limits::EngineLimits;
 pub use mesh::{AlbedoMap, BuiltMesh, MaterialMaps, Mesh, PointId, Shape, SurfaceMaterial};

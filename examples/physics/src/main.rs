@@ -74,7 +74,14 @@ fn build(world: &mut World, noise: &Noise) -> EngineResult<Playground> {
             let z = 9.0;
             let y = ground(x, z) + size * 0.5 + row as f32 * size + 0.01;
             let mesh = Mesh::box_at(Vec3::ZERO, Vec3::splat(size), wood[(row + i) % 3])?;
-            spawn_body(world, &mut p, mesh, Place::new(x, y, z), crate_body.clone(), true)?;
+            spawn_body(
+                world,
+                &mut p,
+                mesh,
+                Place::new(x, y, z),
+                crate_body.clone(),
+                true,
+            )?;
         }
     }
 
@@ -143,11 +150,19 @@ fn build(world: &mut World, noise: &Noise) -> EngineResult<Playground> {
 
     // A sweeper arm turning on a post: a kinematic body that shoves crates.
     let (sx, sz) = (-14.0, 8.0);
-    let post = world.spawn(Mesh::box_at(Vec3::ZERO, Vec3::new(0.5, 1.6, 0.5), rgb(70, 70, 76))?);
+    let post = world.spawn(Mesh::box_at(
+        Vec3::ZERO,
+        Vec3::new(0.5, 1.6, 0.5),
+        rgb(70, 70, 76),
+    )?);
     world.set_place(post, Place::new(sx, ground(sx, sz) + 0.8, sz))?;
     world.add_body(post, Body::fixed())?;
     p.everything.push(post);
-    let arm = world.spawn(Mesh::box_at(Vec3::ZERO, Vec3::new(9.0, 0.35, 0.35), rgb(200, 60, 40))?);
+    let arm = world.spawn(Mesh::box_at(
+        Vec3::ZERO,
+        Vec3::new(9.0, 0.35, 0.35),
+        rgb(200, 60, 40),
+    )?);
     world.set_place(arm, Place::new(sx, ground(sx, sz) + 0.55, sz))?;
     world.add_body(arm, Body::kinematic().shape(BodyShape::BoundingBox))?;
     p.everything.push(arm);

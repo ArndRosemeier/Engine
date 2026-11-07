@@ -679,6 +679,9 @@ pub struct World {
     texture_by_content: HashMap<u64, TextureId>,
     /// Light carried by the viewer (lantern / headlamp), when lit.
     torch: Option<TorchLight>,
+    lamps: std::collections::BTreeMap<crate::lamps::LampId, (crate::lamps::Lamp, SpaceId)>,
+    next_lamp: u32,
+    lamp_shadow_budget: usize,
     /// Nearby mesh CSM + height raymarch. `None` disables shadows.
     shadows: Option<ShadowSettings>,
     /// Instanced mesh submit path. Default stays CPU so Engine demos match today.
@@ -777,6 +780,9 @@ impl Default for World {
             season: 0.0,
             texture_by_content: HashMap::new(),
             torch: None,
+            lamps: std::collections::BTreeMap::new(),
+            next_lamp: 1,
+            lamp_shadow_budget: 4,
             shadows: Some(ShadowSettings::default()),
             instance_submit: InstanceSubmit::from_env(),
             bloom: BloomSettings::default(),
@@ -1066,6 +1072,13 @@ impl World {
 
     pub fn target_fps(&self) -> Option<f32> {
         self.auto_tune.as_ref().map(|t| t.target_fps)
+    }
+
+    /// Runs particles and ribbons by the frame time, unless the game drives
+    /// them itself (see [`ParticleWorld::advance`]).
+    pub(crate) fn tick_effects(&mut self, dt: f32) {
+        self.particles.auto_advance(dt);
+        self.ribbons.auto_advance(dt);
     }
 
     pub(crate) fn tick_auto_quality(&mut self, dt: f32) {
@@ -2260,6 +2273,68 @@ impl World {
         self.torch
     }
 
+    /// Place a lamp (point light or spotlight) in the space things currently
+    /// spawn in. See [`crate::lamps`].
+    pub fn add_lamp(&mut self, lamp: crate::lamps::Lamp) -> EngineResult<crate::lamps::LampId> {
+        lamp.validate()?;
+        let id = crate::lamps::LampId(self.next_lamp);
+        self.next_lamp = self.next_lamp.wrapping_add(1).max(1);
+        self.lamps.insert(id, (lamp, self.spawn_space));
+        Ok(id)
+    }
+
+    /// Change everything about a lamp at once.
+    pub fn set_lamp(
+        &mut self,
+        id: crate::lamps::LampId,
+        lamp: crate::lamps::Lamp,
+    ) -> EngineResult<()> {
+        lamp.validate()?;
+        let slot = self.lamps.get_mut(&id).ok_or(EngineError::UnknownEntity)?;
+        slot.0 = lamp;
+        Ok(())
+    }
+
+    /// Move a lamp (a lantern someone carries, a car's headlight).
+    pub fn set_lamp_position(
+        &mut self,
+        id: crate::lamps::LampId,
+        position: impl Into<Vec3>,
+    ) -> EngineResult<()> {
+        let p = position.into();
+        crate::place::ensure_finite3(p, "lamp position")?;
+        let slot = self.lamps.get_mut(&id).ok_or(EngineError::UnknownEntity)?;
+        slot.0.position = p;
+        Ok(())
+    }
+
+    pub fn lamp(&self, id: crate::lamps::LampId) -> Option<&crate::lamps::Lamp> {
+        self.lamps.get(&id).map(|(l, _)| l)
+    }
+
+    pub fn remove_lamp(&mut self, id: crate::lamps::LampId) {
+        self.lamps.remove(&id);
+    }
+
+    /// Every lamp, with the space it lives in.
+    pub fn lamps(
+        &self,
+    ) -> impl Iterator<Item = (crate::lamps::LampId, &crate::lamps::Lamp, SpaceId)> {
+        self.lamps.iter().map(|(id, (l, s))| (*id, l, *s))
+    }
+
+    /// How many shadow-casting lamps get their shadows drawn per frame (the
+    /// brightest near the camera win; the rest light without shadows).
+    /// Default 4; each costs about as much as drawing the scene around it six
+    /// times at low resolution (once for a spotlight).
+    pub fn set_lamp_shadow_budget(&mut self, lamps: usize) {
+        self.lamp_shadow_budget = lamps.min(crate::lamps::MAX_SHADOW_LAMPS);
+    }
+
+    pub fn lamp_shadow_budget(&self) -> usize {
+        self.lamp_shadow_budget
+    }
+
     /// Enable hybrid sun shadows, or pass `None` to turn them off.
     pub fn set_shadows(&mut self, shadows: Option<ShadowSettings>) {
         self.shadows = shadows;
@@ -2478,12 +2553,13 @@ impl World {
             ));
         }
         let mesh = &e.mesh;
-        self.physics.add(id, &mesh.positions, e.transform, &body, None, || {
-            mesh.indices
-                .chunks_exact(3)
-                .map(|t| [t[0], t[1], t[2]])
-                .collect()
-        })
+        self.physics
+            .add(id, &mesh.positions, e.transform, &body, None, || {
+                mesh.indices
+                    .chunks_exact(3)
+                    .map(|t| [t[0], t[1], t[2]])
+                    .collect()
+            })
     }
 
     /// Take an entity's body away; it stays where it is and stops moving.
@@ -2500,7 +2576,11 @@ impl World {
         self.physics.velocity(id)
     }
 
-    pub fn set_body_velocity(&mut self, id: EntityId, velocity: impl Into<Vec3>) -> EngineResult<()> {
+    pub fn set_body_velocity(
+        &mut self,
+        id: EntityId,
+        velocity: impl Into<Vec3>,
+    ) -> EngineResult<()> {
         self.physics.set_velocity(id, velocity.into())
     }
 
@@ -3309,4 +3389,3 @@ mod vsync_tests {
         assert!(world.vsync());
     }
 }
-

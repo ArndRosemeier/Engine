@@ -53,6 +53,9 @@ pub struct ShadowUniforms {
     pub gi_spacing: f32,
     pub gi_dims: [u32; 3],
     pub _pad1: u32,
+    /// Lamp grid origins (see `lights.rs`); `lamp_origin0.w` is the lamp count.
+    pub lamp_origin0: [f32; 4],
+    pub lamp_origin1: [f32; 4],
 }
 
 /// Texel-snapped ortho looking from the sun toward `focus`.
@@ -80,7 +83,8 @@ pub fn cascade_view_proj(focus: Vec3, light_dir: Vec3, radius: f32, map_size: u3
         ls.z,
     );
     let snapped_focus = view_rot.inverse().transform_point3(snapped_ls);
-    let view = glam::camera::rh::view::look_at_mat4(snapped_focus + light * back, snapped_focus, up);
+    let view =
+        glam::camera::rh::view::look_at_mat4(snapped_focus + light * back, snapped_focus, up);
     let proj = glam::camera::rh::proj::directx::orthographic(-r, r, -r, r, 0.5, back + r * 2.0);
     proj * view
 }
@@ -149,6 +153,8 @@ struct ShadowUniforms {
     gi_spacing: f32,
     gi_dims: vec3<u32>,
     _pad1: u32,
+    lamp_origin0: vec4<f32>,
+    lamp_origin1: vec4<f32>,
 };
 "#
     };
@@ -243,6 +249,10 @@ pub const SCENE_SHADOW_WGSL: &str = concat!(
 @group(0) @binding(8) var gi_probe_r: texture_3d<f32>;
 @group(0) @binding(9) var gi_probe_g: texture_3d<f32>;
 @group(0) @binding(10) var gi_probe_b: texture_3d<f32>;
+@group(0) @binding(11) var<storage, read> lamps: array<GpuLamp>;
+@group(0) @binding(12) var<storage, read> lamp_cells: array<u32>;
+@group(0) @binding(13) var<storage, read> lamp_views: array<mat4x4<f32>>;
+@group(0) @binding(14) var lamp_shadow_map: texture_depth_2d_array;
 
 "#,
     terrain_formula_wgsl!(),
@@ -454,6 +464,10 @@ pub const CLIPMAP_SHADOW_WGSL: &str = r#"
 @group(1) @binding(7) var gi_probe_r: texture_3d<f32>;
 @group(1) @binding(8) var gi_probe_g: texture_3d<f32>;
 @group(1) @binding(9) var gi_probe_b: texture_3d<f32>;
+@group(1) @binding(10) var<storage, read> lamps: array<GpuLamp>;
+@group(1) @binding(11) var<storage, read> lamp_cells: array<u32>;
+@group(1) @binding(12) var<storage, read> lamp_views: array<mat4x4<f32>>;
+@group(1) @binding(13) var lamp_shadow_map: texture_depth_2d_array;
 
 fn atlas_ground(xz: vec2<f32>) -> f32 {
     if shadow.atlas_extent <= 0.0 {
@@ -601,7 +615,20 @@ fn cascade_bytes(m: Mat4, wind: [f32; 4]) -> Vec<u8> {
     out
 }
 
-fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 10] {
+fn lamp_storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 14] {
     [
         wgpu::BindGroupLayoutEntry {
             binding: base,
@@ -668,6 +695,20 @@ fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 10] {
         gi_probe_entry(base + 7),
         gi_probe_entry(base + 8),
         gi_probe_entry(base + 9),
+        // Lamps (see `lights.rs`).
+        lamp_storage_entry(base + 10),
+        lamp_storage_entry(base + 11),
+        lamp_storage_entry(base + 12),
+        wgpu::BindGroupLayoutEntry {
+            binding: base + 13,
+            visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        },
     ]
 }
 
@@ -752,6 +793,7 @@ struct ResourceViews<'a> {
     atlas_sampler: &'a wgpu::Sampler,
     ao: &'a wgpu::TextureView,
     ao_sampler: &'a wgpu::Sampler,
+    lamps: &'a super::lights::LampResources,
 }
 
 fn create_resource_bind(
@@ -803,6 +845,22 @@ fn create_resource_bind(
                 binding: 9,
                 resource: wgpu::BindingResource::TextureView(&v.gi[2]),
             },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: v.lamps.lamps.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: v.lamps.cells.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 12,
+                resource: v.lamps.views.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 13,
+                resource: wgpu::BindingResource::TextureView(&v.lamps.array_view),
+            },
         ],
     })
 }
@@ -834,6 +892,7 @@ pub struct ShadowGpu {
     ao_view: wgpu::TextureView,
     ao_sampler: wgpu::Sampler,
     gi_views: [wgpu::TextureView; 3],
+    pub lamps: super::lights::LampResources,
     /// Probe box for this frame, from the renderer; None switches GI off.
     gi: Option<super::gi::GiPlacement>,
     map_size: u32,
@@ -987,6 +1046,20 @@ impl ShadowGpu {
                 .create_view(&wgpu::TextureViewDescriptor::default())
         });
 
+        let cascade_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow-cascade-layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let lamps = super::lights::LampResources::new(device, &cascade_layout);
         let resource_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow-resource-layout"),
             entries: &resource_layout_entries(0),
@@ -1003,22 +1076,10 @@ impl ShadowGpu {
                 ao: &ao_view,
                 ao_sampler: &ao_sampler,
                 gi: &gi_views,
+                lamps: &lamps,
             },
         );
 
-        let cascade_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("shadow-cascade-layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
         let ident = cascade_bytes(Mat4::IDENTITY, [0.0; 4]);
         let cascade_bufs = std::array::from_fn(|i| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1176,6 +1237,7 @@ impl ShadowGpu {
             ao_view,
             ao_sampler,
             gi_views,
+            lamps,
             gi: None,
             map_size,
             atlas_size,
@@ -1248,6 +1310,7 @@ impl ShadowGpu {
                 ao: &self.ao_view,
                 ao_sampler: &self.ao_sampler,
                 gi: &self.gi_views,
+                lamps: &self.lamps,
             },
         );
     }
@@ -1255,7 +1318,7 @@ impl ShadowGpu {
     pub fn scene_bind_entries<'a>(
         &'a self,
         scene_uniforms: wgpu::BindingResource<'a>,
-    ) -> [wgpu::BindGroupEntry<'a>; 11] {
+    ) -> [wgpu::BindGroupEntry<'a>; 15] {
         [
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -1301,6 +1364,22 @@ impl ShadowGpu {
                 binding: 10,
                 resource: wgpu::BindingResource::TextureView(&self.gi_views[2]),
             },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: self.lamps.lamps.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 12,
+                resource: self.lamps.cells.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 13,
+                resource: self.lamps.views.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 14,
+                resource: wgpu::BindingResource::TextureView(&self.lamps.array_view),
+            },
         ]
     }
 
@@ -1341,10 +1420,30 @@ impl ShadowGpu {
         ));
     }
 
-    pub fn prepare(&mut self, queue: &wgpu::Queue, world: &World) -> [Mat4; CASCADE_COUNT] {
+    pub fn prepare(
+        &mut self,
+        queue: &wgpu::Queue,
+        world: &World,
+        eye: Vec3,
+        view: &super::frustum::Frustum,
+    ) -> [Mat4; CASCADE_COUNT] {
         let wind = [world.time(), world.wind(), 0.0, 0.0];
         self.atlas_wrote = false;
         let mut uniforms = ShadowUniforms::zeroed();
+        let live = world.living_in();
+        let lamp_frame = super::lights::build_frame(
+            world
+                .lamps()
+                .filter(|(_, _, space)| *space == live)
+                .map(|(id, lamp, _)| (id.0, *lamp)),
+            eye,
+            world.time(),
+            world.lamp_shadow_budget(),
+            |p, r| view.intersects_sphere(p, r),
+        );
+        let count = self.lamps.upload(queue, &lamp_frame, wind);
+        uniforms.lamp_origin0 = lamp_frame.origin0.extend(count as f32).into();
+        uniforms.lamp_origin1 = lamp_frame.origin1.extend(0.0).into();
         let light = world.light().direction.normalize_or_zero();
         uniforms.light_dir = [light.x, light.y, light.z];
         uniforms.map_texel = 1.0 / self.map_size as f32;

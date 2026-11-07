@@ -142,12 +142,15 @@ impl Default for Slot {
 pub struct RibbonWorld {
     slots: [Slot; MAX_RIBBONS],
     time_scale: f32,
+    /// Set when the game advanced the ribbons itself this frame.
+    advanced: bool,
 }
 impl Default for RibbonWorld {
     fn default() -> Self {
         Self {
             slots: std::array::from_fn(|_| Slot::default()),
             time_scale: 1.0,
+            advanced: false,
         }
     }
 }
@@ -244,12 +247,22 @@ impl RibbonWorld {
         self.time_scale = scale;
         Ok(())
     }
+    /// Called by the engine once a frame: ages the ribbons by the frame time
+    /// unless the game already called [`Self::advance`] itself (for slow
+    /// motion or fixed steps).
+    pub(crate) fn auto_advance(&mut self, dt_s: f32) {
+        if !std::mem::take(&mut self.advanced) && dt_s.is_finite() && dt_s >= 0.0 {
+            let _ = self.advance(dt_s);
+            self.advanced = false;
+        }
+    }
     pub fn advance(&mut self, dt_s: f32) -> EngineResult<()> {
         if !dt_s.is_finite() || dt_s < 0.0 {
             return Err(EngineError::InvalidValue(
                 "ribbon dt must be finite and >= 0".into(),
             ));
         }
+        self.advanced = true;
         let dt = dt_s * self.time_scale;
         for slot in &mut self.slots {
             let Some(r) = slot.ribbon.as_mut() else {

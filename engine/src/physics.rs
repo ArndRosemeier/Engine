@@ -263,8 +263,7 @@ impl PhysicsSettings {
         if !self.gravity.is_finite() {
             return Err(EngineError::InvalidValue("gravity must be finite".into()));
         }
-        if !self.steps_per_second.is_finite() || !(10.0..=1000.0).contains(&self.steps_per_second)
-        {
+        if !self.steps_per_second.is_finite() || !(10.0..=1000.0).contains(&self.steps_per_second) {
             return Err(EngineError::InvalidValue(
                 "steps_per_second must be in 10..=1000".into(),
             ));
@@ -276,7 +275,9 @@ impl PhysicsSettings {
         }
         if let PhysicsGround::Plane(y) = self.ground {
             if !y.is_finite() {
-                return Err(EngineError::InvalidValue("ground plane must be finite".into()));
+                return Err(EngineError::InvalidValue(
+                    "ground plane must be finite".into(),
+                ));
             }
         }
         Ok(())
@@ -544,7 +545,11 @@ impl Physics {
     }
 
     pub fn temporary_count(&self) -> usize {
-        self.bodies.values().filter(|t| t.temporary.is_some()).count() + self.sinking.len()
+        self.bodies
+            .values()
+            .filter(|t| t.temporary.is_some())
+            .count()
+            + self.sinking.len()
     }
 
     /// Add a body for an entity whose mesh positions are `positions`
@@ -584,10 +589,7 @@ impl Physics {
                     .or_else(|| {
                         // Flat or degenerate meshes: fall back to the box.
                         let h = ((max - min) * 0.5).max(Vec3::splat(0.01));
-                        Some(
-                            ColliderBuilder::cuboid(h.x, h.y, h.z)
-                                .translation((min + max) * 0.5),
-                        )
+                        Some(ColliderBuilder::cuboid(h.x, h.y, h.z).translation((min + max) * 0.5))
                     })
                     .expect("fallback box");
                 (b, probe_points(&scaled))
@@ -768,14 +770,15 @@ impl Physics {
     pub fn cast_ray(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<RayHit> {
         let dir = dir.try_normalize()?;
         let ray = Ray::new(origin, dir);
-        let skip_ground = |_: ColliderHandle, c: &rapier3d::prelude::Collider| {
-            c.user_data != GROUND_TAG
-        };
+        let skip_ground =
+            |_: ColliderHandle, c: &rapier3d::prelude::Collider| c.user_data != GROUND_TAG;
         let filter = QueryFilter::default().predicate(&skip_ground);
-        let (handle, hit) = self.world.cast_ray_and_get_normal(&ray, max, true, filter)?;
+        let (handle, hit) = self
+            .world
+            .cast_ray_and_get_normal(&ray, max, true, filter)?;
         let c = self.world.colliders.get(handle)?;
-        let entity = Some(EntityId::from_raw(c.user_data as u64))
-            .filter(|id| self.bodies.contains_key(id));
+        let entity =
+            Some(EntityId::from_raw(c.user_data as u64)).filter(|id| self.bodies.contains_key(id));
         Some(RayHit {
             entity,
             point: origin + dir * hit.time_of_impact,
@@ -937,7 +940,12 @@ impl Physics {
             let at = c1.position() * point.local_p1;
             let speed = (vel(c1) - vel(c2)).dot(normal).abs();
             if speed > 1.0 {
-                self.impacts.push(Impact { a, b, point: at, speed });
+                self.impacts.push(Impact {
+                    a,
+                    b,
+                    point: at,
+                    speed,
+                });
             }
         }
         if self.impacts.len() > 256 {
@@ -1188,7 +1196,6 @@ impl Physics {
             self.world.remove_collider(c);
         }
     }
-
 }
 
 /// Collects which collider pairs started touching during a step.
@@ -1313,7 +1320,8 @@ mod tests {
         let mut p = Physics::new();
         let id = EntityId::test(1);
         let m = Mat4::from_translation(Vec3::new(0.0, 4.0, 0.0));
-        p.add(id, &cube(), m, &Body::dynamic(), None, Vec::new).unwrap();
+        p.add(id, &cube(), m, &Body::dynamic(), None, Vec::new)
+            .unwrap();
         let mut tf = HashMap::from([(id, m)]);
         run(&mut p, 4.0, &mut tf);
         let y = tf[&id].w_axis.y;
@@ -1328,7 +1336,8 @@ mod tests {
         for i in 0..3 {
             let id = EntityId::test(10 + i);
             let m = Mat4::from_translation(Vec3::new(0.0, 0.6 + i as f32 * 1.1, 0.0));
-            p.add(id, &cube(), m, &Body::dynamic(), None, Vec::new).unwrap();
+            p.add(id, &cube(), m, &Body::dynamic(), None, Vec::new)
+                .unwrap();
             tf.insert(id, m);
         }
         run(&mut p, 4.0, &mut tf);
@@ -1341,13 +1350,17 @@ mod tests {
         let mut p = Physics::new();
         let id = EntityId::test(2);
         let m = Mat4::from_translation(Vec3::new(0.0, 0.5, 0.0));
-        p.add(id, &cube(), m, &Body::dynamic(), None, Vec::new).unwrap();
+        p.add(id, &cube(), m, &Body::dynamic(), None, Vec::new)
+            .unwrap();
         let mut tf = HashMap::from([(id, m)]);
         run(&mut p, 0.5, &mut tf);
         tf.insert(id, Mat4::from_translation(Vec3::new(10.0, 3.0, 0.0)));
         run(&mut p, 2.0, &mut tf);
         let at = tf[&id].w_axis;
-        assert!((at.x - 10.0).abs() < 0.05 && (at.y - 0.5).abs() < 0.05, "{at:?}");
+        assert!(
+            (at.x - 10.0).abs() < 0.05 && (at.y - 0.5).abs() < 0.05,
+            "{at:?}"
+        );
     }
 
     #[test]
@@ -1355,11 +1368,15 @@ mod tests {
         let mut p = Physics::new();
         let id = EntityId::test(3);
         let m = Mat4::from_translation(Vec3::new(0.0, 0.5, 0.0));
-        p.add(id, &cube(), m, &Body::dynamic(), None, Vec::new).unwrap();
+        p.add(id, &cube(), m, &Body::dynamic(), None, Vec::new)
+            .unwrap();
         let mut tf = HashMap::from([(id, m)]);
         run(&mut p, 0.3, &mut tf);
         let mass = p.mass(id).unwrap();
-        assert!((mass - 1000.0).abs() < 1.0, "1 m³ of water-density box: {mass}");
+        assert!(
+            (mass - 1000.0).abs() < 1.0,
+            "1 m³ of water-density box: {mass}"
+        );
         p.push(id, Vec3::new(3.0 * mass, 0.0, 0.0), None).unwrap();
         run(&mut p, 3.0, &mut tf);
         let x = tf[&id].w_axis.x;
@@ -1372,8 +1389,15 @@ mod tests {
         let mut p = Physics::new();
         let id = EntityId::test(4);
         let m = Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0));
-        p.add(id, &cube(), m, &Body::dynamic(), Some(Temporary { keep: 0.5 }), Vec::new)
-            .unwrap();
+        p.add(
+            id,
+            &cube(),
+            m,
+            &Body::dynamic(),
+            Some(Temporary { keep: 0.5 }),
+            Vec::new,
+        )
+        .unwrap();
         let mut gone = false;
         let mut tf = HashMap::from([(id, m)]);
         for _ in 0..400 {
@@ -1392,13 +1416,18 @@ mod tests {
         let mut p = Physics::new();
         let id = EntityId::test(5);
         let m = Mat4::from_translation(Vec3::new(0.0, 0.5, 0.0));
-        p.add(id, &cube(), m, &Body::dynamic(), None, Vec::new).unwrap();
+        p.add(id, &cube(), m, &Body::dynamic(), None, Vec::new)
+            .unwrap();
         let mut tf = HashMap::from([(id, m)]);
         run(&mut p, 0.1, &mut tf);
-        let hit = p.cast_ray(Vec3::new(0.0, 5.0, 0.0), -Vec3::Y, 10.0).unwrap();
+        let hit = p
+            .cast_ray(Vec3::new(0.0, 5.0, 0.0), -Vec3::Y, 10.0)
+            .unwrap();
         assert_eq!(hit.entity, Some(id));
         assert!((hit.point.y - 1.0).abs() < 0.02);
-        assert!(p.cast_ray(Vec3::new(5.0, 5.0, 0.0), -Vec3::Y, 10.0).is_none());
+        assert!(p
+            .cast_ray(Vec3::new(5.0, 5.0, 0.0), -Vec3::Y, 10.0)
+            .is_none());
     }
 
     #[test]

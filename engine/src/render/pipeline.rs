@@ -154,7 +154,8 @@ fn shade_surface_occluded(
     light.gi = gi_irradiance(world_p, n);
     light.gi.a *= u.gi_strength;
     let v = normalize(u.eye - world_p);
-    return pbr_shade(base, n, v, light, roughness, metallic, vis, sun_diffuse);
+    return pbr_shade(base, n, v, light, roughness, metallic, vis, sun_diffuse)
+        + lamp_light(base, n, v, world_p, roughness, metallic);
 }
 
 // Light from the viewer's own lantern. A point light at the eye with a
@@ -336,14 +337,15 @@ fn veg_wind(p: vec3<f32>, n: vec3<f32>, w: f32, flutter: f32, seed: f32,
 
 pub fn scene_shader_prefix() -> String {
     format!(
-        "{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}",
         VEG_WIND_WGSL,
         crate::lod::LOD_DITHER_WGSL,
         LIGHTING_WGSL,
         SCENE_WGSL,
         super::shadow::SHADOW_UNIFORMS_WGSL,
         super::shadow::SCENE_SHADOW_WGSL,
-        super::shadow::SHADOW_EVAL_WGSL
+        super::shadow::SHADOW_EVAL_WGSL,
+        super::lights::LAMP_EVAL_WGSL
     )
 }
 

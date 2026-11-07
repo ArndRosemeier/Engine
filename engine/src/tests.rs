@@ -1460,7 +1460,10 @@ mod physics_world {
             .dig_sphere(Vec3::new(0.3, 2.0, 0.3), 2.5);
         run(&mut world, 3.0);
         let after = y_of(&world, id);
-        assert!(after < rest - 1.0, "crate should drop into the hole: {after}");
+        assert!(
+            after < rest - 1.0,
+            "crate should drop into the hole: {after}"
+        );
     }
 
     #[test]
@@ -1474,7 +1477,12 @@ mod physics_world {
             Default::default(),
         ));
         let id = crate_at(&mut world, Vec3::new(3.0, ground + 5.0, 4.0));
-        world.add_body(id, Body::dynamic().shape(crate::physics::BodyShape::Ball(0.5))).unwrap();
+        world
+            .add_body(
+                id,
+                Body::dynamic().shape(crate::physics::BodyShape::Ball(0.5)),
+            )
+            .unwrap();
         run(&mut world, 1.5);
         let y = y_of(&world, id);
         assert!(
@@ -1493,7 +1501,11 @@ mod physics_world {
         let mut world = World::new();
         let id = crate_at(&mut world, Vec3::new(0.0, 0.5, 0.0));
         let pieces = world
-            .shatter(id, Vec3::new(0.0, 0.8, 0.4), crate::debris::Shatter::default())
+            .shatter(
+                id,
+                Vec3::new(0.0, 0.8, 0.4),
+                crate::debris::Shatter::default(),
+            )
             .unwrap();
         assert!(pieces.len() > 4);
         assert_eq!(world.debris_count(), pieces.len());
@@ -1569,7 +1581,9 @@ fn bench_voxel_collision_tile() {
     let mut volume = crate::volume::Volume::new(1.0);
     volume.ensure_bounds(Vec3::new(0.0, 0.0, 0.0), Vec3::new(31.0, 31.0, 31.0));
     let keys: Vec<_> = volume.chunk_keys().collect();
-    volume.generate_chunks(&keys, |p| 16.0 + (p.x * 0.2).sin() * 4.0 + (p.z * 0.15).cos() * 4.0 - p.y);
+    volume.generate_chunks(&keys, |p| {
+        16.0 + (p.x * 0.2).sin() * 4.0 + (p.z * 0.15).cos() * 4.0 - p.y
+    });
     let t = std::time::Instant::now();
     let (v, tris) = volume.collision_triangles(keys[0]);
     let mesh_ms = t.elapsed().as_secs_f64() * 1e3;
@@ -1580,5 +1594,82 @@ fn bench_voxel_collision_tile() {
         rapier3d::prelude::TriMeshFlags::FIX_INTERNAL_EDGES,
     );
     let build_ms = t.elapsed().as_secs_f64() * 1e3;
-    eprintln!("{} tris: marching {mesh_ms:.2} ms, collider {build_ms:.2} ms ok={}", tris.len(), c.is_ok());
+    eprintln!(
+        "{} tris: marching {mesh_ms:.2} ms, collider {build_ms:.2} ms ok={}",
+        tris.len(),
+        c.is_ok()
+    );
+}
+
+mod lamps_world {
+    use crate::color::Color;
+    use crate::lamps::{Lamp, LampShape};
+    use crate::particles::ParticleEmitter;
+    use crate::world::World;
+    use glam::Vec3;
+
+    #[test]
+    fn lamps_can_be_added_moved_changed_and_removed() {
+        let mut world = World::default();
+        let fire = world.add_lamp(Lamp::fire((1.0, 0.5, 2.0))).unwrap();
+        let spot = world
+            .add_lamp(Lamp::spot(
+                Vec3::Y * 8.0,
+                -Vec3::Y,
+                30.0,
+                Color::WHITE,
+                50.0,
+                30.0,
+            ))
+            .unwrap();
+        assert_ne!(fire, spot);
+        assert_eq!(world.lamps().count(), 2);
+
+        world.set_lamp_position(fire, (3.0, 0.5, 2.0)).unwrap();
+        assert_eq!(world.lamp(fire).unwrap().position, Vec3::new(3.0, 0.5, 2.0));
+        let dimmer = world.lamp(spot).unwrap().intensity(5.0);
+        world.set_lamp(spot, dimmer).unwrap();
+        assert_eq!(world.lamp(spot).unwrap().intensity, 5.0);
+        assert!(matches!(
+            world.lamp(spot).unwrap().shape,
+            LampShape::Spot { .. }
+        ));
+
+        // Bad values are refused and leave the lamp as it was.
+        assert!(world.set_lamp(spot, dimmer.range(-1.0)).is_err());
+        assert!(world.set_lamp_position(fire, (f32::NAN, 0.0, 0.0)).is_err());
+        assert!(world.add_lamp(Lamp::fire(Vec3::ZERO).flicker(2.0)).is_err());
+        assert_eq!(world.lamp(spot).unwrap().range, 30.0);
+
+        world.remove_lamp(fire);
+        assert!(world.lamp(fire).is_none());
+        assert!(world.set_lamp_position(fire, Vec3::ZERO).is_err());
+        assert_eq!(world.lamps().count(), 1);
+
+        world.set_lamp_shadow_budget(100);
+        assert_eq!(world.lamp_shadow_budget(), crate::lamps::MAX_SHADOW_LAMPS);
+    }
+
+    #[test]
+    fn particles_run_by_themselves_unless_the_game_drives_them() {
+        let mut world = World::default();
+        world
+            .particles_mut()
+            .start(ParticleEmitter::new(Vec3::ZERO))
+            .unwrap();
+        world.tick_effects(0.1);
+        let (_, dt, time) = world.particles_frame();
+        assert!((dt - 0.1).abs() < 1e-6 && (time - 0.1).abs() < 1e-6);
+
+        // A game in slow motion advances them itself; the engine stays out.
+        world.particles_mut().advance(0.025).unwrap();
+        world.tick_effects(0.1);
+        let (_, dt, _) = world.particles_frame();
+        assert!((dt - 0.025).abs() < 1e-6, "{dt}");
+
+        // And the next frame without a manual call runs by itself again.
+        world.tick_effects(0.1);
+        let (_, dt, _) = world.particles_frame();
+        assert!((dt - 0.1).abs() < 1e-6, "{dt}");
+    }
 }

@@ -155,6 +155,20 @@ and `.ccd(true)` for small fast things. Then `push`, `push_at`,
 becomes colliders around moving bodies (flat floor at y = 0 without terrain;
 `set_physics_settings` changes that and gravity). See `examples/physics`.
 
+**Lamps:** `world.add_lamp(Lamp::fire(pos))?`, `Lamp::street_lamp(pos)`, or
+`Lamp::point(pos, color, intensity, range)` and
+`Lamp::spot(pos, direction, angle_deg, color, intensity, range)` for your own;
+add `.shadows(true)` and `.flicker(0.4)`. Move a carried lantern with
+`set_lamp_position`, change anything with `set_lamp`, `remove_lamp` when done.
+Hundreds of lamps are fine (each pixel only looks at the lamps that reach it);
+shadows go to the lamps that matter most this frame, 4 by default
+(`set_lamp_shadow_budget`, up to 8). Give bulbs and windows an emissive
+`SurfaceMaterial` so they glow. See `examples/lamps`.
+
+**Particles:** `world.particles_mut().start(ParticleEmitter::new(pos).with_..())`
+runs by itself; call `particles_mut().advance(dt)` only for slow motion or
+fixed steps.
+
 **Input:** `frame.input.down(Key::W)`, `pressed(Key::Space)` (this frame only),
 `mouse_down(MouseButton::Left)`, `move_xz()` for WASD, `mouse_delta()`.
 `FlyCamera` does all of it for a free camera.
@@ -204,6 +218,7 @@ cargo run --release -p <name>
 | `sky_day` | A day passing under the physical sky |
 | `texgen` | The texture layers (`ENGINE_TEXGEN_FAMILY=natural/ground/facade/roof/medieval`) |
 | `voxel_destruction` | Digging terrain and shattering towers |
+| `lamps` | A hamlet at night: street lamps, a camp fire, lit windows, a lantern walker and a sweeping searchlight, all casting shadows (L your own lantern, T shadows, N/M the hour) |
 | `physics` | Crates, a brick wall, dominoes, rolling boulders and a sweeper; throw balls (click), blow things up (F), shatter (X) |
 | `model_viewer` | Any glTF/GLB or `.fmpk` file: `-- path/to/model.glb` |
 | `animated_animal` | Skinned glTF animation |

@@ -329,6 +329,8 @@ pub struct ParticleWorld {
     simulation_dt_s: f32,
     simulation_time_s: f32,
     time_scale: f32,
+    /// Set when the game advanced the effects itself this frame.
+    advanced: bool,
 }
 impl Default for ParticleWorld {
     fn default() -> Self {
@@ -338,6 +340,7 @@ impl Default for ParticleWorld {
             simulation_dt_s: 0.0,
             simulation_time_s: 0.0,
             time_scale: 1.0,
+            advanced: false,
         }
     }
 }
@@ -362,12 +365,22 @@ impl ParticleWorld {
     pub fn time_scale(&self) -> f32 {
         self.time_scale
     }
+    /// Called by the engine once a frame: runs the particles by the frame
+    /// time unless the game already called [`Self::advance`] itself (for
+    /// slow motion or fixed steps).
+    pub(crate) fn auto_advance(&mut self, dt_s: f32) {
+        if !std::mem::take(&mut self.advanced) && dt_s.is_finite() && dt_s >= 0.0 {
+            let _ = self.advance(dt_s);
+            self.advanced = false;
+        }
+    }
     pub fn advance(&mut self, dt_s: f32) -> EngineResult<()> {
         if !dt_s.is_finite() || dt_s < 0.0 {
             return Err(EngineError::InvalidValue(
                 "particle dt must be finite and >= 0".into(),
             ));
         }
+        self.advanced = true;
         let scaled = dt_s * self.time_scale;
         self.simulation_dt_s += scaled;
         self.simulation_time_s += scaled;

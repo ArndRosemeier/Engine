@@ -284,6 +284,9 @@ fn fs_grass(in: GrassOut, @builtin(front_facing) front: bool) -> @location(0) ve
     let through = pow(max(dot(-v, l), 0.0), 3.0) * vis * in.t;
     lit += albedo * frame.light_color * (1.0 - frame.ambient) * through * 0.45;
     lit += albedo * torch_light(in.world_p, n);
+    // Lamps light the blades from either side.
+    lit += lamp_light(albedo, n, v, in.world_p, 0.75, 0.0)
+        + lamp_light(albedo, -n, v, in.world_p, 0.75, 0.0) * 0.6;
     return vec4<f32>(lit, 1.0);
 }
 "#;

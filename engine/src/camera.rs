@@ -186,7 +186,12 @@ impl Camera {
     /// [`wgpu::CompareFunction::Greater`] and the pass clears depth to 0 to
     /// match — all three have to agree or nothing draws.
     pub fn projection_matrix(&self, aspect: f32) -> Mat4 {
-        glam::camera::rh::proj::directx::perspective(self.fov_y_degrees.to_radians(), aspect, self.far, self.near)
+        glam::camera::rh::proj::directx::perspective(
+            self.fov_y_degrees.to_radians(),
+            aspect,
+            self.far,
+            self.near,
+        )
     }
 
     pub fn view_projection(&self, aspect: f32) -> Mat4 {

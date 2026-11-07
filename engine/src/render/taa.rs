@@ -468,7 +468,8 @@ mod tests {
 
     #[test]
     fn reprojection_follows_the_camera() {
-        let proj = glam::camera::rh::proj::directx::perspective_infinite_reverse(1.0, 16.0 / 9.0, 0.1);
+        let proj =
+            glam::camera::rh::proj::directx::perspective_infinite_reverse(1.0, 16.0 / 9.0, 0.1);
         let view_a = glam::camera::rh::view::look_at_mat4(
             Vec3::new(0.0, 2.0, 0.0),
             Vec3::new(0.0, 2.0, -10.0),
