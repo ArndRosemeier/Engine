@@ -62,6 +62,7 @@ pub use crate::voxel_terrain::VoxelTerrain;
 pub use crate::water::{Water, WaterRegion, WaterSample, WaterSource};
 pub use crate::water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use crate::world::AnimatedEntity;
+pub use crate::world::Loaded;
 pub use crate::world::{
     AmbientOcclusion, BloomSettings, EntityId, Frame, GlobalIllumination, Haze, InstanceSubmit,
     Light, ShadowSettings, Sky, ToneMap, TorchLight, World,

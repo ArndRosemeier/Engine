@@ -4,6 +4,8 @@
 //! WASD / arrows fly, Space / Shift up and down, Ctrl faster, hold the right
 //! mouse button to look around. Left click: shoot where the mouse cursor points
 //! (towers shatter, the ground gets a crater). F adds rock back.
+//! K saves (craters, which towers still stand, where you are) to
+//! `voxel_destruction.save`; L loads it again.
 use engine::advanced::Volume;
 use engine::prelude::*;
 use glam::Vec3;
@@ -56,6 +58,8 @@ fn tower(base: Vec3, width: f32, height: f32, color: Color) -> Mesh {
 }
 
 struct Prop {
+    /// Which tower this is, for saves.
+    index: usize,
     id: EntityId,
     centre: Vec3,
     half: Vec3,
@@ -71,6 +75,19 @@ fn ray_box(origin: Vec3, dir: Vec3, prop: &Prop) -> Option<f32> {
     (far >= near.max(0.0)).then_some(near.max(0.0))
 }
 
+/// What this demo keeps in a save besides the terrain the engine saves.
+#[derive(engine::serde::Serialize, engine::serde::Deserialize)]
+#[serde(crate = "engine::serde")]
+struct Saved {
+    eye: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+    /// Towers still standing: which one, and its entity.
+    standing: Vec<(usize, EntityId)>,
+}
+
+const SAVE_FILE: &str = "voxel_destruction.save";
+
 fn main() -> EngineResult<()> {
     let mut eye = Vec3::new(SIZE * 0.5, 62.0, SIZE * 0.5 - 40.0);
     let mut yaw = 20.0_f32;
@@ -82,6 +99,8 @@ fn main() -> EngineResult<()> {
         .unwrap_or(0);
     let mut frame_no = 0u32;
     let mut props: Vec<Prop> = Vec::new();
+    // Every tower's index and box, standing or not, for rebuilding after a load.
+    let mut towers: Vec<(usize, Vec3, Vec3)> = Vec::new();
     let mut shots = 0u32;
 
     Engine::run("voxel_destruction", move |world, frame| {
@@ -119,8 +138,25 @@ fn main() -> EngineResult<()> {
                 let width = 4.0 + (i % 2) as f32;
                 let height = 9.0 + (i * 3 % 5) as f32;
                 let color = [rgb(176, 166, 150), rgb(150, 120, 96)][i % 2];
-                let id = world.spawn(tower(ground, width, height, color));
+                // Each tower is a prefab, so saves know about it.
+                let mut prefab = Prefab::new(format!("tower {i}"));
+                prefab.mesh(
+                    "tower",
+                    tower(ground, width, height, color),
+                    Place::default(),
+                );
+                world.register_prefab(prefab)?;
+                let id = world
+                    .spawn_named(&format!("tower {i}"), Place::default())?
+                    .part("tower")
+                    .expect("tower part");
+                towers.push((
+                    i,
+                    ground + Vec3::new(0.0, height * 0.5, 0.0),
+                    Vec3::new(width * 0.5, height * 0.5 + 1.0, width * 0.5),
+                ));
                 props.push(Prop {
+                    index: i,
                     id,
                     centre: ground + Vec3::new(0.0, height * 0.5, 0.0),
                     half: Vec3::new(width * 0.5, height * 0.5 + 1.0, width * 0.5),
@@ -163,6 +199,47 @@ fn main() -> EngineResult<()> {
         } else {
             dig_every > 0 && frame_no % dig_every == 0
         };
+        if input.pressed(Key::K) {
+            let saved = Saved {
+                eye: eye.to_array(),
+                yaw,
+                pitch,
+                standing: props.iter().map(|p| (p.index, p.id)).collect(),
+            };
+            match world.save(SAVE_FILE, &saved) {
+                Ok(()) => eprintln!("saved to {SAVE_FILE}"),
+                Err(e) => eprintln!("could not save: {e}"),
+            }
+        }
+        if input.pressed(Key::L) {
+            let loaded = world
+                .load(SAVE_FILE)
+                .and_then(|l| l.game::<Saved>().map(|saved| (l, saved)));
+            match loaded {
+                Ok((loaded, saved)) => {
+                    eye = Vec3::from_array(saved.eye);
+                    (yaw, pitch) = (saved.yaw, saved.pitch);
+                    // The engine brought the towers back (as prefabs); point
+                    // our list at their new entities.
+                    props.clear();
+                    for (index, old) in saved.standing {
+                        let (Some(id), Some(&(_, centre, half))) =
+                            (loaded.entity(old), towers.iter().find(|t| t.0 == index))
+                        else {
+                            continue;
+                        };
+                        props.push(Prop {
+                            index,
+                            id,
+                            centre,
+                            half,
+                        });
+                    }
+                    eprintln!("loaded {SAVE_FILE}");
+                }
+                Err(e) => eprintln!("could not load: {e}"),
+            }
+        }
         let shoot = input.mouse_clicked(MouseButton::Left) || scripted;
         let build = input.pressed(Key::F);
         if shoot || build {

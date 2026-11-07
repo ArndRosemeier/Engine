@@ -5,3 +5,4 @@
 __pycache__/
 # run_examples.py smoke captures
 examples/**/smoke.png
+voxel_destruction.save

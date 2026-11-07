@@ -29,8 +29,14 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Opaque handle to a spawned entity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[path = "save.rs"]
+mod save;
+pub use save::Loaded;
+
+/// Opaque handle to a spawned entity. Saves can hold it; after loading,
+/// map it to the new one with [`Loaded::entity`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct EntityId(u64);
 
 #[cfg(test)]
@@ -706,6 +712,9 @@ pub struct World {
     global_illumination: Option<GlobalIllumination>,
     /// Smooth destructible terrain, meshed by the renderer on the GPU.
     voxel_terrain: Option<crate::voxel_terrain::VoxelTerrain>,
+    /// Volume revision when the voxel terrain was set: chunks changed after
+    /// it were dug or built on, and go into saves.
+    voxel_baseline_rev: u64,
     water: Option<crate::water::Water>,
     /// Voxel terrain revision the water last read its columns from.
     water_terrain_rev: u64,
@@ -807,6 +816,7 @@ impl Default for World {
             ambient_occlusion: Some(AmbientOcclusion::default()),
             global_illumination: Some(GlobalIllumination::default()),
             voxel_terrain: None,
+            voxel_baseline_rev: 0,
             water: None,
             water_terrain_rev: 0,
             physics: crate::physics::Physics::new(),
@@ -2838,6 +2848,7 @@ impl World {
     }
 
     pub fn set_voxel_terrain(&mut self, terrain: Option<crate::voxel_terrain::VoxelTerrain>) {
+        self.voxel_baseline_rev = terrain.as_ref().map_or(0, |t| t.volume().rev());
         self.voxel_terrain = terrain;
     }
 

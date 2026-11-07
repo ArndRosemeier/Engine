@@ -344,6 +344,17 @@ impl Animator {
     pub(crate) fn clip_index(&self) -> usize {
         self.clip_index
     }
+    /// Jump to `time` seconds into the current clip (for loading saves).
+    pub fn seek(&mut self, time: f32) {
+        if time.is_finite() {
+            self.time = match self.clip_duration() {
+                Some(d) if d > 0.0 && self.looping => time.rem_euclid(d),
+                Some(d) if d > 0.0 => time.clamp(0.0, d),
+                _ => time.max(0.0),
+            };
+        }
+    }
+
     pub fn time(&self) -> f32 {
         self.time
     }

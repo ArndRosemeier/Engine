@@ -2000,3 +2000,257 @@ mod shapes_and_roll {
         assert!(Place::new(0.0, 0.0, 0.0).roll_deg(f32::NAN).is_err());
     }
 }
+
+mod save_load {
+    use crate::color::{rgb, Color};
+    use crate::lamps::Lamp;
+    use crate::mesh::Mesh;
+    use crate::physics::{Body, PhysicsGround, PhysicsSettings};
+    use crate::place::Place;
+    use crate::prefab::Prefab;
+    use crate::world::{EntityId, World};
+    use glam::Vec3;
+    use serde::{Deserialize, Serialize};
+
+    fn cart(falls: bool) -> Prefab {
+        let mut p = Prefab::new(if falls { "falling cart" } else { "cart" });
+        let body = p.mesh(
+            "body",
+            Mesh::box_at(Vec3::ZERO, Vec3::new(1.0, 0.4, 2.0), rgb(150, 100, 60)).unwrap(),
+            Place::new(0.0, 0.6, 0.0),
+        );
+        p.mesh_on(
+            body,
+            "wheel",
+            Mesh::cylinder(Vec3::ZERO, Vec3::X, 0.3, 0.1, 10, rgb(60, 40, 30)).unwrap(),
+            Place::new(0.6, -0.3, 0.7),
+        );
+        p.lamp_on(body, Lamp::point((0.0, 1.0, 0.0), Color::WHITE, 3.0, 8.0));
+        if falls {
+            p.body(body, Body::dynamic());
+        }
+        p
+    }
+
+    fn fresh() -> World {
+        let mut world = World::default();
+        world
+            .set_physics_settings(PhysicsSettings {
+                ground: PhysicsGround::Plane(0.0),
+                ..Default::default()
+            })
+            .unwrap();
+        world.register_prefab(cart(false)).unwrap();
+        world.register_prefab(cart(true)).unwrap();
+        world
+    }
+
+    fn voxel_ground() -> crate::voxel_terrain::VoxelTerrain {
+        let mut volume = crate::volume::Volume::new(0.5);
+        volume.ensure_bounds(Vec3::new(-8.0, -4.0, -8.0), Vec3::new(8.0, 8.0, 8.0));
+        let keys: Vec<_> = volume.chunk_keys().collect();
+        volume.generate_chunks(&keys, |p| 2.0 - p.y);
+        crate::voxel_terrain::VoxelTerrain::new(volume)
+    }
+
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct Game {
+        gold: u32,
+        hero_cart: EntityId,
+        name: String,
+    }
+
+    fn pos(world: &World, id: EntityId) -> Vec3 {
+        world.world_transform(id).unwrap().w_axis.truncate()
+    }
+
+    #[test]
+    fn a_world_comes_back_as_it_was_saved() {
+        let mut world = fresh();
+        world.set_voxel_terrain(Some(voxel_ground()));
+        world.set_physical_sky(Some(crate::sky::PhysicalSky::at_hour(17.25)));
+        let a = world
+            .spawn_named("cart", Place::new(3.0, 0.0, 1.0).with_yaw_deg(30.0))
+            .unwrap();
+        let wheel = a.part("wheel").unwrap();
+        world
+            .set_place(wheel, Place::new(0.6, -0.3, 0.7).with_pitch_deg(77.0))
+            .unwrap();
+        let flying = world
+            .spawn_named("falling cart", Place::new(-4.0, 9.0, 0.0))
+            .unwrap();
+        let fbody = flying.part("body").unwrap();
+        world.set_body_velocity(fbody, (2.0, 1.0, 0.0)).unwrap();
+        for _ in 0..10 {
+            world.tick_physics(1.0 / 60.0);
+            world.tick_hierarchy();
+        }
+        let free = world
+            .add_lamp(Lamp::fire((1.0, 0.5, -2.0)).intensity(4.5))
+            .unwrap();
+        let riding = world
+            .add_lamp(Lamp::point(Vec3::ZERO, rgb(10, 200, 30), 2.0, 6.0))
+            .unwrap();
+        world
+            .attach_lamp(riding, a.part("body").unwrap(), (0.0, 2.0, 0.0))
+            .unwrap();
+        world.lamp(a.lamps[0]).unwrap();
+        let mut look = *world.lamp(a.lamps[0]).unwrap();
+        look.intensity = 9.0;
+        world.set_lamp(a.lamps[0], look).unwrap();
+        world
+            .voxel_terrain_mut()
+            .unwrap()
+            .dig_sphere(Vec3::new(0.0, 2.0, 0.0), 1.5);
+        assert!(!world
+            .voxel_terrain()
+            .unwrap()
+            .is_solid(Vec3::new(0.0, 1.2, 0.0)));
+        assert!(world
+            .voxel_terrain()
+            .unwrap()
+            .is_solid(Vec3::new(5.0, 1.2, 5.0)));
+
+        let game = Game {
+            gold: 42,
+            hero_cart: a.root,
+            name: "Ærnd".into(),
+        };
+        let bytes = world.save_to_bytes(&game).unwrap();
+
+        // A new session: build the world as at startup, then load.
+        let mut world2 = fresh();
+        world2.set_voxel_terrain(Some(voxel_ground()));
+        let stray = world2
+            .spawn_named("cart", Place::new(50.0, 0.0, 0.0))
+            .unwrap();
+        world2.add_lamp(Lamp::fire(Vec3::ZERO)).unwrap();
+        let loaded = world2.load_from_bytes(&bytes).unwrap();
+        assert!(
+            world2.world_transform(stray.root).is_err(),
+            "load replaces what was there"
+        );
+
+        let got: Game = loaded.game().unwrap();
+        assert_eq!(got.gold, 42);
+        assert_eq!(got.name, "Ærnd");
+        let a2 = loaded.entity(got.hero_cart).unwrap();
+        assert_eq!(world2.prefab_of(a2), Some("cart"));
+        assert!(world2
+            .world_transform(a2)
+            .unwrap()
+            .abs_diff_eq(world.world_transform(a.root).unwrap(), 1e-5));
+        let wheel2 = loaded.entity(wheel).unwrap();
+        assert!(world2
+            .world_transform(wheel2)
+            .unwrap()
+            .abs_diff_eq(world.world_transform(wheel).unwrap(), 1e-5));
+        assert_eq!(
+            world2.parent(wheel2),
+            loaded.entity(a.part("body").unwrap())
+        );
+
+        // The flying cart is where it was, still flying the same way.
+        let fbody2 = loaded.entity(fbody).unwrap();
+        assert!(pos(&world2, fbody2).distance(pos(&world, fbody)) < 1e-4);
+        let (v1, v2) = (
+            world.body_velocity(fbody).unwrap(),
+            world2.body_velocity(fbody2).unwrap(),
+        );
+        assert!(v1.distance(v2) < 1e-3, "{v1} {v2}");
+
+        // Lamps: the free fire, the one riding on the cart, the prefab's own
+        // (with its changed brightness).
+        assert_eq!(world2.lamps().count(), 4);
+        let free2 = loaded.lamp(free).unwrap();
+        assert_eq!(world2.lamp(free2).unwrap().intensity, 4.5);
+        assert!(world2.lamp(free2).unwrap().flicker > 0.0);
+        let riding2 = loaded.lamp(riding).unwrap();
+        world2.set_place(a2, Place::new(10.0, 0.0, 0.0)).unwrap();
+        world2.tick_hierarchy();
+        assert!(
+            world2
+                .lamp(riding2)
+                .unwrap()
+                .position
+                .distance(Vec3::new(10.0, 2.6, 0.0))
+                < 1e-4
+        );
+        let prefab_lamp = world2.lamps().find(|(id, _, _)| {
+            *id != free2 && *id != riding2 && world2.lamp(*id).unwrap().intensity == 9.0
+        });
+        assert!(prefab_lamp.is_some());
+
+        // Dug terrain and time of day.
+        assert!(!world2
+            .voxel_terrain()
+            .unwrap()
+            .is_solid(Vec3::new(0.0, 1.2, 0.0)));
+        assert!(world2
+            .voxel_terrain()
+            .unwrap()
+            .is_solid(Vec3::new(5.0, 1.2, 5.0)));
+        assert_eq!(world2.physical_sky().unwrap().hour, 17.25);
+
+        // Saving the loaded world again gives the same world once more.
+        let again = world2.save_to_bytes(&got).unwrap();
+        let mut world3 = fresh();
+        world3.set_voxel_terrain(Some(voxel_ground()));
+        world3.load_from_bytes(&again).unwrap();
+        assert_eq!(world3.lamps().count(), 4);
+        assert!(!world3
+            .voxel_terrain()
+            .unwrap()
+            .is_solid(Vec3::new(0.0, 1.2, 0.0)));
+    }
+
+    #[test]
+    fn parts_destroyed_before_saving_stay_destroyed() {
+        let mut world = fresh();
+        let a = world
+            .spawn_named("cart", Place::new(1.0, 0.0, 0.0))
+            .unwrap();
+        world.despawn(a.part("wheel").unwrap());
+        let bytes = world.save_to_bytes(&a.part("body").unwrap()).unwrap();
+        let mut world2 = fresh();
+        let loaded = world2.load_from_bytes(&bytes).unwrap();
+        let body = loaded.entity(loaded.game().unwrap()).unwrap();
+        assert!(world2.children(body).is_empty(), "the wheel stays gone");
+        assert!(world2.world_transform(body).is_ok());
+    }
+
+    #[test]
+    fn bad_saves_are_refused_without_touching_the_world() {
+        let mut world = fresh();
+        let keep = world.spawn_named("cart", Place::default()).unwrap();
+        assert!(world.load_from_bytes(b"hello").is_err());
+        let mut damaged = world.save_to_bytes(&()).unwrap();
+        let mid = damaged.len() / 2;
+        damaged.truncate(mid);
+        assert!(world.load_from_bytes(&damaged).is_err());
+
+        // A save needing a prefab this world doesn't know.
+        let mut other = World::default();
+        let mut boat = Prefab::new("boat");
+        boat.mesh(
+            "hull",
+            Mesh::box_at(Vec3::ZERO, Vec3::ONE, rgb(1, 1, 1)).unwrap(),
+            Place::default(),
+        );
+        other.spawn_prefab(&boat, Place::default()).unwrap();
+        let bytes = other.save_to_bytes(&()).unwrap();
+        let err = world.load_from_bytes(&bytes).unwrap_err().to_string();
+        assert!(err.contains("boat"), "{err}");
+        assert!(world.world_transform(keep.root).is_ok());
+
+        // Files on disk, written safely.
+        let dir = std::env::temp_dir().join(format!("engine-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("slot.save");
+        world.save(&path, &7u32).unwrap();
+        let loaded = fresh().load(&path).unwrap();
+        assert_eq!(loaded.game::<u32>().unwrap(), 7);
+        assert!(loaded.game::<String>().is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
