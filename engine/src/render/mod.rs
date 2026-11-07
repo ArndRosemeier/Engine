@@ -2097,7 +2097,7 @@ impl Renderer {
 
         pass.set_pipeline(&self.skinned.depth_prepass);
         for (id, anim) in world.animated_entities() {
-            if anim.space() != space {
+            if anim.space() != space || world.room_hidden(*id) {
                 continue;
             }
             let Some(gpu) = self.gpu_skinned.get(id) else {
@@ -2318,7 +2318,7 @@ impl Renderer {
             &self.skinned.opaque
         });
         for (id, anim) in world.animated_entities() {
-            if anim.space() != space {
+            if anim.space() != space || world.room_hidden(*id) {
                 continue;
             }
             let Some(gpu) = self.gpu_skinned.get(id) else {
@@ -2631,7 +2631,7 @@ impl Renderer {
             pass.set_pipeline(&self.shadow.skinned_pipeline);
             pass.set_bind_group(0, view_bind, &[]);
             for (id, anim) in world.animated_entities() {
-                if anim.space() != world.living_in() {
+                if anim.space() != world.living_in() || world.room_hidden(*id) {
                     continue;
                 }
                 let Some(gpu) = self.gpu_skinned.get(id) else {
@@ -3383,7 +3383,7 @@ fn submit_mesh_draw(
 }
 
 fn entity_in_space(world: &World, id: EntityId, space: SpaceId) -> bool {
-    world.entity(id).expect("draw source is live").space() == space
+    world.entity(id).expect("draw source is live").space() == space && !world.room_hidden(id)
 }
 
 fn mesh_submit(compacted: &HashSet<EntityId>, id: EntityId) -> MeshSubmit {

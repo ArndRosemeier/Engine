@@ -71,6 +71,7 @@ pub mod quality;
 pub mod ragdoll;
 pub mod ribbons;
 pub mod rocks;
+pub mod rooms;
 pub mod scatter;
 pub mod sim;
 pub mod sky;
@@ -143,6 +144,7 @@ pub use proc_terrain::{
 pub use props::{PropModel, PropPack};
 pub use ragdoll::{Knock, RagdollEvent, RagdollSettings, RagdollState};
 pub use ribbons::{RibbonId, RibbonProfile, RibbonStyle, RibbonWorld};
+pub use rooms::{Opening, OpeningId, Room, RoomId};
 /// For your save data: `#[derive(engine::serde::Serialize, engine::serde::Deserialize)]`
 /// with `#[serde(crate = "engine::serde")]`, or add serde to your own crate.
 pub use serde;

@@ -40,6 +40,8 @@ mod nav;
 mod world_buildings;
 #[path = "world_ragdolls.rs"]
 mod world_ragdolls;
+#[path = "world_rooms.rs"]
+mod world_rooms;
 pub use nav::{NavAgent, NavSettings, NavStats, NavStatus};
 
 /// Opaque handle to a spawned entity. Saves can hold it; after loading,
@@ -746,6 +748,9 @@ pub struct World {
     rubble: world_buildings::RubbleSet,
     /// Characters knocked down, lying or getting up.
     ragdolls: world_ragdolls::Ragdolls,
+    /// Indoor culling: rooms, openings, and what is in which room.
+    rooms: crate::rooms::Rooms,
+    entity_rooms: HashMap<EntityId, crate::rooms::RoomId>,
     /// Surface presentation sync. Engine default stays on so demos never tear;
     /// the renderer applies it at every present.
     vsync: bool,
@@ -856,6 +861,8 @@ impl Default for World {
             falling: Vec::new(),
             rubble: Default::default(),
             ragdolls: Default::default(),
+            rooms: crate::rooms::Rooms::new(),
+            entity_rooms: HashMap::new(),
             vsync: true,
             shadow_contact: ContactSnapshot::default(),
             shadow_contact_epoch: 0,
@@ -1910,6 +1917,7 @@ impl World {
     pub fn despawn(&mut self, id: EntityId) {
         self.sim_poses.remove(&id);
         self.forget_ragdoll(id);
+        self.entity_rooms.remove(&id);
         if self.buildings.contains_key(&id) || self.falling.iter().any(|p| p.building == id) {
             self.forget_building(id);
         }
