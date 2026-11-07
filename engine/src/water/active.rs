@@ -62,11 +62,11 @@ pub(crate) struct Sweep<'a> {
 }
 
 impl Sweep<'_> {
-    pub fn each(
+    pub fn each<T: Send>(
         &self,
-        data: &mut [f32],
+        data: &mut [T],
         start: impl Fn(usize) -> usize + Sync,
-        f: impl Fn(usize, &mut f32) -> f32 + Sync,
+        f: impl Fn(usize, &mut T) -> f32 + Sync,
     ) -> f32 {
         let (nx, nz) = (self.nx, self.nz);
         let mut slices = Vec::with_capacity(self.runs.len());

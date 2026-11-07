@@ -741,3 +741,40 @@ fn a_still_lake_sleeps_and_wakes_when_disturbed() {
         "sleeping changed the wave: {worst} vs peak {peak}"
     );
 }
+
+#[test]
+fn breaking_swell_leaves_foam_and_wet_sand() {
+    let beach = HeightMapTerrain(|x: f32, _| beach_ground(x));
+    let region = WaterRegion::new(Vec2::ZERO, Vec2::new(160.0, 2.0), 1.0, -8.0, 20.0);
+    let mut water = Water::new(region, &beach);
+    water.flood_sea(0.0);
+    let still = beach_shoreline(&water, beach_ground);
+    water.set_sea(Some(
+        Sea::calm(0.0)
+            .with_edges(SeaEdges {
+                min_x: true,
+                ..Default::default()
+            })
+            .with_swell(Swell {
+                height: 1.8,
+                period: 11.0,
+                direction_deg: 90.0,
+            }),
+    ));
+    let mut foam: f32 = 0.0;
+    for _ in 0..60 * 60 {
+        water.update(1.0 / 60.0);
+        for x in 80..140 {
+            let px = x as f32 + 0.5;
+            foam = foam.max(water.foam(Vec3::new(px, beach_ground(px) + 0.01, 1.0)));
+        }
+    }
+    assert!(foam > 0.5, "breaking waves should foam, max {foam}");
+    // Sand above the still waterline that the swash reached is wet;
+    // high up the dune it is dry.
+    let px = still.floor() + 2.5;
+    let wet = water.wetness(Vec3::new(px, beach_ground(px) + 0.01, 1.0));
+    assert!(wet > 0.3, "swash zone at x {px} should be wet, {wet}");
+    let dune = water.wetness(Vec3::new(155.5, beach_ground(155.5) + 0.01, 1.0));
+    assert!(dune < 0.01, "dune should be dry, {dune}");
+}

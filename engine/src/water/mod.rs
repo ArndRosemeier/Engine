@@ -40,6 +40,7 @@
 
 mod active;
 mod look;
+mod marks;
 mod render_data;
 mod sea;
 mod sim;
