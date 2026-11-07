@@ -19,6 +19,7 @@ members = [
     "examples/sky_day",
     "examples/texgen",
     "examples/vegetation",
+    "examples/starter",
 ]
 default-members = ["engine"]
 
@@ -47,3 +48,11 @@ rodio = "0.21"
 thiserror = "2"
 wgpu = "25"
 winit = "0.30"
+
+# Generators and the renderer crawl without optimisation, so debug builds
+# optimise dependencies (and the engine) while your own code stays quick to build.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

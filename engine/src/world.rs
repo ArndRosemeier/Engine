@@ -655,6 +655,8 @@ pub struct World {
     travel_gate: Option<EntityId>,
     particles: ParticleWorld,
     ribbons: RibbonWorld,
+    quality: crate::quality::Quality,
+    auto_tune: Option<crate::quality::AutoTune>,
 }
 
 impl Default for World {
@@ -729,6 +731,8 @@ impl Default for World {
             travel_gate: None,
             particles: ParticleWorld::default(),
             ribbons: RibbonWorld::default(),
+            quality: crate::quality::Quality::High,
+            auto_tune: None,
         }
     }
 }
@@ -829,6 +833,26 @@ impl World {
         Ok(id)
     }
 
+    /// [`Self::spawn_lod`] and [`Self::set_lod_places`] in one call: the
+    /// usual way to put a tree, rock or prop model into the world.
+    ///
+    /// ```no_run
+    /// # use engine::prelude::*;
+    /// # fn f(world: &mut World) -> EngineResult<()> {
+    /// let oak = tree_model(TreeSpecies::Oak, 0)?;
+    /// let places = Scatter::new(1).rect(-50.0, -50.0, 50.0, 50.0).spacing(9.0).places()?;
+    /// world.spawn_lod_at(oak.lod_levels(), &places)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn spawn_lod_at(&mut self, levels: Vec<LodLevel>, places: &[Place]) -> EngineResult<LodId> {
+        let id = self.spawn_lod(levels)?;
+        if let Err(e) = self.set_lod_places(id, places) {
+            self.despawn_lod(id);
+            return Err(e);
+        }
+        Ok(id)
+    }
+
     /// Where a LOD set's instances stand.
     pub fn set_lod_places(&mut self, id: LodId, places: &[Place]) -> EngineResult<()> {
         if places.len() as u64 > self.limits.max_instances_per_spawn {
@@ -873,6 +897,68 @@ impl World {
 
     pub fn lod_bias(&self) -> f32 {
         self.lod_bias
+    }
+
+    /// Apply a quality preset: shadows, ambient occlusion, GI and LOD bias.
+    /// A new world starts at [`Quality::High`](crate::quality::Quality::High).
+    /// Settings changed afterwards (for example `set_ambient_occlusion`) win
+    /// until the next call.
+    pub fn set_quality(&mut self, quality: crate::quality::Quality) {
+        let s = quality.settings();
+        self.quality = quality;
+        self.shadows = s.shadows;
+        self.ambient_occlusion = s.ambient_occlusion;
+        self.global_illumination = s.global_illumination;
+        self.lod_bias = s.lod_bias;
+        if let Some(t) = &mut self.auto_tune {
+            t.max_bias = s.lod_bias;
+        }
+    }
+
+    /// The last preset given to [`Self::set_quality`].
+    pub fn quality(&self) -> crate::quality::Quality {
+        self.quality
+    }
+
+    /// Keep the frame rate at or above `fps` by trading detail for speed,
+    /// within the current [`Self::set_quality`] preset: LOD distances first,
+    /// then GI, then AO. `None` stops tuning and leaves things as they are.
+    /// See [`crate::quality`].
+    pub fn set_target_fps(&mut self, fps: Option<f32>) -> EngineResult<()> {
+        match fps {
+            None => self.auto_tune = None,
+            Some(f) if f.is_finite() && (1.0..=1000.0).contains(&f) => {
+                let max_bias = self.quality.settings().lod_bias;
+                self.auto_tune = Some(crate::quality::AutoTune::new(f, max_bias));
+            }
+            Some(f) => {
+                return Err(EngineError::InvalidValue(format!(
+                    "target fps {f} must be within 1..=1000"
+                )))
+            }
+        }
+        Ok(())
+    }
+
+    pub fn target_fps(&self) -> Option<f32> {
+        self.auto_tune.as_ref().map(|t| t.target_fps)
+    }
+
+    pub(crate) fn tick_auto_quality(&mut self, dt: f32) {
+        use crate::quality::TuneStep;
+        let (gi, ao) = (
+            self.global_illumination.is_some(),
+            self.ambient_occlusion.is_some(),
+        );
+        let Some(t) = &mut self.auto_tune else {
+            return;
+        };
+        match t.tick(dt, self.lod_bias, gi, ao) {
+            TuneStep::Hold => {}
+            TuneStep::Bias(b) => self.lod_bias = b,
+            TuneStep::DropGi => self.global_illumination = None,
+            TuneStep::DropAo => self.ambient_occlusion = None,
+        }
     }
 
     /// Width of the cross-fade band as a fraction of each level's end
