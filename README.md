@@ -142,6 +142,36 @@ gives diggable ground (see `examples/voxel_destruction`);
 solid pieces; they become physics bodies that hit each other and sink away
 after `keep_seconds`.
 
+**Huge streamed worlds:** implement `WorldGenerator` (in `engine::stream`):
+`height(x, z)` for the ground, optionally `density(p, ground)` for caves and
+overhangs, `populate(tile)` for what stands on each tile, and `sea()` /
+`water_level(x, z)` for water. Then
+`world.set_stream(Some(WorldStream::new(my_world, StreamSettings::default())))?`
+and the engine does the rest on worker threads, a little per frame so moving
+never stalls:
+
+- diggable voxel ground in blocks around the camera (3 x 3 blocks of 128 m by
+  default). Digging works as usual; edits are kept when a block unloads, come
+  back when you return and go into save files;
+- height tiles from there to `view_distance` (6 km), coarser with distance,
+  drawn with the voxel shader so far ground matches near ground;
+- tiles (128 m) populated out to `content_distance` (1.2 km): in `populate`,
+  `tile.place(model, place)` puts down a model (a LOD set you spawned once
+  with `world.spawn_lod(levels)` and no places: every tile's copies share its
+  meshes and GPU batches), `tile.spawn(mesh, place)` / `spawn_solid` a one-off
+  mesh (with a collider), `tile.add_lamp(lamp)` a light. `tile.seed()` and
+  `Scatter::rect` make this a few lines;
+- a water simulation window that follows the camera and opens onto your sea,
+  drawn on to the horizon.
+
+GI, shadows, physics and navigation see the streamed ground like any other.
+`world.prepare_stream(10.0)` on the first frame waits until the ground under
+the camera is there; `stream.set_focus(Some(player))` loads around a player
+instead of the camera; `stream.stats()` counts what is loaded;
+`.with_terrain(|t| t.with_beach(2.0))` styles the ground. Coordinates stay
+plain metres (fine for worlds tens of kilometres across). See
+`examples/open_world`.
+
 **Physics:** `world.add_body(id, Body::dynamic())?` and the entity falls,
 collides and comes to rest; `Body::fixed()` for walls and floors (exact mesh),
 `Body::kinematic()` for things you move with `set_place` (lifts, doors, a
@@ -384,6 +414,7 @@ Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_glo
 | `rocks` | `rock_model(shape, seed)`: boulders, blocks, slabs, spires with LOD |
 | `texgen` | `texture_layer(layer)`: 61 tileable albedo/normal/roughness layers |
 | `scatter` | `Scatter`: deterministic places with clumping, ground snapping, filters |
+| `stream` | `WorldStream` + your `WorldGenerator`: huge worlds streamed around the camera (diggable voxels near, height tiles to the horizon, populated tiles, water window) |
 | `proc_terrain` | `ProcTerrain::gpu_clipmap`: endless terrain with lakes, painted with texgen layers (`with_layers(Some(TerrainLayers { .. }))`) and grown with grass (`with_grass(Some(Grass { height, density, distance }))`), `HeightField` to query it |
 | `landscape` | `Landscape::new(seed)`: hills and caves as a mesh |
 | `voxel_terrain` | Smooth, diggable voxel ground meshed on the GPU (`with_beach(top_y)` for sand along the sea) |
@@ -404,6 +435,7 @@ cargo run --release -p <name>
 | Example | Shows |
 |---|---|
 | `starter` | The template: terrain, wood, rocks, sky, quality presets, fly camera |
+| `open_world` | An endless streamed world: continents, mountains, beaches, woods, huts and the sea to the horizon, generated around you as you fly (F very fast, click digs, B builds) |
 | `island` | Everything together: a wooded island in an open sea with surf, characters on the beach, digging, swimming |
 | `hello_mesh` | Building a mesh by hand (a little house) |
 | `vegetation` | All tree species, shrubs and rocks in the wind |

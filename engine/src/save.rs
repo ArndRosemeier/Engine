@@ -318,6 +318,20 @@ impl World {
                 });
             }
         }
+        // Edits a world stream keeps while their ground is unloaded.
+        if let Some(stream) = self.stream() {
+            let mut stored: Vec<&crate::volume::EditedChunk> = stream.stored_edits().collect();
+            stored.sort_by_key(|e| (e.key.x, e.key.y, e.key.z));
+            for e in stored {
+                let samples = put(bytemuck::cast_slice(&e.samples));
+                let materials = e.materials.as_deref().map(&mut put);
+                chunks.push(SavedChunk {
+                    key: e.key.to_array(),
+                    samples,
+                    materials,
+                });
+            }
+        }
 
         let file = SaveFile {
             version: VERSION,

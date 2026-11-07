@@ -219,7 +219,10 @@ impl FogVolume {
 
     pub fn validate(&self) -> EngineResult<()> {
         let bad = |what: &str| Err(EngineError::InvalidValue(format!("fog volume {what}")));
-        if !self.center.is_finite() || !self.half_extents.is_finite() || self.half_extents.min_element() <= 0.0 {
+        if !self.center.is_finite()
+            || !self.half_extents.is_finite()
+            || self.half_extents.min_element() <= 0.0
+        {
             return bad("needs a finite center and positive half extents");
         }
         if !self.blend_m.is_finite() || self.blend_m < 0.0 {
@@ -299,7 +302,11 @@ impl FogState {
     pub fn haze(&self) -> Option<Haze> {
         (self.density > 1e-6).then(|| {
             let c = self.color;
-            Haze::new(Color::rgb01(c.x, c.y, c.z).unwrap_or(Color::WHITE), 1.978 / self.density).thinning_above(self.base_y, self.height_m)
+            Haze::new(
+                Color::rgb01(c.x, c.y, c.z).unwrap_or(Color::WHITE),
+                1.978 / self.density,
+            )
+            .thinning_above(self.base_y, self.height_m)
         })
     }
 }

@@ -110,7 +110,11 @@ mod tests {
         }
         assert!(world.fog_volume_blend(id) > 0.99);
         let haze = world.screen_haze().unwrap();
-        assert!((haze.visibility_m - 60.0).abs() < 2.0, "{}", haze.visibility_m);
+        assert!(
+            (haze.visibility_m - 60.0).abs() < 2.0,
+            "{}",
+            haze.visibility_m
+        );
         assert!(world.remove_fog_volume(id));
         assert_eq!(world.screen_grade(), ColorGrade::NEUTRAL);
     }

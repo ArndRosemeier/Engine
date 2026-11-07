@@ -22,10 +22,10 @@
 //! ```
 
 use crate::anim::{AnimatedModel, SkinMesh, MAX_JOINTS};
-use glam::Vec3;
 use crate::error::{EngineError, EngineResult};
 use crate::place::Place;
 use crate::world::EntityId;
+use glam::Vec3;
 use std::sync::Arc;
 
 /// Frames per second the clips are baked at (the GPU blends between them).
@@ -273,11 +273,15 @@ pub(crate) fn spread(i: u32) -> f32 {
 /// drawing far away: meshoptimizer's edge collapse, then unused vertices
 /// dropped. Tiny parts (eyes, lashes, teeth) vanish at crowd distance, so
 /// meshes under `min_size_m` across are left out (None).
-pub(crate) fn simplify_skin_mesh(mesh: &SkinMesh, fraction: f32, min_size_m: f32) -> Option<SkinMesh> {
-    let (lo, hi) = mesh
-        .positions
-        .iter()
-        .fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+pub(crate) fn simplify_skin_mesh(
+    mesh: &SkinMesh,
+    fraction: f32,
+    min_size_m: f32,
+) -> Option<SkinMesh> {
+    let (lo, hi) = mesh.positions.iter().fold(
+        (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+        |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+    );
     if mesh.indices.len() < 3 || (hi - lo).max_element() < min_size_m {
         return None;
     }

@@ -147,8 +147,8 @@ impl MoonSpec {
     /// This moon at `hour` of a day `hours` into the game.
     pub fn at(&self, hour: f32, hours: f32, sun: Vec3) -> MoonView {
         let phase = (hours / 24.0 / self.period_days + self.phase).rem_euclid(1.0);
-        let dir = glam::Quat::from_rotation_x(self.tilt_deg.to_radians())
-            * sky_path(hour - phase * 24.0);
+        let dir =
+            glam::Quat::from_rotation_x(self.tilt_deg.to_radians()) * sky_path(hour - phase * 24.0);
         let pa = phase * std::f32::consts::TAU;
         let mut perp = sun - dir * sun.dot(dir);
         if perp.length_squared() < 1e-6 {
@@ -480,15 +480,18 @@ mod tests {
         let one = sky.lighting_with(&sky.moon_views(&[]));
         assert_eq!(one, sky.lighting(), "no moons listed: the usual one");
         // Two full moons high at midnight light more than one.
-        let full = |size: f32, tilt: f32| {
-            MoonSpec::new(size, 10.0, 0.5).tilt(tilt)
-        };
+        let full = |size: f32, tilt: f32| MoonSpec::new(size, 10.0, 0.5).tilt(tilt);
         let a = sky.moon_views(&[full(1.0, 0.0)]);
         let b = sky.moon_views(&[full(1.0, 0.0), full(2.0, -20.0)]);
         assert!(a[0].moon.lit > 0.99 && a[0].moon.dir.y > 0.3);
         let la = sky.lighting_with(&a);
         let lb = sky.lighting_with(&b);
-        assert!(lb.light_intensity > la.light_intensity * 1.5, "{} {}", la.light_intensity, lb.light_intensity);
+        assert!(
+            lb.light_intensity > la.light_intensity * 1.5,
+            "{} {}",
+            la.light_intensity,
+            lb.light_intensity
+        );
         // A red moon tints the night light.
         let red = sky.moon_views(&[full(1.5, 0.0).color(crate::color::Color::rgb(255, 120, 90))]);
         let lr = sky.lighting_with(&red);

@@ -98,7 +98,11 @@ fn main() -> EngineResult<()> {
                     }
                     let x = WEST + gx as f32 * 18.0 + rng.range(-3.0, 3.0);
                     let z = gz as f32 * 18.0 + rng.range(-3.0, 3.0);
-                    let (w, d, h) = (rng.range(7.0, 12.0), rng.range(7.0, 12.0), rng.range(5.0, 11.0));
+                    let (w, d, h) = (
+                        rng.range(7.0, 12.0),
+                        rng.range(7.0, 12.0),
+                        rng.range(5.0, 11.0),
+                    );
                     let y = ground.height_at(x, z);
                     let walls = [rgb(232, 206, 160), rgb(220, 180, 130), rgb(240, 225, 190)];
                     world.spawn(Mesh::box_at(
@@ -124,7 +128,11 @@ fn main() -> EngineResult<()> {
                     let y = ground.height_at(x, z);
                     let pick = rng.next();
                     if pick < 0.6 {
-                        let (w, d, h) = (rng.range(14.0, 22.0), rng.range(10.0, 18.0), rng.range(8.0, 16.0));
+                        let (w, d, h) = (
+                            rng.range(14.0, 22.0),
+                            rng.range(10.0, 18.0),
+                            rng.range(8.0, 16.0),
+                        );
                         world.spawn(Mesh::box_at(
                             Vec3::new(x, y + h * 0.5, z),
                             Vec3::new(w, h, d),

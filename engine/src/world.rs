@@ -657,6 +657,9 @@ pub struct World {
     next_id: u64,
     entities: HashMap<EntityId, Entity>,
     order: Vec<EntityId>,
+    /// Despawned ids still listed in `order` (dropped in bulk, so despawning
+    /// many entities stays cheap).
+    order_stale: usize,
     /// Changes whenever static render state could require a GPU resync.
     render_epoch: u64,
     animated: HashMap<EntityId, AnimatedEntity>,
@@ -735,6 +738,8 @@ pub struct World {
     global_illumination: Option<GlobalIllumination>,
     /// Smooth destructible terrain, meshed by the renderer on the GPU.
     voxel_terrain: Option<crate::voxel_terrain::VoxelTerrain>,
+    /// The world stream, if one is set (taken out while it updates).
+    stream: Option<Box<crate::stream::WorldStream>>,
     /// Volume revision when the voxel terrain was set: chunks changed after
     /// it were dug or built on, and go into saves.
     voxel_baseline_rev: u64,
@@ -820,6 +825,7 @@ impl Default for World {
             next_id: 1,
             entities: HashMap::new(),
             order: Vec::new(),
+            order_stale: 0,
             render_epoch: 1,
             animated: HashMap::new(),
             animated_order: Vec::new(),
@@ -871,6 +877,7 @@ impl Default for World {
             voxel_baseline_rev: 0,
             water: None,
             water_terrain_rev: 0,
+            stream: None,
             physics: crate::physics::Physics::new(),
             sim_clock: None,
             sim_tick: 0,
@@ -1024,8 +1031,58 @@ impl World {
                 levels: ids,
                 places: Vec::new(),
                 assigned_for: None,
+                bounds: None,
+                assigned_zone: None,
             },
         );
+        Ok(id)
+    }
+
+    /// Another LOD set drawing the same model as `model` at `places`. Its
+    /// levels share `model`'s meshes and GPU buffers and are drawn in the
+    /// same batches, so many small sets (one per streamed tile, say) cost
+    /// about as much as one big one. Despawn the like-sets before `model`.
+    pub fn spawn_lod_like(&mut self, model: LodId, places: &[Place]) -> EngineResult<LodId> {
+        let levels: Vec<(EntityId, f32)> = self
+            .lods
+            .get(&model)
+            .ok_or(EngineError::UnknownEntity)?
+            .levels
+            .clone();
+        let mut ids = Vec::with_capacity(levels.len());
+        for (prototype, max_distance) in levels {
+            // A like-set of a like-set draws the original prototype.
+            let prototype = self
+                .entities
+                .get(&prototype)
+                .and_then(|e| e.instance_of)
+                .unwrap_or(prototype);
+            match self.spawn_instanced_like(prototype) {
+                Ok(id) => ids.push((id, max_distance)),
+                Err(e) => {
+                    for (id, _) in ids {
+                        self.despawn(id);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let id = LodId(self.next_lod);
+        self.next_lod += 1;
+        self.lods.insert(
+            id,
+            LodSet {
+                levels: ids,
+                places: Vec::new(),
+                assigned_for: None,
+                bounds: None,
+                assigned_zone: None,
+            },
+        );
+        if let Err(e) = self.set_lod_places(id, places) {
+            self.despawn_lod(id);
+            return Err(e);
+        }
         Ok(id)
     }
 
@@ -1061,6 +1118,7 @@ impl World {
         let set = self.lods.get_mut(&id).ok_or(EngineError::UnknownEntity)?;
         set.places = crate::lod::instances_from(places);
         set.assigned_for = None;
+        set.update_bounds();
         Ok(())
     }
 
@@ -1208,6 +1266,7 @@ impl World {
         self.lod_fade = fraction;
         for set in self.lods.values_mut() {
             set.assigned_for = None;
+            set.assigned_zone = None;
         }
         Ok(())
     }
@@ -1220,22 +1279,48 @@ impl World {
         }
         let eye = self.camera.eye();
         let (bias, fade) = (self.lod_bias, self.lod_fade);
-        let mut updates = Vec::new();
+        let mut stale_sets: Vec<&mut LodSet> = Vec::new();
         for set in self.lods.values_mut() {
+            // Far sets need a proportionally longer move to change visibly
+            // (a metre at a kilometre moves a fade by a fraction of a percent).
+            let near = set
+                .bounds
+                .map_or(0.0, |(c, r)| (c.distance(eye) - r).max(0.0));
+            let threshold = set.move_threshold(bias, fade).max(near * 0.01);
             let stale = match set.assigned_for {
                 None => true,
-                Some((at, b)) => b != bias || at.distance(eye) >= set.move_threshold(bias, fade),
+                Some((at, b)) => b != bias || at.distance(eye) >= threshold,
             };
             if !stale {
                 continue;
             }
-            set.assigned_for = Some((eye, bias));
-            let ends: Vec<f32> = set.levels.iter().map(|(_, d)| *d).collect();
-            let lists = crate::lod::assign(&set.places, &ends, eye, bias, fade);
-            for ((entity, _), list) in set.levels.iter().zip(lists) {
-                updates.push((*entity, list));
+            // Wholly within the same pair of thresholds as last time: no
+            // instance can have changed level.
+            let zone = set.zone(eye, bias, fade);
+            if zone.is_some()
+                && zone == set.assigned_zone
+                && set.assigned_for.is_some_and(|(_, b)| b == bias)
+            {
+                continue;
             }
+            set.assigned_zone = zone;
+            set.assigned_for = Some((eye, bias));
+            stale_sets.push(set);
         }
+        // Sets are independent: assign them on all cores.
+        use rayon::prelude::*;
+        let updates: Vec<(EntityId, Vec<MeshInstance>)> = stale_sets
+            .par_iter()
+            .flat_map_iter(|set| {
+                let ends: Vec<f32> = set.levels.iter().map(|(_, d)| *d).collect();
+                let lists = crate::lod::assign(&set.places, &ends, eye, bias, fade);
+                set.levels
+                    .iter()
+                    .map(|(e, _)| *e)
+                    .zip(lists)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         for (entity, list) in updates {
             self.replace_instances(entity, list);
         }
@@ -1967,7 +2052,15 @@ impl World {
         }
         self.physics.remove(id);
         let removed_static = self.entities.remove(&id).is_some();
-        self.order.retain(|x| *x != id);
+        if removed_static {
+            // `entities()` skips ids that are gone; compact now and then.
+            self.order_stale += 1;
+            if self.order_stale > 256 && self.order_stale * 2 > self.order.len() {
+                let entities = &self.entities;
+                self.order.retain(|x| entities.contains_key(x));
+                self.order_stale = 0;
+            }
+        }
         self.animated.remove(&id);
         self.animated_order.retain(|x| *x != id);
         self.chunk_entities.retain(|_, eid| *eid != id);
@@ -3250,6 +3343,73 @@ impl World {
     pub fn set_voxel_terrain(&mut self, terrain: Option<crate::voxel_terrain::VoxelTerrain>) {
         self.voxel_baseline_rev = terrain.as_ref().map_or(0, |t| t.volume().rev());
         self.voxel_terrain = terrain;
+    }
+
+    /// Stream a procedural world around the camera (see [`crate::stream`]).
+    /// Replaces the voxel terrain with the stream's; `None` removes the
+    /// stream and everything it loaded.
+    pub fn set_stream(&mut self, stream: Option<crate::stream::WorldStream>) -> EngineResult<()> {
+        if let Some(mut old) = self.stream.take() {
+            old.detach(self);
+        }
+        if let Some(mut stream) = stream {
+            stream.attach(self)?;
+            self.stream = Some(Box::new(stream));
+        }
+        Ok(())
+    }
+
+    pub fn stream(&self) -> Option<&crate::stream::WorldStream> {
+        self.stream.as_deref()
+    }
+
+    pub fn stream_mut(&mut self) -> Option<&mut crate::stream::WorldStream> {
+        self.stream.as_deref_mut()
+    }
+
+    /// Load around the camera until the ground is there (or `timeout_s`).
+    /// Call it once on the first frame so nothing starts in the void.
+    pub fn prepare_stream(&mut self, timeout_s: f32) -> bool {
+        let Some(mut stream) = self.stream.take() else {
+            return true;
+        };
+        let ready = stream.prepare(self, timeout_s);
+        self.stream = Some(stream);
+        ready
+    }
+
+    /// Advance the world stream. The engine calls this every frame.
+    pub fn tick_stream(&mut self) {
+        if let Some(mut stream) = self.stream.take() {
+            stream.update(self);
+            self.stream = Some(stream);
+        }
+    }
+
+    /// Re-read water columns from the voxel terrain (after a stream moved
+    /// the water window).
+    pub(crate) fn resync_water_columns(&mut self, changed: &[bool]) {
+        if let (Some(water), Some(terrain)) = (self.water.as_mut(), self.voxel_terrain.as_ref()) {
+            water.resync_columns(terrain, changed);
+        }
+    }
+
+    /// Spawn a mesh that was built elsewhere (a worker thread).
+    pub(crate) fn spawn_prebuilt(
+        &mut self,
+        built: BuiltMesh,
+        albedo: (
+            Option<crate::mesh::AlbedoMap>,
+            Option<crate::mesh::MaterialMaps>,
+        ),
+        place: Place,
+    ) -> EngineResult<EntityId> {
+        let id = self.spawn_built(built, place.to_matrix());
+        if let Err(e) = self.attach_albedo(id, albedo) {
+            self.despawn(id);
+            return Err(e);
+        }
+        Ok(id)
     }
 
     /// The water simulation, if one is set.

@@ -104,18 +104,31 @@ impl SkyUniforms {
         let light = sky.lighting_with(&views);
         let moon = views[0].moon;
         // Seeds follow the list, so each moon keeps its face when sorted.
-        let mut seeded: Vec<(crate::sky::MoonView, f32)> =
-            views.drain(..).enumerate().map(|(i, v)| (v, i as f32)).collect();
+        let mut seeded: Vec<(crate::sky::MoonView, f32)> = views
+            .drain(..)
+            .enumerate()
+            .map(|(i, v)| (v, i as f32))
+            .collect();
         // Small ones first: the bigger (nearer) ones are drawn over them.
         seeded.sort_by(|a, b| a.0.radius.total_cmp(&b.0.radius));
         for (i, (v, seed)) in seeded.iter().take(crate::sky::MAX_MOONS).enumerate() {
             let d = v.moon.dir;
             let ss = v.moon.sun_side;
             self.moons[i * 3] = [d.x, d.y, d.z, v.radius];
-            self.moons[i * 3 + 1] = [ss.x, ss.y, ss.z, v.light / (v.radius / crate::sky::MOON_RADIUS).powi(2)];
+            self.moons[i * 3 + 1] = [
+                ss.x,
+                ss.y,
+                ss.z,
+                v.light / (v.radius / crate::sky::MOON_RADIUS).powi(2),
+            ];
             self.moons[i * 3 + 2] = [v.color.x, v.color.y, v.color.z, *seed];
         }
-        self.moon_info = [seeded.len().min(crate::sky::MAX_MOONS) as f32, 0.0, 0.0, 0.0];
+        self.moon_info = [
+            seeded.len().min(crate::sky::MAX_MOONS) as f32,
+            0.0,
+            0.0,
+            0.0,
+        ];
         self.physical = 1.0;
         self.sun_dir = sky.sun().into();
         self.sun_cos = crate::sky::SUN_RADIUS.cos();
