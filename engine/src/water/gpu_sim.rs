@@ -33,6 +33,9 @@ const MAX_SOURCES: usize = 64;
 const READBACKS: usize = 4;
 /// The whole state is read back in this many slices, one per frame.
 const REFRESH_FRAMES: usize = 60;
+/// Currents of the running tiles are read back every this many frames
+/// (depths every frame).
+const Q_EVERY: u64 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -186,6 +189,8 @@ struct Readback {
     buffer: wgpu::Buffer,
     /// Running tiles copied (the rest wait for the slow refresh).
     tiles: usize,
+    /// With their currents.
+    with_q: bool,
     /// Refreshed slices: cells `[c0, c1)`, links `[l0, l1)`.
     cells: (usize, usize),
     links: (usize, usize),
@@ -938,6 +943,7 @@ impl GpuWaterSim {
                             mapped_at_creation: false,
                         }),
                         tiles: 0,
+                        with_q: false,
                         cells: (0, 0),
                         links: (0, 0),
                         used: 0,
@@ -969,11 +975,20 @@ impl GpuWaterSim {
             ((SIM_WORDS + tiles) * 4) as u64,
             (budget * 4) as u64,
         );
+        let depth_slots = SIM_WORDS + 2 * tiles;
         copy(
             &b.sim,
-            ((SIM_WORDS + 2 * tiles) * 4) as u64,
-            (budget * layout.slot() * 4) as u64,
+            (depth_slots * 4) as u64,
+            (budget * layout.slot_cells * 4) as u64,
         );
+        let with_q = self.frame_no.is_multiple_of(Q_EVERY);
+        if with_q {
+            copy(
+                &b.sim,
+                ((depth_slots + tiles * layout.slot_cells) * 4) as u64,
+                (budget * layout.slot_links * 4) as u64,
+            );
+        }
         copy(
             &b.dynamic,
             (cells.0 * 16) as u64,
@@ -990,6 +1005,7 @@ impl GpuWaterSim {
             ((cells.1 - cells.0) * 16) as u64,
         );
         r.tiles = budget;
+        r.with_q = with_q;
         r.cells = cells;
         r.links = links;
         r.used = at;
@@ -1053,50 +1069,57 @@ impl GpuWaterSim {
     }
 }
 
-/// The patches in one read-back, and how many tiles ran.
+/// The runs in one read-back, and how many tiles ran.
 fn unpack(words: &[u32], r: &Readback, layout: &TileLayout, water: &Water) -> (Snapshot, usize) {
     let n_run = words[SIM_WORDS + 1] as usize;
+    let tiles = n_run.min(r.tiles);
     let list_at = SIM_WORDS + ARGS_WORDS;
     let slots_at = list_at + r.tiles;
+    let (sc, sl) = (
+        layout.slot_cells,
+        if r.with_q { layout.slot_links } else { 0 },
+    );
+    let q_at = slots_at + r.tiles * sc;
+    let refresh_at = q_at + r.tiles * sl;
     let floats: &[f32] = bytemuck::cast_slice(words);
+    // One copy of the slots that were filled, then the slice of everything.
+    let mut raw = Vec::with_capacity(tiles * (sc + sl) + floats.len() - refresh_at);
+    raw.extend_from_slice(&floats[slots_at..slots_at + tiles * sc]);
+    raw.extend_from_slice(&floats[q_at..q_at + tiles * sl]);
+    raw.extend_from_slice(&floats[refresh_at..]);
     let mut s = Snapshot {
         generation: r.generation,
         topology: r.topology,
+        depth: Vec::with_capacity(tiles * TILE + 1),
+        q: Vec::with_capacity(if r.with_q { tiles * TILE + 1 } else { 1 }),
         ..Default::default()
     };
-    let slot_len = layout.slot();
-    for k in 0..n_run.min(r.tiles) {
+    for k in 0..tiles {
         let t = words[list_at + k] as usize;
         if t >= layout.tiles() {
             continue;
         }
-        let slot = &floats[slots_at + k * slot_len..][..slot_len];
-        let (mut jc, mut jl) = (0, layout.slot_cells);
+        let (mut jc, mut jl) = (k * sc, tiles * sc + k * sl);
         layout.rows(t, |c0, c1| {
-            let (s0, s1) = (water.col_start[c0] as usize, water.col_start[c1] as usize);
-            s.depth.push(s0 as u32, &slot[jc..jc + s1 - s0]);
-            jc += s1 - s0;
-            let (l0, l1) = (
-                water.link_group[2 * c0] as usize,
-                water.link_group[2 * c1] as usize,
-            );
-            s.q.push(l0 as u32, &slot[jl..jl + l1 - l0]);
-            jl += l1 - l0;
+            let (s0, s1) = (water.col_start[c0], water.col_start[c1]);
+            s.depth.push([s0, jc as u32, s1 - s0]);
+            jc += (s1 - s0) as usize;
+            if r.with_q {
+                let (l0, l1) = (water.link_group[2 * c0], water.link_group[2 * c1]);
+                s.q.push([l0, jl as u32, l1 - l0]);
+                jl += (l1 - l0) as usize;
+            }
         });
     }
-    // The slice of everything.
-    let mut at = slots_at + r.tiles * slot_len;
+    let mut at = tiles * (sc + sl);
     let nc = r.cells.1 - r.cells.0;
     let nl = r.links.1 - r.links.0;
-    let depth: Vec<f32> = floats[at..at + nc * 4].iter().step_by(4).copied().collect();
-    s.depth.push(r.cells.0 as u32, &depth);
+    s.cells = [r.cells.0 as u32, at as u32, nc as u32];
     at += nc * 4;
-    s.q.push(r.links.0 as u32, &floats[at..at + nl]);
+    s.q.push([r.links.0 as u32, at as u32, nl as u32]);
     at += nl;
-    s.marks.push(
-        r.cells.0 as u32,
-        bytemuck::cast_slice(&floats[at..at + nc * 4]),
-    );
+    s.marks = [r.cells.0 as u32, at as u32, nc as u32];
+    s.raw = raw;
     (s, n_run)
 }
 
@@ -1237,9 +1260,14 @@ fn span_at(sp: Spans, n: u32) -> u32 {
     return sp.first[k] + n - sp.before[k];
 }
 
-// Read-back slot of running tile k (after the flags and the list).
+// Read-back slots of running tile k (after the flags and the list): all
+// depth slots, then all discharge slots.
 fn slot_at(k: u32) -> u32 {
-    return 2u * P.slots.z + k * (P.slots.x + P.slots.y);
+    return 2u * P.slots.z + k * P.slots.x;
+}
+
+fn q_slot_at(k: u32) -> u32 {
+    return 2u * P.slots.z + P.slots.z * P.slots.x + k * P.slots.y;
 }
 "#;
 
@@ -1726,7 +1754,7 @@ fn level_differs(l: Link) -> bool {
 fn k_settle(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
     let t = listed(wg.y);
     let r = rows_of(t, wg.x);
-    let base = slot_at(wg.y) + P.slots.x + links_before(r);
+    let base = q_slot_at(wg.y) + links_before(r);
     let sp = spans(r, true);
     var flowing = false;
     for (var n = lid; n < sp.before[ROWS]; n += 64u) {
@@ -2077,6 +2105,16 @@ mod tests {
             eprintln!("never sleep {never_sleep}: worst depth difference {worst} m, depth at x=26: {moved}");
             assert!(moved > 0.05, "the front should reach x = 26, depth {moved}");
             assert!(worst < 0.1, "GPU and CPU differ by {worst} m");
+            // The currents reach the CPU copy too.
+            let worst_q = cpu
+                .q
+                .iter()
+                .zip(&gpu.q)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            let peak = gpu.q.iter().fold(0.0f32, |m, q| m.max(q.abs()));
+            eprintln!("currents: worst difference {worst_q}, peak {peak}");
+            assert!(peak > 0.01 && worst_q < 0.05, "currents {worst_q} / {peak}");
         }
     }
 
