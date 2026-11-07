@@ -2,7 +2,7 @@
 //! meshes (stone towers) that break into solid pieces.
 //!
 //! WASD / arrows fly, Space / Shift up and down, Ctrl faster, hold the right
-//! mouse button to look around. Left click: shoot where the crosshair points
+//! mouse button to look around. Left click: shoot where the mouse cursor points
 //! (towers shatter, the ground gets a crater). F adds rock back.
 use engine::advanced::Volume;
 use engine::prelude::*;
@@ -85,8 +85,6 @@ fn main() -> EngineResult<()> {
     let mut shots = 0u32;
 
     Engine::run("voxel_destruction", move |world, frame| {
-        // Uncapped so the title bar shows the real frame rate.
-        world.set_vsync(false);
         if frame.first {
             let noise = Noise::new(11);
             let started = std::time::Instant::now();
@@ -135,9 +133,9 @@ fn main() -> EngineResult<()> {
 
         let input = &frame.input;
         if input.mouse_down(MouseButton::Right) {
-            let d = input.mouse_delta();
-            yaw += d.x * 0.15;
-            pitch = (pitch - d.y * 0.15).clamp(-85.0, 85.0);
+            let (dyaw, dpitch) = input.look_delta(0.15);
+            yaw += dyaw;
+            pitch = (pitch + dpitch).clamp(-85.0, 85.0);
         }
         let speed = if input.down(Key::Ctrl) { 60.0 } else { 18.0 };
         let forward = Camera::direction(yaw, pitch);
@@ -148,7 +146,8 @@ fn main() -> EngineResult<()> {
         world.look_first_person(eye, yaw, pitch);
 
         // Scripted shots for screenshots and timing runs.
-        let mut aim = forward;
+        // Aim where the mouse cursor points.
+        let mut aim = world.cursor_ray(frame).1;
         let scripted = if screenshot && (frame_no == 4 || frame_no == 6) {
             // First the tower straight ahead, then the ground left of it.
             aim = if frame_no == 4 {

@@ -24,8 +24,6 @@ fn main() -> EngineResult<()> {
     };
 
     Engine::run("gpu_field_demo", move |world, frame| {
-        // Uncapped so the title bar shows the real frame rate.
-        world.set_vsync(false);
         if frame.first {
             world.set_clear_color(rgb(30, 36, 48));
             world.set_sun((0.4, 1.0, 0.25), 0.28);

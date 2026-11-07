@@ -173,9 +173,9 @@ impl Swimmer {
     pub fn update(&mut self, world: &mut World, frame: &Frame) -> SwimEvents {
         let input = &frame.input;
         if input.mouse_down(MouseButton::Right) || world.pointer_lock() {
-            let d = input.mouse_delta();
-            self.yaw_deg = (self.yaw_deg + d.x * self.look_sensitivity).rem_euclid(360.0);
-            self.pitch_deg = (self.pitch_deg - d.y * self.look_sensitivity).clamp(-89.0, 89.0);
+            let (yaw, pitch) = input.look_delta(self.look_sensitivity);
+            self.yaw_deg = (self.yaw_deg + yaw).rem_euclid(360.0);
+            self.pitch_deg = (self.pitch_deg + pitch).clamp(-89.0, 89.0);
         }
         let wish = SwimInput::from_keys(input);
         let events = {

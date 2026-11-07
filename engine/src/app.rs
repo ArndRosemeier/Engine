@@ -35,6 +35,12 @@ struct App {
     fps_frames: u32,
     pointer_locked: bool,
     hitch_ms: f32,
+    clock: crate::frame_clock::FrameClock,
+    frame_stats: Option<crate::frame_clock::FrameStats>,
+    pacer: crate::frame_clock::FramePacer,
+    refresh_hz: Option<f32>,
+    /// ENGINE_PRESENT_MODE or a screenshot run: never pace.
+    no_pacing: bool,
     fatal_error: Option<String>,
 }
 
@@ -64,6 +70,13 @@ impl App {
             fps_frames: 0,
             pointer_locked: false,
             hitch_ms: hitch_threshold_ms()?,
+            clock: crate::frame_clock::FrameClock::from_env(),
+            frame_stats: crate::frame_clock::FrameStats::from_env(),
+            pacer: crate::frame_clock::FramePacer::new(),
+            refresh_hz: None,
+            no_pacing: std::env::var_os("ENGINE_PRESENT_MODE").is_some()
+                || std::env::var_os("ENGINE_SCREENSHOT").is_some()
+                || std::env::var("ENGINE_PACE").is_ok_and(|v| v.trim() == "0"),
             fatal_error: None,
         })
     }
@@ -100,6 +113,275 @@ impl App {
             )));
         }
         Ok(winit::dpi::LogicalSize::new(w, h))
+    }
+}
+
+impl App {
+    /// Wait for the display's next refresh slot when vsync does not.
+    fn pace_frame(&mut self) {
+        if self.no_pacing {
+            return;
+        }
+        let hz = self.refresh_hz.unwrap_or(0.0);
+        if let Some(until) = self.pacer.schedule(Instant::now(), hz) {
+            crate::frame_clock::wait_until(until);
+        }
+    }
+
+    /// One whole frame: input, the game's update, simulation, rendering.
+    fn run_frame(&mut self, event_loop: &ActiveEventLoop) {
+        self.pace_frame();
+        let now = Instant::now();
+        let cpu_dt = (now - self.last).as_secs_f32();
+        self.last = now;
+        // Time frames by when the display took them: the CPU's own clock
+        // bunches up when presentation makes it wait.
+        let raw_dt = self
+            .renderer
+            .as_ref()
+            .and_then(Renderer::acquire_interval)
+            .filter(|d| d.is_finite() && *d > 0.0)
+            .unwrap_or(cpu_dt);
+        let time = (now - self.start).as_secs_f32();
+        // Movement uses a steady step; the raw one only counts FPS.
+        let vsynced = self.world.vsync() && !self.no_pacing;
+        let dt = self.clock.tick(raw_dt, self.refresh_hz.filter(|_| vsynced));
+        if let Some(stats) = self.frame_stats.as_mut() {
+            stats.add(raw_dt);
+        }
+
+        self.fps_accum_s += raw_dt.max(0.0);
+        self.fps_frames += 1;
+        if self.fps_accum_s >= 0.5 {
+            self.fps = self.fps_frames as f32 / self.fps_accum_s;
+            self.fps_accum_s = 0.0;
+            self.fps_frames = 0;
+            self.refresh_hz = self
+                .window
+                .as_ref()
+                .and_then(|w| w.current_monitor())
+                .and_then(|m| m.refresh_rate_millihertz())
+                .map(|mhz| mhz as f32 / 1000.0);
+            self.pacer
+                .observe(self.world.vsync(), self.fps, self.refresh_hz);
+            if let Some(window) = &self.window {
+                window.set_title(&format!("{} - {:.0} FPS", self.title, self.fps));
+            }
+        }
+
+        let size = self
+            .renderer
+            .as_ref()
+            .expect("renderer must exist before redraw")
+            .size();
+        let first = !self.first_update_done;
+        self.first_update_done = true;
+
+        let window = self
+            .window
+            .clone()
+            .expect("window must exist before redraw");
+        let ui_backend = self
+            .ui_backend
+            .as_mut()
+            .expect("UI backend must exist before redraw");
+
+        // A locked pointer means the game owns the mouse, so egui's
+        // hover state must not swallow look and movement input.
+        let mut input = self.input.clone();
+        if !self.world.bind_listen()
+            && !self.pointer_locked
+            && (ui_backend.wants_keyboard_input() || ui_backend.wants_pointer_input())
+        {
+            input = Input::new();
+        }
+        if input_log() {
+            eprintln!(
+                "frame {:>9.3}s move {:?} ui_wants_kb={} ui_wants_pointer={}",
+                time,
+                input.move_xz(),
+                ui_backend.wants_keyboard_input(),
+                ui_backend.wants_pointer_input()
+            );
+        }
+
+        let update = &mut self.update;
+        let world = &mut self.world;
+        let fps = self.fps;
+        let update_t = Instant::now();
+        let (modal_was_open, full_output) = {
+            let (ui_result, full_output) = ui_backend.run_ui(&window, |ui| {
+                ui.set_bind_listen(world.bind_listen());
+                let frame = Frame {
+                    dt,
+                    time,
+                    fps,
+                    width: size.width,
+                    height: size.height,
+                    aspect: size.width as f32 / size.height.max(1) as f32,
+                    first,
+                    input: input.clone(),
+                    ui: ui.clone(),
+                };
+                if let Some(message) = self.fatal_error.as_ref() {
+                    egui::CentralPanel::default().show(ui.ctx(), |panel| {
+                        panel.vertical_centered(|panel| {
+                            panel.add_space(48.0);
+                            panel.heading("Fatal application error");
+                            panel.add_space(12.0);
+                            panel.label(message);
+                            panel.add_space(16.0);
+                            panel.label("Gameplay has stopped and will not resume.");
+                            panel.label("Press Escape, close the window, or choose Exit.");
+                            if panel.button("Exit").clicked() {
+                                world.request_exit();
+                            }
+                        });
+                    });
+                } else if !run_callback_until_fatal(&mut self.fatal_error, || update(world, &frame))
+                {
+                    world.set_pointer_lock(false);
+                }
+                ui.modal_was_open()
+            });
+            (ui_result, full_output)
+        };
+        let update_ms = elapsed_ms(update_t);
+        self.input.end_frame();
+
+        // Escape gives the mouse back before it closes the window: a
+        // player whose cursor is pinned reaches for Escape to get it
+        // out, not to quit.
+        if ui_backend.take_escape_pressed() {
+            if self.world.bind_listen() {
+                self.world.set_bind_listen(false);
+            } else if !modal_was_open {
+                if self.world.pointer_lock() {
+                    self.world.set_pointer_lock(false);
+                } else {
+                    event_loop.exit();
+                    return;
+                }
+            }
+        }
+
+        let wants_lock = self.world.pointer_lock();
+        self.apply_pointer_lock(&window, wants_lock);
+
+        let anim_t = Instant::now();
+        if self.fatal_error.is_none() {
+            self.world.set_time(time);
+            self.world.tick_animations(dt);
+            self.world.tick_debris(dt);
+            self.world.tick_water(dt);
+            self.world.tick_auto_quality(dt);
+            self.world.tick_lods();
+            self.world.tick_sky();
+        }
+        let anim_ms = elapsed_ms(anim_t);
+
+        {
+            let renderer = self
+                .renderer
+                .as_mut()
+                .expect("renderer must exist before redraw");
+            let sync_t = Instant::now();
+            renderer.sync_world(&mut self.world);
+            let sync_ms = elapsed_ms(sync_t);
+            let ui_backend = self.ui_backend.as_mut().expect("ui backend");
+            let fixed_shot_due = !self.screenshot_wait
+                && self.screenshot_path.is_some()
+                && self.frame_index + 1 >= self.screenshot_frame;
+            if fixed_shot_due || self.world.has_screenshot_queued() {
+                renderer.request_capture();
+            }
+            let render_t = Instant::now();
+            match renderer.render_with(&self.world, |device, queue, encoder, view| {
+                ui_backend.paint(
+                    &window,
+                    device,
+                    queue,
+                    UiPaintTarget {
+                        view,
+                        viewport: UiViewport {
+                            width: size.width,
+                            height: size.height,
+                        },
+                        encoder,
+                    },
+                    full_output,
+                );
+            }) {
+                Ok(()) => {}
+                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                    renderer.resize(renderer.size());
+                }
+                Err(wgpu::SurfaceError::OutOfMemory) => {
+                    panic!("GPU out of memory");
+                }
+                // Timeout is transient presentation backpressure. Skip this frame, preserve
+                // world state, and request the next redraw; repeated timeouts remain visible
+                // through frame/hitch telemetry rather than corrupting renderer state.
+                Err(wgpu::SurfaceError::Timeout) => {
+                    eprintln!("surface frame timed out; retrying on next redraw");
+                }
+                Err(other) => panic!("surface error: {other}"),
+            }
+            let render_ms = elapsed_ms(render_t);
+            let gpu = renderer.take_gpu_stats();
+            let notes = self.world.take_hitch_spans();
+            let phases = HitchPhases {
+                update_ms,
+                anim_ms,
+                sync_ms,
+                render_ms,
+            };
+            if phases.work_ms() >= self.hitch_ms {
+                if let Some(path) = self.world.hitch_log() {
+                    emit_hitch(
+                        path,
+                        self.frame_index,
+                        fps,
+                        raw_dt * 1000.0,
+                        phases,
+                        &notes,
+                        &gpu,
+                    );
+                }
+            }
+            self.frame_index += 1;
+            let queued = self.world.take_screenshot_queue();
+            for path in queued {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).unwrap_or_else(|error| {
+                        panic!(
+                            "failed to create screenshot directory {} for {}: {error}",
+                            parent.display(),
+                            path.display()
+                        )
+                    });
+                }
+                renderer
+                    .capture_png(&self.world, &path)
+                    .unwrap_or_else(|error| panic!("{error}"));
+                eprintln!("wrote screenshot {}", path.display());
+            }
+            if self.world.take_exit_requested() {
+                event_loop.exit();
+                return;
+            }
+            if !self.screenshot_wait {
+                if let Some(path) = self.screenshot_path.clone() {
+                    if self.frame_index >= self.screenshot_frame {
+                        renderer
+                            .capture_png(&self.world, &path)
+                            .unwrap_or_else(|error| panic!("{error}"));
+                        eprintln!("wrote screenshot {}", path.display());
+                        event_loop.exit();
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -145,10 +427,24 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
+                if input_log() {
+                    eprintln!(
+                        "input {:>9.3}s key {:?} {} repeat={}",
+                        self.start.elapsed().as_secs_f64(),
+                        event.physical_key,
+                        if pressed { "down" } else { "up" },
+                        event.repeat
+                    );
+                }
                 if !event.repeat {
                     self.input.set_key(event.physical_key, pressed);
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.input
+                    .set_cursor(Some((position.x as f32, position.y as f32)));
+            }
+            WindowEvent::CursorLeft { .. } => self.input.set_cursor(None),
             WindowEvent::MouseInput { state, button, .. } => {
                 self.input
                     .set_mouse_button(button, state == ElementState::Pressed);
@@ -166,231 +462,11 @@ impl ApplicationHandler for App {
                     r.resize(size);
                 }
             }
-            WindowEvent::RedrawRequested => {
-                let now = Instant::now();
-                let dt = (now - self.last).as_secs_f32();
-                self.last = now;
-                let time = (now - self.start).as_secs_f32();
-
-                self.fps_accum_s += dt.max(0.0);
-                self.fps_frames += 1;
-                if self.fps_accum_s >= 0.5 {
-                    self.fps = self.fps_frames as f32 / self.fps_accum_s;
-                    self.fps_accum_s = 0.0;
-                    self.fps_frames = 0;
-                    if let Some(window) = &self.window {
-                        window.set_title(&format!("{} - {:.0} FPS", self.title, self.fps));
-                    }
-                }
-
-                let size = self
-                    .renderer
-                    .as_ref()
-                    .expect("renderer must exist before redraw")
-                    .size();
-                let first = !self.first_update_done;
-                self.first_update_done = true;
-
-                let window = self
-                    .window
-                    .clone()
-                    .expect("window must exist before redraw");
-                let ui_backend = self
-                    .ui_backend
-                    .as_mut()
-                    .expect("UI backend must exist before redraw");
-
-                // A locked pointer means the game owns the mouse, so egui's
-                // hover state must not swallow look and movement input.
-                let mut input = self.input.clone();
-                if !self.world.bind_listen()
-                    && !self.pointer_locked
-                    && (ui_backend.wants_keyboard_input() || ui_backend.wants_pointer_input())
-                {
-                    input = Input::new();
-                }
-
-                let update = &mut self.update;
-                let world = &mut self.world;
-                let fps = self.fps;
-                let update_t = Instant::now();
-                let (modal_was_open, full_output) = {
-                    let (ui_result, full_output) = ui_backend.run_ui(&window, |ui| {
-                        ui.set_bind_listen(world.bind_listen());
-                        let frame = Frame {
-                            dt,
-                            time,
-                            fps,
-                            width: size.width,
-                            height: size.height,
-                            aspect: size.width as f32 / size.height.max(1) as f32,
-                            first,
-                            input: input.clone(),
-                            ui: ui.clone(),
-                        };
-                        if let Some(message) = self.fatal_error.as_ref() {
-                            egui::CentralPanel::default().show(ui.ctx(), |panel| {
-                                panel.vertical_centered(|panel| {
-                                    panel.add_space(48.0);
-                                    panel.heading("Fatal application error");
-                                    panel.add_space(12.0);
-                                    panel.label(message);
-                                    panel.add_space(16.0);
-                                    panel.label("Gameplay has stopped and will not resume.");
-                                    panel.label("Press Escape, close the window, or choose Exit.");
-                                    if panel.button("Exit").clicked() {
-                                        world.request_exit();
-                                    }
-                                });
-                            });
-                        } else if !run_callback_until_fatal(&mut self.fatal_error, || {
-                            update(world, &frame)
-                        }) {
-                            world.set_pointer_lock(false);
-                        }
-                        ui.modal_was_open()
-                    });
-                    (ui_result, full_output)
-                };
-                let update_ms = elapsed_ms(update_t);
-                self.input.end_frame();
-
-                // Escape gives the mouse back before it closes the window: a
-                // player whose cursor is pinned reaches for Escape to get it
-                // out, not to quit.
-                if ui_backend.take_escape_pressed() {
-                    if self.world.bind_listen() {
-                        self.world.set_bind_listen(false);
-                    } else if !modal_was_open {
-                        if self.world.pointer_lock() {
-                            self.world.set_pointer_lock(false);
-                        } else {
-                            event_loop.exit();
-                            return;
-                        }
-                    }
-                }
-
-                let wants_lock = self.world.pointer_lock();
-                self.apply_pointer_lock(&window, wants_lock);
-
-                let anim_t = Instant::now();
-                if self.fatal_error.is_none() {
-                    self.world.set_time(time);
-                    self.world.tick_animations(dt);
-                    self.world.tick_debris(dt);
-                    self.world.tick_water(dt);
-                    self.world.tick_auto_quality(dt);
-                    self.world.tick_lods();
-                    self.world.tick_sky();
-                }
-                let anim_ms = elapsed_ms(anim_t);
-
-                {
-                    let renderer = self
-                        .renderer
-                        .as_mut()
-                        .expect("renderer must exist before redraw");
-                    let sync_t = Instant::now();
-                    renderer.sync_world(&mut self.world);
-                    let sync_ms = elapsed_ms(sync_t);
-                    let ui_backend = self.ui_backend.as_mut().expect("ui backend");
-                    let fixed_shot_due = !self.screenshot_wait
-                        && self.screenshot_path.is_some()
-                        && self.frame_index + 1 >= self.screenshot_frame;
-                    if fixed_shot_due || self.world.has_screenshot_queued() {
-                        renderer.request_capture();
-                    }
-                    let render_t = Instant::now();
-                    match renderer.render_with(&self.world, |device, queue, encoder, view| {
-                        ui_backend.paint(
-                            &window,
-                            device,
-                            queue,
-                            UiPaintTarget {
-                                view,
-                                viewport: UiViewport {
-                                    width: size.width,
-                                    height: size.height,
-                                },
-                                encoder,
-                            },
-                            full_output,
-                        );
-                    }) {
-                        Ok(()) => {}
-                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                            renderer.resize(renderer.size());
-                        }
-                        Err(wgpu::SurfaceError::OutOfMemory) => {
-                            panic!("GPU out of memory");
-                        }
-                        // Timeout is transient presentation backpressure. Skip this frame, preserve
-                        // world state, and request the next redraw; repeated timeouts remain visible
-                        // through frame/hitch telemetry rather than corrupting renderer state.
-                        Err(wgpu::SurfaceError::Timeout) => {
-                            eprintln!("surface frame timed out; retrying on next redraw");
-                        }
-                        Err(other) => panic!("surface error: {other}"),
-                    }
-                    let render_ms = elapsed_ms(render_t);
-                    let gpu = renderer.take_gpu_stats();
-                    let notes = self.world.take_hitch_spans();
-                    let phases = HitchPhases {
-                        update_ms,
-                        anim_ms,
-                        sync_ms,
-                        render_ms,
-                    };
-                    if phases.work_ms() >= self.hitch_ms {
-                        if let Some(path) = self.world.hitch_log() {
-                            emit_hitch(
-                                path,
-                                self.frame_index,
-                                fps,
-                                dt * 1000.0,
-                                phases,
-                                &notes,
-                                &gpu,
-                            );
-                        }
-                    }
-                    self.frame_index += 1;
-                    let queued = self.world.take_screenshot_queue();
-                    for path in queued {
-                        if let Some(parent) = path.parent() {
-                            std::fs::create_dir_all(parent).unwrap_or_else(|error| {
-                                panic!(
-                                    "failed to create screenshot directory {} for {}: {error}",
-                                    parent.display(),
-                                    path.display()
-                                )
-                            });
-                        }
-                        renderer
-                            .capture_png(&self.world, &path)
-                            .unwrap_or_else(|error| panic!("{error}"));
-                        eprintln!("wrote screenshot {}", path.display());
-                    }
-                    if self.world.take_exit_requested() {
-                        event_loop.exit();
-                        return;
-                    }
-                    if !self.screenshot_wait {
-                        if let Some(path) = self.screenshot_path.clone() {
-                            if self.frame_index >= self.screenshot_frame {
-                                renderer
-                                    .capture_png(&self.world, &path)
-                                    .unwrap_or_else(|error| panic!("{error}"));
-                                eprintln!("wrote screenshot {}", path.display());
-                                event_loop.exit();
-                                return;
-                            }
-                        }
-                    }
-                }
-
-                window.request_redraw();
+            // Frames run from `about_to_wait`: on Windows a burst of input
+            // (a held key's auto-repeat) starves redraw requests, and the
+            // view would only move at the key-repeat rate.
+            WindowEvent::RedrawRequested if !self.first_update_done => {
+                self.run_frame(event_loop);
             }
             _ => {}
         }
@@ -403,9 +479,9 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(window) = &self.window {
-            window.request_redraw();
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() && self.renderer.is_some() && !event_loop.exiting() {
+            self.run_frame(event_loop);
         }
     }
 }
@@ -459,6 +535,13 @@ fn optional_bool_env(name: &'static str) -> EngineResult<Option<bool>> {
         .map(|raw| parse_bool_env_value(name, &raw))
         .transpose()
 }
+/// `ENGINE_INPUT_LOG=1`: print every key event and each frame's movement
+/// input, to debug input that arrives wrongly.
+fn input_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ENGINE_INPUT_LOG").is_ok_and(|v| v.trim() != "0"))
+}
+
 fn hitch_threshold_ms() -> EngineResult<f32> {
     match std::env::var("ENGINE_HITCH_MS") {
         Ok(raw) => {

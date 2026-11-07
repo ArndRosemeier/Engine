@@ -26,8 +26,6 @@ fn main() -> EngineResult<()> {
     let mut yaw = 180.0_f32;
 
     Engine::run("portal_pair", move |world, frame| {
-        // Uncapped so the title bar shows the real frame rate.
-        world.set_vsync(false);
         if frame.first {
             world.set_clear_color(rgb(36, 40, 48));
             world.set_sun((0.35, 1.0, 0.45), 0.32);
