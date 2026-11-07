@@ -31,6 +31,7 @@
 //!   [`proc_terrain`], [`landscape`], [`voxel_terrain`].
 //! - [`quality`]: presets and the frame-rate auto-tuner.
 //! - [`fly::FlyCamera`], [`input::Input`], [`ui`], [`audio`], [`collision`].
+//! - [`version`]: the engine version (`CHANGELOG.md`) and the "What's new" button.
 //! - [`zfight`]: find flickering, overlapping faces (`ENGINE_ZFIGHT=1`).
 //!
 //! Coordinates are metres with Y up; yaw is in degrees, 0 facing +Z.
@@ -92,6 +93,7 @@ pub mod stream;
 pub mod tree;
 pub mod ui;
 pub mod vegetation;
+pub mod version;
 pub mod vfx;
 pub mod voxel_terrain;
 pub mod water;
@@ -171,6 +173,7 @@ pub use texture::{
 };
 pub use tree::{BranchNode, LeafKind, TreeAsset, TreeKind, TreeLod, TreeProfile, TreeSettings};
 pub use ui::{egui, UiFrame, UiPanel};
+pub use version::{version, whats_new_ui};
 pub use vfx::{Delivery, EffectHandle, EffectSpec, VfxPalette, VfxSystem, VisualKind};
 pub use voxel_terrain::{VoxelTerrain, VOXEL_MAX_LOD};
 pub use world::world_effects::Fire;

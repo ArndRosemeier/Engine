@@ -1,0 +1,17 @@
+name: version
+
+# Every pull request into main must raise the Engine version by exactly
+# 0.001 (one new entry on top of CHANGELOG.md). See "Versioning" in README.md.
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  bumped:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check the version was bumped
+        run: python3 tools/bump_version.py --check origin/${{ github.base_ref }}

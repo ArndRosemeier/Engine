@@ -182,7 +182,12 @@ impl App {
             self.pacer
                 .observe(self.world.vsync(), self.fps, self.refresh_hz);
             if let Some(window) = &self.window {
-                window.set_title(&format!("{} - {:.0} FPS", self.title, self.fps));
+                window.set_title(&format!(
+                    "{} - Engine {} - {:.0} FPS",
+                    self.title,
+                    crate::version::version(),
+                    self.fps
+                ));
             }
         }
 
@@ -230,6 +235,9 @@ impl App {
         let update = &mut self.update;
         let world = &mut self.world;
         let fps = self.fps;
+        // Screenshot runs hide the button unless ENGINE_WHATS_NEW asks for it.
+        let whats_new_env = std::env::var("ENGINE_WHATS_NEW").ok();
+        let screenshot_run = self.screenshot_path.is_some() && whats_new_env.is_none();
         let update_t = Instant::now();
         let (modal_was_open, full_output) = {
             let (ui_result, full_output) = ui_backend.run_ui(&window, |ui| {
@@ -264,6 +272,12 @@ impl App {
                 } else if !run_callback_until_fatal(&mut self.fatal_error, || update(world, &frame))
                 {
                     world.set_pointer_lock(false);
+                }
+                if whats_new_env.as_deref() == Some("open") && first {
+                    crate::version::set_whats_new_open(ui.ctx(), true);
+                }
+                if world.whats_new_button() && !screenshot_run && !world.pointer_lock() {
+                    crate::version::whats_new_ui(ui.ctx());
                 }
                 ui.modal_was_open()
             });
@@ -435,7 +449,11 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title(self.title.clone())
+            .with_title(format!(
+                "{} - Engine {}",
+                self.title,
+                crate::version::version()
+            ))
             .with_inner_size(Self::window_inner_size().expect("validated window size"));
         let window = Arc::new(
             event_loop
