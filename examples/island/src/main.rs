@@ -8,7 +8,7 @@
 //! Left click digs under the cursor, F builds rock, 1/2/3 sets a calm,
 //! moderate or rough sea.
 //!
-//! `ENGINE_ISLAND_VIEW=landing|hill|sea` picks a starting view,
+//! `ENGINE_ISLAND_VIEW=landing|hill|sea|above` picks a starting view,
 //! `ENGINE_SKY_HOUR=17.5` the time of day.
 use engine::advanced::Volume;
 use engine::prelude::*;
@@ -205,6 +205,8 @@ fn view(island: &Island, name: &str) -> (Vec3, f32, f32) {
             (eye, to.x.atan2(to.z).to_degrees(), -14.0)
         }
         "sea" => (Vec3::new(-40.0, 30.0, 20.0), 50.0, -12.0),
+        // High above the sea, where the simulated square meets the open sea.
+        "above" => (Vec3::new(CENTER.x, 220.0, -150.0), 0.0, -45.0),
         _ => {
             // At the landing, looking along the beach and out to sea.
             let eye = island.ring_point(LANDING, 5.0) + Vec3::Y * 1.8;
