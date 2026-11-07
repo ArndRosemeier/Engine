@@ -144,6 +144,7 @@ fn load_gltf_document(
     limits: &EngineLimits,
 ) -> EngineResult<BuiltMesh> {
     let mut combined = BuiltMesh {
+        elements: Vec::new(),
         positions: Vec::new(),
         normals: Vec::new(),
         colors: Vec::new(),
@@ -266,6 +267,7 @@ fn load_gltf_document(
             let material = imported_surface_material(primitive.material().name());
             let vertex_count = positions.len();
             let part = BuiltMesh {
+                elements: Vec::new(),
                 positions: positions.into_iter().map(Vec3::from).collect(),
                 // Primitive vertex count is retained before positions is moved.
                 normals,

@@ -374,6 +374,7 @@ pub fn fracture(
             .sum::<Vec3>()
             / count;
         let mut built = BuiltMesh {
+            elements: Vec::new(),
             positions: Vec::with_capacity(cell.len() * 3),
             normals: Vec::with_capacity(cell.len() * 3),
             colors: Vec::with_capacity(cell.len() * 3),

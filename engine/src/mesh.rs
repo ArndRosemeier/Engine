@@ -1053,6 +1053,7 @@ impl Mesh {
         );
 
         BuiltMesh {
+            elements: Vec::new(),
             positions,
             normals,
             colors,
@@ -1161,6 +1162,7 @@ impl Mesh {
         );
 
         BuiltMesh {
+            elements: Vec::new(),
             positions,
             normals,
             colors,
@@ -1221,6 +1223,9 @@ pub struct BuiltMesh {
     pub surface: SurfaceMaterial,
     /// Optional per-vertex materials for imported multi-material meshes.
     pub surface_overrides: Vec<SurfaceMaterial>,
+    /// Optional per-vertex breakable element ids (see [`crate::building`]):
+    /// 0 is none, otherwise the vertex disappears when its element breaks.
+    pub elements: Vec<u32>,
 }
 
 impl BuiltMesh {
@@ -1301,6 +1306,7 @@ impl BuiltMesh {
                         m.overlay_metallic,
                     ]
                 },
+                element: self.elements.get(i).copied().unwrap_or(0),
             })
             .collect()
     }
@@ -1407,6 +1413,8 @@ pub(crate) struct Vertex {
     pub surface3: [f32; 4],
     pub surface4: [f32; 4],
     pub surface5: [f32; 4],
+    /// Breakable element (1-based, 0 = none): hidden once its bit is set.
+    pub element: u32,
 }
 
 impl Vertex {
@@ -1423,6 +1431,7 @@ impl Vertex {
             11 => Float32x4,
             12 => Float32x4,
             13 => Float32x4,
+            14 => Uint32,
         ],
     };
 }

@@ -453,6 +453,7 @@ impl Volume {
     /// Extract every chunk into one combined mesh (fine for small demos).
     pub fn extract_all(&self, color: Color) -> BuiltMesh {
         let mut combined = BuiltMesh {
+            elements: Vec::new(),
             positions: Vec::new(),
             normals: Vec::new(),
             colors: Vec::new(),

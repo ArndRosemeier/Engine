@@ -337,7 +337,8 @@ fn veg_wind(p: vec3<f32>, n: vec3<f32>, w: f32, flutter: f32, seed: f32,
 
 pub fn scene_shader_prefix() -> String {
     format!(
-        "{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}",
+        super::shadow::element_dead_wgsl(0, 15),
         VEG_WIND_WGSL,
         crate::lod::LOD_DITHER_WGSL,
         LIGHTING_WGSL,
@@ -368,6 +369,7 @@ struct VsIn {
     @location(11) surface3: vec4<f32>,
     @location(12) surface4: vec4<f32>,
     @location(13) surface5: vec4<f32>,
+    @location(14) element: u32,
 };
 
 struct VsOut {
@@ -561,6 +563,12 @@ fn grass_profile(p: vec3<f32>, seed: f32, gain: f32) -> vec3<f32> {
 
 @vertex
 fn vs_main(v: VsIn) -> VsOut {
+    var out: VsOut;
+    if element_dead(v.element) {
+        // A broken element: every corner outside the view, so nothing draws.
+        out.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        return out;
+    }
     let model = mat4x4<f32>(v.m0, v.m1, v.m2, v.m3);
     var local = v.position;
     if v.surface3.w > 7.5 && v.surface3.w < 10.5 {
@@ -568,7 +576,6 @@ fn vs_main(v: VsIn) -> VsOut {
         local = veg_wind(local, v.normal, v.surface2.x, flutter, v.surface2.y, model, u.time, u.wind);
     }
     let world = model * vec4<f32>(local, 1.0);
-    var out: VsOut;
     out.clip = u.view_proj * world;
     // Assume uniform scale for normals (friendly default).
     out.world_n = normalize((model * vec4<f32>(v.normal, 0.0)).xyz);
