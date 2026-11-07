@@ -70,6 +70,7 @@ pub mod quality;
 pub mod ribbons;
 pub mod rocks;
 pub mod scatter;
+pub mod sim;
 pub mod sky;
 pub mod space;
 pub mod surface;
@@ -142,6 +143,7 @@ pub use ribbons::{RibbonId, RibbonProfile, RibbonStyle, RibbonWorld};
 /// For your save data: `#[derive(engine::serde::Serialize, engine::serde::Deserialize)]`
 /// with `#[serde(crate = "engine::serde")]`, or add serde to your own crate.
 pub use serde;
+pub use sim::{Headless, HeadlessRun, SimClock, SimSteps};
 pub use space::{
     ChunkCoord, ChunkId, ChunkLayer, ChunkLevel, ChunkSpan, GlobalPosition, GlobalXZ, RenderOrigin,
     RenderPosition,

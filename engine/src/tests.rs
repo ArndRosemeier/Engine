@@ -248,6 +248,7 @@ fn frame_first_flag_exists() {
         first: true,
         input: crate::input::Input::new(),
         ui: crate::ui::UiFrame::default(),
+        sim: Default::default(),
     };
     assert!(f.first);
 }
