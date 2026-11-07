@@ -14,6 +14,7 @@ use glam::Vec3;
 pub struct Fire {
     emitters: Vec<EmitterId>,
     lamp: Option<LampId>,
+    sound: Option<crate::audio::SoundId>,
 }
 
 /// Loose earth, for dug ground.
@@ -56,6 +57,7 @@ impl World {
         let up = terrain.normal_at(center).normalize_or(Vec3::Y);
         let changed = terrain.dig_sphere(center, radius);
         if changed > 0 {
+            self.sound_dig(center, radius);
             self.destruction_burst(center + up * radius * 0.3, radius, EARTH, up);
         }
         changed
@@ -99,7 +101,12 @@ impl World {
                 return Err(e);
             }
         };
-        Ok(Fire { emitters, lamp })
+        let sound = self.sound_fire(at, s);
+        Ok(Fire {
+            emitters,
+            lamp,
+            sound,
+        })
     }
 
     /// Put a fire out: no new flames; the smoke drifts away on its own.
@@ -107,6 +114,9 @@ impl World {
         self.particles_mut().stop_all(&fire.emitters);
         if let Some(lamp) = fire.lamp {
             self.remove_lamp(lamp);
+        }
+        if let Some(sound) = fire.sound {
+            self.stop_sound(sound, 1.5);
         }
     }
 
@@ -117,6 +127,7 @@ impl World {
     pub fn explosion(&mut self, at: impl Into<Vec3>, radius: f32) -> EngineResult<()> {
         let at = at.into();
         let r = radius.clamp(0.2, 50.0);
+        self.sound_explosion(at, r);
         let soot = Color {
             r: 0.12,
             g: 0.11,
@@ -148,7 +159,11 @@ impl World {
     /// size `radius`. Used by digging, shattering and building hits; call it
     /// yourself for custom destruction.
     pub fn destruction_burst(&mut self, at: Vec3, radius: f32, color: Color, normal: Vec3) {
-        if !self.destruction_effects || !at.is_finite() || !radius.is_finite() {
+        if !at.is_finite() || !radius.is_finite() {
+            return;
+        }
+        self.sound_crumble(at, radius.clamp(0.1, 20.0));
+        if !self.destruction_effects {
             return;
         }
         let r = radius.clamp(0.1, 20.0);

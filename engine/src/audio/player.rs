@@ -1,8 +1,7 @@
-//! Clip playback through the default output device.
-//!
-//! The game owns policy (when to start a village loop, how loud a river is).
-//! This module loads WAV bytes, keeps the output stream alive, and exposes
-//! voices the game can fade, stop, or poll.
+//! Plain clip playback through the default output device, without 3D
+//! placement. Most games want [`crate::World::play_sound`] instead, which
+//! places sounds in the world, adds reverb and mixes music; this stays for
+//! tools that only need to play a file.
 
 use crate::error::{EngineError, EngineResult};
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};

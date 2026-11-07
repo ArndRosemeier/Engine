@@ -36,6 +36,8 @@ pub use save::Loaded;
 #[path = "nav.rs"]
 mod nav;
 
+#[path = "world_audio.rs"]
+mod world_audio;
 #[path = "world_buildings.rs"]
 mod world_buildings;
 #[path = "world_crowds.rs"]
@@ -812,6 +814,8 @@ pub struct World {
     particles: ParticleWorld,
     /// Dust and flying chunks when things are dug, shattered or hit.
     destruction_effects: bool,
+    audio: crate::audio::AudioScene,
+    auto_audio: world_audio::AutoAudio,
     ribbons: RibbonWorld,
     quality: crate::quality::Quality,
     taa: bool,
@@ -924,6 +928,8 @@ impl Default for World {
             travel_gate: None,
             particles: ParticleWorld::default(),
             destruction_effects: true,
+            audio: crate::audio::AudioScene::new(),
+            auto_audio: Default::default(),
             ribbons: RibbonWorld::default(),
             quality: crate::quality::Quality::High,
             taa: true,
@@ -3789,6 +3795,7 @@ impl World {
             water: self.water.as_ref(),
         };
         let entities = &self.entities;
+        let impacts_before = self.physics.pending_impacts().len();
         let result = self
             .physics
             .tick(dt, &around, |id| entities.get(&id).map(|e| e.transform));
@@ -3796,6 +3803,14 @@ impl World {
             for s in &result.splashes {
                 water.disturb(s.at, 1.5, (s.speed * 0.3).min(4.0));
             }
+        }
+        if self.audio.auto_sounds {
+            let splashes: Vec<(Vec3, f32)> =
+                result.splashes.iter().map(|s| (s.at, s.speed)).collect();
+            self.sound_splashes(&splashes);
+            let pending = self.physics.pending_impacts();
+            let new = pending.get(impacts_before..).unwrap_or(pending).to_vec();
+            self.sound_impacts(&new, dt);
         }
         let mut changed = false;
         for (id, m) in result.moved {

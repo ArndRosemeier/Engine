@@ -72,6 +72,8 @@ VARIANTS: list[Launch] = [
            {"ENGINE_AUTOFLY": "1", "ENGINE_OPEN_WORLD_SPEED": "120"}),
     Launch("open_world: evening", "open_world", {"ENGINE_SKY_HOUR": "19.0"}),
     Launch("open_world: another world", "open_world", {"ENGINE_OPEN_WORLD_SEED": "11"}),
+    Launch("audio: in the cave", "audio", {"ENGINE_AUDIO_VIEW": "cave"}),
+    Launch("audio: in the hall", "audio", {"ENGINE_AUDIO_VIEW": "hall"}),
     Launch("particles: by the fire at dusk", "particles",
            {"ENGINE_PARTICLES_VIEW": "fire", "ENGINE_SKY_HOUR": "19.6"}),
     Launch("lamps: by the fire", "lamps", {"ENGINE_LAMPS_VIEW": "fire"}),
