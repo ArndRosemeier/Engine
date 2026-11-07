@@ -55,7 +55,11 @@ impl App {
             window: None,
             renderer: None,
             ui_backend: None,
-            world: World::new().with_limits(limits),
+            world: {
+                let mut world = World::new().with_limits(limits);
+                world.watch_z_fighting_from_env();
+                world
+            },
             update,
             input: Input::new(),
             start: now,
@@ -291,6 +295,7 @@ impl App {
             self.world.tick_lods();
             self.world.tick_sky();
             self.world.tick_grading(dt);
+            self.world.tick_zfight_watch(dt);
         }
         let anim_ms = elapsed_ms(anim_t);
 

@@ -335,6 +335,28 @@ fixed steps.
 
 **UI:** `frame.ui` is an egui frame: panels, buttons, images, modals.
 
+**Finding z-fighting (flickering surfaces):** run any app with
+`ENGINE_ZFIGHT=1` and every place where two faces lie in the same plane and
+overlap is marked with a glowing magenta post, with a list in the console
+(where, which colours, which meshes). It scans again whenever the scene
+changes. In code, `world.check_z_fighting()` does the same once,
+`world.find_z_fighting()` returns a `ZFightReport` without marking anything,
+and `world.set_name(id, "rug")` makes the report say "rug / floor" instead
+of entity numbers. Keep generated content clean in a test, with no window:
+
+```rust
+let report = ZFightCheck::new()
+    .options(engine::zfight::Options::ground_at(0.0)) // bottoms resting on the ground never show
+    .with("house", &house_mesh)
+    .with("ground", &ground_mesh)
+    .run();
+report.assert_clean(); // panics with the worst spots
+```
+
+Fix an overlap by lifting the face a centimetre or cutting the hidden one away.
+Faces closer than 4 mm count (`Options::gap`); see `engine::zfight` and
+`examples/zfight`.
+
 ### Quality and performance
 
 ```rust
@@ -392,6 +414,7 @@ cargo run --release -p <name>
 | `decals` | Scorch marks, cracks, frost, impacts, paint and glowing power marks sprayed on terrain, a wall, a sliding block and people walking by (click sprays, 1-6 pick the kind, B the budget) |
 | `interiors` | A city block of office towers, every floor furnished (about a million triangles); from the street only the rooms you can see through windows are drawn (C toggles culling, I interiors, click punches a wall open) |
 | `reflections` | A rain-wet street between glass towers at dusk mirrors lamps, windows and chrome spheres; a polished hall's chrome ball shows the hall from a reflection probe (R toggles SSR, P the probe) |
+| `zfight` | The z-fighting finder: a yard with four classic mistakes marked with magenta posts; F shows the fixed yard |
 | `fixed_tick` | A 30 Hz simulation drawn smoothly at any frame rate, next to the raw steps; I toggles interpolation, 1/2/3 change the rate |
 | `physics` | Crates, a brick wall, dominoes, rolling boulders and a sweeper; throw balls (click), blow things up (F), shatter (X) |
 | `model_viewer` | Any glTF/GLB or `.fmpk` file: `-- path/to/model.glb` |
@@ -423,6 +446,7 @@ Every program built on the engine understands these:
 | `ENGINE_AUTOFLY=1` | `FlyCamera` flies ahead in a slow curve by itself (for smoothness and speed checks) |
 | `ENGINE_GPU_PROFILE_EVERY=N` | Print GPU timings every N frames: shadow, AO, scene, water, TAA, post; plus a split of the scene pass (sky, land, grass, voxel, meshes, ...) where the GPU supports it |
 | `ENGINE_HITCH_MS` | Log frames slower than this (default 33) |
+| `ENGINE_ZFIGHT=1` | Find z-fighting around the camera (250 m; a number sets the radius, `all` scans everything), mark it with magenta posts and print where it is |
 
 The examples add their own (listed at the top of each `main.rs`).
 

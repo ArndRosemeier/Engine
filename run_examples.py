@@ -91,6 +91,9 @@ VARIANTS: list[Launch] = [
     Launch("reflections: in the hall", "reflections", {"ENGINE_REFLECTIONS_VIEW": "hall"}),
     Launch("reflections: without SSR (compare)", "reflections", {"ENGINE_REFLECTIONS_SSR": "0"}),
     Launch("starter with ACES tone mapping (compare)", "starter", {"ENGINE_TONEMAP": "aces"}),
+    Launch("zfight: the fixed yard", "zfight", {"ENGINE_ZFIGHT_FIXED": "1"}),
+    Launch("buildings: find z-fighting (magenta posts)", "buildings", {"ENGINE_ZFIGHT": "1"}),
+    Launch("interiors: find z-fighting (magenta posts)", "interiors", {"ENGINE_ZFIGHT": "100"}),
 ]
 
 
