@@ -39,44 +39,51 @@ pub(crate) enum GpuEdit {
     Foam { cell: u32, amount: f32 },
 }
 
-/// Parts of an array: `(first index, count)` ranges and their values, in
-/// order.
-#[derive(Debug, Default)]
-pub(crate) struct Patch<T> {
-    pub ranges: Vec<(u32, u32)>,
-    pub values: Vec<T>,
-}
-
-impl<T: Copy> Patch<T> {
-    pub fn push(&mut self, start: u32, values: &[T]) {
-        if !values.is_empty() {
-            self.ranges.push((start, values.len() as u32));
-            self.values.extend_from_slice(values);
-        }
-    }
-
-    fn apply(&self, to: &mut [T]) {
-        let mut at = 0;
-        for &(start, n) in &self.ranges {
-            let (s, n) = (start as usize, n as usize);
-            if s + n <= to.len() && at + n <= self.values.len() {
-                to[s..s + n].copy_from_slice(&self.values[at..at + n]);
-            }
-            at += n;
-        }
-    }
-}
-
 /// What changed on the GPU in one frame, read back: the areas that ran,
 /// plus a slice of everything (so the whole copy refreshes every second).
+/// The values stay in one block as read; runs point into it.
 #[derive(Debug, Default)]
 pub(crate) struct Snapshot {
     /// The CPU state revision the GPU state descends from.
     pub generation: u64,
     pub topology: u64,
-    pub depth: Patch<f32>,
-    pub q: Patch<f32>,
-    pub marks: Patch<[f32; 4]>,
+    pub raw: Vec<f32>,
+    /// `[first element, offset in raw, count]` runs of depths and currents.
+    pub depth: Vec<[u32; 3]>,
+    pub q: Vec<[u32; 3]>,
+    /// The slice of everything: cells as `[depth, head, scale, 0]`, and
+    /// marks, both `[first cell, offset in raw, count]`.
+    pub cells: [u32; 3],
+    pub marks: [u32; 3],
+}
+
+impl Snapshot {
+    fn apply(&self, water: &mut Water) {
+        let raw = &self.raw;
+        let fits = |to: usize, [d, s, n]: [u32; 3], stride: usize| {
+            let (d, s, n) = (d as usize, s as usize, n as usize);
+            (d + n <= to && s + n * stride <= raw.len()).then_some((d, s, n))
+        };
+        for (runs, to) in [(&self.depth, &mut water.depth), (&self.q, &mut water.q)] {
+            for &run in runs {
+                if let Some((d, s, n)) = fits(to.len(), run, 1) {
+                    to[d..d + n].copy_from_slice(&raw[s..s + n]);
+                }
+            }
+        }
+        if let Some((d, s, n)) = fits(water.depth.len(), self.cells, 4) {
+            for (o, v) in water.depth[d..d + n]
+                .iter_mut()
+                .zip(raw[s..].chunks_exact(4))
+            {
+                *o = v[0];
+            }
+        }
+        if let Some((d, s, n)) = fits(water.marks.len(), self.marks, 4) {
+            let m: &[[f32; 4]] = bytemuck::cast_slice(&raw[s..s + n * 4]);
+            water.marks[d..d + n].copy_from_slice(m);
+        }
+    }
 }
 
 /// Read-backs waiting for the CPU copy (older ones are dropped).
@@ -144,17 +151,17 @@ impl Water {
     pub(crate) fn update_gpu(&mut self, dt: f32) {
         let dt = dt.clamp(0.0, 0.1);
         let link = self.gpu.0.get_mut().unwrap_or_else(|e| e.into_inner());
-        if let Some(n) = link.running_tiles.take() {
+        link.pending_dt = (link.pending_dt + dt).min(0.1);
+        let running = link.running_tiles.take();
+        let inbox = std::mem::take(&mut link.inbox);
+        if let Some(n) = running {
             self.gpu_running = n;
         }
-        for s in link.inbox.drain(..) {
+        for s in inbox {
             if s.generation == self.state_rev && s.topology == self.topology_rev {
-                s.depth.apply(&mut self.depth);
-                s.q.apply(&mut self.q);
-                s.marks.apply(&mut self.marks);
+                s.apply(self);
             }
         }
-        link.pending_dt = (link.pending_dt + dt).min(0.1);
         self.time += dt as f64;
         self.sea_clock += dt as f64;
     }
