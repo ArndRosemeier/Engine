@@ -39,8 +39,7 @@ pub(crate) fn atlas() -> &'static Atlas {
 }
 
 fn build() -> Atlas {
-    let (bark_col, bark_nrm) = bark_textures();
-    let leaves = leaf_atlas();
+    let ((bark_col, bark_nrm), leaves) = rayon::join(bark_textures, leaf_atlas);
     let mut color = leaves;
     color.extend_from_slice(&bark_col);
     let mut normal = Vec::with_capacity((ATLAS_W * ATLAS_H * 4) as usize);

@@ -50,10 +50,11 @@ fn populate(world: &mut World, ground: &HeightField, clearing: Vec3) -> EngineRe
         .only_where(dry)
         .places()?;
     // Two individuals per species, so neighbours differ.
-    let kinds = WOOD.len() * 2;
-    for (k, places) in Scatter::split(&trees, kinds, 1).iter().enumerate() {
-        let tree = tree_model(WOOD[k % WOOD.len()], k as u32)?;
-        world.spawn_lod_at(tree.lod_levels(), places)?;
+    // Generating models is the slow part of startup: build them all at once.
+    let kinds: Vec<usize> = (0..WOOD.len() * 2).collect();
+    let models = build_all(&kinds, |&k| tree_model(WOOD[k % WOOD.len()], k as u32))?;
+    for (tree, places) in models.iter().zip(Scatter::split(&trees, kinds.len(), 1)) {
+        world.spawn_lod_at(tree.lod_levels(), &places)?;
     }
 
     let shrubs = Scatter::new(2)
@@ -64,8 +65,9 @@ fn populate(world: &mut World, ground: &HeightField, clearing: Vec3) -> EngineRe
         .on_ground(height)
         .only_where(dry)
         .places()?;
-    for (v, places) in Scatter::split(&shrubs, 2, 2).iter().enumerate() {
-        world.spawn_lod_at(shrub_model(v as u32)?.lod_levels(), places)?;
+    let models = build_all(&[0, 1], |&v| shrub_model(v))?;
+    for (shrub, places) in models.iter().zip(Scatter::split(&shrubs, 2, 2)) {
+        world.spawn_lod_at(shrub.lod_levels(), &places)?;
     }
 
     let rocks = Scatter::new(3)
@@ -76,9 +78,11 @@ fn populate(world: &mut World, ground: &HeightField, clearing: Vec3) -> EngineRe
         .on_ground(|x, z| ground.height_at(x, z) - 0.3)
         .only_where(|x, z| !ground.sample(x, z).water)
         .places()?;
-    for (k, places) in Scatter::split(&rocks, 4, 3).iter().enumerate() {
-        let rock = rock_model(RockShape::ALL[k], k as u32)?;
-        world.spawn_lod_at(rock.lod_levels_scaled(1.6), places)?;
+    let models = build_all(&[0, 1, 2, 3], |&k: &usize| {
+        rock_model(RockShape::ALL[k], k as u32)
+    })?;
+    for (rock, places) in models.iter().zip(Scatter::split(&rocks, 4, 3)) {
+        world.spawn_lod_at(rock.lod_levels_scaled(1.6), &places)?;
     }
     eprintln!(
         "{} trees, {} shrubs, {} rocks",
@@ -118,7 +122,9 @@ fn main() -> EngineResult<()> {
                 ProcTerrain::gpu_clipmap(rules.clone(), ClipmapConfig::default())
                     .with_focus(camera.position),
             );
+            let t = std::time::Instant::now();
             populate(world, &ground, start)?;
+            eprintln!("TIMING populate {:?}", t.elapsed());
         }
         camera.update_above(world, frame, |x, z| ground.height_at(x, z));
         world.set_proc_focus(camera.position);
