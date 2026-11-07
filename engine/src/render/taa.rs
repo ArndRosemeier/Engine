@@ -468,13 +468,13 @@ mod tests {
 
     #[test]
     fn reprojection_follows_the_camera() {
-        let proj = Mat4::perspective_infinite_reverse_rh(1.0, 16.0 / 9.0, 0.1);
-        let view_a = Mat4::look_at_rh(
+        let proj = glam::camera::rh::proj::directx::perspective_infinite_reverse(1.0, 16.0 / 9.0, 0.1);
+        let view_a = glam::camera::rh::view::look_at_mat4(
             Vec3::new(0.0, 2.0, 0.0),
             Vec3::new(0.0, 2.0, -10.0),
             Vec3::Y,
         );
-        let view_b = Mat4::look_at_rh(
+        let view_b = glam::camera::rh::view::look_at_mat4(
             Vec3::new(1.0, 2.0, 0.0),
             Vec3::new(1.0, 2.0, -10.0),
             Vec3::Y,
@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn jitter_shifts_by_whole_ndc_offset() {
-        let proj = Mat4::perspective_infinite_reverse_rh(1.0, 1.0, 0.1);
+        let proj = glam::camera::rh::proj::directx::perspective_infinite_reverse(1.0, 1.0, 0.1);
         let j = Vec2::new(0.01, -0.02);
         let p = Vec4::new(0.3, -0.2, -5.0, 1.0);
         let (c0, c1) = (proj * p, jittered(proj, j) * p);

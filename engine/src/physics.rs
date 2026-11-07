@@ -1,0 +1,1417 @@
+//! Rigid-body physics: boxes that stack, crates that tumble down hills,
+//! rubble that piles up, things that float.
+//!
+//! Give any mesh entity a [`Body`] with [`World::add_body`] and the engine
+//! moves it every frame. The ground comes for free: voxel terrain and height
+//! terrain become colliders around each moving body as it needs them (and
+//! are rebuilt after digging), or a flat floor at y = 0 when the world has no
+//! terrain. Bodies in water float or sink by their density.
+//!
+//! ```ignore
+//! let crate_id = world.spawn(Mesh::box_at(Vec3::ZERO, Vec3::ONE, rgb(150, 100, 50))?);
+//! world.set_place(crate_id, Place::new(0.0, 5.0, 0.0))?;
+//! world.add_body(crate_id, Body::dynamic().density(0.6))?;
+//! world.push(crate_id, Vec3::new(0.0, 0.0, 300.0))?;
+//! ```
+//!
+//! Under the hood this is [Rapier](https://rapier.rs), stepped at a fixed
+//! rate and interpolated for drawing, so motion is smooth at any frame rate.
+//!
+//! [`World::add_body`]: crate::world::World::add_body
+
+use crate::error::{EngineError, EngineResult};
+use crate::world::EntityId;
+use glam::{IVec3, Mat4, Quat, Vec2, Vec3};
+use rapier3d::prelude::{
+    ColliderBuilder, ColliderHandle, PhysicsWorld, QueryFilter, Ray, RigidBodyBuilder,
+    RigidBodyHandle, TriMeshFlags,
+};
+use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
+
+/// Water: 1000 kg per cubic metre. Densities in this module are relative to it.
+const WATER_KG_M3: f32 = 1000.0;
+/// `user_data` tag for ground colliders.
+const GROUND_TAG: u128 = u128::MAX;
+/// Side of one height-terrain collider tile in metres, and its samples per side.
+const HEIGHT_TILE_M: f32 = 16.0;
+const HEIGHT_TILE_SAMPLES: usize = 33;
+/// Seconds an unused ground tile is kept before it is dropped.
+const TILE_KEEP_S: f32 = 3.0;
+/// Rubble sinks into the ground for this long before it vanishes.
+const SINK_SECONDS: f32 = 2.0;
+
+/// How a body moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BodyKind {
+    /// Falls, collides, gets pushed.
+    #[default]
+    Dynamic,
+    /// Never moves (walls, floors, static props). Other bodies collide with it.
+    /// Moving the entity with `set_place` teleports it.
+    Fixed,
+    /// Moved by you with `set_place`; pushes dynamic bodies out of the way
+    /// (lifts, doors, a swinging hammer). Not affected by anything.
+    Kinematic,
+}
+
+/// The collision shape of a body, in the entity's own (unscaled) space.
+/// The entity's scale is applied on top.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum BodyShape {
+    /// The convex hull of the entity's mesh. Good for props, rocks, rubble.
+    #[default]
+    Hull,
+    /// The exact triangle mesh. Only for [`BodyKind::Fixed`] and
+    /// [`BodyKind::Kinematic`] bodies (walls, buildings, terrain pieces).
+    Mesh,
+    /// The mesh's bounding box.
+    BoundingBox,
+    /// A box with these half extents.
+    Box(Vec3),
+    /// A sphere.
+    Ball(f32),
+    /// An upright capsule: half the straight part's length, and the radius.
+    Capsule { half_height: f32, radius: f32 },
+}
+
+/// Everything about a physics body. Start from [`Body::dynamic`],
+/// [`Body::fixed`] or [`Body::kinematic`] and change what you need.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Body {
+    pub kind: BodyKind,
+    pub shape: BodyShape,
+    /// Relative to water: wood 0.6 floats, stone 2.4 sinks.
+    pub density: f32,
+    /// 0 is ice, 1 is rubber on concrete.
+    pub friction: f32,
+    /// 0 is a sandbag, 1 bounces back to where it fell from.
+    pub bounce: f32,
+    /// Starting velocity in m/s.
+    pub velocity: Vec3,
+    /// Starting spin in rad/s around each axis.
+    pub spin: Vec3,
+    /// Continuous collision detection: stops small fast things (bullets,
+    /// pebbles) from passing through thin walls. Costs a little.
+    pub ccd: bool,
+    /// How quickly motion and spin die down in air (0 = never).
+    pub damping: f32,
+}
+
+impl Default for Body {
+    fn default() -> Self {
+        Self::dynamic()
+    }
+}
+
+impl Body {
+    /// A body that falls and collides, with the mesh's convex hull as shape.
+    pub fn dynamic() -> Self {
+        Self {
+            kind: BodyKind::Dynamic,
+            shape: BodyShape::Hull,
+            density: 1.0,
+            friction: 0.6,
+            bounce: 0.1,
+            velocity: Vec3::ZERO,
+            spin: Vec3::ZERO,
+            ccd: false,
+            damping: 0.05,
+        }
+    }
+
+    /// A body that never moves, with the exact mesh as shape.
+    pub fn fixed() -> Self {
+        Self {
+            kind: BodyKind::Fixed,
+            shape: BodyShape::Mesh,
+            ..Self::dynamic()
+        }
+    }
+
+    /// A body you move by hand that shoves dynamic bodies aside.
+    pub fn kinematic() -> Self {
+        Self {
+            kind: BodyKind::Kinematic,
+            shape: BodyShape::Hull,
+            ..Self::dynamic()
+        }
+    }
+
+    pub fn shape(mut self, shape: BodyShape) -> Self {
+        self.shape = shape;
+        self
+    }
+
+    pub fn density(mut self, density: f32) -> Self {
+        self.density = density;
+        self
+    }
+
+    pub fn friction(mut self, friction: f32) -> Self {
+        self.friction = friction;
+        self
+    }
+
+    pub fn bounce(mut self, bounce: f32) -> Self {
+        self.bounce = bounce;
+        self
+    }
+
+    pub fn velocity(mut self, velocity: impl Into<Vec3>) -> Self {
+        self.velocity = velocity.into();
+        self
+    }
+
+    pub fn spin(mut self, spin: impl Into<Vec3>) -> Self {
+        self.spin = spin.into();
+        self
+    }
+
+    pub fn ccd(mut self, ccd: bool) -> Self {
+        self.ccd = ccd;
+        self
+    }
+
+    pub fn damping(mut self, damping: f32) -> Self {
+        self.damping = damping;
+        self
+    }
+
+    pub fn validate(&self) -> EngineResult<()> {
+        let bad = |what: &str| Err(EngineError::InvalidValue(format!("body {what}")));
+        if !self.density.is_finite() || self.density <= 0.0 {
+            return bad("density must be finite and > 0");
+        }
+        if !self.friction.is_finite() || self.friction < 0.0 {
+            return bad("friction must be finite and >= 0");
+        }
+        if !self.bounce.is_finite() || !(0.0..=1.0).contains(&self.bounce) {
+            return bad("bounce must be in 0..=1");
+        }
+        if !self.damping.is_finite() || self.damping < 0.0 {
+            return bad("damping must be finite and >= 0");
+        }
+        if !self.velocity.is_finite() || !self.spin.is_finite() {
+            return bad("velocity and spin must be finite");
+        }
+        match self.shape {
+            BodyShape::Mesh if self.kind == BodyKind::Dynamic => {
+                return bad("shape Mesh only works for fixed and kinematic bodies; use Hull");
+            }
+            BodyShape::Box(h) if !(h.is_finite() && h.min_element() > 0.0) => {
+                return bad("box half extents must be > 0");
+            }
+            BodyShape::Ball(r) if !(r.is_finite() && r > 0.0) => {
+                return bad("ball radius must be > 0");
+            }
+            BodyShape::Capsule {
+                half_height,
+                radius,
+            } if !(half_height.is_finite()
+                && half_height >= 0.0
+                && radius.is_finite()
+                && radius > 0.0) =>
+            {
+                return bad("capsule needs half_height >= 0 and radius > 0");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// What dynamic bodies land on when nothing else is in the way.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum PhysicsGround {
+    /// The voxel or height terrain; a flat floor at y = 0 without one.
+    #[default]
+    Auto,
+    /// A flat floor at this height, ignoring any terrain.
+    Plane(f32),
+    /// Nothing: bodies fall forever unless a fixed body catches them.
+    None,
+}
+
+/// World-wide physics settings.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhysicsSettings {
+    /// m/s². Earth by default.
+    pub gravity: Vec3,
+    pub ground: PhysicsGround,
+    /// Simulation steps per second. Drawing is interpolated between steps,
+    /// so 60 looks smooth even at 200 FPS.
+    pub steps_per_second: f32,
+    /// Most steps taken in one frame; a long hitch slows physics down
+    /// instead of freezing the game catching up.
+    pub max_steps_per_frame: u32,
+}
+
+impl Default for PhysicsSettings {
+    fn default() -> Self {
+        Self {
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            ground: PhysicsGround::Auto,
+            steps_per_second: 60.0,
+            max_steps_per_frame: 4,
+        }
+    }
+}
+
+impl PhysicsSettings {
+    pub fn validate(&self) -> EngineResult<()> {
+        if !self.gravity.is_finite() {
+            return Err(EngineError::InvalidValue("gravity must be finite".into()));
+        }
+        if !self.steps_per_second.is_finite() || !(10.0..=1000.0).contains(&self.steps_per_second)
+        {
+            return Err(EngineError::InvalidValue(
+                "steps_per_second must be in 10..=1000".into(),
+            ));
+        }
+        if self.max_steps_per_frame == 0 {
+            return Err(EngineError::InvalidValue(
+                "max_steps_per_frame must be >= 1".into(),
+            ));
+        }
+        if let PhysicsGround::Plane(y) = self.ground {
+            if !y.is_finite() {
+                return Err(EngineError::InvalidValue("ground plane must be finite".into()));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What a ray hit: a body, or the ground (`entity` is `None`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RayHit {
+    pub entity: Option<EntityId>,
+    pub point: Vec3,
+    pub normal: Vec3,
+    pub distance: f32,
+}
+
+/// Two things hitting each other hard enough to matter (for sounds, damage,
+/// dust). `b` is `None` when `a` hit the ground.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Impact {
+    pub a: EntityId,
+    pub b: Option<EntityId>,
+    pub point: Vec3,
+    /// Closing speed along the contact normal, m/s.
+    pub speed: f32,
+}
+
+/// Where the ground comes from this frame; tiles are rebuilt when it changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum GroundSource {
+    None,
+    Plane(f32),
+    Voxels { id: usize, voxel_size: f32 },
+    Heights { id: usize },
+}
+
+/// What the world lends physics for one tick.
+pub(crate) struct Surroundings<'a> {
+    pub voxels: Option<&'a crate::voxel_terrain::VoxelTerrain>,
+    pub heights: Option<&'a crate::proc_terrain::HeightField>,
+    pub water: Option<&'a crate::water::Water>,
+}
+
+impl Surroundings<'_> {
+    fn source(&self, ground: PhysicsGround) -> GroundSource {
+        match ground {
+            PhysicsGround::None => GroundSource::None,
+            PhysicsGround::Plane(y) => GroundSource::Plane(y),
+            PhysicsGround::Auto => {
+                if let Some(v) = self.voxels {
+                    if v.volume().chunk_keys().next().is_some() {
+                        return GroundSource::Voxels {
+                            id: v as *const _ as usize,
+                            voxel_size: v.volume().voxel_size(),
+                        };
+                    }
+                }
+                if let Some(h) = self.heights {
+                    return GroundSource::Heights {
+                        id: h as *const _ as usize,
+                    };
+                }
+                GroundSource::Plane(0.0)
+            }
+        }
+    }
+
+    /// Water surface height and current at `p`, if there is water nearby.
+    pub fn water_at(&self, p: Vec3) -> Option<(f32, Vec2)> {
+        let w = self.water?;
+        let surface = w.surface_at(p + Vec3::Y * 2.0)?;
+        (surface > p.y - 3.0).then(|| {
+            (
+                surface,
+                w.sample(p.min(Vec3::new(p.x, surface - 0.05, p.z)))
+                    .map_or(Vec2::ZERO, |s| s.current),
+            )
+        })
+    }
+}
+
+/// A splash for the water to show.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Splash {
+    pub at: Vec3,
+    pub speed: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Temporary {
+    pub keep: f32,
+}
+
+#[derive(Clone, Debug)]
+struct Tracked {
+    handle: RigidBodyHandle,
+    collider: ColliderHandle,
+    kind: BodyKind,
+    scale: Vec3,
+    /// Pose at the previous and current step, for drawing in between.
+    prev: (Vec3, Quat),
+    cur: (Vec3, Quat),
+    /// The transform physics last gave the entity; anything else means the
+    /// game moved it.
+    written: Mat4,
+    /// Local points sampled for buoyancy.
+    probes: Vec<Vec3>,
+    volume: f32,
+    density: f32,
+    wet: bool,
+    age: f32,
+    temporary: Option<Temporary>,
+}
+
+/// Rubble whose time is up, sinking into the ground.
+#[derive(Clone, Copy, Debug)]
+struct Sinking {
+    id: EntityId,
+    left: f32,
+}
+
+#[derive(Debug)]
+struct Tile {
+    collider: Option<ColliderHandle>,
+    last_needed: f32,
+}
+
+/// The physics world inside [`crate::world::World`].
+pub(crate) struct Physics {
+    world: PhysicsWorld,
+    settings: PhysicsSettings,
+    bodies: HashMap<EntityId, Tracked>,
+    sinking: Vec<Sinking>,
+    tiles: HashMap<IVec3, Tile>,
+    source: GroundSource,
+    plane: Option<ColliderHandle>,
+    voxel_rev: u64,
+    clock: f32,
+    accumulator: f32,
+    impacts: Vec<Impact>,
+}
+
+impl std::fmt::Debug for Physics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Physics")
+            .field("bodies", &self.bodies.len())
+            .field("tiles", &self.tiles.len())
+            .finish()
+    }
+}
+
+impl Default for Physics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn tag(id: EntityId) -> u128 {
+    id.raw() as u128
+}
+
+fn split(m: Mat4) -> (Vec3, Quat, Vec3) {
+    let (s, r, t) = m.to_scale_rotation_translation();
+    (s, r.normalize(), t)
+}
+
+fn pose(t: Vec3, r: Quat) -> rapier3d::math::Pose {
+    rapier3d::math::Pose::from_parts(t, r)
+}
+
+/// Up to a dozen points spread over a point cloud: the extreme point along
+/// a fixed set of directions. Used to sample how much of a body is under water.
+pub(crate) fn probe_points(positions: &[Vec3]) -> Vec<Vec3> {
+    let dirs = [
+        Vec3::X,
+        -Vec3::X,
+        Vec3::Y,
+        -Vec3::Y,
+        Vec3::Z,
+        -Vec3::Z,
+        Vec3::new(1.0, -1.0, 1.0),
+        Vec3::new(-1.0, -1.0, 1.0),
+        Vec3::new(1.0, -1.0, -1.0),
+        Vec3::new(-1.0, -1.0, -1.0),
+        Vec3::new(1.0, 1.0, 1.0),
+        Vec3::new(-1.0, 1.0, -1.0),
+    ];
+    let mut out: Vec<Vec3> = Vec::with_capacity(dirs.len());
+    for d in dirs {
+        if let Some(&p) = positions
+            .iter()
+            .max_by(|a, b| a.dot(d).total_cmp(&b.dot(d)))
+        {
+            if !out.iter().any(|q| q.distance_squared(p) < 1e-8) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+fn box_points(min: Vec3, max: Vec3) -> Vec<Vec3> {
+    (0..8)
+        .map(|i| {
+            Vec3::new(
+                if i & 1 == 0 { min.x } else { max.x },
+                if i & 2 == 0 { min.y } else { max.y },
+                if i & 4 == 0 { min.z } else { max.z },
+            )
+        })
+        .collect()
+}
+
+impl Physics {
+    pub fn new() -> Self {
+        let mut world = PhysicsWorld::new();
+        let settings = PhysicsSettings::default();
+        world.gravity = settings.gravity;
+        world.integration_parameters.dt = 1.0 / settings.steps_per_second;
+        Self {
+            world,
+            settings,
+            bodies: HashMap::new(),
+            sinking: Vec::new(),
+            tiles: HashMap::new(),
+            source: GroundSource::None,
+            plane: None,
+            voxel_rev: 0,
+            clock: 0.0,
+            accumulator: 0.0,
+            impacts: Vec::new(),
+        }
+    }
+
+    pub fn settings(&self) -> PhysicsSettings {
+        self.settings
+    }
+
+    pub fn set_settings(&mut self, settings: PhysicsSettings) {
+        self.settings = settings;
+        self.world.gravity = settings.gravity;
+        self.world.integration_parameters.dt = 1.0 / settings.steps_per_second;
+        self.world.wake_up_all(true);
+    }
+
+    pub fn contains(&self, id: EntityId) -> bool {
+        self.bodies.contains_key(&id)
+    }
+
+    pub fn body_count(&self) -> usize {
+        self.bodies.len()
+    }
+
+    pub fn awake_count(&self) -> usize {
+        self.bodies
+            .values()
+            .filter(|t| {
+                t.kind == BodyKind::Dynamic
+                    && self
+                        .world
+                        .bodies
+                        .get(t.handle)
+                        .is_some_and(|b| !b.is_sleeping())
+            })
+            .count()
+    }
+
+    pub fn temporary_count(&self) -> usize {
+        self.bodies.values().filter(|t| t.temporary.is_some()).count() + self.sinking.len()
+    }
+
+    /// Add a body for an entity whose mesh positions are `positions`
+    /// (local space) and whose transform is `transform`.
+    pub fn add(
+        &mut self,
+        id: EntityId,
+        positions: &[Vec3],
+        transform: Mat4,
+        body: &Body,
+        temporary: Option<Temporary>,
+        indices: impl FnOnce() -> Vec<[u32; 3]>,
+    ) -> EngineResult<()> {
+        body.validate()?;
+        self.remove(id);
+        let (scale, rotation, translation) = split(transform);
+        if !scale.is_finite() || scale.min_element() <= 1e-6 {
+            return Err(EngineError::InvalidValue(
+                "body entity needs a finite, non-zero scale".into(),
+            ));
+        }
+        let scaled: Vec<Vec3> = positions.iter().map(|p| *p * scale).collect();
+        let (min, max) = if scaled.is_empty() {
+            (Vec3::splat(-0.5), Vec3::splat(0.5))
+        } else {
+            scaled.iter().fold((Vec3::MAX, Vec3::MIN), |(lo, hi), p| {
+                (lo.min(*p), hi.max(*p))
+            })
+        };
+        let no_mesh = || EngineError::InvalidValue("body shape needs a mesh with points".into());
+        let (builder, probes) = match &body.shape {
+            BodyShape::Hull => {
+                if scaled.len() < 4 {
+                    return Err(no_mesh());
+                }
+                let b = ColliderBuilder::convex_hull(&scaled)
+                    .or_else(|| {
+                        // Flat or degenerate meshes: fall back to the box.
+                        let h = ((max - min) * 0.5).max(Vec3::splat(0.01));
+                        Some(
+                            ColliderBuilder::cuboid(h.x, h.y, h.z)
+                                .translation((min + max) * 0.5),
+                        )
+                    })
+                    .expect("fallback box");
+                (b, probe_points(&scaled))
+            }
+            BodyShape::Mesh => {
+                let tris = indices();
+                if scaled.is_empty() || tris.is_empty() {
+                    return Err(no_mesh());
+                }
+                let b = ColliderBuilder::trimesh_with_flags(
+                    scaled.clone(),
+                    tris.clone(),
+                    TriMeshFlags::MERGE_DUPLICATE_VERTICES | TriMeshFlags::FIX_INTERNAL_EDGES,
+                )
+                .or_else(|_| ColliderBuilder::trimesh(scaled.clone(), tris))
+                .map_err(|e| EngineError::InvalidValue(format!("body mesh: {e}")))?;
+                (b, probe_points(&scaled))
+            }
+            BodyShape::BoundingBox => {
+                let h = ((max - min) * 0.5).max(Vec3::splat(0.01));
+                (
+                    ColliderBuilder::cuboid(h.x, h.y, h.z).translation((min + max) * 0.5),
+                    box_points(min, max),
+                )
+            }
+            BodyShape::Box(h) => {
+                let h = *h * scale;
+                (ColliderBuilder::cuboid(h.x, h.y, h.z), box_points(-h, h))
+            }
+            BodyShape::Ball(r) => {
+                let r = r * scale.max_element();
+                let mut pts = box_points(Vec3::splat(-r * 0.7), Vec3::splat(r * 0.7));
+                pts.extend([Vec3::Y * r, -Vec3::Y * r]);
+                (ColliderBuilder::ball(r), pts)
+            }
+            BodyShape::Capsule {
+                half_height,
+                radius,
+            } => {
+                let r = radius * scale.x.max(scale.z);
+                let hh = half_height * scale.y;
+                let mut pts = box_points(Vec3::new(-r, -hh, -r), Vec3::new(r, hh, r));
+                pts.extend([Vec3::Y * (hh + r), -Vec3::Y * (hh + r)]);
+                (ColliderBuilder::capsule_y(hh, r), pts)
+            }
+        };
+        let rb = match body.kind {
+            BodyKind::Dynamic => RigidBodyBuilder::dynamic(),
+            BodyKind::Fixed => RigidBodyBuilder::fixed(),
+            BodyKind::Kinematic => RigidBodyBuilder::kinematic_position_based(),
+        }
+        .pose(pose(translation, rotation))
+        .linvel(body.velocity)
+        .angvel(body.spin)
+        .linear_damping(body.damping)
+        .angular_damping(body.damping * 2.0 + 0.05)
+        .ccd_enabled(body.ccd)
+        .user_data(tag(id))
+        .build();
+        let handle = self.world.insert_body(rb);
+        let collider = self.world.insert_collider(
+            builder
+                .density(body.density * WATER_KG_M3)
+                .friction(body.friction)
+                .restitution(body.bounce)
+                .user_data(tag(id))
+                .active_events(rapier3d::prelude::ActiveEvents::COLLISION_EVENTS),
+            Some(handle),
+        );
+        let volume = self.world.colliders[collider].volume();
+        self.bodies.insert(
+            id,
+            Tracked {
+                handle,
+                collider,
+                kind: body.kind,
+                scale,
+                prev: (translation, rotation),
+                cur: (translation, rotation),
+                written: transform,
+                probes,
+                volume,
+                density: body.density,
+                wet: false,
+                age: 0.0,
+                temporary,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn remove(&mut self, id: EntityId) {
+        if let Some(t) = self.bodies.remove(&id) {
+            self.world.remove_body_with_colliders(t.handle, true);
+        }
+        self.sinking.retain(|s| s.id != id);
+    }
+
+    fn body_mut(&mut self, id: EntityId) -> EngineResult<&mut rapier3d::prelude::RigidBody> {
+        let t = self.bodies.get(&id).ok_or(EngineError::UnknownEntity)?;
+        self.world
+            .bodies
+            .get_mut(t.handle)
+            .ok_or(EngineError::UnknownEntity)
+    }
+
+    pub fn velocity(&self, id: EntityId) -> Option<Vec3> {
+        let t = self.bodies.get(&id)?;
+        self.world.bodies.get(t.handle).map(|b| b.linvel())
+    }
+
+    pub fn spin(&self, id: EntityId) -> Option<Vec3> {
+        let t = self.bodies.get(&id)?;
+        self.world.bodies.get(t.handle).map(|b| b.angvel())
+    }
+
+    pub fn mass(&self, id: EntityId) -> Option<f32> {
+        let t = self.bodies.get(&id)?;
+        self.world.bodies.get(t.handle).map(|b| b.mass())
+    }
+
+    pub fn set_velocity(&mut self, id: EntityId, v: Vec3) -> EngineResult<()> {
+        crate::place::ensure_finite3(v, "velocity")?;
+        self.body_mut(id)?.set_linvel(v, true);
+        Ok(())
+    }
+
+    pub fn set_spin(&mut self, id: EntityId, w: Vec3) -> EngineResult<()> {
+        crate::place::ensure_finite3(w, "spin")?;
+        self.body_mut(id)?.set_angvel(w, true);
+        Ok(())
+    }
+
+    pub fn push(&mut self, id: EntityId, impulse: Vec3, at: Option<Vec3>) -> EngineResult<()> {
+        crate::place::ensure_finite3(impulse, "impulse")?;
+        let b = self.body_mut(id)?;
+        match at {
+            Some(p) => {
+                crate::place::ensure_finite3(p, "impulse point")?;
+                b.apply_impulse_at_point(impulse, p, true);
+            }
+            None => b.apply_impulse(impulse, true),
+        }
+        Ok(())
+    }
+
+    /// Push every dynamic body near `center` away from it, strongest at the
+    /// centre and fading to nothing at `radius`. `strength` is the speed in
+    /// m/s given to a body right at the centre.
+    pub fn blast(&mut self, center: Vec3, radius: f32, strength: f32) {
+        for t in self.bodies.values() {
+            if t.kind != BodyKind::Dynamic {
+                continue;
+            }
+            let Some(b) = self.world.bodies.get_mut(t.handle) else {
+                continue;
+            };
+            let to = b.translation() - center;
+            let d = to.length();
+            if d >= radius {
+                continue;
+            }
+            let dir = to.try_normalize().unwrap_or(Vec3::Y);
+            let falloff = 1.0 - d / radius;
+            b.apply_impulse(dir * strength * falloff * b.mass(), true);
+        }
+    }
+
+    /// Bodies hit since the last call, hardest first.
+    pub fn take_impacts(&mut self) -> Vec<Impact> {
+        let mut out = std::mem::take(&mut self.impacts);
+        out.sort_by(|a, b| b.speed.total_cmp(&a.speed));
+        out
+    }
+
+    /// First body or ground along a ray. Ground means the colliders physics
+    /// has built so far; the world combines this with terrain rays.
+    pub fn cast_ray(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<RayHit> {
+        let dir = dir.try_normalize()?;
+        let ray = Ray::new(origin, dir);
+        let skip_ground = |_: ColliderHandle, c: &rapier3d::prelude::Collider| {
+            c.user_data != GROUND_TAG
+        };
+        let filter = QueryFilter::default().predicate(&skip_ground);
+        let (handle, hit) = self.world.cast_ray_and_get_normal(&ray, max, true, filter)?;
+        let c = self.world.colliders.get(handle)?;
+        let entity = Some(EntityId::from_raw(c.user_data as u64))
+            .filter(|id| self.bodies.contains_key(id));
+        Some(RayHit {
+            entity,
+            point: origin + dir * hit.time_of_impact,
+            normal: hit.normal,
+            distance: hit.time_of_impact,
+        })
+    }
+
+    /// Advance by `dt`. `transform_of` reads an entity's current transform
+    /// (to notice when the game moved it). Returns new transforms to write,
+    /// rubble to despawn, and splashes.
+    pub fn tick(
+        &mut self,
+        dt: f32,
+        around: &Surroundings,
+        mut transform_of: impl FnMut(EntityId) -> Option<Mat4>,
+    ) -> TickResult {
+        let mut out = TickResult::default();
+        if !dt.is_finite() || dt <= 0.0 {
+            return out;
+        }
+        // Forget bodies whose entities are gone; follow ones the game moved.
+        let ids: Vec<EntityId> = self.bodies.keys().copied().collect();
+        for id in ids {
+            let Some(m) = transform_of(id) else {
+                self.remove(id);
+                continue;
+            };
+            let t = &self.bodies[&id];
+            if m == t.written {
+                continue;
+            }
+            let (_, r, p) = split(m);
+            let (handle, kind) = (t.handle, t.kind);
+            if let Some(b) = self.world.bodies.get_mut(handle) {
+                match kind {
+                    BodyKind::Kinematic => b.set_next_kinematic_position(pose(p, r)),
+                    _ => b.set_position(pose(p, r), true),
+                }
+            }
+            let t = self.bodies.get_mut(&id).expect("tracked");
+            t.written = m;
+            if kind != BodyKind::Kinematic {
+                t.prev = (p, r);
+                t.cur = (p, r);
+            }
+        }
+        self.sinking.retain_mut(|s| {
+            s.left -= dt;
+            if s.left <= 0.0 {
+                out.expired.push(s.id);
+                return false;
+            }
+            out.sink.push((s.id, dt * 0.6));
+            true
+        });
+        if self.bodies.is_empty() {
+            self.accumulator = 0.0;
+            return out;
+        }
+
+        let h = 1.0 / self.settings.steps_per_second;
+        self.accumulator += dt.min(0.25);
+        let mut steps = 0;
+        while self.accumulator >= h && steps < self.settings.max_steps_per_frame {
+            self.accumulator -= h;
+            steps += 1;
+            self.clock += h;
+            self.update_ground(around);
+            self.apply_water(around, &mut out.splashes);
+            for t in self.bodies.values_mut() {
+                t.prev = t.cur;
+            }
+            let before: HashMap<RigidBodyHandle, Vec3> = self
+                .world
+                .active_bodies()
+                .map(|(h, b)| (h, b.linvel()))
+                .collect();
+            let events = StartEvents::default();
+            self.world.step_with_events(&(), &events);
+            self.collect_impacts(events, &before);
+            for t in self.bodies.values_mut() {
+                if let Some(b) = self.world.bodies.get(t.handle) {
+                    t.cur = (b.translation(), *b.rotation());
+                }
+            }
+        }
+        if steps == self.settings.max_steps_per_frame {
+            // Fell behind: drop the backlog rather than spiral.
+            self.accumulator = self.accumulator.min(h);
+        }
+
+        // Rubble whose time is up starts sinking.
+        let mut done = Vec::new();
+        for (id, t) in self.bodies.iter_mut() {
+            t.age += dt;
+            if let Some(tmp) = t.temporary {
+                if t.age > tmp.keep {
+                    done.push(*id);
+                }
+            }
+        }
+        for id in done {
+            self.remove(id);
+            self.sinking.push(Sinking {
+                id,
+                left: SINK_SECONDS,
+            });
+        }
+
+        // Draw between the last two steps.
+        let alpha = (self.accumulator / h).clamp(0.0, 1.0);
+        for (id, t) in self.bodies.iter_mut() {
+            if t.kind == BodyKind::Fixed {
+                continue;
+            }
+            let p = t.prev.0.lerp(t.cur.0, alpha);
+            let r = t.prev.1.slerp(t.cur.1, alpha);
+            let m = Mat4::from_scale_rotation_translation(t.scale, r, p);
+            if m != t.written {
+                t.written = m;
+                out.moved.push((*id, m));
+            }
+        }
+        out
+    }
+
+    fn collect_impacts(&mut self, events: StartEvents, before: &HashMap<RigidBodyHandle, Vec3>) {
+        // Contacts that began this step, with the speed things had just
+        // before they met. Resting contacts don't start again, so piles stay quiet.
+        let pairs = events.pairs.into_inner().unwrap_or_default();
+        for (h1, h2) in pairs {
+            let (Some(c1), Some(c2)) = (self.world.colliders.get(h1), self.world.colliders.get(h2))
+            else {
+                continue;
+            };
+            let id_of = |c: &rapier3d::prelude::Collider| {
+                (c.user_data != GROUND_TAG)
+                    .then(|| EntityId::from_raw(c.user_data as u64))
+                    .filter(|id| self.bodies.contains_key(id))
+            };
+            let (a, b) = match (id_of(c1), id_of(c2)) {
+                (Some(a), b) => (a, b),
+                (None, Some(b)) => (b, None),
+                _ => continue,
+            };
+            let Some(pair) = self.world.contact_pair(h1, h2) else {
+                continue;
+            };
+            let Some((manifold, point)) = pair.find_deepest_contact() else {
+                continue;
+            };
+            let normal = manifold.data.normal;
+            let vel = |c: &rapier3d::prelude::Collider| {
+                c.parent()
+                    .and_then(|h| before.get(&h).copied())
+                    .unwrap_or(Vec3::ZERO)
+            };
+            let at = c1.position() * point.local_p1;
+            let speed = (vel(c1) - vel(c2)).dot(normal).abs();
+            if speed > 1.0 {
+                self.impacts.push(Impact { a, b, point: at, speed });
+            }
+        }
+        if self.impacts.len() > 256 {
+            self.impacts.sort_by(|a, b| b.speed.total_cmp(&a.speed));
+            self.impacts.truncate(128);
+        }
+    }
+
+    /// Buoyancy, drag and current for bodies in water.
+    fn apply_water(&mut self, around: &Surroundings, splashes: &mut Vec<Splash>) {
+        let g = -self.settings.gravity.y;
+        for t in self.bodies.values_mut() {
+            if t.kind != BodyKind::Dynamic {
+                continue;
+            }
+            let Some(b) = self.world.bodies.get_mut(t.handle) else {
+                continue;
+            };
+            b.reset_forces(false);
+            b.reset_torques(false);
+            if around.water.is_none() || b.is_sleeping() && !t.wet {
+                continue;
+            }
+            let pos = b.translation();
+            let Some((surface, current)) = around.water_at(pos) else {
+                t.wet = false;
+                continue;
+            };
+            let rot = *b.rotation();
+            // Share of the body's height under the surface, pushing up at the
+            // middle of the submerged part (so a tilted body rights itself).
+            let points: Vec<Vec3> = t.probes.iter().map(|&l| pos + rot * l).collect();
+            let (lo, hi) = points
+                .iter()
+                .fold((pos.y, pos.y), |(lo, hi), p| (lo.min(p.y), hi.max(p.y)));
+            let frac = ((surface - lo) / (hi - lo).max(1e-3)).clamp(0.0, 1.0);
+            if frac <= 0.0 {
+                t.wet = false;
+                continue;
+            }
+            let under: Vec<Vec3> = points.iter().copied().filter(|p| p.y < surface).collect();
+            let mut centre = if under.is_empty() {
+                pos
+            } else {
+                (under.iter().copied().sum::<Vec3>() + pos) / (under.len() + 1) as f32
+            };
+            centre.y = (lo + surface.min(hi)) * 0.5;
+            b.add_force_at_point(Vec3::Y * WATER_KG_M3 * g * t.volume * frac, centre, true);
+            let v = b.linvel();
+            if !t.wet && v.y < -1.5 {
+                splashes.push(Splash {
+                    at: pos,
+                    speed: -v.y,
+                });
+            }
+            t.wet = true;
+            let rel = v - Vec3::new(current.x, 0.0, current.y);
+            let mass = b.mass();
+            b.add_force(-rel * mass * 3.0 * frac, true);
+            let w = b.angvel();
+            let inertia = mass * t.volume.cbrt().powi(2) * 0.2;
+            b.add_torque(-w * inertia * 2.0 * frac, true);
+            let _ = t.density;
+        }
+    }
+
+    /// Make sure every dynamic body has ground colliders around it.
+    fn update_ground(&mut self, around: &Surroundings) {
+        let source = around.source(self.settings.ground);
+        if source != self.source {
+            self.clear_ground();
+            self.source = source;
+            if let GroundSource::Plane(y) = source {
+                // A thick slab rather than a half-space: same contacts, and
+                // fast things can't tunnel through it.
+                let c = ColliderBuilder::cuboid(1.0e4, 5.0, 1.0e4)
+                    .translation(Vec3::new(0.0, y - 5.0, 0.0))
+                    .friction(0.7)
+                    .user_data(GROUND_TAG);
+                self.plane = Some(self.world.insert_collider(c, None));
+            }
+            if let (GroundSource::Voxels { .. }, Some(v)) = (source, around.voxels) {
+                self.voxel_rev = v.volume().rev();
+            }
+            self.world.wake_up_all(false);
+        }
+        match source {
+            GroundSource::Voxels { voxel_size, .. } => {
+                let v = around.voxels.expect("voxels").volume();
+                // Rebuild tiles whose voxels changed and wake what rests there.
+                let (changed, removed) = if v.rev() == self.voxel_rev {
+                    (Vec::new(), false)
+                } else {
+                    v.changed_since(self.voxel_rev)
+                };
+                if !changed.is_empty() || removed {
+                    self.voxel_rev = v.rev();
+                    let chunk_m = v.chunk_world_size();
+                    let mut stale: Vec<IVec3> = changed
+                        .into_iter()
+                        .filter(|k| self.tiles.contains_key(k))
+                        .collect();
+                    if removed {
+                        stale.extend(self.tiles.keys().filter(|k| !v.has_chunk(**k)));
+                    }
+                    for key in &stale {
+                        if let Some(tile) = self.tiles.remove(key) {
+                            if let Some(c) = tile.collider {
+                                self.world.remove_collider(c);
+                            }
+                        }
+                        let lo = key.as_vec3() * chunk_m - Vec3::splat(1.0);
+                        let hi = lo + Vec3::splat(chunk_m + 2.0);
+                        self.wake_in(lo, hi);
+                    }
+                }
+                let chunk_m = v.chunk_world_size();
+                let needed = self.needed_tiles(chunk_m, true);
+                let missing: Vec<IVec3> = needed
+                    .iter()
+                    .filter(|k| !self.tiles.contains_key(k))
+                    .copied()
+                    .collect();
+                let built: Vec<(IVec3, Option<ColliderBuilder>)> = missing
+                    .par_iter()
+                    .map(|k| {
+                        let (verts, tris) = v.collision_triangles(*k);
+                        (*k, ground_mesh(verts, tris))
+                    })
+                    .collect();
+                let _ = voxel_size;
+                for (key, builder) in built {
+                    let collider = builder.map(|b| self.world.insert_collider(b, None));
+                    self.tiles.insert(
+                        key,
+                        Tile {
+                            collider,
+                            last_needed: self.clock,
+                        },
+                    );
+                }
+                self.touch_and_drop(&needed);
+            }
+            GroundSource::Heights { .. } => {
+                let field = around.heights.expect("heights");
+                let needed = self.needed_tiles(HEIGHT_TILE_M, false);
+                let missing: Vec<IVec3> = needed
+                    .iter()
+                    .filter(|k| !self.tiles.contains_key(k))
+                    .copied()
+                    .collect();
+                let built: Vec<(IVec3, Option<ColliderBuilder>)> = missing
+                    .par_iter()
+                    .map(|k| {
+                        let (verts, tris) = height_tile(field, *k);
+                        (*k, ground_mesh(verts, tris))
+                    })
+                    .collect();
+                for (key, builder) in built {
+                    let collider = builder.map(|b| self.world.insert_collider(b, None));
+                    self.tiles.insert(
+                        key,
+                        Tile {
+                            collider,
+                            last_needed: self.clock,
+                        },
+                    );
+                }
+                self.touch_and_drop(&needed);
+            }
+            GroundSource::Plane(_) | GroundSource::None => {}
+        }
+    }
+
+    fn touch_and_drop(&mut self, needed: &HashSet<IVec3>) {
+        let now = self.clock;
+        let mut drop = Vec::new();
+        for (k, tile) in self.tiles.iter_mut() {
+            if needed.contains(k) {
+                tile.last_needed = now;
+            } else if now - tile.last_needed > TILE_KEEP_S {
+                drop.push(*k);
+            }
+        }
+        for k in drop {
+            if let Some(tile) = self.tiles.remove(&k) {
+                if let Some(c) = tile.collider {
+                    self.world.remove_collider(c);
+                }
+            }
+        }
+    }
+
+    /// Tile keys overlapping each dynamic body's reach for the next step.
+    fn needed_tiles(&self, tile_m: f32, three_d: bool) -> HashSet<IVec3> {
+        let h = 1.0 / self.settings.steps_per_second;
+        let mut out = HashSet::new();
+        for t in self.bodies.values() {
+            if t.kind != BodyKind::Dynamic {
+                continue;
+            }
+            let (Some(b), Some(c)) = (
+                self.world.bodies.get(t.handle),
+                self.world.colliders.get(t.collider),
+            ) else {
+                continue;
+            };
+            let aabb = c.compute_aabb();
+            let reach = Vec3::splat(0.5) + b.linvel().abs() * h * 2.0;
+            let lo = ((aabb.mins - reach) / tile_m).floor().as_ivec3();
+            let hi = ((aabb.maxs + reach) / tile_m).floor().as_ivec3();
+            if (hi - lo).max_element() > 8 {
+                continue; // a giant body; don't build half the world
+            }
+            for x in lo.x..=hi.x {
+                for z in lo.z..=hi.z {
+                    if three_d {
+                        for y in lo.y..=hi.y {
+                            out.insert(IVec3::new(x, y, z));
+                        }
+                    } else {
+                        out.insert(IVec3::new(x, 0, z));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn wake_in(&mut self, lo: Vec3, hi: Vec3) {
+        for t in self.bodies.values() {
+            if let Some(b) = self.world.bodies.get_mut(t.handle) {
+                let p = b.translation();
+                if p.cmpge(lo).all() && p.cmple(hi).all() {
+                    b.wake_up(true);
+                }
+            }
+        }
+    }
+
+    fn clear_ground(&mut self) {
+        for (_, tile) in self.tiles.drain() {
+            if let Some(c) = tile.collider {
+                self.world.remove_collider(c);
+            }
+        }
+        if let Some(c) = self.plane.take() {
+            self.world.remove_collider(c);
+        }
+    }
+
+}
+
+/// Collects which collider pairs started touching during a step.
+#[derive(Default)]
+struct StartEvents {
+    pairs: std::sync::Mutex<Vec<(ColliderHandle, ColliderHandle)>>,
+}
+
+impl rapier3d::prelude::EventHandler for StartEvents {
+    fn handle_collision_event(
+        &self,
+        _: &rapier3d::prelude::RigidBodySet,
+        _: &rapier3d::prelude::ColliderSet,
+        event: rapier3d::prelude::CollisionEvent,
+        _: Option<&rapier3d::prelude::ContactPair>,
+    ) {
+        if let rapier3d::prelude::CollisionEvent::Started(a, b, _) = event {
+            if let Ok(mut v) = self.pairs.lock() {
+                v.push((a, b));
+            }
+        }
+    }
+
+    fn handle_contact_force_event(
+        &self,
+        _: f32,
+        _: &rapier3d::prelude::RigidBodySet,
+        _: &rapier3d::prelude::ColliderSet,
+        _: &rapier3d::prelude::ContactPair,
+        _: f32,
+    ) {
+    }
+
+    fn handle_soft_body_tear_event(
+        &self,
+        _: &rapier3d::prelude::SoftBodySet,
+        _: &rapier3d::prelude::SoftBodyTearEvent,
+    ) {
+    }
+}
+
+/// Per-tick output for the world to apply.
+#[derive(Default, Debug)]
+pub(crate) struct TickResult {
+    pub moved: Vec<(EntityId, Mat4)>,
+    pub sink: Vec<(EntityId, f32)>,
+    pub expired: Vec<EntityId>,
+    pub splashes: Vec<Splash>,
+}
+
+/// A ground collider from triangles; `None` when there are none.
+fn ground_mesh(verts: Vec<Vec3>, tris: Vec<[u32; 3]>) -> Option<ColliderBuilder> {
+    if tris.is_empty() {
+        return None;
+    }
+    let b = ColliderBuilder::trimesh_with_flags(
+        verts.clone(),
+        tris.clone(),
+        TriMeshFlags::FIX_INTERNAL_EDGES,
+    )
+    .or_else(|_| ColliderBuilder::trimesh(verts, tris))
+    .ok()?;
+    Some(b.friction(0.7).user_data(GROUND_TAG))
+}
+
+/// Triangles of one height-terrain tile.
+fn height_tile(field: &crate::proc_terrain::HeightField, key: IVec3) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+    let n = HEIGHT_TILE_SAMPLES;
+    let step = HEIGHT_TILE_M / (n - 1) as f32;
+    let x0 = key.x as f32 * HEIGHT_TILE_M;
+    let z0 = key.z as f32 * HEIGHT_TILE_M;
+    let mut verts = Vec::with_capacity(n * n);
+    for j in 0..n {
+        for i in 0..n {
+            let x = x0 + i as f32 * step;
+            let z = z0 + j as f32 * step;
+            verts.push(Vec3::new(x, field.height_at(x, z), z));
+        }
+    }
+    let mut tris = Vec::with_capacity((n - 1) * (n - 1) * 2);
+    for j in 0..n - 1 {
+        for i in 0..n - 1 {
+            let a = (j * n + i) as u32;
+            let b = a + 1;
+            let c = a + n as u32;
+            let d = c + 1;
+            tris.push([a, c, b]);
+            tris.push([b, c, d]);
+        }
+    }
+    (verts, tris)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cube() -> Vec<Vec3> {
+        box_points(Vec3::splat(-0.5), Vec3::splat(0.5))
+    }
+
+    fn none() -> Surroundings<'static> {
+        Surroundings {
+            voxels: None,
+            heights: None,
+            water: None,
+        }
+    }
+
+    fn run(p: &mut Physics, seconds: f32, transforms: &mut HashMap<EntityId, Mat4>) {
+        let frames = (seconds * 120.0) as usize;
+        for _ in 0..frames {
+            let r = p.tick(1.0 / 120.0, &none(), |id| transforms.get(&id).copied());
+            for (id, m) in r.moved {
+                transforms.insert(id, m);
+            }
+        }
+    }
+
+    #[test]
+    fn a_dropped_box_lands_on_the_floor_and_sleeps() {
+        let mut p = Physics::new();
+        let id = EntityId::test(1);
+        let m = Mat4::from_translation(Vec3::new(0.0, 4.0, 0.0));
+        p.add(id, &cube(), m, &Body::dynamic(), None, Vec::new).unwrap();
+        let mut tf = HashMap::from([(id, m)]);
+        run(&mut p, 4.0, &mut tf);
+        let y = tf[&id].w_axis.y;
+        assert!((y - 0.5).abs() < 0.03, "rest height {y}");
+        assert_eq!(p.awake_count(), 0, "box should be asleep");
+    }
+
+    #[test]
+    fn boxes_stack_instead_of_passing_through_each_other() {
+        let mut p = Physics::new();
+        let mut tf = HashMap::new();
+        for i in 0..3 {
+            let id = EntityId::test(10 + i);
+            let m = Mat4::from_translation(Vec3::new(0.0, 0.6 + i as f32 * 1.1, 0.0));
+            p.add(id, &cube(), m, &Body::dynamic(), None, Vec::new).unwrap();
+            tf.insert(id, m);
+        }
+        run(&mut p, 4.0, &mut tf);
+        let top = tf[&EntityId::test(12)].w_axis.y;
+        assert!((top - 2.5).abs() < 0.08, "top of the stack at {top}");
+    }
+
+    #[test]
+    fn moving_the_entity_teleports_the_body() {
+        let mut p = Physics::new();
+        let id = EntityId::test(2);
+        let m = Mat4::from_translation(Vec3::new(0.0, 0.5, 0.0));
+        p.add(id, &cube(), m, &Body::dynamic(), None, Vec::new).unwrap();
+        let mut tf = HashMap::from([(id, m)]);
+        run(&mut p, 0.5, &mut tf);
+        tf.insert(id, Mat4::from_translation(Vec3::new(10.0, 3.0, 0.0)));
+        run(&mut p, 2.0, &mut tf);
+        let at = tf[&id].w_axis;
+        assert!((at.x - 10.0).abs() < 0.05 && (at.y - 0.5).abs() < 0.05, "{at:?}");
+    }
+
+    #[test]
+    fn a_push_slides_a_box_and_friction_stops_it() {
+        let mut p = Physics::new();
+        let id = EntityId::test(3);
+        let m = Mat4::from_translation(Vec3::new(0.0, 0.5, 0.0));
+        p.add(id, &cube(), m, &Body::dynamic(), None, Vec::new).unwrap();
+        let mut tf = HashMap::from([(id, m)]);
+        run(&mut p, 0.3, &mut tf);
+        let mass = p.mass(id).unwrap();
+        assert!((mass - 1000.0).abs() < 1.0, "1 m³ of water-density box: {mass}");
+        p.push(id, Vec3::new(3.0 * mass, 0.0, 0.0), None).unwrap();
+        run(&mut p, 3.0, &mut tf);
+        let x = tf[&id].w_axis.x;
+        assert!(x > 0.3 && x < 2.0, "slid to {x}");
+        assert!(p.velocity(id).unwrap().length() < 0.05);
+    }
+
+    #[test]
+    fn rubble_expires_after_its_time() {
+        let mut p = Physics::new();
+        let id = EntityId::test(4);
+        let m = Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0));
+        p.add(id, &cube(), m, &Body::dynamic(), Some(Temporary { keep: 0.5 }), Vec::new)
+            .unwrap();
+        let mut gone = false;
+        let mut tf = HashMap::from([(id, m)]);
+        for _ in 0..400 {
+            let r = p.tick(1.0 / 120.0, &none(), |id| tf.get(&id).copied());
+            for (id, m) in r.moved {
+                tf.insert(id, m);
+            }
+            gone |= r.expired.contains(&id);
+        }
+        assert!(gone);
+        assert_eq!(p.temporary_count(), 0);
+    }
+
+    #[test]
+    fn rays_hit_bodies_but_not_the_floor() {
+        let mut p = Physics::new();
+        let id = EntityId::test(5);
+        let m = Mat4::from_translation(Vec3::new(0.0, 0.5, 0.0));
+        p.add(id, &cube(), m, &Body::dynamic(), None, Vec::new).unwrap();
+        let mut tf = HashMap::from([(id, m)]);
+        run(&mut p, 0.1, &mut tf);
+        let hit = p.cast_ray(Vec3::new(0.0, 5.0, 0.0), -Vec3::Y, 10.0).unwrap();
+        assert_eq!(hit.entity, Some(id));
+        assert!((hit.point.y - 1.0).abs() < 0.02);
+        assert!(p.cast_ray(Vec3::new(5.0, 5.0, 0.0), -Vec3::Y, 10.0).is_none());
+    }
+
+    #[test]
+    fn a_dynamic_triangle_mesh_is_refused() {
+        let mut p = Physics::new();
+        let err = p.add(
+            EntityId::test(6),
+            &cube(),
+            Mat4::IDENTITY,
+            &Body::dynamic().shape(BodyShape::Mesh),
+            None,
+            Vec::new,
+        );
+        assert!(err.is_err());
+    }
+}

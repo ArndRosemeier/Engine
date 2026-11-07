@@ -103,7 +103,7 @@ fn box_normals_point_outward() {
 #[test]
 fn volume_sphere_extracts_triangles() {
     let mut v = Volume::new(0.5);
-    v.fill_sphere(Vec3::new(8.0, 8.0, 8.0), 3.0);
+    v.fill_sphere(Vec3::new(8.0, 20.0, 8.0), 3.0);
     let mesh = v.extract_all(rgb(255, 255, 255));
     assert!(mesh.index_count() > 0);
     assert_eq!(mesh.index_count() % 3, 0);
@@ -111,7 +111,7 @@ fn volume_sphere_extracts_triangles() {
 
 #[test]
 fn volume_sphere_normals_point_outward() {
-    let center = Vec3::new(8.0, 8.0, 8.0);
+    let center = Vec3::new(8.0, 20.0, 8.0);
     let mut v = Volume::new(0.5);
     v.fill_sphere(center, 3.0);
     let mesh = v.extract_all(rgb(255, 255, 255));
@@ -1409,4 +1409,176 @@ fn trees_share_one_atlas_texture() {
     };
     assert!(tex(&world, a).is_some());
     assert_eq!(tex(&world, a), tex(&world, b));
+}
+
+mod physics_world {
+    use crate::color::rgb;
+    use crate::mesh::Mesh;
+    use crate::physics::{Body, PhysicsGround, PhysicsSettings};
+    use crate::place::Place;
+    use crate::world::World;
+    use glam::Vec3;
+
+    fn crate_at(world: &mut World, p: Vec3) -> crate::world::EntityId {
+        let id = world.spawn(Mesh::box_at(Vec3::ZERO, Vec3::ONE, rgb(150, 100, 50)).unwrap());
+        world.set_place(id, Place::new(p.x, p.y, p.z)).unwrap();
+        id
+    }
+
+    fn run(world: &mut World, seconds: f32) {
+        for _ in 0..(seconds * 60.0) as usize {
+            world.tick_physics(1.0 / 60.0);
+        }
+    }
+
+    fn y_of(world: &World, id: crate::world::EntityId) -> f32 {
+        world.entity(id).unwrap().transform().w_axis.y
+    }
+
+    fn voxel_ground(top: f32) -> crate::voxel_terrain::VoxelTerrain {
+        let mut volume = crate::volume::Volume::new(0.5);
+        volume.ensure_bounds(Vec3::new(-8.0, -4.0, -8.0), Vec3::new(8.0, 20.0, 8.0));
+        let keys: Vec<_> = volume.chunk_keys().collect();
+        volume.generate_chunks(&keys, |p| top - p.y);
+        crate::voxel_terrain::VoxelTerrain::new(volume)
+    }
+
+    #[test]
+    fn a_crate_rests_on_voxel_ground_and_falls_into_a_dug_hole() {
+        let mut world = World::new();
+        world.set_voxel_terrain(Some(voxel_ground(2.0)));
+        let id = crate_at(&mut world, Vec3::new(0.3, 6.0, 0.3));
+        world.add_body(id, Body::dynamic()).unwrap();
+        run(&mut world, 3.0);
+        let rest = y_of(&world, id);
+        assert!((rest - 2.5).abs() < 0.1, "rest height {rest}");
+        assert_eq!(world.body_count().1, 0, "should be asleep");
+        world
+            .voxel_terrain_mut()
+            .unwrap()
+            .volume_mut()
+            .dig_sphere(Vec3::new(0.3, 2.0, 0.3), 2.5);
+        run(&mut world, 3.0);
+        let after = y_of(&world, id);
+        assert!(after < rest - 1.0, "crate should drop into the hole: {after}");
+    }
+
+    #[test]
+    fn a_crate_lands_on_height_terrain() {
+        let mut world = World::new();
+        let rules = crate::proc_terrain::demo_terrain_rules();
+        let field = crate::proc_terrain::HeightField::new(rules.clone());
+        let ground = field.height_at(3.0, 4.0);
+        world.set_proc_terrain(crate::proc_terrain::ProcTerrain::gpu_clipmap(
+            rules,
+            Default::default(),
+        ));
+        let id = crate_at(&mut world, Vec3::new(3.0, ground + 5.0, 4.0));
+        world.add_body(id, Body::dynamic().shape(crate::physics::BodyShape::Ball(0.5))).unwrap();
+        run(&mut world, 1.5);
+        let y = y_of(&world, id);
+        assert!(
+            y > ground - 0.6 && y < ground + 2.0,
+            "ball at {y}, ground {ground}"
+        );
+        let hit = world
+            .cast_ray(Vec3::new(10.0, ground + 50.0, 10.0), -Vec3::Y, 200.0)
+            .unwrap();
+        assert!(hit.entity.is_none());
+        assert!((hit.point.y - field.height_at(10.0, 10.0)).abs() < 0.05);
+    }
+
+    #[test]
+    fn shattered_pieces_pile_up_instead_of_overlapping_the_floor() {
+        let mut world = World::new();
+        let id = crate_at(&mut world, Vec3::new(0.0, 0.5, 0.0));
+        let pieces = world
+            .shatter(id, Vec3::new(0.0, 0.8, 0.4), crate::debris::Shatter::default())
+            .unwrap();
+        assert!(pieces.len() > 4);
+        assert_eq!(world.debris_count(), pieces.len());
+        run(&mut world, 5.0);
+        for p in &pieces {
+            let y = y_of(&world, *p);
+            assert!(y > -0.05 && y < 1.5, "piece at {y}");
+        }
+    }
+
+    #[test]
+    fn a_fixed_wall_stops_a_thrown_crate_and_reports_the_impact() {
+        let mut world = World::new();
+        let wall = world
+            .spawn(Mesh::box_at(Vec3::ZERO, Vec3::new(0.4, 3.0, 4.0), rgb(128, 128, 128)).unwrap());
+        world.set_place(wall, Place::new(4.0, 1.5, 0.0)).unwrap();
+        world.add_body(wall, Body::fixed()).unwrap();
+        let id = crate_at(&mut world, Vec3::new(0.0, 0.6, 0.0));
+        world
+            .add_body(id, Body::dynamic().velocity(Vec3::new(12.0, 0.0, 0.0)))
+            .unwrap();
+        run(&mut world, 2.0);
+        let x = world.entity(id).unwrap().transform().w_axis.x;
+        assert!(x < 3.4, "crate went through the wall: {x}");
+        let hits = world.take_impacts();
+        assert!(
+            hits.iter().any(|h| h.b == Some(wall) || h.a == wall),
+            "no impact with the wall: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn light_crates_float_and_heavy_ones_sink() {
+        use crate::water::{HeightMapTerrain, Water, WaterRegion};
+        let mut world = World::new();
+        let floor = HeightMapTerrain(|_: f32, _: f32| 0.0);
+        let region = WaterRegion::new(glam::Vec2::ZERO, glam::Vec2::splat(16.0), 1.0, -1.0, 10.0);
+        let mut water = Water::new(region, &floor);
+        water.flood(Vec3::new(8.0, 0.5, 8.0), 3.0);
+        world.set_water(Some(water));
+        let wood = crate_at(&mut world, Vec3::new(6.0, 6.0, 8.0));
+        world.add_body(wood, Body::dynamic().density(0.5)).unwrap();
+        let stone = crate_at(&mut world, Vec3::new(10.0, 6.0, 8.0));
+        world.add_body(stone, Body::dynamic().density(2.4)).unwrap();
+        run(&mut world, 8.0);
+        let w = y_of(&world, wood);
+        let s = y_of(&world, stone);
+        assert!(w > 2.6 && w < 3.4, "wood should float at the surface: {w}");
+        assert!(s < 0.7, "stone should sink: {s}");
+    }
+
+    #[test]
+    fn ground_plane_setting_moves_the_floor() {
+        let mut world = World::new();
+        world
+            .set_physics_settings(PhysicsSettings {
+                ground: PhysicsGround::Plane(-3.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let id = crate_at(&mut world, Vec3::new(0.0, 1.0, 0.0));
+        world.add_body(id, Body::dynamic()).unwrap();
+        run(&mut world, 3.0);
+        assert!((y_of(&world, id) + 2.5).abs() < 0.05);
+        world.despawn(id);
+        assert_eq!(world.body_count().0, 0);
+    }
+}
+
+#[test]
+#[ignore]
+fn bench_voxel_collision_tile() {
+    let mut volume = crate::volume::Volume::new(1.0);
+    volume.ensure_bounds(Vec3::new(0.0, 0.0, 0.0), Vec3::new(31.0, 31.0, 31.0));
+    let keys: Vec<_> = volume.chunk_keys().collect();
+    volume.generate_chunks(&keys, |p| 16.0 + (p.x * 0.2).sin() * 4.0 + (p.z * 0.15).cos() * 4.0 - p.y);
+    let t = std::time::Instant::now();
+    let (v, tris) = volume.collision_triangles(keys[0]);
+    let mesh_ms = t.elapsed().as_secs_f64() * 1e3;
+    let t = std::time::Instant::now();
+    let c = rapier3d::prelude::ColliderBuilder::trimesh_with_flags(
+        v.clone(),
+        tris.clone(),
+        rapier3d::prelude::TriMeshFlags::FIX_INTERNAL_EDGES,
+    );
+    let build_ms = t.elapsed().as_secs_f64() * 1e3;
+    eprintln!("{} tris: marching {mesh_ms:.2} ms, collider {build_ms:.2} ms ok={}", tris.len(), c.is_ok());
 }

@@ -21,7 +21,11 @@ render loop.
   (ground, cliffs, facades, roofs, paving, medieval), procedural surface
   materials, caves and landscapes.
 - **Destruction:** smooth voxel terrain you can dig into (meshed on the GPU),
-  and meshes that shatter into solid pieces.
+  and meshes that shatter into solid pieces that tumble and pile up.
+- **Physics:** rigid bodies (Rapier) for any mesh: stacking, pushing,
+  throwing, explosions, kinematic movers, floating and sinking in water,
+  impacts for sounds, rays. Voxel and height terrain are colliders
+  automatically, and stay right after digging.
 - **Characters and models:** glTF/GLB loading with full materials, skinned
   animation with blending, Actors characters, AssetGenerator `.fmpk` prop packs.
 - **Everything else a game needs:** keyboard and mouse input, a fly camera,
@@ -135,7 +139,21 @@ drives sun, ambient light, fog and exposure. `set_wind(0..2)` and
 **Destruction:** `world.set_voxel_terrain(Some(VoxelTerrain::new(volume)))`
 gives diggable ground (see `examples/voxel_destruction`);
 `world.shatter(entity, impact_point, Shatter::default())?` breaks a mesh into
-solid pieces.
+solid pieces; they become physics bodies that hit each other and sink away
+after `keep_seconds`.
+
+**Physics:** `world.add_body(id, Body::dynamic())?` and the entity falls,
+collides and comes to rest; `Body::fixed()` for walls and floors (exact mesh),
+`Body::kinematic()` for things you move with `set_place` (lifts, doors, a
+sweeper) that shove others aside. Set `.density(0.6)` (relative to water: it
+floats), `.friction()`, `.bounce()`, `.velocity()`, `.shape(BodyShape::Ball(r))`
+and `.ccd(true)` for small fast things. Then `push`, `push_at`,
+`set_body_velocity`, `blast(center, radius, speed)` for explosions,
+`cast_ray(origin, dir, max)` for what's in the way (a body or the ground), and
+`take_impacts()` each frame for hits worth a sound. Moving a body's entity with
+`set_place` teleports it. The ground needs nothing: voxel or height terrain
+becomes colliders around moving bodies (flat floor at y = 0 without terrain;
+`set_physics_settings` changes that and gravity). See `examples/physics`.
 
 **Input:** `frame.input.down(Key::W)`, `pressed(Key::Space)` (this frame only),
 `mouse_down(MouseButton::Left)`, `move_xz()` for WASD, `mouse_delta()`.
@@ -166,6 +184,7 @@ Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_glo
 | `landscape` | `Landscape::new(seed)`: hills and caves as a mesh |
 | `voxel_terrain` | Smooth, diggable voxel ground meshed on the GPU (`with_beach(top_y)` for sand along the sea) |
 | `fracture` / `debris` | Shatter meshes into solid chunks |
+| `physics` | `Body`, `BodyShape`, `PhysicsSettings`: rigid bodies on top of Rapier |
 | `proc` | `Noise`, carving helpers |
 | `props` | AssetGenerator `.fmpk` prop packs |
 
@@ -185,6 +204,7 @@ cargo run --release -p <name>
 | `sky_day` | A day passing under the physical sky |
 | `texgen` | The texture layers (`ENGINE_TEXGEN_FAMILY=natural/ground/facade/roof/medieval`) |
 | `voxel_destruction` | Digging terrain and shattering towers |
+| `physics` | Crates, a brick wall, dominoes, rolling boulders and a sweeper; throw balls (click), blow things up (F), shatter (X) |
 | `model_viewer` | Any glTF/GLB or `.fmpk` file: `-- path/to/model.glb` |
 | `animated_animal` | Skinned glTF animation |
 | `infinite_walker` | Endless clipmap terrain with a walker |

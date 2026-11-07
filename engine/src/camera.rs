@@ -173,7 +173,7 @@ impl Camera {
     }
 
     pub fn view_matrix(&self) -> Mat4 {
-        Mat4::look_at_rh(self.eye, self.target, self.up)
+        glam::camera::rh::view::look_at_mat4(self.eye, self.target, self.up)
     }
 
     /// Perspective projection with **reversed depth**: near maps to 1, far to 0.
@@ -186,7 +186,7 @@ impl Camera {
     /// [`wgpu::CompareFunction::Greater`] and the pass clears depth to 0 to
     /// match — all three have to agree or nothing draws.
     pub fn projection_matrix(&self, aspect: f32) -> Mat4 {
-        Mat4::perspective_rh(self.fov_y_degrees.to_radians(), aspect, self.far, self.near)
+        glam::camera::rh::proj::directx::perspective(self.fov_y_degrees.to_radians(), aspect, self.far, self.near)
     }
 
     pub fn view_projection(&self, aspect: f32) -> Mat4 {

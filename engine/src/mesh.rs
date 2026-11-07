@@ -516,6 +516,43 @@ impl Mesh {
         Ok(mesh)
     }
 
+    /// A smooth sphere (24 × 16 segments) as a complete mesh.
+    pub fn ball(center: impl Into<Vec3>, radius: f32, color: Color) -> EngineResult<Self> {
+        let center = center.into();
+        ensure_finite3(center, "ball center")?;
+        if !radius.is_finite() || radius <= 0.0 {
+            return Err(EngineError::InvalidMesh("ball radius must be > 0".into()));
+        }
+        let (around, down) = (24u32, 16u32);
+        let mut mesh = Self::new();
+        let mut ids = Vec::with_capacity(((around + 1) * (down + 1)) as usize);
+        for j in 0..=down {
+            let v = j as f32 / down as f32 * std::f32::consts::PI;
+            for i in 0..=around {
+                let u = i as f32 / around as f32 * std::f32::consts::TAU;
+                let n = Vec3::new(v.sin() * u.cos(), v.cos(), v.sin() * u.sin());
+                let id = mesh.add_point(center + n * radius)?;
+                mesh.set_point_color(id, color)?;
+                mesh.set_point_normal(id, n)?;
+                ids.push(id);
+            }
+        }
+        let at = |i: u32, j: u32| ids[(j * (around + 1) + i) as usize];
+        for j in 0..down {
+            for i in 0..around {
+                let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
+                if j == 0 {
+                    mesh.add_face(&[a, c, d])?;
+                } else if j == down - 1 {
+                    mesh.add_face(&[a, b, c])?;
+                } else {
+                    mesh.add_face(&[a, b, c, d])?;
+                }
+            }
+        }
+        Ok(mesh)
+    }
+
     /// A doorway, dungeon mouth, or teleport surface: a quad on the XY plane
     /// facing `+Z`. Pair two of these with [`crate::world::World::link`].
     pub fn opening(width: f32, height: f32) -> EngineResult<Self> {
