@@ -528,14 +528,16 @@ fn fs_land(in: VsOut) -> @location(0) vec4<f32> {
     if layers.inv_tile_b.y > 0.5 && in.wet < 0.5 {
         let surf = ground_surface(in, n, grads);
         light.ao *= surf.orh.x;
-        let lit = pbr_shade(surf.albedo, surf.n, v, light, surf.orh.y, 0.0, vis, sun_diffuse)
-            + surf.albedo * torch_light(in.world_p, surf.n)
-            + lamp_light(surf.albedo, surf.n, v, in.world_p, surf.orh.y, 0.0);
+        let ds = apply_decals(in.world_p, surf.n, surf.albedo, surf.orh.y, 0.0, frame.eye);
+        let lit = pbr_shade(ds.base, ds.n, v, light, ds.roughness, ds.metallic, vis, sun_diffuse)
+            + ds.base * torch_light(in.world_p, ds.n)
+            + lamp_light(ds.base, ds.n, v, in.world_p, ds.roughness, ds.metallic) + ds.emit;
         return vec4(lit, 1.0);
     }
-    let lit = pbr_shade(in.color.rgb, n, v, light, 0.92, 0.0, vis, sun_diffuse)
-        + in.color.rgb * torch_light(in.world_p, n)
-        + lamp_light(in.color.rgb, n, v, in.world_p, 0.92, 0.0);
+    let ds = apply_decals(in.world_p, n, in.color.rgb, 0.92, 0.0, frame.eye);
+    let lit = pbr_shade(ds.base, ds.n, v, light, ds.roughness, ds.metallic, vis, sun_diffuse)
+        + ds.base * torch_light(in.world_p, ds.n)
+        + lamp_light(ds.base, ds.n, v, in.world_p, ds.roughness, ds.metallic) + ds.emit;
     return vec4(lit, 1.0);
 }
 
@@ -836,13 +838,14 @@ impl ClipmapRenderer {
             label: Some("clipmap-shader"),
             source: wgpu::ShaderSource::Wgsl(
                 format!(
-                    "{}{SHADER}{}{}{}{}{}",
+                    "{}{SHADER}{}{}{}{}{}{}",
                     super::pipeline::LIGHTING_WGSL,
                     super::shadow::SHADOW_UNIFORMS_WGSL,
                     super::shadow::CLIPMAP_SHADOW_WGSL,
                     super::shadow::SHADOW_EVAL_WGSL,
                     super::lights::LAMP_EVAL_WGSL,
-                    super::grass::GRASS_WGSL
+                    super::grass::GRASS_WGSL,
+                    super::decals::decal_wgsl(1, 19, 16, true),
                 )
                 .into(),
             ),

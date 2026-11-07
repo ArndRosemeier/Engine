@@ -44,6 +44,7 @@ pub mod collision;
 pub mod color;
 pub mod contact;
 pub mod debris;
+pub mod decals;
 pub mod error;
 pub mod fly;
 pub mod fracture;

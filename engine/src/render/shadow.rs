@@ -633,7 +633,7 @@ fn lamp_storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 19] {
+fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 22] {
     [
         wgpu::BindGroupLayoutEntry {
             binding: base,
@@ -750,6 +750,37 @@ fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 19] {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
                 min_binding_size: None,
+            },
+            count: None,
+        },
+        // Decals (see `decals.rs`): the list, its grid, the images.
+        wgpu::BindGroupLayoutEntry {
+            binding: base + 19,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: base + 20,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Uint,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: base + 21,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
             },
             count: None,
         },
@@ -875,6 +906,24 @@ struct ResourceViews<'a> {
     lamps: &'a super::lights::LampResources,
     elements: &'a wgpu::Buffer,
     reflect: &'a ReflectResources,
+    decals: &'a super::decals::DecalGpu,
+}
+
+fn decal_entries(d: &super::decals::DecalGpu, base: u32) -> [wgpu::BindGroupEntry<'_>; 3] {
+    [
+        wgpu::BindGroupEntry {
+            binding: base,
+            resource: d.uniform.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: base + 1,
+            resource: wgpu::BindingResource::TextureView(&d.grid_view),
+        },
+        wgpu::BindGroupEntry {
+            binding: base + 2,
+            resource: wgpu::BindingResource::TextureView(&d.images_view),
+        },
+    ]
 }
 
 /// What the lit shaders read for reflections; see `reflect.rs`.
@@ -980,6 +1029,7 @@ fn create_resource_bind(
         ]
         .into_iter()
         .chain(v.reflect.entries(15))
+        .chain(decal_entries(v.decals, 19))
         .collect::<Vec<_>>(),
     })
 }
@@ -1014,6 +1064,7 @@ pub struct ShadowGpu {
     ao_sampler: wgpu::Sampler,
     gi_views: [wgpu::TextureView; 3],
     pub reflect: ReflectResources,
+    pub decals: super::decals::DecalGpu,
     pub lamps: super::lights::LampResources,
     /// Probe box for this frame, from the renderer; None switches GI off.
     gi: Option<super::gi::GiPlacement>,
@@ -1196,11 +1247,13 @@ impl ShadowGpu {
             entries: &resource_layout_entries(0),
         });
         let reflect = ReflectResources::placeholder(device, queue);
+        let decals = super::decals::DecalGpu::new(device, queue);
         let resource_bind = create_resource_bind(
             device,
             &resource_layout,
             ResourceViews {
                 reflect: &reflect,
+                decals: &decals,
                 uniform: &uniform_buf,
                 map: &map_array_view,
                 comparison: &comparison_sampler,
@@ -1385,6 +1438,7 @@ impl ShadowGpu {
             ao_sampler,
             gi_views,
             reflect,
+            decals,
             lamps,
             gi: None,
             map_size,
@@ -1461,6 +1515,7 @@ impl ShadowGpu {
                 lamps: &self.lamps,
                 elements: &self.element_states,
                 reflect: &self.reflect,
+                decals: &self.decals,
             },
         );
     }
@@ -1536,6 +1591,7 @@ impl ShadowGpu {
             },
         ];
         out.extend(self.reflect.entries(16));
+        out.extend(decal_entries(&self.decals, 20));
         out
     }
 
@@ -1611,6 +1667,7 @@ impl ShadowGpu {
             |p, r| view.intersects_sphere(p, r),
         );
         let count = self.lamps.upload(queue, &lamp_frame, wind);
+        self.decals.upload(queue, world, eye);
         uniforms.lamp_origin0 = lamp_frame.origin0.extend(count as f32).into();
         uniforms.lamp_origin1 = lamp_frame.origin1.extend(0.0).into();
         let light = world.light().direction.normalize_or_zero();

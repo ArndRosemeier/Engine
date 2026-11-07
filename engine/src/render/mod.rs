@@ -1,4 +1,5 @@
 mod clipmap;
+mod decals;
 pub(crate) mod frustum;
 mod gi;
 mod gpu_mesh;

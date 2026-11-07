@@ -29,6 +29,7 @@ members = [
     "examples/characters",
     "examples/fixed_tick",
     "examples/ragdolls",
+    "examples/decals",
     "examples/interiors",
     "examples/reflections",
     "examples/buildings",
