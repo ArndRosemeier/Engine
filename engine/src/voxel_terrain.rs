@@ -22,6 +22,7 @@ pub struct VoxelTerrain {
     color: Color,
     detail_distance: f32,
     max_lod: u32,
+    beach: Option<f32>,
 }
 
 impl VoxelTerrain {
@@ -32,6 +33,7 @@ impl VoxelTerrain {
             color: Color::rgb(142, 128, 112),
             detail_distance: 1.0,
             max_lod: VOXEL_MAX_LOD,
+            beach: None,
         }
     }
 
@@ -39,6 +41,18 @@ impl VoxelTerrain {
     pub fn with_material(mut self, material: SurfaceMaterial) -> Self {
         self.material = material;
         self
+    }
+
+    /// Sand beaches: flat and gentle ground up to height `top_y` (a little
+    /// above the sea) shows sand; grass, earth and rock above it as usual.
+    pub fn with_beach(mut self, top_y: f32) -> Self {
+        self.beach = top_y.is_finite().then_some(top_y);
+        self
+    }
+
+    /// Top of the sand beaches, if set ([`Self::with_beach`]).
+    pub fn beach(&self) -> Option<f32> {
+        self.beach
     }
 
     pub fn with_color(mut self, color: Color) -> Self {

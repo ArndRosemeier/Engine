@@ -164,7 +164,7 @@ Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_glo
 | `scatter` | `Scatter`: deterministic places with clumping, ground snapping, filters |
 | `proc_terrain` | `ProcTerrain::gpu_clipmap`: endless terrain with lakes, painted with texgen layers (`with_layers(Some(TerrainLayers { .. }))`) and grown with grass (`with_grass(Some(Grass { height, density, distance }))`), `HeightField` to query it |
 | `landscape` | `Landscape::new(seed)`: hills and caves as a mesh |
-| `voxel_terrain` | Smooth, diggable voxel ground meshed on the GPU |
+| `voxel_terrain` | Smooth, diggable voxel ground meshed on the GPU (`with_beach(top_y)` for sand along the sea) |
 | `fracture` / `debris` | Shatter meshes into solid chunks |
 | `proc` | `Noise`, carving helpers |
 | `props` | AssetGenerator `.fmpk` prop packs |
@@ -178,6 +178,7 @@ cargo run --release -p <name>
 | Example | Shows |
 |---|---|
 | `starter` | The template: terrain, wood, rocks, sky, quality presets, fly camera |
+| `island` | Everything together: a wooded island in an open sea with surf, characters on the beach, digging, swimming |
 | `hello_mesh` | Building a mesh by hand (a little house) |
 | `vegetation` | All tree species, shrubs and rocks in the wind |
 | `lod_forest` | 12 000 trees with per-instance LOD |
