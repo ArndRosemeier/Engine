@@ -24,8 +24,9 @@ pub use crate::mesh::{Mesh, PointId, Shape, SurfaceMaterial};
 pub use crate::model::{scatter_places, Model, ModelScene};
 pub use crate::parallel::build_all;
 pub use crate::particles::{
-    EmitterId, ParticleBlend, ParticleEmitter, ParticleForce, ParticleMode, ParticleShape,
-    ParticleSilhouette, ParticleWorld, SizeOverLife,
+    EmitterId, ParticleBlend, ParticleCollision, ParticleEmitter, ParticleForce, ParticleMode,
+    ParticleShape, ParticleSilhouette, ParticleWorld, SizeOverLife, MAX_PARTICLES,
+    MAX_PARTICLE_EMITTERS,
 };
 pub use crate::physics::{
     Body, BodyHit, BodyId, BodyImpact, BodyKind, BodyShape, Impact, PhysicsGround, PhysicsSettings,
@@ -71,6 +72,7 @@ pub use crate::vfx::{Delivery, EffectHandle, EffectSpec, VfxPalette, VfxSystem, 
 pub use crate::voxel_terrain::VoxelTerrain;
 pub use crate::water::{Water, WaterRegion, WaterSample, WaterSource};
 pub use crate::water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
+pub use crate::world::world_effects::Fire;
 pub use crate::world::AnimatedEntity;
 pub use crate::world::Loaded;
 pub use crate::world::WorldScan;

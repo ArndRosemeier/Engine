@@ -26,6 +26,27 @@ where
     items.par_iter().map(make).collect()
 }
 
+/// Lower the calling thread's priority, for background workers (world
+/// streaming). Frame work then always wins the cores: on a busy machine
+/// the OS would otherwise let a streaming job hold a core for a whole time
+/// slice (up to ~15 ms on Windows) while the frame waits on it.
+pub(crate) fn lower_thread_priority() {
+    #[cfg(windows)]
+    // SAFETY: changes only the current thread's scheduling priority.
+    unsafe {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+        };
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+    #[cfg(target_os = "linux")]
+    // SAFETY: on Linux a thread id names one thread; this sets its nice value.
+    unsafe {
+        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+        libc::setpriority(libc::PRIO_PROCESS, tid, 10);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

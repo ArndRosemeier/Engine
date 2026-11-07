@@ -137,19 +137,17 @@ impl LodSet {
     }
 
     /// Distances where some instance changes level or fade (sorted).
-    fn thresholds(&self, bias: f32, fade: f32) -> Vec<f32> {
-        let mut out = Vec::with_capacity(self.levels.len() * 2);
+    fn thresholds(&self, bias: f32, fade: f32) -> impl Iterator<Item = f32> + '_ {
         let mut start = 0.0;
-        for (_, d) in &self.levels {
+        self.levels.iter().flat_map(move |(_, d)| {
             let end = d * bias;
-            if end.is_finite() {
+            let pair = end.is_finite().then(|| {
                 let band = (end * fade).min((end - start) * 0.5);
-                out.push(end - band.max(0.0));
-                out.push(end);
-            }
+                [end - band.max(0.0), end]
+            });
             start = end;
-        }
-        out
+            pair.into_iter().flatten()
+        })
     }
 
     /// The threshold zone every instance is in for a camera at `eye`, or
@@ -158,9 +156,11 @@ impl LodSet {
         let (c, r) = self.bounds?;
         let d = c.distance(eye);
         let (near, far) = ((d - r).max(0.0), d + r);
-        let t = self.thresholds(bias, fade);
-        let a = t.iter().filter(|&&x| x <= near).count();
-        let b = t.iter().filter(|&&x| x < far).count();
+        let (mut a, mut b) = (0, 0);
+        for x in self.thresholds(bias, fade) {
+            a += usize::from(x <= near);
+            b += usize::from(x < far);
+        }
         (a == b).then_some(a)
     }
 

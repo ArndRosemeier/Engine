@@ -311,6 +311,9 @@ impl World {
             .state
             .hit(local, radius, power);
         self.show_building_change(id, &change, Some(point), true);
+        if !change.broken.is_empty() || !change.dropped.is_empty() {
+            self.building_dust(point, radius);
+        }
         Ok(change)
     }
 

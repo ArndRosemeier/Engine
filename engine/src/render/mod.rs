@@ -435,6 +435,7 @@ pub struct Renderer {
     /// whole swapchain image every frame costs bandwidth nobody uses.
     capture_next_frame: bool,
     particles: ParticleGpu,
+    pub(crate) cpu_spans: crate::cpu_trace::Spans,
     ribbons: RibbonGpu,
     postprocess: Postprocess,
     taa: taa::Taa,
@@ -525,7 +526,9 @@ impl Renderer {
         // keeps normal presentation stable across GPUs and window compositors.
         // Uncapped modes remain available explicitly for rendering stress tests.
         let env_present_mode = match std::env::var("ENGINE_PRESENT_MODE") {
-            Ok(value) => Some(match value.as_str() {
+            // Empty counts as unset.
+            Ok(value) if value.trim().is_empty() => None,
+            Ok(value) => Some(match value.trim() {
                 "immediate" => wgpu::PresentMode::Immediate,
                 "mailbox" => wgpu::PresentMode::Mailbox,
                 "fifo-relaxed" => wgpu::PresentMode::FifoRelaxed,
@@ -607,7 +610,8 @@ impl Renderer {
             )
         });
 
-        let particles = ParticleGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
+        let particles =
+            ParticleGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout, &depth_texture);
         let ribbons = RibbonGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
         let postprocess = Postprocess::new(&device, format, config.width, config.height);
         let taa = taa::Taa::new(&device, &depth_texture, config.width, config.height);
@@ -698,6 +702,7 @@ impl Renderer {
             last_color: None,
             capture_next_frame: false,
             particles,
+            cpu_spans: crate::cpu_trace::Spans::default(),
             ribbons,
             postprocess,
             taa,
@@ -745,6 +750,7 @@ impl Renderer {
             create_depth(&self.device, self.config.width, self.config.height);
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
+        self.particles.set_depth(&self.device, &self.depth_texture);
         self.ssao.resize(
             &self.device,
             &self.depth_texture,
@@ -783,6 +789,7 @@ impl Renderer {
     }
 
     pub fn sync_world(&mut self, world: &mut World) {
+        let mut t = std::time::Instant::now();
         self.apply_present_mode(world.vsync());
         if let Some((start, words)) = world.take_element_upload() {
             let words = &words[..words.len().min(ELEMENT_STATE_WORDS.saturating_sub(start))];
@@ -798,6 +805,7 @@ impl Renderer {
         let (particle_commands, particle_dt, particle_time) = world.particles_frame();
         self.particles
             .sync(&self.queue, particle_commands, particle_dt, particle_time);
+        self.cpu_spans.mark("sync.effects", &mut t);
         self.gpu_stats = GpuFrameStats::default();
         self.gpu_stats.entities =
             u32::try_from(world.entity_count()).expect("entity count exceeds u32");
@@ -861,6 +869,7 @@ impl Renderer {
             self.clipmap = None;
         }
 
+        self.cpu_spans.mark("sync.terrain", &mut t);
         if self.synced_render_epoch != world.render_epoch()
             || self.synced_instance_epoch != world.instance_epoch()
         {
@@ -881,7 +890,9 @@ impl Renderer {
                     }
                 }
                 InstanceSubmit::GpuIndirect => {
+                    self.cpu_spans.mark("sync.meshes", &mut t);
                     self.sync_gpu_instance_batches(world);
+                    self.cpu_spans.mark("sync.batches", &mut t);
                 }
             }
             self.synced_render_epoch = world.render_epoch();
@@ -891,6 +902,7 @@ impl Renderer {
                 .expect("GPU instance batch count exceeds u32");
         }
 
+        self.cpu_spans.mark("sync.meshes", &mut t);
         self.gpu_skinned
             .retain(|id, _| world.contains_animated(*id));
         let live_models: HashSet<usize> = world
@@ -1325,7 +1337,9 @@ impl Renderer {
         world: &World,
         after: impl FnOnce(&wgpu::Device, &wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView),
     ) -> Result<(), wgpu::SurfaceError> {
+        let mut t = std::time::Instant::now();
         let frame = self.surface.get_current_texture()?;
+        self.cpu_spans.mark("render.acquire", &mut t);
         // Acquiring waits for the display, so the time between acquires is
         // the even rhythm frames reach the screen at.
         let acquired = std::time::Instant::now();
@@ -1354,6 +1368,7 @@ impl Renderer {
         let (scene_view, scene_resolve) = self.postprocess.scene_attachment();
         self.encode_world(&mut encoder, &scene_view, scene_resolve.as_ref(), world);
         self.mark_gpu(&mut encoder, Mark::SceneDone);
+        self.cpu_spans.mark("render.world", &mut t);
         if let Some(water) = world.water() {
             let camera = Self::main_scene_camera(world);
             let aspect = width as f32 / height as f32;
@@ -1377,6 +1392,22 @@ impl Renderer {
             );
         }
         self.mark_gpu(&mut encoder, Mark::WaterDone);
+        self.cpu_spans.mark("render.water", &mut t);
+        {
+            let camera = Self::main_scene_camera(world);
+            let aspect = width as f32 / height as f32;
+            let view_proj = taa::jittered(camera.view_projection(aspect), self.taa_jitter);
+            let (scene_view, _) = self.postprocess.scene_target();
+            let scene_view = scene_view.clone();
+            self.particles.encode_draw(
+                &self.queue,
+                &mut encoder,
+                &scene_view,
+                self.pipelines.scene_bind_group(self.main_uniform_slot),
+                view_proj,
+                camera.eye(),
+            );
+        }
         {
             let camera = Self::main_scene_camera(world);
             let aspect = width as f32 / height as f32;
@@ -1412,6 +1443,7 @@ impl Renderer {
             self.taa.reset();
         }
         self.mark_gpu(&mut encoder, Mark::WorldDone);
+        self.cpu_spans.mark("render.particles_fx", &mut t);
         self.postprocess.encode(
             &self.queue,
             &mut encoder,
@@ -1426,14 +1458,17 @@ impl Renderer {
             self.store_composited(&mut encoder, &frame.texture);
         }
         self.mark_gpu(&mut encoder, Mark::UiDone);
+        self.cpu_spans.mark("render.post_ui", &mut t);
         if let Some(profiler) = self.gpu_profiler.as_ref() {
             profiler.resolve(&mut encoder);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
+        self.cpu_spans.mark("render.submit", &mut t);
         if let Some(profiler) = self.gpu_profiler.as_mut() {
             profiler.read_and_report(&self.device);
         }
         frame.present();
+        self.cpu_spans.mark("render.present", &mut t);
         Ok(())
     }
 
@@ -1740,6 +1775,7 @@ impl Renderer {
         resolve: Option<&wgpu::TextureView>,
         world: &World,
     ) {
+        let mut t = std::time::Instant::now();
         self.next_scene_uniform_slot = 0;
         let scene_camera = Self::main_scene_camera(world);
         let ao = world.ambient_occlusion();
@@ -1779,6 +1815,7 @@ impl Renderer {
             scene_camera.eye(),
         );
         self.mark_gpu(encoder, Mark::VoxelDone);
+        self.cpu_spans.mark("world.crowd_voxel", &mut t);
         self.write_shadows(world);
         self.begin_instance_cull_frame(world);
         if self.shadow.encode_horizon(encoder) {
@@ -1786,10 +1823,12 @@ impl Renderer {
         }
         self.encode_shadow_pass(encoder, world);
         self.mark_gpu(encoder, Mark::ShadowDone);
+        self.cpu_spans.mark("world.shadows", &mut t);
         if let Some(placement) = gi_placement {
             self.encode_gi(encoder, world, placement, &scene_camera);
         }
         self.mark_gpu(encoder, Mark::GiDone);
+        self.cpu_spans.mark("world.gi", &mut t);
         self.capture_probes(encoder, world);
         let probes: Vec<_> = world
             .reflection_probe_slots()
@@ -1808,8 +1847,10 @@ impl Renderer {
         self.particles
             .encode_compute(encoder, self.pipelines.scene_bind_group(main_uniform_slot));
 
+        self.cpu_spans.mark("world.probes_fx", &mut t);
         let live = world.living_in();
         self.collect_draws(world, live, true);
+        self.cpu_spans.mark("world.collect_draws", &mut t);
         self.prepare_terrain_bundle(world);
         let submit = world.instance_submit();
         let main_cull = if submit == InstanceSubmit::GpuIndirect {
@@ -1824,6 +1865,7 @@ impl Renderer {
             }
         };
 
+        self.cpu_spans.mark("world.cull", &mut t);
         let depth = self.depth_view.clone();
         if let Some(ao) = ao {
             self.encode_depth_prepass(encoder, world, live, &main_cull, main_uniform_slot, &depth);
@@ -1840,6 +1882,7 @@ impl Renderer {
             self.ssao.encode(encoder);
         }
         self.mark_gpu(encoder, Mark::AoDone);
+        self.cpu_spans.mark("world.prepass_ao", &mut t);
         // With a prepass the world pass keeps its depth: hidden fragments
         // then fail the depth test before any shading runs.
         let (depth_load, stencil_load) = if self.ao_active {
@@ -1895,6 +1938,8 @@ impl Renderer {
             &main_cull,
             Some(main_uniform_slot),
         );
+        drop(pass);
+        self.cpu_spans.mark("world.main_pass", &mut t);
     }
 
     /// Draw this frame's reflection probe faces (see `reflect.rs`).
@@ -2788,8 +2833,6 @@ impl Renderer {
 
         self.mark_scene(pass, stamp, SceneMark::Transparent);
         self.ribbons
-            .draw(pass, self.pipelines.scene_bind_group(uniform_slot));
-        self.particles
             .draw(pass, self.pipelines.scene_bind_group(uniform_slot));
 
         if draw_environment {

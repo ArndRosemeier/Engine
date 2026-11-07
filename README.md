@@ -363,9 +363,21 @@ Voxel digging updates the walkable area by itself; after adding or removing
 fixed bodies call `world.rebuild_nav_area(min, max)`. `world.nav_debug_mesh()`
 shows it.
 
-**Particles:** `world.particles_mut().start(ParticleEmitter::new(pos).with_..())`
-runs by itself; call `particles_mut().advance(dt)` only for slow motion or
-fixed steps.
+**Particles:** up to 262 144 particles, emitted, moved and drawn on the GPU.
+Ready-made emitters: `ParticleEmitter::flames`, `smoke`, `embers`, `sparks`,
+`dust`, `debris` (solid chunks that tumble, bounce and settle) and `fireball`;
+change any of them with the `with_..()` setters.
+`world.particles_mut().start(emitter)?` runs one until `stop(id)`, and
+`burst(emitter)?` fires a one-off burst that needs no handle (impacts,
+explosions). Smoke and dust are lit by sun and sky and fade softly into the
+ground; `with_collision(..)` makes particles bounce off whatever is on screen.
+`world.start_fire(pos, size)?` lights a fire (flames, smoke, embers and a
+flickering lamp) and `world.explosion(pos, radius)?` sets one off.
+Destruction makes its own dust and chunks: `world.dig(pos, r)`,
+`world.shatter(..)` and `world.hit_building(..)` (turn it off with
+`world.set_destruction_effects(false)`). Streamed tiles can carry effects too
+(`tile.add_fire(..)`, `tile.add_effect(..)`). Particles run by themselves;
+call `particles_mut().advance(dt)` only for slow motion or fixed steps.
 
 **Input:** `frame.input.down(Key::W)`, `pressed(Key::Space)` (this frame only),
 `mouse_down(MouseButton::Left)`, `move_xz()` for WASD, `mouse_delta()`.
@@ -463,6 +475,7 @@ cargo run --release -p <name>
 | `infinite_walker` | Endless clipmap terrain with a walker |
 | `portals`, `portal_pair` | Spaces joined by portals |
 | `material_showcase` | Procedural surface materials |
+| `particles` | A camp fire, a forge throwing sparks and explosions that dig craters and blow towers apart into dust and chunks (click: explosion, 1/2/3: sparks, dust, debris, F: fire) |
 | `vfx_showcase` | Particles, ribbons and spell effects |
 | `procedural_caves`, `populate_world`, `gpu_field_demo`, `ui_modal` | Caves, prop scattering, GPU density fields, UI |
 
@@ -487,6 +500,7 @@ Every program built on the engine understands these:
 | `ENGINE_AUTOFLY=1` | `FlyCamera` flies ahead in a slow curve by itself (for smoothness and speed checks) |
 | `ENGINE_GPU_PROFILE_EVERY=N` | Print GPU timings every N frames: shadow, AO, scene, water, TAA, post; plus a split of the scene pass (sky, land, grass, voxel, meshes, ...) where the GPU supports it |
 | `ENGINE_HITCH_MS` | Log frames slower than this (default 33) |
+| `ENGINE_CPU_TRACE=1` | Print every 2 s where the CPU time of a frame went: game update, each world tick, renderer sync and drawing (average and worst ms) |
 | `ENGINE_ZFIGHT=1` | Find z-fighting around the camera (250 m; a number sets the radius, `all` scans everything), mark it with magenta posts and print where it is |
 
 The examples add their own (listed at the top of each `main.rs`).

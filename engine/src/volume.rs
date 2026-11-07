@@ -962,6 +962,34 @@ impl Volume {
         out.clear();
         out.reserve((n * n * n) as usize);
         let cs = IVec3::splat(CHUNK_SIZE);
+        // Regions not loaded yet come from the source, sampled in one go:
+        // a height-field source then works out each column once instead of
+        // once per sample.
+        let mut filled: Vec<f32> = Vec::new();
+        if let Some(source) = &self.source {
+            let lo = origin.div_euclid(cs);
+            let hi = (origin + IVec3::splat((n - 1) * stride)).div_euclid(cs);
+            let mut any_missing = false;
+            'scan: for z in lo.z..=hi.z {
+                for y in lo.y..=hi.y {
+                    for x in lo.x..=hi.x {
+                        if !self.chunks.contains_key(&IVec3::new(x, y, z)) {
+                            any_missing = true;
+                            break 'scan;
+                        }
+                    }
+                }
+            }
+            if any_missing {
+                source.0.fill(
+                    origin.as_vec3() * self.voxel_size,
+                    stride as f32 * self.voxel_size,
+                    n as usize,
+                    &mut filled,
+                );
+            }
+        }
+        let n_u = n as usize;
         let mut cached_key = IVec3::splat(i32::MIN);
         let mut cached: Option<&Chunk> = None;
         for z in 0..n {
@@ -982,6 +1010,12 @@ impl Volume {
                                 Some(m) => pack_material(d, m[i]),
                                 None => pack_material(d, 0),
                             }
+                        }
+                        None if !filled.is_empty() => {
+                            // `fill` runs x fastest, then z, then y.
+                            let (x, y, z) = (x as usize, y as usize, z as usize);
+                            let d = filled[(y * n_u + z) * n_u + x];
+                            pack_material(if d.is_finite() { d } else { -1.0 }, 0)
                         }
                         None => pack_material(self.missing(g), 0),
                     });

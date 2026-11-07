@@ -29,6 +29,8 @@ const CELLS: i32 = GRID - 1;
 const PAD: i32 = 3;
 /// Regions meshed per frame at most (edits first, then new regions).
 const JOBS_PER_FRAME: usize = 32;
+/// CPU time per frame for sampling regions to mesh (at least one round).
+const MESH_BUDGET_MS: f32 = 2.0;
 /// u32 words per vertex: position xyz (f32) + normal (snorm16 x4).
 const VERTEX_WORDS: u64 = 5;
 const VERTEX_BYTES: u64 = VERTEX_WORDS * 4;
@@ -1124,9 +1126,13 @@ impl VoxelTerrainGpu {
         work.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
         work.truncate(JOBS_PER_FRAME);
 
-        let prepared: Vec<Prepared> = work
-            .par_iter()
-            .map(|&(_, _, node, faces)| {
+        // Sample in rounds of one job per core until the frame's budget is
+        // spent, so flying fast never stalls a frame on meshing.
+        let started = std::time::Instant::now();
+        let round = rayon::current_num_threads().max(1);
+        let mut prepared: Vec<Prepared> = Vec::new();
+        for batch in work.chunks(round) {
+            prepared.par_extend(batch.par_iter().map(|&(_, _, node, faces)| {
                 let s = node.stride();
                 let origin = node.key * CHUNK - IVec3::splat(PAD * s);
                 let mut samples = Vec::new();
@@ -1140,8 +1146,11 @@ impl VoxelTerrainGpu {
                     index_count,
                     cells,
                 }
-            })
-            .collect();
+            }));
+            if started.elapsed().as_secs_f32() * 1000.0 > MESH_BUDGET_MS {
+                break;
+            }
+        }
 
         let limits = device.limits();
         let max_bytes = (limits.max_storage_buffer_binding_size as u64).min(limits.max_buffer_size);
