@@ -9,7 +9,7 @@ render loop.
 
 **What you get**
 
-- **Rendering:** HDR with ACES tone mapping and bloom, 4x MSAA plus temporal anti-aliasing, PBR materials
+- **Rendering:** HDR with AgX tone mapping (ACES on request) and wide multi-level bloom, 4x MSAA plus temporal anti-aliasing, PBR materials
   (glTF metallic-roughness, normal, occlusion and emissive maps), three shadow
   cascades with soft filtering, SSAO, voxel-probe global illumination, a
   physical sky with day/night, clouds and weather, distance haze.
@@ -151,7 +151,7 @@ world.set_vsync(false);               // uncapped frame rate (title bar shows FP
 ```
 
 Finer knobs: `set_shadows`, `set_ambient_occlusion`, `set_global_illumination`,
-`set_bloom`, `set_haze`, `set_lod_bias`, `set_view_distance`.
+`set_bloom`, `set_tone_map`, `set_haze`, `set_lod_bias`, `set_view_distance`.
 
 ## Generators
 
@@ -203,6 +203,7 @@ Every program built on the engine understands these:
 | `ENGINE_SCREENSHOT=out.png` | Save frame `ENGINE_SCREENSHOT_FRAME` (default 3) to a PNG and exit |
 | `ENGINE_SCREENSHOT_WAIT=1` | Wait for `world.mark_ready()` before counting screenshot frames |
 | `ENGINE_MSAA=1` | Turn MSAA off (default 4) |
+| `ENGINE_TONEMAP=aces` | Tone-map with ACES instead of AgX (`world.set_tone_map(ToneMap::Aces)` in code) |
 | `ENGINE_TAA=0` | Turn temporal anti-aliasing off (`world.set_taa(false)` in code) |
 | `ENGINE_PRESENT_MODE` | `fifo` (default), `fifo-relaxed`, `mailbox` or `immediate` |
 | `ENGINE_GPU_PROFILE_EVERY=N` | Print GPU pass timings every N frames |

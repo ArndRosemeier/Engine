@@ -121,6 +121,29 @@ impl InstanceSubmit {
     }
 }
 
+/// The curve that turns the HDR scene into screen colours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToneMap {
+    /// AgX (default): bright, saturated light fades towards white like film,
+    /// so sunsets, fire and spell effects keep their hue instead of turning
+    /// into flat yellow or cyan.
+    #[default]
+    Agx,
+    /// The classic ACES fit: more contrast, more saturated highlights.
+    Aces,
+}
+
+impl ToneMap {
+    /// `"agx"` or `"aces"` (any case), for settings files and env vars.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "agx" => Some(Self::Agx),
+            "aces" => Some(Self::Aces),
+            _ => None,
+        }
+    }
+}
+
 /// HDR bloom and tone-mapping controls for the rendered world.
 ///
 /// Values are validated when constructed or changed. Disabling bloom leaves
@@ -657,6 +680,7 @@ pub struct World {
     ribbons: RibbonWorld,
     quality: crate::quality::Quality,
     taa: bool,
+    tone_map: ToneMap,
     auto_tune: Option<crate::quality::AutoTune>,
 }
 
@@ -734,6 +758,7 @@ impl Default for World {
             ribbons: RibbonWorld::default(),
             quality: crate::quality::Quality::High,
             taa: true,
+            tone_map: ToneMap::default(),
             auto_tune: None,
         }
     }
@@ -2303,6 +2328,16 @@ impl World {
 
     pub fn set_bloom(&mut self, bloom: BloomSettings) {
         self.bloom = bloom;
+    }
+
+    /// Choose the tone-mapping curve (AgX by default). `ENGINE_TONEMAP=aces`
+    /// or `agx` overrides it for quick comparisons.
+    pub fn set_tone_map(&mut self, tone_map: ToneMap) {
+        self.tone_map = tone_map;
+    }
+
+    pub fn tone_map(&self) -> ToneMap {
+        self.tone_map
     }
 
     /// Request synchronized presentation (FIFO). Turning it off presents
