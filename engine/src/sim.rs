@@ -18,7 +18,7 @@
 //! Engine::run("tick", move |world, frame| {
 //!     if frame.first {
 //!         world.set_sim_rate(Some(30.0))?;
-//!         ball = Some(world.spawn(Shape::sphere_at((0.0, 1.0, 0.0), 0.5, rgb(200, 60, 40))?));
+//!         ball = Some(world.spawn(Mesh::ball((0.0, 1.0, 0.0), 0.5, rgb(200, 60, 40))?));
 //!     }
 //!     for _ in 0..frame.sim.steps {
 //!         world.begin_sim_step();
