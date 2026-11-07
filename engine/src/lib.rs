@@ -44,6 +44,7 @@ pub mod chunk_stream;
 pub mod collision;
 pub mod color;
 pub mod contact;
+mod cpu_trace;
 pub mod crowd;
 pub mod debris;
 pub mod decals;

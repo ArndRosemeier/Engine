@@ -15,6 +15,17 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 type UpdateFn = Box<dyn FnMut(&mut World, &Frame) -> EngineResult<()>>;
 
+/// Run `$e`, adding its time to the CPU trace (when on) under `$name`.
+macro_rules! timed {
+    ($app:ident, $name:expr, $e:expr) => {{
+        let t = Instant::now();
+        $e;
+        if let Some(trace) = $app.cpu_trace.as_mut() {
+            trace.add($name, elapsed_ms(t));
+        }
+    }};
+}
+
 struct App {
     title: String,
     window: Option<Arc<Window>>,
@@ -35,6 +46,7 @@ struct App {
     fps_frames: u32,
     pointer_locked: bool,
     hitch_ms: f32,
+    cpu_trace: Option<crate::cpu_trace::CpuTrace>,
     clock: crate::frame_clock::FrameClock,
     frame_stats: Option<crate::frame_clock::FrameStats>,
     pacer: crate::frame_clock::FramePacer,
@@ -74,6 +86,7 @@ impl App {
             fps_frames: 0,
             pointer_locked: false,
             hitch_ms: hitch_threshold_ms()?,
+            cpu_trace: crate::cpu_trace::CpuTrace::from_env(),
             clock: crate::frame_clock::FrameClock::from_env(),
             frame_stats: crate::frame_clock::FrameStats::from_env(),
             pacer: crate::frame_clock::FramePacer::new(),
@@ -281,22 +294,22 @@ impl App {
         let anim_t = Instant::now();
         if self.fatal_error.is_none() {
             self.world.set_time(time);
-            self.world.tick_stream();
-            self.world.tick_nav(dt);
-            self.world.tick_crowds(dt);
-            self.world.tick_animations(dt);
-            self.world.tick_physics(dt);
-            self.world.tick_ragdolls(dt);
-            self.world.tick_buildings(dt);
-            self.world.tick_interpolation();
-            self.world.tick_hierarchy();
-            self.world.tick_effects(dt);
-            self.world.tick_water(dt);
-            self.world.tick_auto_quality(dt);
-            self.world.tick_lods();
-            self.world.tick_sky();
-            self.world.tick_grading(dt);
-            self.world.tick_zfight_watch(dt);
+            timed!(self, "tick.stream", self.world.tick_stream());
+            timed!(self, "tick.nav", self.world.tick_nav(dt));
+            timed!(self, "tick.crowds", self.world.tick_crowds(dt));
+            timed!(self, "tick.animations", self.world.tick_animations(dt));
+            timed!(self, "tick.physics", self.world.tick_physics(dt));
+            timed!(self, "tick.ragdolls", self.world.tick_ragdolls(dt));
+            timed!(self, "tick.buildings", self.world.tick_buildings(dt));
+            timed!(self, "tick.interpolation", self.world.tick_interpolation());
+            timed!(self, "tick.hierarchy", self.world.tick_hierarchy());
+            timed!(self, "tick.effects", self.world.tick_effects(dt));
+            timed!(self, "tick.water", self.world.tick_water(dt));
+            timed!(self, "tick.auto_quality", self.world.tick_auto_quality(dt));
+            timed!(self, "tick.lods", self.world.tick_lods());
+            timed!(self, "tick.sky", self.world.tick_sky());
+            timed!(self, "tick.grading", self.world.tick_grading(dt));
+            timed!(self, "tick.zfight_watch", self.world.tick_zfight_watch(dt));
         }
         let anim_ms = elapsed_ms(anim_t);
 
@@ -305,6 +318,7 @@ impl App {
                 .renderer
                 .as_mut()
                 .expect("renderer must exist before redraw");
+            renderer.cpu_spans.on = self.cpu_trace.is_some();
             let sync_t = Instant::now();
             let size = renderer.size();
             self.world
@@ -351,6 +365,13 @@ impl App {
                 Err(other) => panic!("surface error: {other}"),
             }
             let render_ms = elapsed_ms(render_t);
+            if let Some(trace) = self.cpu_trace.as_mut() {
+                trace.add("game update", update_ms);
+                for (name, ms) in renderer.cpu_spans.take() {
+                    trace.add(name, ms);
+                }
+                trace.end_frame(raw_dt * 1000.0);
+            }
             let gpu = renderer.take_gpu_stats();
             let notes = self.world.take_hitch_spans();
             let phases = HitchPhases {
