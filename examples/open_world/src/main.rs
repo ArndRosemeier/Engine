@@ -206,22 +206,34 @@ struct Bench {
     time: f32,
     frames: Vec<f32>,
     stream_ms: Vec<f32>,
-    start: Option<Vec3>,
-    end: Vec3,
+    /// Path length flown (the auto flight circles back to its start).
+    path: f32,
+    prev: Option<Vec3>,
+    /// Wall clock between frames: `frame.dt` is smoothed and capped.
+    clock: Option<std::time::Instant>,
     last: engine::stream::StreamStats,
 }
 
 impl Bench {
-    fn add(&mut self, dt: f32, stats: engine::stream::StreamStats, at: Vec3) {
-        self.time += dt;
-        self.frames.push(dt * 1000.0);
-        self.stream_ms.push(stats.install_ms);
-        self.start.get_or_insert(at);
-        self.end = at;
+    fn add(&mut self, stats: engine::stream::StreamStats, at: Vec3) {
+        let now = std::time::Instant::now();
+        if let Some(before) = self.clock.replace(now) {
+            let dt = (now - before).as_secs_f32();
+            self.time += dt;
+            self.frames.push(dt * 1000.0);
+            self.stream_ms.push(stats.install_ms);
+        }
+        if let Some(p) = self.prev.replace(at) {
+            self.path += (at - p).length();
+        }
         self.last = stats;
     }
 
     fn report(&mut self) {
+        if self.frames.is_empty() {
+            println!("open_world bench: no frames recorded");
+            return;
+        }
         let pct = |v: &mut Vec<f32>, p: f32| {
             v.sort_by(f32::total_cmp);
             v[((v.len() - 1) as f32 * p).round() as usize]
@@ -232,7 +244,7 @@ impl Bench {
         let (h25, h50) = (over(25.0), over(50.0));
         let mut f = self.frames.clone();
         let mut s = self.stream_ms.clone();
-        let dist = self.start.map_or(0.0, |a| (self.end - a).length());
+        let dist = self.path;
         println!(
             "open_world bench: {n} frames in {:.1} s, flew {dist:.0} m\n  \
              frame ms: avg {avg:.2} ({:.0} FPS)  p50 {:.2}  p95 {:.2}  p99 {:.2}  max {:.2}\n  \
@@ -346,7 +358,7 @@ fn main() -> EngineResult<()> {
         if let (Some(seconds), Some(stream)) = (bench_seconds, world.stream()) {
             // Skip the first second (shader warm-up), then record.
             if frame.time > 1.0 {
-                bench.add(frame.dt, stream.stats(), camera.position);
+                bench.add(stream.stats(), camera.position);
             }
             if bench.time >= seconds {
                 bench.report();

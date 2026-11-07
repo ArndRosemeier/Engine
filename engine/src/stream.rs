@@ -906,6 +906,25 @@ impl WorldStream {
         self.settings.block_size() * (1u64 << level) as f32
     }
 
+    fn far_has_built_ancestor(&self, key: FarTileKey) -> bool {
+        let mut k = key;
+        while k.level < 16 {
+            k = FarTileKey {
+                level: k.level + 1,
+                x: k.x.div_euclid(2),
+                z: k.z.div_euclid(2),
+            };
+            if self.far_built.contains_key(&k) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn block_rect_distance(&self, block: IVec2, f: Vec2) -> f32 {
+        tile_distance(block, self.settings.block_size(), f)
+    }
+
     fn far_rect_distance(&self, key: FarTileKey, f: Vec2) -> f32 {
         let size = self.far_size(key.level);
         let min = Vec2::new(key.x as f32, key.z as f32) * size;
@@ -966,34 +985,46 @@ impl WorldStream {
         // Candidates by urgency: the voxel block under the camera, then far
         // ground (cheap, and holes there show sky), then the other blocks
         // and tiles by distance.
-        let mut far_needed: Vec<FarTileKey> = far
-            .leaves
-            .iter()
-            .copied()
-            .filter(|k| !self.far_built.contains_key(k))
-            .collect();
-        far_needed.sort_by(|a, b| {
-            self.far_rect_distance(*a, f)
-                .total_cmp(&self.far_rect_distance(*b, f))
-                .then(b.level.cmp(&a.level))
-        });
+        // Everything else by distance, so near tiles are not starved while
+        // flying fast. Far ground that only refines a tile already shown (an
+        // ancestor is built) counts as twice as far; far ground with nothing
+        // to stand in for it is urgent (it would show a hole).
+        let mut ranked: Vec<(f32, JobKey)> = Vec::new();
+        for k in far.leaves.iter().copied() {
+            if self.far_built.contains_key(&k) {
+                continue;
+            }
+            let d = self.far_rect_distance(k, f);
+            let rank = if self.far_has_built_ancestor(k) {
+                d * 2.0
+            } else {
+                -1.0e6 + d
+            };
+            ranked.push((rank, JobKey::Far(k)));
+        }
         self.far_wanted = far.leaves.iter().copied().collect();
         let mut jobs: Vec<JobKey> = Vec::new();
-        let mut block_iter = blocks
-            .iter()
-            .filter(|b| !self.blocks.contains(b) && !ready_blocks.contains(b))
-            .map(|b| JobKey::Block(*b));
-        if let Some(first) = block_iter.next() {
-            jobs.push(first);
+        let mut first_block = true;
+        for b in blocks {
+            if self.blocks.contains(b) || ready_blocks.contains(b) {
+                continue;
+            }
+            if first_block {
+                // The block under the camera goes before anything.
+                jobs.push(JobKey::Block(*b));
+                first_block = false;
+            } else {
+                ranked.push((self.block_rect_distance(*b, f), JobKey::Block(*b)));
+            }
         }
-        jobs.extend(far_needed.into_iter().map(JobKey::Far));
-        jobs.extend(block_iter);
-        jobs.extend(
-            tiles
-                .iter()
-                .filter(|t| !self.tiles.contains_key(t) && !ready_tiles.contains(t))
-                .map(|t| JobKey::Tile(*t)),
-        );
+        let size = self.settings.tile_size;
+        for t in tiles {
+            if !self.tiles.contains_key(t) && !ready_tiles.contains(t) {
+                ranked.push((tile_distance(*t, size, f), JobKey::Tile(*t)));
+            }
+        }
+        ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
+        jobs.extend(ranked.into_iter().map(|(_, j)| j));
         for job in jobs {
             if self.inflight.len() >= max {
                 break;
@@ -1375,7 +1406,8 @@ impl WorldStream {
                 hi + 8.0,
             );
             let shape = GenShape { gen: &*gen };
-            let mut water = crate::water::Water::new(region, &shape);
+            let mut water = crate::water::Water::new(region, &shape)
+                .with_backend(crate::water::WaterBackend::preferred());
             if let Some(look) = look {
                 water.set_look(look);
             }
@@ -1508,6 +1540,39 @@ mod tests {
 
     fn pump(world: &mut World) {
         assert!(world.prepare_stream(30.0), "stream got ready");
+    }
+
+    #[test]
+    fn gathering_unloaded_ground_matches_sampling_it_point_by_point() {
+        let gen: Arc<dyn WorldGenerator> = Arc::new(TestWorld {
+            model: None,
+            water: false,
+        });
+        let source = Arc::new(GenSource {
+            gen: gen.clone(),
+            voxel: 1.0,
+        });
+        let mut volume = crate::volume::Volume::new(1.0).with_source(source.clone());
+        // One chunk loaded (and edited), the rest of the region not.
+        volume.dig_sphere(Vec3::new(8.0, 2.0, 8.0), 3.0);
+        for stride in [1, 2, 4] {
+            let origin = IVec3::new(-5, -6, -7) * stride;
+            let mut fast = Vec::new();
+            volume.gather(origin, stride, 12, &mut fast);
+            let mut i = 0;
+            for z in 0..12 {
+                for y in 0..12 {
+                    for x in 0..12 {
+                        let g = origin + IVec3::new(x, y, z) * stride;
+                        let want = volume.corner(g);
+                        let got = fast[i];
+                        // Packing keeps the material in the low mantissa bits.
+                        assert!((want - got).abs() < 1e-3, "{g}: {want} vs {got}");
+                        i += 1;
+                    }
+                }
+            }
+        }
     }
 
     #[test]
