@@ -932,6 +932,10 @@ impl Default for World {
     }
 }
 
+/// Below this many instances to reassign, LOD assignment runs on the
+/// calling thread instead of all cores.
+const LOD_PARALLEL_PLACES: usize = 8192;
+
 impl World {
     pub fn new() -> Self {
         Self::default()
@@ -1312,20 +1316,24 @@ impl World {
             set.assigned_for = Some((eye, bias));
             stale_sets.push(set);
         }
-        // Sets are independent: assign them on all cores.
-        use rayon::prelude::*;
-        let updates: Vec<(EntityId, Vec<MeshInstance>)> = stale_sets
-            .par_iter()
-            .flat_map_iter(|set| {
-                let ends: Vec<f32> = set.levels.iter().map(|(_, d)| *d).collect();
-                let lists = crate::lod::assign(&set.places, &ends, eye, bias, fade);
-                set.levels
-                    .iter()
-                    .map(|(e, _)| *e)
-                    .zip(lists)
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+        let assign_set = |set: &&mut LodSet| {
+            let ends: Vec<f32> = set.levels.iter().map(|(_, d)| *d).collect();
+            let lists = crate::lod::assign(&set.places, &ends, eye, bias, fade);
+            set.levels
+                .iter()
+                .map(|(e, _)| *e)
+                .zip(lists)
+                .collect::<Vec<_>>()
+        };
+        // Sets are independent: many are assigned on all cores. A few are
+        // quicker here than waking the worker threads (which may be busy).
+        let places: usize = stale_sets.iter().map(|s| s.places.len()).sum();
+        let updates: Vec<(EntityId, Vec<MeshInstance>)> = if places < LOD_PARALLEL_PLACES {
+            stale_sets.iter().flat_map(assign_set).collect()
+        } else {
+            use rayon::prelude::*;
+            stale_sets.par_iter().flat_map_iter(assign_set).collect()
+        };
         for (entity, list) in updates {
             self.replace_instances(entity, list);
         }
