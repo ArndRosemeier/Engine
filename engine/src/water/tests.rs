@@ -382,10 +382,22 @@ fn bench_water_384() {
     }
     let s = water.stats();
     eprintln!(
-        "update {:.2} ms/frame, {} substeps, {} wet cells",
+        "update {:.2} ms/frame, {} substeps, {} wet cells, tiles {:?}",
         started.elapsed().as_secs_f32() * 1e3 / 120.0,
         s.substeps,
-        s.wet_cells
+        s.wet_cells,
+        water.active_tiles()
+    );
+    // Everything stirred up: the worst case.
+    water.rain(0.05);
+    let started = std::time::Instant::now();
+    for _ in 0..60 {
+        water.update(1.0 / 60.0);
+    }
+    eprintln!(
+        "after rain {:.2} ms/frame, tiles {:?}",
+        started.elapsed().as_secs_f32() * 1e3 / 60.0,
+        water.active_tiles()
     );
 }
 
@@ -628,4 +640,104 @@ fn waves_leave_through_an_open_edge_instead_of_bouncing_back() {
         .into_iter()
         .fold(0.0f32, |m, h| m.max(h.abs()));
     assert!(worst < 0.05, "waves should be gone, still {worst} m");
+}
+
+#[test]
+#[ignore]
+fn bench_water_1024_mostly_dry() {
+    let noise = crate::proc::Noise::new(11);
+    let terrain = HeightMapTerrain(move |x: f32, z: f32| {
+        noise.fbm2(x * 0.004, z * 0.004, 5, 2.0, 0.5) * 40.0 + 10.0
+    });
+    let region = WaterRegion::new(Vec2::ZERO, Vec2::splat(1024.0), 1.0, -40.0, 80.0);
+    let started = std::time::Instant::now();
+    let mut water = Water::new(region, &terrain);
+    eprintln!(
+        "build {:.1} ms, {} cells",
+        started.elapsed().as_secs_f32() * 1e3,
+        water.cell_count()
+    );
+    // A few lakes and a river source; most of the land stays dry.
+    water.flood_sea(0.0);
+    water.add_source(WaterSource {
+        position: Vec3::new(512.0, 70.0, 512.0),
+        rate: 5.0,
+    });
+    for _ in 0..60 {
+        water.update(1.0 / 60.0);
+    }
+    let started = std::time::Instant::now();
+    for _ in 0..120 {
+        water.update(1.0 / 60.0);
+    }
+    let s = water.stats();
+    eprintln!(
+        "update {:.2} ms/frame, {} substeps, {} wet cells, tiles {:?}",
+        started.elapsed().as_secs_f32() * 1e3 / 120.0,
+        s.substeps,
+        s.wet_cells,
+        water.active_tiles()
+    );
+    // Everything stirred up: the worst case.
+    water.rain(0.05);
+    let started = std::time::Instant::now();
+    for _ in 0..60 {
+        water.update(1.0 / 60.0);
+    }
+    eprintln!(
+        "after rain {:.2} ms/frame, tiles {:?}",
+        started.elapsed().as_secs_f32() * 1e3 / 60.0,
+        water.active_tiles()
+    );
+}
+
+#[test]
+fn a_still_lake_sleeps_and_wakes_when_disturbed() {
+    let bowl = HeightMapTerrain(|x: f32, z: f32| ((x - 64.0).powi(2) + (z - 64.0).powi(2)) * 0.002);
+    let region = WaterRegion::new(Vec2::ZERO, Vec2::splat(128.0), 1.0, -5.0, 40.0);
+    let far = Vec3::new(90.0, 2.0, 64.0);
+    // The same splash with sleeping tiles and with everything running.
+    let trace = |never_sleep: bool| {
+        let mut water = Water::new(region, &bowl);
+        water.activity.never_sleep = never_sleep;
+        water.flood(Vec3::new(64.0, 0.1, 64.0), 3.0);
+        run(&mut water, 20.0);
+        let (running, total) = water.active_tiles();
+        if !never_sleep {
+            assert!(
+                running < total / 4,
+                "a still lake should mostly sleep: {running}/{total}"
+            );
+        }
+        let v0 = water.total_volume();
+        water.disturb(Vec3::new(40.0, 3.0, 64.0), 6.0, 3.0);
+        let still = water.surface_at(far).expect("far side wet");
+        let mut series = Vec::new();
+        for _ in 0..60 * 15 {
+            water.update(1.0 / 60.0);
+            series.push(water.surface_at(far).unwrap() - still);
+        }
+        assert!(rel_change(v0, water.total_volume()) < 1e-5);
+        run(&mut water, 90.0);
+        if !never_sleep {
+            let (running, _) = water.active_tiles();
+            assert!(
+                running < total / 4,
+                "and go back to sleep: {running}/{total}"
+            );
+        }
+        series
+    };
+    let asleep = trace(false);
+    let awake = trace(true);
+    let peak = awake.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    assert!(peak > 2e-4, "the wave should cross the lake, peak {peak}");
+    let worst = asleep
+        .iter()
+        .zip(&awake)
+        .fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+    assert!(
+        worst < peak * 0.1,
+        "sleeping changed the wave: {worst} vs peak {peak}"
+    );
 }

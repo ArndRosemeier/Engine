@@ -207,7 +207,7 @@ pub struct Water {
     pub(crate) links: Vec<Link>,
     pub(crate) q: Vec<f32>,
     /// Links of column c along axis k are link_group[2c + k]..link_group[2c + k + 1].
-    link_group: Vec<u32>,
+    pub(crate) link_group: Vec<u32>,
     /// Upstream and downstream link along the same axis (θ smoothing).
     link_prev: Vec<u32>,
     link_next: Vec<u32>,
@@ -215,9 +215,9 @@ pub struct Water {
     cell_links: Vec<u32>,
     // Scratch.
     pub(crate) head: Vec<f32>,
-    q_new: Vec<f32>,
+    pub(crate) q_new: Vec<f32>,
     scale: Vec<f32>,
-    sources: Vec<(SourceId, WaterSource)>,
+    pub(crate) sources: Vec<(SourceId, WaterSource)>,
     next_source: u64,
     pub(crate) sea: Option<super::Sea>,
     pub(crate) sea_clock: f64,
@@ -232,6 +232,7 @@ pub struct Water {
     stats: WaterStats,
     /// Bumped whenever cells or links change (renderers rebuild topology).
     pub(crate) topology_rev: u64,
+    pub(crate) activity: super::active::Activity,
 }
 
 impl std::fmt::Debug for Water {
@@ -288,6 +289,7 @@ impl Water {
             boundary_q: Vec::new(),
             sea_depth: 10.0,
             sea_out: Vec::new(),
+            activity: Default::default(),
             next_dt: 1.0 / 120.0,
             time: 0.0,
             stats: WaterStats::default(),
@@ -419,6 +421,7 @@ impl Water {
             }
         }
         self.time_step_reset();
+        self.wake_all();
         self.total_volume() - before
     }
 
@@ -446,6 +449,7 @@ impl Water {
         let new = (self.depth[i] + volume / area).max(0.0);
         let moved = (new - self.depth[i]) * area;
         self.depth[i] = new;
+        self.wake_near(Vec2::new(at.x, at.z), 0.0);
         moved
     }
 
@@ -458,6 +462,7 @@ impl Water {
                 self.depth[top] = (self.depth[top] + metres).max(0.0);
             }
         }
+        self.wake_all();
     }
 
     /// Push water outward from `at`, as something falling in or a blast
@@ -515,6 +520,7 @@ impl Water {
                 }
             }
         }
+        self.wake_near(Vec2::new(at.x, at.z), radius);
         self.time_step_reset();
     }
 
@@ -522,6 +528,7 @@ impl Water {
     pub fn clear(&mut self) {
         self.depth.iter_mut().for_each(|d| *d = 0.0);
         self.q.iter_mut().for_each(|q| *q = 0.0);
+        self.wake_all();
     }
 
     pub fn add_source(&mut self, source: WaterSource) -> SourceId {
@@ -717,6 +724,7 @@ impl Water {
         let mut steps = 0;
         let mut simulated = 0.0;
         let mut max_speed: f32 = 0.0;
+        self.schedule();
         while remaining > 1e-6 && steps < self.settings.max_substeps.max(1) {
             let step = self.next_dt.min(remaining);
             let speed = self.step(step);
@@ -726,13 +734,14 @@ impl Water {
             steps += 1;
         }
         self.time += simulated as f64;
+        self.settle_activity();
         self.stats = WaterStats {
             substeps: steps,
             simulated_seconds: simulated,
             max_speed,
             cells: self.floor.len(),
             links: self.links.len(),
-            wet_cells: self.depth.iter().filter(|&&d| d > DRY).count(),
+            wet_cells: self.activity.wet.iter().map(|&w| w as usize).sum(),
         };
     }
 
@@ -748,13 +757,25 @@ impl Water {
         let dx = self.region.cell_size;
         let stiffness = s.stiffness;
 
+        // Only the running tiles (see `active`).
+        let runs = std::mem::take(&mut self.activity.runs);
+        let sweep = super::active::Sweep {
+            nx: self.region.cells_x as usize,
+            nz: self.region.cells_z as usize,
+            runs: &runs,
+        };
+        let col_start = std::mem::take(&mut self.col_start);
+        let link_group = std::mem::take(&mut self.link_group);
+        let cell_start = |c: usize| col_start[c] as usize;
+        let link_start = |c: usize| link_group[2 * c] as usize;
+
         // 1. Heads.
         {
             let (floor, ceil, depth) = (&self.floor, &self.ceil, &self.depth);
-            self.head
-                .par_iter_mut()
-                .enumerate()
-                .for_each(|(i, h)| *h = head_of(floor[i], ceil[i], depth[i], stiffness));
+            sweep.each(&mut self.head, cell_start, |i, h| {
+                *h = head_of(floor[i], ceil[i], depth[i], stiffness);
+                0.0
+            });
         }
 
         // 2. Discharge on every link.
@@ -774,71 +795,80 @@ impl Water {
             &self.ceil,
             &self.floor,
         );
-        let max_speed = self
-            .q_new
-            .par_iter_mut()
-            .enumerate()
-            .map(|(i, out)| {
-                let l = links[i];
-                let (a, b) = (l.a as usize, l.b as usize);
-                let (ha, hb) = (head[a], head[b]);
-                let eta = ha.max(hb);
-                if eta <= l.lo + DRY {
-                    *out = 0.0;
-                    return 0.0;
-                }
-                // Flow depth through the shared opening.
-                let h = (eta.min(l.hi) - l.lo).max(DRY);
-                // Below the lip the far side's level does not matter: water
-                // falls freely.
-                let (ea, eb) = (ha.max(l.lo), hb.max(l.lo));
-                let q0 = q_old[i];
-                let qp = if prev[i] != NONE {
-                    q_old[prev[i] as usize]
-                } else {
-                    q0
-                };
-                let qn = if next[i] != NONE {
-                    q_old[next[i] as usize]
-                } else {
-                    q0
-                };
-                let qt = theta * q0 + (1.0 - theta) * 0.5 * (qp + qn);
-                // Drag: bed friction, settling of slow flow, breaking fronts.
-                let speed = qt.abs() / h;
-                let settle = settle * (1.0 - speed / settle_speed).max(0.0);
-                let slope = (eb - ea).abs() / dx;
-                let both_wet = ha > l.lo + DRY && hb > l.lo + DRY;
-                let breaking = if both_wet {
-                    (slope - breaking_slope).max(0.0) * 4.0
-                } else {
-                    0.0
-                };
-                let drag = G * n2 * qt.abs() / h.powf(7.0 / 3.0) + settle + breaking;
-                let mut q = (qt - G * h * dt * (eb - ea) / dx) / (1.0 + dt * drag);
-                // No faster than the head difference can drive (Torricelli)
-                // plus the wave speed: keeps falls and wet fronts sane.
-                let vmax = (2.0 * G * (ea - eb).abs()).sqrt() + (G * h).sqrt();
-                q = q.clamp(-h * vmax, h * vmax);
-                // A side can only give water it holds above the opening.
-                let donor_excess = if q > 0.0 { ha - l.lo } else { hb - l.lo };
-                if donor_excess <= DRY {
-                    q = 0.0;
-                } else {
-                    let cap = donor_excess * dx / dt;
-                    q = q.clamp(-cap, cap);
-                }
-                *out = q;
-                // Signal speed for the next step's CFL limit.
-                let pressurised = ha > ceil[a] || hb > ceil[b];
-                let wave_depth = if pressurised {
-                    h * stiffness
-                } else {
-                    h.min((ceil[a] - floor[a]).max(ceil[b] - floor[b]))
-                };
-                q.abs() / h + (G * wave_depth).sqrt()
-            })
-            .reduce(|| 0.0f32, f32::max);
+        let (cell_col, activity) = (&self.cell_col, &self.activity);
+        let nx = self.region.cells_x as usize;
+        let max_speed = sweep.each(&mut self.q_new, link_start, |i, out| {
+            let l = links[i];
+            let (a, b) = (l.a as usize, l.b as usize);
+            // Into a resting tile: closed for this frame.
+            if !activity.run[activity.tile_of_column(nx, cell_col[b] as usize)] {
+                *out = 0.0;
+                return 0.0;
+            }
+            let (ha, hb) = (head[a], head[b]);
+            let eta = ha.max(hb);
+            if eta <= l.lo + DRY {
+                *out = 0.0;
+                return 0.0;
+            }
+            // Flow depth through the shared opening.
+            let h = (eta.min(l.hi) - l.lo).max(DRY);
+            // Below the lip the far side's level does not matter: water
+            // falls freely.
+            let (ea, eb) = (ha.max(l.lo), hb.max(l.lo));
+            let q0 = q_old[i];
+            let qp = if prev[i] != NONE {
+                q_old[prev[i] as usize]
+            } else {
+                q0
+            };
+            let qn = if next[i] != NONE {
+                q_old[next[i] as usize]
+            } else {
+                q0
+            };
+            let qt = theta * q0 + (1.0 - theta) * 0.5 * (qp + qn);
+            // Drag: bed friction, settling of slow flow, breaking fronts.
+            let speed = qt.abs() / h;
+            let settle = settle * (1.0 - speed / settle_speed).max(0.0);
+            let slope = (eb - ea).abs() / dx;
+            let both_wet = ha > l.lo + DRY && hb > l.lo + DRY;
+            let breaking = if both_wet {
+                (slope - breaking_slope).max(0.0) * 4.0
+            } else {
+                0.0
+            };
+            let drag = G * n2 * qt.abs() / h.powf(7.0 / 3.0) + settle + breaking;
+            // Level differences within float rounding of the heads are
+            // noise, not slope: without this, still water keeps a faint
+            // circulation forever.
+            let mut fall = eb - ea;
+            if fall.abs() <= eta.abs().max(1.0) * 2e-6 {
+                fall = 0.0;
+            }
+            let mut q = (qt - G * h * dt * fall / dx) / (1.0 + dt * drag);
+            // No faster than the head difference can drive (Torricelli)
+            // plus the wave speed: keeps falls and wet fronts sane.
+            let vmax = (2.0 * G * (ea - eb).abs()).sqrt() + (G * h).sqrt();
+            q = q.clamp(-h * vmax, h * vmax);
+            // A side can only give water it holds above the opening.
+            let donor_excess = if q > 0.0 { ha - l.lo } else { hb - l.lo };
+            if donor_excess <= DRY {
+                q = 0.0;
+            } else {
+                let cap = donor_excess * dx / dt;
+                q = q.clamp(-cap, cap);
+            }
+            *out = q;
+            // Signal speed for the next step's CFL limit.
+            let pressurised = ha > ceil[a] || hb > ceil[b];
+            let wave_depth = if pressurised {
+                h * stiffness
+            } else {
+                h.min((ceil[a] - floor[a]).max(ceil[b] - floor[b]))
+            };
+            q.abs() / h + (G * wave_depth).sqrt()
+        });
 
         // Exchange with the open sea.
         let mut sea_out = std::mem::take(&mut self.sea_out);
@@ -855,7 +885,7 @@ impl Water {
                 &sea_out,
             );
             let k = dt / dx;
-            self.scale.par_iter_mut().enumerate().for_each(|(i, sc)| {
+            sweep.each(&mut self.scale, cell_start, |i, sc| {
                 let mut out = 0.0;
                 for &entry in &cl[cls[i] as usize..cls[i + 1] as usize] {
                     let id = (entry & !B_SIDE) as usize;
@@ -872,14 +902,16 @@ impl Water {
                 } else {
                     1.0
                 };
+                0.0
             });
         }
         {
             let (links, scale) = (&self.links, &self.scale);
-            self.q_new.par_iter_mut().enumerate().for_each(|(i, q)| {
+            sweep.each(&mut self.q_new, link_start, |i, q| {
                 let l = links[i];
                 let donor = if *q > 0.0 { l.a } else { l.b } as usize;
                 *q *= scale[donor];
+                0.0
             });
         }
 
@@ -907,19 +939,23 @@ impl Water {
                 &sea_out,
             );
             let k = dt / dx;
-            self.depth.par_iter_mut().enumerate().for_each(|(i, d)| {
+            sweep.each(&mut self.depth, cell_start, |i, d| {
                 let mut net = sea_net[i];
                 for &entry in &cl[cls[i] as usize..cls[i + 1] as usize] {
                     let qv = q[(entry & !B_SIDE) as usize];
                     net += if entry & B_SIDE == 0 { -qv } else { qv };
                 }
                 *d = (*d + net * k).max(0.0);
+                0.0
             });
         }
         for b in &self.boundary {
             sea_out[b.cell as usize] = 0.0;
         }
         self.sea_out = sea_out;
+        self.col_start = col_start;
+        self.link_group = link_group;
+        self.activity.runs = runs;
         self.sea_clock += dt as f64;
         std::mem::swap(&mut self.q, &mut self.q_new);
 
@@ -1089,6 +1125,12 @@ impl Water {
         self.link_prev = prev;
         self.link_next = next;
         self.rebuild_boundary();
+        let never_sleep = self.activity.never_sleep;
+        self.activity = super::active::Activity::new(
+            self.region.cells_x as usize,
+            self.region.cells_z as usize,
+        );
+        self.activity.never_sleep = never_sleep;
         self.topology_rev += 1;
     }
 
