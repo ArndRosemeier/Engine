@@ -10,6 +10,7 @@ pub use crate::collision::{
 pub use crate::color::{rgb, rgba, Color};
 pub use crate::contact::{ContactGrid, ContactSnapshot};
 pub use crate::debris::Shatter;
+pub use crate::grading::{ColorGrade, FogVolume, FogVolumeId, VolumeFog};
 pub use crate::decals::{Decal, DecalId, DecalKind, MAX_DECALS};
 pub use crate::error::{EngineError, EngineResult};
 pub use crate::fly::FlyCamera;

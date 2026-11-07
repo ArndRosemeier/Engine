@@ -831,6 +831,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fog_volumes"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "glam 0.33.12",
+]
+
+[[package]]
 name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

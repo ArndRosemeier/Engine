@@ -243,6 +243,17 @@ dented and frost glossy. `.lifetime(s)` and `.fade(in, out)` make it fade;
 the pool holds `set_decal_budget(n)` decals (256 by default, up to 512) and
 the oldest make room. See `examples/decals`.
 
+**Colour grading and fog by zone:** `world.set_color_grade(ColorGrade::warm())?`
+sets the look of the image (exposure, contrast, saturation, white balance,
+shadow and highlight tints, vignette; presets `warm`, `smog`, `cool`,
+`bleak`). `world.add_fog_volume(FogVolume::new(center, half_extents)
+.grade(ColorGrade::smog()).fog(rgb(128, 112, 84), 110.0).blend(40.0))?` gives
+a district its own grade and fog. Inside the box's faces the look fades in
+over `blend` metres, and it eases toward the camera's place over
+`set_zone_transition(seconds)` (2.5 by default), so flying from one zone into
+another blends over a few seconds with no pop. Overlapping volumes stack by
+`.priority(n)`. See `examples/fog_volumes`.
+
 **Lamps:** `world.add_lamp(Lamp::fire(pos))?`, `Lamp::street_lamp(pos)`, or
 `Lamp::point(pos, color, intensity, range)` and
 `Lamp::spot(pos, direction, angle_deg, color, intensity, range)` for your own;
@@ -364,6 +375,7 @@ cargo run --release -p <name>
 | `prefabs` | Carts built from parts driving with spinning wheels, a windmill turning its sails, a lantern carried in a hand; C drops carts that tumble whole, X removes them |
 | `buildings` | A block of breakable towers: punch panels (click), blast (F), topple (T), pancake (P), rebuild (R) |
 | `ragdolls` | People strolling about: click knocks one flying, F a blast; they tumble, settle and get up (K keeps them down, G gets everyone up) |
+| `fog_volumes` | Colour grading and fog by zone: the camera flies from a warm old town into a smog-choked factory district and back (T: transition time, G: volumes on/off) |
 | `decals` | Scorch marks, cracks, frost, impacts, paint and glowing power marks sprayed on terrain, a wall, a sliding block and people walking by (click sprays, 1-6 pick the kind, B the budget) |
 | `interiors` | A city block of office towers, every floor furnished (about a million triangles); from the street only the rooms you can see through windows are drawn (C toggles culling, I interiors, click punches a wall open) |
 | `reflections` | A rain-wet street between glass towers at dusk mirrors lamps, windows and chrome spheres; a polished hall's chrome ball shows the hall from a reflection probe (R toggles SSR, P the probe) |
