@@ -56,6 +56,7 @@ pub mod mesh;
 pub mod model;
 pub mod parallel;
 pub mod particles;
+pub mod physics;
 pub mod place;
 pub mod portal;
 pub mod prelude;
@@ -120,6 +121,7 @@ pub use particles::{
     EmitterId, ParticleBlend, ParticleEmitter, ParticleForce, ParticleMode, ParticleShape,
     ParticleSilhouette, ParticleWorld, SizeOverLife,
 };
+pub use physics::{Body, BodyKind, BodyShape, Impact, PhysicsGround, PhysicsSettings, RayHit};
 pub use place::{GlobalPlace, MeshInstance, Place};
 pub use portal::{Portal, PortalId, PortalSettings, SpaceId};
 pub use proc_terrain::{

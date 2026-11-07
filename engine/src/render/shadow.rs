@@ -71,7 +71,7 @@ pub fn cascade_view_proj(focus: Vec3, light_dir: Vec3, radius: f32, map_size: u3
     } else {
         Vec3::Y
     };
-    let view_rot = Mat4::look_at_rh(light * back, Vec3::ZERO, up);
+    let view_rot = glam::camera::rh::view::look_at_mat4(light * back, Vec3::ZERO, up);
     let ls = view_rot.transform_point3(focus);
     let texel = (2.0 * r) / map_size.max(1) as f32;
     let snapped_ls = Vec3::new(
@@ -80,8 +80,8 @@ pub fn cascade_view_proj(focus: Vec3, light_dir: Vec3, radius: f32, map_size: u3
         ls.z,
     );
     let snapped_focus = view_rot.inverse().transform_point3(snapped_ls);
-    let view = Mat4::look_at_rh(snapped_focus + light * back, snapped_focus, up);
-    let proj = Mat4::orthographic_rh(-r, r, -r, r, 0.5, back + r * 2.0);
+    let view = glam::camera::rh::view::look_at_mat4(snapped_focus + light * back, snapped_focus, up);
+    let proj = glam::camera::rh::proj::directx::orthographic(-r, r, -r, r, 0.5, back + r * 2.0);
     proj * view
 }
 

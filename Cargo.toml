@@ -23,6 +23,7 @@ members = [
     "examples/water",
     "examples/coast",
     "examples/island",
+    "examples/physics",
 ]
 default-members = ["engine"]
 
@@ -40,12 +41,13 @@ bytemuck = { version = "1.22", features = ["derive"] }
 egui = "0.32.3"
 egui-wgpu = "0.32.3"
 egui-winit = "0.32.3"
-glam = { version = "0.30", features = ["bytemuck"] }
+glam = { version = "0.33", features = ["bytemuck"] }
 gltf = { version = "1.4", default-features = true, features = ["utils", "extras", "extensions", "KHR_materials_emissive_strength", "KHR_texture_transform"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 noise = "0.9"
 pollster = "0.4"
 rayon = "1.10"
+rapier3d = "0.36"
 tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
 rodio = "0.21"
 thiserror = "2"

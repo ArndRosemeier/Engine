@@ -40,6 +40,16 @@ impl EntityId {
     }
 }
 
+impl EntityId {
+    pub(crate) fn raw(self) -> u64 {
+        self.0
+    }
+
+    pub(crate) fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
 impl fmt::Display for EntityId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -681,8 +691,8 @@ pub struct World {
     water: Option<crate::water::Water>,
     /// Voxel terrain revision the water last read its columns from.
     water_terrain_rev: u64,
-    /// Pieces of shattered meshes still flying or lying around.
-    debris: Vec<crate::debris::Piece>,
+    /// Rigid bodies, including pieces of shattered meshes.
+    physics: crate::physics::Physics,
     /// Surface presentation sync. Engine default stays on so demos never tear;
     /// the renderer applies it at every present.
     vsync: bool,
@@ -775,7 +785,7 @@ impl Default for World {
             voxel_terrain: None,
             water: None,
             water_terrain_rev: 0,
-            debris: Vec::new(),
+            physics: crate::physics::Physics::new(),
             vsync: true,
             shadow_contact: ContactSnapshot::default(),
             shadow_contact_epoch: 0,
@@ -1819,6 +1829,7 @@ impl World {
     }
 
     pub fn despawn(&mut self, id: EntityId) {
+        self.physics.remove(id);
         let removed_static = self.entities.remove(&id).is_some();
         self.order.retain(|x| *x != id);
         self.animated.remove(&id);
@@ -2402,7 +2413,6 @@ impl World {
             .max(0.5);
         let mut ids = Vec::with_capacity(fragments.len());
         for fragment in fragments {
-            let support = crate::debris::support_points(&fragment.mesh.positions);
             let piece_id =
                 self.spawn_built(fragment.mesh, Mat4::from_translation(fragment.centroid));
             if let Some(e) = self.entities.get_mut(&piece_id) {
@@ -2421,64 +2431,261 @@ impl World {
             let spin = Vec3::new(rand(), rand(), rand()) * settings.speed
                 / fragment.radius.max(0.15)
                 * 0.4;
-            self.debris.push(crate::debris::Piece {
-                id: piece_id,
-                position: fragment.centroid,
-                rotation: glam::Quat::IDENTITY,
-                velocity,
-                spin,
-                support,
-                age: 0.0,
-                keep: settings.keep_seconds,
-                still_for: 0.0,
-                asleep: false,
-                density: settings.density,
-                wet: false,
-            });
+            let body = crate::physics::Body::dynamic()
+                .density(settings.density)
+                .friction(0.7)
+                .bounce(0.2)
+                .velocity(velocity)
+                .spin(spin)
+                .ccd(fragment.radius < 0.3);
+            let positions = &self.entities[&piece_id].mesh.positions;
+            let added = self.physics.add(
+                piece_id,
+                positions,
+                Mat4::from_translation(fragment.centroid),
+                &body,
+                Some(crate::physics::Temporary {
+                    keep: settings.keep_seconds.unwrap_or(f32::INFINITY),
+                }),
+                Vec::new,
+            );
+            if added.is_err() {
+                // Slivers too thin for a hull: drop them rather than leave
+                // them hanging in the air.
+                self.despawn(piece_id);
+                continue;
+            }
             ids.push(piece_id);
         }
         self.spawn_space = prev_space;
         Ok(ids)
     }
 
-    /// Debris pieces still in the world (flying or resting).
+    /// Shattered pieces still in the world (flying, resting or sinking away).
     pub fn debris_count(&self) -> usize {
-        self.debris.len()
+        self.physics.temporary_count()
     }
 
-    /// Move shattered pieces. The engine calls this every frame.
-    pub fn tick_debris(&mut self, dt: f32) {
-        if self.debris.is_empty() || !dt.is_finite() || dt <= 0.0 {
-            return;
+    /// Give an entity a rigid body: from now on physics moves it (or, for
+    /// fixed bodies, other bodies bump into it). Moving the entity with
+    /// [`Self::set_place`] still works and teleports the body. Adding a body
+    /// to an entity that has one replaces it. See [`crate::physics`].
+    pub fn add_body(&mut self, id: EntityId, body: crate::physics::Body) -> EngineResult<()> {
+        let e = self.entities.get(&id).ok_or(EngineError::UnknownEntity)?;
+        if e.instanced || e.instance_of.is_some() {
+            return Err(EngineError::InvalidValue(
+                "bodies work on single (non-instanced) mesh entities".into(),
+            ));
         }
-        self.debris.retain(|p| self.entities.contains_key(&p.id));
-        let ground = DebrisGround {
+        let mesh = &e.mesh;
+        self.physics.add(id, &mesh.positions, e.transform, &body, None, || {
+            mesh.indices
+                .chunks_exact(3)
+                .map(|t| [t[0], t[1], t[2]])
+                .collect()
+        })
+    }
+
+    /// Take an entity's body away; it stays where it is and stops moving.
+    pub fn remove_body(&mut self, id: EntityId) {
+        self.physics.remove(id);
+    }
+
+    pub fn has_body(&self, id: EntityId) -> bool {
+        self.physics.contains(id)
+    }
+
+    /// Velocity of a body in m/s.
+    pub fn body_velocity(&self, id: EntityId) -> Option<Vec3> {
+        self.physics.velocity(id)
+    }
+
+    pub fn set_body_velocity(&mut self, id: EntityId, velocity: impl Into<Vec3>) -> EngineResult<()> {
+        self.physics.set_velocity(id, velocity.into())
+    }
+
+    /// Spin of a body in rad/s around each axis.
+    pub fn body_spin(&self, id: EntityId) -> Option<Vec3> {
+        self.physics.spin(id)
+    }
+
+    pub fn set_body_spin(&mut self, id: EntityId, spin: impl Into<Vec3>) -> EngineResult<()> {
+        self.physics.set_spin(id, spin.into())
+    }
+
+    /// Mass of a body in kg (volume times density times 1000).
+    pub fn body_mass(&self, id: EntityId) -> Option<f32> {
+        self.physics.mass(id)
+    }
+
+    /// Give a body a kick through its centre. `impulse` is in kg·m/s, so
+    /// `direction * speed * world.body_mass(id)` changes its speed by `speed`.
+    pub fn push(&mut self, id: EntityId, impulse: impl Into<Vec3>) -> EngineResult<()> {
+        self.physics.push(id, impulse.into(), None)
+    }
+
+    /// Kick a body at a world point, so it also starts to spin.
+    pub fn push_at(
+        &mut self,
+        id: EntityId,
+        impulse: impl Into<Vec3>,
+        point: impl Into<Vec3>,
+    ) -> EngineResult<()> {
+        self.physics.push(id, impulse.into(), Some(point.into()))
+    }
+
+    /// Throw every body within `radius` of `center` outward: `speed` m/s at
+    /// the centre, fading to nothing at the edge. Mass doesn't matter.
+    pub fn blast(&mut self, center: impl Into<Vec3>, radius: f32, speed: f32) {
+        let c = center.into();
+        if c.is_finite() && radius.is_finite() && radius > 0.0 && speed.is_finite() {
+            self.physics.blast(c, radius, speed);
+        }
+    }
+
+    /// Hard hits since the last call (for impact sounds, damage or dust),
+    /// hardest first.
+    pub fn take_impacts(&mut self) -> Vec<crate::physics::Impact> {
+        self.physics.take_impacts()
+    }
+
+    /// First body or piece of terrain along a ray, within `max_distance`.
+    pub fn cast_ray(
+        &self,
+        origin: impl Into<Vec3>,
+        direction: impl Into<Vec3>,
+        max_distance: f32,
+    ) -> Option<crate::physics::RayHit> {
+        let (origin, dir) = (origin.into(), direction.into().try_normalize()?);
+        if !origin.is_finite() || !max_distance.is_finite() || max_distance <= 0.0 {
+            return None;
+        }
+        let body = self.physics.cast_ray(origin, dir, max_distance);
+        let reach = body.map_or(max_distance, |h| h.distance);
+        let ground = self.ground_ray(origin, dir, reach);
+        match (body, ground) {
+            (Some(b), Some(g)) if g.distance < b.distance => Some(g),
+            (Some(b), _) => Some(b),
+            (None, g) => g,
+        }
+    }
+
+    fn ground_ray(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<crate::physics::RayHit> {
+        use crate::physics::{PhysicsGround, RayHit};
+        let hit = |p: Vec3, n: Vec3| RayHit {
+            entity: None,
+            point: p,
+            normal: n,
+            distance: (p - origin).length(),
+        };
+        let plane = |y: f32| {
+            (dir.y.abs() > 1e-6)
+                .then(|| (y - origin.y) / dir.y)
+                .filter(|t| *t >= 0.0 && *t <= max)
+                .map(|t| hit(origin + dir * t, Vec3::Y))
+        };
+        match self.physics.settings().ground {
+            PhysicsGround::None => None,
+            PhysicsGround::Plane(y) => plane(y),
+            PhysicsGround::Auto => {
+                if let Some(v) = self.voxel_terrain.as_ref() {
+                    if v.volume().chunk_keys().next().is_some() {
+                        return v.raycast(origin, dir, max).map(|p| hit(p, v.normal_at(p)));
+                    }
+                }
+                if let Some(f) = self.height_field.as_ref() {
+                    // March, then refine by bisection.
+                    let step = 0.5;
+                    let mut t0 = 0.0;
+                    let mut t = 0.0;
+                    while t <= max {
+                        let p = origin + dir * t;
+                        if p.y <= f.height_at(p.x, p.z) {
+                            let (mut lo, mut hi) = (t0, t);
+                            for _ in 0..16 {
+                                let mid = (lo + hi) * 0.5;
+                                let q = origin + dir * mid;
+                                if q.y <= f.height_at(q.x, q.z) {
+                                    hi = mid;
+                                } else {
+                                    lo = mid;
+                                }
+                            }
+                            let p = origin + dir * hi;
+                            let e = 0.25;
+                            let n = Vec3::new(
+                                f.height_at(p.x - e, p.z) - f.height_at(p.x + e, p.z),
+                                2.0 * e,
+                                f.height_at(p.x, p.z - e) - f.height_at(p.x, p.z + e),
+                            )
+                            .normalize();
+                            return Some(hit(p, n));
+                        }
+                        t0 = t;
+                        t += step;
+                    }
+                    return None;
+                }
+                plane(0.0)
+            }
+        }
+    }
+
+    pub fn physics_settings(&self) -> crate::physics::PhysicsSettings {
+        self.physics.settings()
+    }
+
+    pub fn set_physics_settings(
+        &mut self,
+        settings: crate::physics::PhysicsSettings,
+    ) -> EngineResult<()> {
+        settings.validate()?;
+        self.physics.set_settings(settings);
+        Ok(())
+    }
+
+    /// Bodies in the world, and how many of them are moving (not asleep).
+    pub fn body_count(&self) -> (usize, usize) {
+        (self.physics.body_count(), self.physics.awake_count())
+    }
+
+    /// Step physics. The engine calls this every frame.
+    pub fn tick_physics(&mut self, dt: f32) {
+        let around = crate::physics::Surroundings {
             voxels: self.voxel_terrain.as_ref(),
             heights: self.height_field.as_ref(),
             water: self.water.as_ref(),
         };
-        let (moved, expired, splashes) = crate::debris::step(&mut self.debris, dt, &ground);
+        let entities = &self.entities;
+        let result = self
+            .physics
+            .tick(dt, &around, |id| entities.get(&id).map(|e| e.transform));
         if let Some(water) = self.water.as_mut() {
-            for s in splashes {
+            for s in &result.splashes {
                 water.disturb(s.at, 1.5, (s.speed * 0.3).min(4.0));
             }
         }
-        if moved {
-            for piece in &self.debris {
-                if let Some(e) = self.entities.get_mut(&piece.id) {
-                    let m = piece.matrix();
-                    if e.transform != m {
-                        e.transform = m;
-                        e.bump_xform();
-                    }
-                }
+        let mut changed = false;
+        for (id, m) in result.moved {
+            if let Some(e) = self.entities.get_mut(&id) {
+                e.transform = m;
+                e.bump_xform();
+                changed = true;
             }
+        }
+        for (id, dy) in result.sink {
+            if let Some(e) = self.entities.get_mut(&id) {
+                e.transform.w_axis.y -= dy;
+                e.bump_xform();
+                changed = true;
+            }
+        }
+        if changed {
             self.bump_render_epoch();
         }
-        for id in expired {
+        for id in result.expired {
             self.despawn(id);
         }
-        self.debris.retain(|p| self.entities.contains_key(&p.id));
     }
 
     pub fn bloom(&self) -> BloomSettings {
@@ -3103,40 +3310,3 @@ mod vsync_tests {
     }
 }
 
-/// What debris lands on: voxel terrain where it has data, else the height
-/// terrain (or y = 0 without one).
-struct DebrisGround<'a> {
-    voxels: Option<&'a crate::voxel_terrain::VoxelTerrain>,
-    heights: Option<&'a HeightField>,
-    water: Option<&'a crate::water::Water>,
-}
-
-impl crate::debris::Ground for DebrisGround<'_> {
-    fn depth(&self, p: Vec3) -> Option<(f32, Vec3)> {
-        if let Some(t) = self.voxels {
-            let d = t.volume().sample(p);
-            if d > 0.0 {
-                // Density is about distance in voxels near the surface.
-                let depth = (d * t.volume().voxel_size()).min(t.volume().voxel_size() * 2.0);
-                return Some((depth, t.normal_at(p)));
-            }
-            if t.volume().chunk_keys().next().is_some() {
-                return Some((d * t.volume().voxel_size(), Vec3::Y));
-            }
-        }
-        let h = self.heights.map_or(0.0, |f| f.height_at(p.x, p.z));
-        Some((h - p.y, Vec3::Y))
-    }
-
-    fn water(&self, p: Vec3) -> Option<(f32, glam::Vec2)> {
-        let w = self.water?;
-        let surface = w.surface_at(p + Vec3::Y * 2.0)?;
-        (surface > p.y - 3.0).then(|| {
-            (
-                surface,
-                w.sample(p.min(Vec3::new(p.x, surface - 0.05, p.z)))
-                    .map_or(glam::Vec2::ZERO, |s| s.current),
-            )
-        })
-    }
-}

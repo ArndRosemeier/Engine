@@ -23,6 +23,7 @@ pub use crate::particles::{
     EmitterId, ParticleBlend, ParticleEmitter, ParticleForce, ParticleMode, ParticleShape,
     ParticleSilhouette, ParticleWorld, SizeOverLife,
 };
+pub use crate::physics::{Body, BodyKind, BodyShape, Impact, PhysicsGround, PhysicsSettings, RayHit};
 pub use crate::place::{GlobalPlace, MeshInstance, Place};
 pub use crate::portal::{Portal, PortalId, PortalSettings, SpaceId};
 pub use crate::proc::{scatter_on_xz, Noise};

@@ -348,6 +348,58 @@ impl Volume {
         mesh
     }
 
+    /// One chunk's surface as a welded triangle list for physics colliders.
+    /// Empty when the chunk is missing or holds no surface.
+    pub(crate) fn collision_triangles(&self, chunk_key: IVec3) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+        let mut verts = Vec::new();
+        let mut tris = Vec::new();
+        let Some(chunk) = self.chunks.get(&chunk_key) else {
+            return (verts, tris);
+        };
+        let origin = chunk_key.as_vec3() * (CHUNK_SIZE as f32) * self.voxel_size;
+        // Weld on a grid far finer than a voxel: neighbouring cells compute the
+        // same edge vertex with tiny float differences.
+        let quant = 1024.0 / self.voxel_size;
+        let mut index: HashMap<(i32, i32, i32), u32> = HashMap::new();
+        for y in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    let c = [
+                        chunk.get(x, y, z),
+                        chunk.get(x + 1, y, z),
+                        chunk.get(x + 1, y, z + 1),
+                        chunk.get(x, y, z + 1),
+                        chunk.get(x, y + 1, z),
+                        chunk.get(x + 1, y + 1, z),
+                        chunk.get(x + 1, y + 1, z + 1),
+                        chunk.get(x, y + 1, z + 1),
+                    ];
+                    let solid = c.iter().filter(|v| **v >= 0.0).count();
+                    if solid == 0 || solid == 8 {
+                        continue;
+                    }
+                    let cell_origin =
+                        origin + Vec3::new(x as f32, y as f32, z as f32) * self.voxel_size;
+                    for tri in triangulate_cell(CornerValues(c), cell_origin, self.voxel_size) {
+                        let mut ids = [0u32; 3];
+                        for (k, p) in tri.iter().enumerate() {
+                            let q = (p * quant).round();
+                            let key = (q.x as i32, q.y as i32, q.z as i32);
+                            ids[k] = *index.entry(key).or_insert_with(|| {
+                                verts.push(*p);
+                                (verts.len() - 1) as u32
+                            });
+                        }
+                        if ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2] {
+                            tris.push(ids);
+                        }
+                    }
+                }
+            }
+        }
+        (verts, tris)
+    }
+
     /// Extract all dirty chunks in parallel and clear their dirty flags.
     pub fn extract_dirty(&mut self, color: Color) -> Vec<(IVec3, BuiltMesh)> {
         let keys: Vec<IVec3> = self.dirty_chunk_keys();
