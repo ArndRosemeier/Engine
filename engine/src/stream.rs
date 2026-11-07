@@ -615,6 +615,7 @@ impl WorldStream {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|i| format!("engine-stream-{i}"))
+            .start_handler(|_| crate::parallel::lower_thread_priority())
             .build()
             .expect("stream worker pool");
         let (tx, rx) = mpsc::channel();
