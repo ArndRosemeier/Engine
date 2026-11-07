@@ -206,6 +206,7 @@ Every program built on the engine understands these:
 | `ENGINE_SCREENSHOT_WAIT=1` | Wait for `world.mark_ready()` before counting screenshot frames |
 | `ENGINE_MSAA=4` | 4x MSAA on top of TAA (default 1 while TAA is on: TAA smooths edges and costs 10-15% less at 4K; 4 when `ENGINE_TAA=0`) |
 | `ENGINE_TONEMAP=aces` | Tone-map with ACES instead of AgX (`world.set_tone_map(ToneMap::Aces)` in code) |
+| `ENGINE_INSTANCE_SUBMIT=cpu` | Draw every instance from the CPU instead of culling instances per view and shadow cascade on the GPU (default `gpu`) |
 | `ENGINE_TAA=0` | Turn temporal anti-aliasing off (`world.set_taa(false)` in code) |
 | `ENGINE_PRESENT_MODE` | `fifo` (default, vsync), `fifo-relaxed`, `mailbox` or `immediate` (uncapped, to see the real frame rate) |
 | `ENGINE_FRAME_STATS=1` | Print frame-time statistics every 2 s (average, worst, spread: judges smoothness) |

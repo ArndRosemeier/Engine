@@ -106,18 +106,20 @@ impl TorchLight {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InstanceSubmit {
     /// Entity-sphere cull, then `draw_indexed` of every instance.
-    #[default]
     CpuIndexed,
     /// Prototype-batched per-instance GPU compact, then `draw_indexed_indirect`.
+    /// The default: each shadow cascade and the view draw only the instances
+    /// inside them (lod_forest at 4K: shadows 1.44 -> 0.43 ms, +23% FPS).
+    #[default]
     GpuIndirect,
 }
 
 impl InstanceSubmit {
-    /// `ENGINE_INSTANCE_SUBMIT=gpu|cpu` picks the starting mode.
+    /// `ENGINE_INSTANCE_SUBMIT=cpu` starts on the CPU path (default gpu).
     fn from_env() -> Self {
         match std::env::var("ENGINE_INSTANCE_SUBMIT").as_deref() {
-            Ok("gpu") => Self::GpuIndirect,
-            _ => Self::CpuIndexed,
+            Ok("cpu") => Self::CpuIndexed,
+            _ => Self::GpuIndirect,
         }
     }
 
