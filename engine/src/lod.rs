@@ -66,11 +66,13 @@ pub(crate) fn dither_keep(code: f32, h: f32) -> bool {
 /// Shared WGSL: decodes [`fade_code`] against an interleaved-gradient dither
 /// of the pixel position.
 pub(crate) const LOD_DITHER_WGSL: &str = r#"
-fn lod_dither_keep(code: f32, frag: vec2<f32>) -> bool {
+fn lod_dither_keep(code: f32, frag: vec2<f32>, frame: f32) -> bool {
     if code >= 0.0 {
         return true;
     }
-    let h = fract(52.9829189 * fract(dot(floor(frag), vec2<f32>(0.06711056, 0.00583715))));
+    // Interleaved gradient noise, stepped every frame (Jimenez 2014).
+    let q = floor(frag) + vec2<f32>(5.588238 * frame);
+    let h = fract(52.9829189 * fract(dot(q, vec2<f32>(0.06711056, 0.00583715))));
     if code >= -2.0 {
         return h >= -code - 1.0;
     }
