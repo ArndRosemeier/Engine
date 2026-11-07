@@ -2361,6 +2361,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "prefabs"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "glam 0.33.12",
+]
+
+[[package]]
 name = "presser"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

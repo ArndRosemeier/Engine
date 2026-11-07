@@ -29,6 +29,7 @@ pub use crate::physics::{
 };
 pub use crate::place::{GlobalPlace, MeshInstance, Place};
 pub use crate::portal::{Portal, PortalId, PortalSettings, SpaceId};
+pub use crate::prefab::{PartRef, Prefab, Spawned};
 pub use crate::proc::{scatter_on_xz, Noise};
 pub use crate::proc_terrain::{
     demo_terrain_rules, ClipmapConfig, Grass, HeightField, ProcTerrain, TerrainLayers,

@@ -25,6 +25,7 @@ members = [
     "examples/island",
     "examples/physics",
     "examples/lamps",
+    "examples/prefabs",
 ]
 default-members = ["engine"]
 

@@ -273,6 +273,7 @@ impl App {
             self.world.set_time(time);
             self.world.tick_animations(dt);
             self.world.tick_physics(dt);
+            self.world.tick_hierarchy();
             self.world.tick_effects(dt);
             self.world.tick_water(dt);
             self.world.tick_auto_quality(dt);

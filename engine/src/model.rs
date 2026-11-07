@@ -485,6 +485,7 @@ pub fn scatter_places(
             position: *p,
             yaw_degrees: y_rotation_degrees(i),
             pitch_degrees: 0.0,
+            roll_degrees: 0.0,
             scale,
             stretch: Vec3::ONE,
             tint: crate::color::Color::WHITE,

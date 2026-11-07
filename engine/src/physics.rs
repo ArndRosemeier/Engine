@@ -526,6 +526,10 @@ impl Physics {
         self.bodies.contains_key(&id)
     }
 
+    pub fn body_kind(&self, id: EntityId) -> Option<BodyKind> {
+        self.bodies.get(&id).map(|t| t.kind)
+    }
+
     pub fn body_count(&self) -> usize {
         self.bodies.len()
     }
