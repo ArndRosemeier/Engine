@@ -1101,6 +1101,15 @@ fn fs_voxel(in: VsOut) -> @location(0) vec4<f32> {
         earth = sand * 0.88;
         rock = vec3<f32>(0.40, 0.37, 0.33) * (0.62 + 0.5 * strata) * (0.86 + 0.28 * fine);
     }
+    if in.surface5.y > 0.5 {
+        // Beach: sand on the low ground, its upper edge wandering with the
+        // noise; steep faces keep their rock.
+        let top = in.surface5.x + (broad - 0.5) * 2.4;
+        let s = 1.0 - smoothstep(top - 0.5, top + 0.5, p.y);
+        let sand = vec3<f32>(0.66, 0.55, 0.36) * (0.9 + 0.2 * broad) * (0.9 + 0.2 * fine);
+        grass = mix(grass, sand, s);
+        earth = mix(earth, sand * 0.88, s);
+    }
     let up = n0.y + (broad - 0.5) * 0.3;
     let grass_w = smoothstep(0.72, 0.84, up);
     let earth_w = smoothstep(0.42, 0.62, up);

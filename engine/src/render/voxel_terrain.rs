@@ -717,12 +717,12 @@ impl VoxelTerrainGpu {
                     m.coverage_direction[2],
                     m.coverage_level,
                 ],
-                [
-                    m.coverage_softness,
-                    m.coverage_strength,
-                    m.overlay_roughness,
-                    m.overlay_metallic,
-                ],
+                // The voxel shader has no snow cover; this row carries the
+                // beach instead: top height and an on flag.
+                match terrain.beach() {
+                    Some(top) => [top, 1.0, 0.0, 0.0],
+                    None => [0.0; 4],
+                },
             ],
         }
     }
@@ -885,7 +885,7 @@ impl VoxelTerrainGpu {
                 c.x.to_bits(),
                 c.y.to_bits(),
                 c.z.to_bits(),
-                m.detail_scale.to_bits() ^ m.coverage_level.to_bits(),
+                m.detail_scale.to_bits() ^ terrain.beach().unwrap_or(f32::NAN).to_bits(),
             ]
         };
         let rewrite_instances = self.instance_key != Some(instance_key);
