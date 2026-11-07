@@ -110,6 +110,8 @@ pub use color::{rgb, rgba, Color};
 pub use contact::{ContactGrid, ContactSnapshot};
 pub use debris::Shatter;
 pub use error::{EngineError, EngineResult};
+/// The maths types the engine's API uses (`Vec3`, `Mat4`, `Quat`...).
+pub use glam;
 pub use gpu_field::{
     demo_sphere_density, extract_mesh_cpu, gpu_tests_enabled, CustomFieldKernel, DensityMirror,
     DensityReferenceFn, FieldBounds, FieldChunkKey, FieldChunkMesh, FieldGpuContext, FieldGrid,
@@ -126,7 +128,10 @@ pub use particles::{
     EmitterId, ParticleBlend, ParticleEmitter, ParticleForce, ParticleMode, ParticleShape,
     ParticleSilhouette, ParticleWorld, SizeOverLife,
 };
-pub use physics::{Body, BodyKind, BodyShape, Impact, PhysicsGround, PhysicsSettings, RayHit};
+pub use physics::{
+    Body, BodyHit, BodyId, BodyImpact, BodyKind, BodyShape, Impact, PhysicsGround, PhysicsSettings,
+    PhysicsWorld, RayHit,
+};
 pub use place::{GlobalPlace, MeshInstance, Place};
 pub use portal::{Portal, PortalId, PortalSettings, SpaceId};
 pub use proc_terrain::{

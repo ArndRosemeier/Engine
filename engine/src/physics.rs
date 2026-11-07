@@ -17,14 +17,17 @@
 //! Under the hood this is [Rapier](https://rapier.rs), stepped at a fixed
 //! rate and interpolated for drawing, so motion is smooth at any frame rate.
 //!
+//! [`PhysicsWorld`] is the same physics without a `World`, a window or a GPU,
+//! for a game server or tests; it owns its bodies by [`BodyId`].
+//!
 //! [`World::add_body`]: crate::world::World::add_body
 
 use crate::error::{EngineError, EngineResult};
 use crate::world::EntityId;
 use glam::{IVec3, Mat4, Quat, Vec2, Vec3};
 use rapier3d::prelude::{
-    ColliderBuilder, ColliderHandle, PhysicsWorld, QueryFilter, Ray, RigidBodyBuilder,
-    RigidBodyHandle, TriMeshFlags,
+    ColliderBuilder, ColliderHandle, PhysicsWorld as RapierWorld, QueryFilter, Ray,
+    RigidBodyBuilder, RigidBodyHandle, TriMeshFlags,
 };
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -313,10 +316,14 @@ pub(crate) enum GroundSource {
     Heights { id: usize },
 }
 
+/// Ground height at (x, z), shared by tiles built on worker threads.
+pub(crate) type HeightFn<'a> = &'a (dyn Fn(f32, f32) -> f32 + Sync);
+
 /// What the world lends physics for one tick.
 pub(crate) struct Surroundings<'a> {
     pub voxels: Option<&'a crate::voxel_terrain::VoxelTerrain>,
-    pub heights: Option<&'a crate::proc_terrain::HeightField>,
+    /// A height function and an id that changes only when the terrain does.
+    pub heights: Option<(usize, HeightFn<'a>)>,
     pub water: Option<&'a crate::water::Water>,
 }
 
@@ -334,10 +341,8 @@ impl Surroundings<'_> {
                         };
                     }
                 }
-                if let Some(h) = self.heights {
-                    return GroundSource::Heights {
-                        id: h as *const _ as usize,
-                    };
+                if let Some((id, _)) = self.heights {
+                    return GroundSource::Heights { id };
                 }
                 GroundSource::Plane(0.0)
             }
@@ -406,7 +411,7 @@ struct Tile {
 
 /// The physics world inside [`crate::world::World`].
 pub(crate) struct Physics {
-    world: PhysicsWorld,
+    world: RapierWorld,
     settings: PhysicsSettings,
     bodies: HashMap<EntityId, Tracked>,
     sinking: Vec<Sinking>,
@@ -492,7 +497,7 @@ fn box_points(min: Vec3, max: Vec3) -> Vec<Vec3> {
 
 impl Physics {
     pub fn new() -> Self {
-        let mut world = PhysicsWorld::new();
+        let mut world = RapierWorld::new();
         let settings = PhysicsSettings::default();
         world.gravity = settings.gravity;
         world.integration_parameters.dt = 1.0 / settings.steps_per_second;
@@ -805,7 +810,8 @@ impl Physics {
             return out;
         }
         // Forget bodies whose entities are gone; follow ones the game moved.
-        let ids: Vec<EntityId> = self.bodies.keys().copied().collect();
+        let mut ids: Vec<EntityId> = self.bodies.keys().copied().collect();
+        ids.sort_by_key(|id| id.raw());
         for id in ids {
             let Some(m) = transform_of(id) else {
                 self.remove(id);
@@ -885,6 +891,7 @@ impl Physics {
                 }
             }
         }
+        done.sort_by_key(|id| id.raw());
         for id in done {
             self.remove(id);
             self.sinking.push(Sinking {
@@ -906,6 +913,20 @@ impl Physics {
                 t.written = m;
                 out.moved.push((*id, m));
             }
+        }
+        out
+    }
+
+    /// Draw every moving body at its last step (no interpolation).
+    fn show_current(&mut self) -> Vec<(EntityId, Mat4)> {
+        let mut out = Vec::new();
+        for (id, t) in self.bodies.iter_mut() {
+            if t.kind == BodyKind::Fixed {
+                continue;
+            }
+            let m = Mat4::from_scale_rotation_translation(t.scale, t.cur.1, t.cur.0);
+            t.written = m;
+            out.push((*id, m));
         }
         out
     }
@@ -1068,11 +1089,7 @@ impl Physics {
                 }
                 let chunk_m = v.chunk_world_size();
                 let needed = self.needed_tiles(chunk_m, true);
-                let missing: Vec<IVec3> = needed
-                    .iter()
-                    .filter(|k| !self.tiles.contains_key(k))
-                    .copied()
-                    .collect();
+                let missing = missing_sorted(&needed, &self.tiles);
                 let built: Vec<(IVec3, Option<ColliderBuilder>)> = missing
                     .par_iter()
                     .map(|k| {
@@ -1094,13 +1111,9 @@ impl Physics {
                 self.touch_and_drop(&needed);
             }
             GroundSource::Heights { .. } => {
-                let field = around.heights.expect("heights");
+                let (_, field) = around.heights.expect("heights");
                 let needed = self.needed_tiles(HEIGHT_TILE_M, false);
-                let missing: Vec<IVec3> = needed
-                    .iter()
-                    .filter(|k| !self.tiles.contains_key(k))
-                    .copied()
-                    .collect();
+                let missing = missing_sorted(&needed, &self.tiles);
                 let built: Vec<(IVec3, Option<ColliderBuilder>)> = missing
                     .par_iter()
                     .map(|k| {
@@ -1265,8 +1278,20 @@ fn ground_mesh(verts: Vec<Vec3>, tris: Vec<[u32; 3]>) -> Option<ColliderBuilder>
     Some(b.friction(0.7).user_data(GROUND_TAG))
 }
 
+/// Tiles still to build, in a fixed order: colliders inserted in the same
+/// order give the same simulation on every machine and in every run.
+fn missing_sorted(needed: &HashSet<IVec3>, tiles: &HashMap<IVec3, Tile>) -> Vec<IVec3> {
+    let mut out: Vec<IVec3> = needed
+        .iter()
+        .filter(|k| !tiles.contains_key(k))
+        .copied()
+        .collect();
+    out.sort_by_key(|k| (k.x, k.y, k.z));
+    out
+}
+
 /// Triangles of one height-terrain tile.
-fn height_tile(field: &crate::proc_terrain::HeightField, key: IVec3) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+fn height_tile(field: HeightFn, key: IVec3) -> (Vec<Vec3>, Vec<[u32; 3]>) {
     let n = HEIGHT_TILE_SAMPLES;
     let step = HEIGHT_TILE_M / (n - 1) as f32;
     let x0 = key.x as f32 * HEIGHT_TILE_M;
@@ -1276,7 +1301,7 @@ fn height_tile(field: &crate::proc_terrain::HeightField, key: IVec3) -> (Vec<Vec
         for i in 0..n {
             let x = x0 + i as f32 * step;
             let z = z0 + j as f32 * step;
-            verts.push(Vec3::new(x, field.height_at(x, z), z));
+            verts.push(Vec3::new(x, field(x, z), z));
         }
     }
     let mut tris = Vec::with_capacity((n - 1) * (n - 1) * 2);
@@ -1291,6 +1316,490 @@ fn height_tile(field: &crate::proc_terrain::HeightField, key: IVec3) -> (Vec<Vec
         }
     }
     (verts, tris)
+}
+
+/// A body in a [`PhysicsWorld`]. The game owns it: store it, send it over the
+/// network as [`BodyId::raw`], turn it back with [`BodyId::from_raw`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BodyId(u64);
+
+impl BodyId {
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+
+    pub fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    fn key(self) -> EntityId {
+        EntityId::from_raw(self.0)
+    }
+}
+
+/// What a ray hit in a [`PhysicsWorld`]: a body, or the ground (`body` is `None`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodyHit {
+    pub body: Option<BodyId>,
+    pub point: Vec3,
+    pub normal: Vec3,
+    pub distance: f32,
+}
+
+/// Two bodies hitting each other in a [`PhysicsWorld`]; `b` is `None` for the ground.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodyImpact {
+    pub a: BodyId,
+    pub b: Option<BodyId>,
+    pub point: Vec3,
+    /// Closing speed along the contact normal, m/s.
+    pub speed: f32,
+}
+
+type SharedHeight = std::sync::Arc<dyn Fn(f32, f32) -> f32 + Send + Sync>;
+
+/// Physics on its own: no window, no GPU, no [`World`](crate::world::World).
+/// For a game server, tools and tests. Bodies, shapes, ground and stepping are
+/// the same code `World` uses, so a server and its clients agree on every shape.
+///
+/// ```
+/// use engine::physics::{Body, BodyShape, PhysicsWorld};
+/// use engine::glam::{Mat4, Vec3};
+///
+/// let mut physics = PhysicsWorld::new();
+/// let ball = physics
+///     .add(&Body::dynamic().shape(BodyShape::Ball(0.5)), Mat4::from_translation(Vec3::new(0.0, 5.0, 0.0)))
+///     .unwrap();
+/// for _ in 0..120 {
+///     physics.step(1.0 / 60.0);
+/// }
+/// assert!((physics.position(ball).unwrap().y - 0.5).abs() < 0.05);
+/// ```
+pub struct PhysicsWorld {
+    inner: Physics,
+    /// The transform of every body as the game last saw it (interpolated).
+    transforms: HashMap<EntityId, Mat4>,
+    next: u64,
+    heights: Option<SharedHeight>,
+    voxels: Option<crate::voxel_terrain::VoxelTerrain>,
+    expired: Vec<BodyId>,
+}
+
+impl std::fmt::Debug for PhysicsWorld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhysicsWorld")
+            .field("bodies", &self.inner.body_count())
+            .field("height_terrain", &self.heights.is_some())
+            .field("voxel_terrain", &self.voxels.is_some())
+            .finish()
+    }
+}
+
+impl Default for PhysicsWorld {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PhysicsWorld {
+    /// Earth gravity, 60 steps a second, a flat floor at y = 0.
+    pub fn new() -> Self {
+        Self {
+            inner: Physics::new(),
+            transforms: HashMap::new(),
+            next: 1,
+            heights: None,
+            voxels: None,
+            expired: Vec::new(),
+        }
+    }
+
+    pub fn with_settings(settings: PhysicsSettings) -> EngineResult<Self> {
+        let mut w = Self::new();
+        w.set_settings(settings)?;
+        Ok(w)
+    }
+
+    pub fn settings(&self) -> PhysicsSettings {
+        self.inner.settings()
+    }
+
+    pub fn set_settings(&mut self, settings: PhysicsSettings) -> EngineResult<()> {
+        settings.validate()?;
+        self.inner.set_settings(settings);
+        Ok(())
+    }
+
+    /// Height terrain as the ground (with [`PhysicsGround::Auto`]): the same
+    /// [`HeightField`](crate::proc_terrain::HeightField) the client draws.
+    pub fn set_height_terrain(&mut self, field: crate::proc_terrain::HeightField) {
+        self.set_height_fn(move |x, z| field.height_at(x, z));
+    }
+
+    /// Any height function as the ground: `height(x, z)` in metres.
+    pub fn set_height_fn(&mut self, height: impl Fn(f32, f32) -> f32 + Send + Sync + 'static) {
+        self.heights = Some(std::sync::Arc::new(height));
+    }
+
+    /// Voxel terrain as the ground; it wins over height terrain. Dig it with
+    /// [`Self::voxel_terrain_mut`] and colliders near bodies are rebuilt.
+    pub fn set_voxel_terrain(&mut self, terrain: crate::voxel_terrain::VoxelTerrain) {
+        self.voxels = Some(terrain);
+    }
+
+    pub fn voxel_terrain(&self) -> Option<&crate::voxel_terrain::VoxelTerrain> {
+        self.voxels.as_ref()
+    }
+
+    pub fn voxel_terrain_mut(&mut self) -> Option<&mut crate::voxel_terrain::VoxelTerrain> {
+        self.voxels.as_mut()
+    }
+
+    /// Drop both terrains: the ground is a floor at y = 0 again.
+    pub fn clear_terrain(&mut self) {
+        self.heights = None;
+        self.voxels = None;
+    }
+
+    fn new_id(&mut self) -> BodyId {
+        let id = BodyId(self.next);
+        self.next += 1;
+        id
+    }
+
+    /// A body with a shape that needs no mesh: [`BodyShape::Box`],
+    /// [`BodyShape::Ball`] or [`BodyShape::Capsule`]. `transform` places it
+    /// (its scale scales the shape).
+    pub fn add(&mut self, body: &Body, transform: Mat4) -> EngineResult<BodyId> {
+        if !matches!(
+            body.shape,
+            BodyShape::Box(_) | BodyShape::Ball(_) | BodyShape::Capsule { .. }
+        ) {
+            return Err(EngineError::InvalidValue(
+                "this shape needs a mesh: use add_mesh, or a Box, Ball or Capsule shape".into(),
+            ));
+        }
+        self.add_points(body, transform, &[], &[])
+    }
+
+    /// A body shaped by a mesh (its hull, triangles or bounds, as
+    /// `body.shape` says), exactly as `World::add_body` builds it.
+    pub fn add_mesh(
+        &mut self,
+        body: &Body,
+        transform: Mat4,
+        mesh: &crate::mesh::Mesh,
+    ) -> EngineResult<BodyId> {
+        let built = mesh.build();
+        self.add_points(body, transform, &built.positions, &built.indices)
+    }
+
+    /// A body from raw local points (and triangle indices for
+    /// [`BodyShape::Mesh`]), for shapes that come from somewhere else.
+    pub fn add_points(
+        &mut self,
+        body: &Body,
+        transform: Mat4,
+        points: &[Vec3],
+        indices: &[u32],
+    ) -> EngineResult<BodyId> {
+        let id = self.new_id();
+        self.insert(id, body, transform, points, indices, None)?;
+        Ok(id)
+    }
+
+    /// Like [`Self::add_mesh`] for short-lived rubble: after `keep_seconds`
+    /// the body sinks into the ground, is removed and shows up in
+    /// [`Self::take_expired`].
+    pub fn add_temporary(
+        &mut self,
+        body: &Body,
+        transform: Mat4,
+        mesh: &crate::mesh::Mesh,
+        keep_seconds: f32,
+    ) -> EngineResult<BodyId> {
+        let built = mesh.build();
+        let id = self.new_id();
+        self.insert(
+            id,
+            body,
+            transform,
+            &built.positions,
+            &built.indices,
+            Some(Temporary { keep: keep_seconds }),
+        )?;
+        Ok(id)
+    }
+
+    fn insert(
+        &mut self,
+        id: BodyId,
+        body: &Body,
+        transform: Mat4,
+        points: &[Vec3],
+        indices: &[u32],
+        temporary: Option<Temporary>,
+    ) -> EngineResult<()> {
+        if !transform.is_finite() {
+            return Err(EngineError::InvalidValue(
+                "body transform must be finite".into(),
+            ));
+        }
+        self.inner
+            .add(id.key(), points, transform, body, temporary, || {
+                indices
+                    .chunks_exact(3)
+                    .map(|t| [t[0], t[1], t[2]])
+                    .collect()
+            })?;
+        self.transforms.insert(id.key(), transform);
+        Ok(())
+    }
+
+    pub fn remove(&mut self, id: BodyId) {
+        self.inner.remove(id.key());
+        self.transforms.remove(&id.key());
+    }
+
+    pub fn contains(&self, id: BodyId) -> bool {
+        self.inner.contains(id.key())
+    }
+
+    /// Bodies, and how many of them are moving (not asleep).
+    pub fn body_count(&self) -> (usize, usize) {
+        (self.inner.body_count(), self.inner.awake_count())
+    }
+
+    /// Where a body is drawn: between its last two steps, so it moves
+    /// smoothly when read every frame. Includes the body's scale.
+    pub fn transform(&self, id: BodyId) -> Option<Mat4> {
+        self.transforms.get(&id.key()).copied()
+    }
+
+    pub fn position(&self, id: BodyId) -> Option<Vec3> {
+        self.transform(id).map(|m| m.w_axis.truncate())
+    }
+
+    /// Position and rotation after the last whole step (no interpolation):
+    /// the authoritative state to send to clients.
+    pub fn pose(&self, id: BodyId) -> Option<(Vec3, Quat)> {
+        self.inner.bodies.get(&id.key()).map(|t| t.cur)
+    }
+
+    /// Teleport a body (and its scale) to `transform`. Kinematic bodies move
+    /// there over the next step, pushing what's in the way.
+    pub fn set_transform(&mut self, id: BodyId, transform: Mat4) -> EngineResult<()> {
+        if !self.contains(id) {
+            return Err(EngineError::UnknownEntity);
+        }
+        if !transform.is_finite() {
+            return Err(EngineError::InvalidValue(
+                "body transform must be finite".into(),
+            ));
+        }
+        self.transforms.insert(id.key(), transform);
+        Ok(())
+    }
+
+    pub fn velocity(&self, id: BodyId) -> Option<Vec3> {
+        self.inner.velocity(id.key())
+    }
+
+    pub fn set_velocity(&mut self, id: BodyId, velocity: Vec3) -> EngineResult<()> {
+        self.inner.set_velocity(id.key(), velocity)
+    }
+
+    pub fn spin(&self, id: BodyId) -> Option<Vec3> {
+        self.inner.spin(id.key())
+    }
+
+    pub fn set_spin(&mut self, id: BodyId, spin: Vec3) -> EngineResult<()> {
+        self.inner.set_spin(id.key(), spin)
+    }
+
+    pub fn mass(&self, id: BodyId) -> Option<f32> {
+        self.inner.mass(id.key())
+    }
+
+    /// A kick through the centre, in kg·m/s.
+    pub fn push(&mut self, id: BodyId, impulse: Vec3) -> EngineResult<()> {
+        self.inner.push(id.key(), impulse, None)
+    }
+
+    /// A kick at a world point, so the body also spins.
+    pub fn push_at(&mut self, id: BodyId, impulse: Vec3, point: Vec3) -> EngineResult<()> {
+        self.inner.push(id.key(), impulse, Some(point))
+    }
+
+    /// Throw every dynamic body within `radius` outward: `speed` m/s at the
+    /// centre, fading to nothing at the edge.
+    pub fn blast(&mut self, center: Vec3, radius: f32, speed: f32) {
+        if center.is_finite() && radius.is_finite() && radius > 0.0 && speed.is_finite() {
+            self.inner.blast(center, radius, speed);
+        }
+    }
+
+    /// Hard hits since the last call, hardest first.
+    pub fn take_impacts(&mut self) -> Vec<BodyImpact> {
+        self.inner
+            .take_impacts()
+            .into_iter()
+            .map(|i| BodyImpact {
+                a: BodyId(i.a.raw()),
+                b: i.b.map(|b| BodyId(b.raw())),
+                point: i.point,
+                speed: i.speed,
+            })
+            .collect()
+    }
+
+    /// Temporary bodies whose time ran out since the last call.
+    pub fn take_expired(&mut self) -> Vec<BodyId> {
+        std::mem::take(&mut self.expired)
+    }
+
+    /// First body or ground along a ray within `max_distance`.
+    pub fn cast_ray(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<BodyHit> {
+        let dir = direction.try_normalize()?;
+        if !origin.is_finite() || !max_distance.is_finite() || max_distance <= 0.0 {
+            return None;
+        }
+        let body = self
+            .inner
+            .cast_ray(origin, dir, max_distance)
+            .map(|h| BodyHit {
+                body: h.entity.map(|e| BodyId(e.raw())),
+                point: h.point,
+                normal: h.normal,
+                distance: h.distance,
+            });
+        let reach = body.map_or(max_distance, |h| h.distance);
+        let ground = self.ground_ray(origin, dir, reach);
+        match (body, ground) {
+            (Some(b), Some(g)) if g.distance < b.distance => Some(g),
+            (Some(b), _) => Some(b),
+            (None, g) => g,
+        }
+    }
+
+    fn ground_ray(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<BodyHit> {
+        let hit = |p: Vec3, n: Vec3| BodyHit {
+            body: None,
+            point: p,
+            normal: n,
+            distance: (p - origin).length(),
+        };
+        let plane = |y: f32| {
+            (dir.y.abs() > 1e-6)
+                .then(|| (y - origin.y) / dir.y)
+                .filter(|t| *t >= 0.0 && *t <= max)
+                .map(|t| hit(origin + dir * t, Vec3::Y))
+        };
+        match self.inner.settings().ground {
+            PhysicsGround::None => None,
+            PhysicsGround::Plane(y) => plane(y),
+            PhysicsGround::Auto => {
+                if let Some(v) = self.voxels.as_ref() {
+                    if v.volume().chunk_keys().next().is_some() {
+                        return v.raycast(origin, dir, max).map(|p| hit(p, v.normal_at(p)));
+                    }
+                }
+                if let Some(f) = self.heights.as_ref() {
+                    return height_ray(&**f, origin, dir, max).map(|(p, n)| hit(p, n));
+                }
+                plane(0.0)
+            }
+        }
+    }
+
+    /// Advance by `dt` seconds of real time: as many fixed steps as are due
+    /// (see [`PhysicsSettings::steps_per_second`]). Returns how many ran.
+    pub fn step(&mut self, dt: f32) -> u32 {
+        let heights = self.heights.clone();
+        let height_ref = heights.as_deref().map(|h| h as HeightFn);
+        let around = Surroundings {
+            voxels: self.voxels.as_ref(),
+            heights: height_ref.map(|h| {
+                (
+                    heights
+                        .as_ref()
+                        .map_or(0, |a| std::sync::Arc::as_ptr(a) as *const u8 as usize),
+                    h,
+                )
+            }),
+            water: None,
+        };
+        let transforms = &self.transforms;
+        let before = self.inner.clock;
+        let result = self
+            .inner
+            .tick(dt, &around, |id| transforms.get(&id).copied());
+        for (id, m) in result.moved {
+            self.transforms.insert(id, m);
+        }
+        for (id, dy) in result.sink {
+            if let Some(m) = self.transforms.get_mut(&id) {
+                m.w_axis.y -= dy;
+            }
+        }
+        for id in result.expired {
+            self.transforms.remove(&id);
+            self.expired.push(BodyId(id.raw()));
+        }
+        ((self.inner.clock - before) * self.inner.settings.steps_per_second).round() as u32
+    }
+
+    /// Exactly one fixed step, whatever the clock says. For servers that
+    /// keep their own tick.
+    pub fn step_once(&mut self) {
+        let h = 1.0 / self.inner.settings.steps_per_second;
+        // Top the accumulator up to one step; tick then runs exactly one.
+        self.inner.accumulator = 0.0;
+        self.step(h * 1.000_01);
+        self.inner.accumulator = 0.0;
+        for (id, m) in self.inner.show_current() {
+            self.transforms.insert(id, m);
+        }
+    }
+}
+
+/// March a height function along a ray, then refine by bisection.
+pub(crate) fn height_ray(
+    f: &dyn Fn(f32, f32) -> f32,
+    origin: Vec3,
+    dir: Vec3,
+    max: f32,
+) -> Option<(Vec3, Vec3)> {
+    let step = 0.5;
+    let mut t0 = 0.0;
+    let mut t = 0.0;
+    while t <= max {
+        let p = origin + dir * t;
+        if p.y <= f(p.x, p.z) {
+            let (mut lo, mut hi) = (t0, t);
+            for _ in 0..16 {
+                let mid = (lo + hi) * 0.5;
+                let q = origin + dir * mid;
+                if q.y <= f(q.x, q.z) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            let p = origin + dir * hi;
+            let e = 0.25;
+            let n = Vec3::new(
+                f(p.x - e, p.z) - f(p.x + e, p.z),
+                2.0 * e,
+                f(p.x, p.z - e) - f(p.x, p.z + e),
+            )
+            .normalize();
+            return Some((p, n));
+        }
+        t0 = t;
+        t += step;
+    }
+    None
 }
 
 #[cfg(test)]
