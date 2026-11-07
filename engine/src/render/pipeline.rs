@@ -38,7 +38,9 @@ pub struct Uniforms {
     /// Scales sky reflections on glossy surfaces; 1 is physically balanced.
     pub env_strength: f32,
     pub sky_horizon: [f32; 3],
-    pub _horizon_pad: f32,
+    /// Frame counter (mod 64) that shifts the LOD dither each frame, so
+    /// temporal anti-aliasing averages it into a smooth fade.
+    pub dither_frame: f32,
     /// Light bounced up from the ground, same scale as `sky_up`.
     pub sky_down: [f32; 3],
     /// 0 summer green, 0.5 early autumn, 1 full autumn colours.
@@ -71,7 +73,7 @@ impl Uniforms {
             sky_up: [1.0, 1.0, 1.0],
             env_strength: 1.0,
             sky_horizon: [1.0, 1.0, 1.0],
-            _horizon_pad: 0.0,
+            dither_frame: 0.0,
             sky_down: [1.0, 1.0, 1.0],
             season: 0.0,
         }
@@ -106,7 +108,7 @@ struct Uniforms {
     sky_up: vec3<f32>,
     env_strength: f32,
     sky_horizon: vec3<f32>,
-    _horizon_pad: f32,
+    dither_frame: f32,
     sky_down: vec3<f32>,
     season: f32,
 };
@@ -674,7 +676,7 @@ fn vegetation_shade(in: VsOut) -> vec4<f32> {
 // Depth prepass: only texels the shaded pass will cover on every sample.
 @fragment
 fn fs_depth(in: VsOut) {
-    if !lod_dither_keep(in.lod_fade, in.clip.xy) {
+    if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) {
         discard;
     }
     if in.surface3.w > 7.5 {
@@ -746,7 +748,7 @@ fn triplanar_surface(in: VsOut, geo_n: vec3<f32>) -> TriSurface {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    if !lod_dither_keep(in.lod_fade, in.clip.xy) {
+    if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) {
         discard;
     }
     if in.surface3.w > 7.5 {

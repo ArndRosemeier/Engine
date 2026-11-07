@@ -36,7 +36,10 @@ impl Target {
         let usage = if samples > 1 {
             wgpu::TextureUsages::RENDER_ATTACHMENT
         } else {
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
+            // Copy destination: the TAA pass writes its result back here.
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
@@ -210,6 +213,11 @@ impl Postprocess {
         );
         self.width = width;
         self.height = height;
+    }
+
+    /// The resolved HDR scene colour (what bloom and tone mapping read).
+    pub fn scene_target(&self) -> (&wgpu::TextureView, &wgpu::Texture) {
+        (&self.scene.view, &self.scene._texture)
     }
 
     /// Colour attachment for the world pass: `(view, resolve_target)`.

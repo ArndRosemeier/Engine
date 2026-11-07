@@ -9,7 +9,7 @@ render loop.
 
 **What you get**
 
-- **Rendering:** HDR with ACES tone mapping and bloom, 4x MSAA, PBR materials
+- **Rendering:** HDR with ACES tone mapping and bloom, 4x MSAA plus temporal anti-aliasing, PBR materials
   (glTF metallic-roughness, normal, occlusion and emissive maps), three shadow
   cascades with soft filtering, SSAO, voxel-probe global illumination, a
   physical sky with day/night, clouds and weather, distance haze.
@@ -191,7 +191,7 @@ cargo run --release -p <name>
 | `vfx_showcase` | Particles, ribbons and spell effects |
 | `procedural_caves`, `populate_world`, `gpu_field_demo`, `ui_modal` | Caves, prop scattering, GPU density fields, UI |
 
-`run_examples.py` (or `run_examples.bat` on Windows) opens a small launcher.
+`run_examples.py` (or `run_examples.bat` on Windows) opens a launcher with a button per example, plus ready-made variants (texture families, the Actors character, sunset, storm...). Add new variants to its `VARIANTS` list.
 
 ## Environment variables
 
@@ -203,6 +203,7 @@ Every program built on the engine understands these:
 | `ENGINE_SCREENSHOT=out.png` | Save frame `ENGINE_SCREENSHOT_FRAME` (default 3) to a PNG and exit |
 | `ENGINE_SCREENSHOT_WAIT=1` | Wait for `world.mark_ready()` before counting screenshot frames |
 | `ENGINE_MSAA=1` | Turn MSAA off (default 4) |
+| `ENGINE_TAA=0` | Turn temporal anti-aliasing off (`world.set_taa(false)` in code) |
 | `ENGINE_PRESENT_MODE` | `fifo` (default), `fifo-relaxed`, `mailbox` or `immediate` |
 | `ENGINE_GPU_PROFILE_EVERY=N` | Print GPU pass timings every N frames |
 | `ENGINE_HITCH_MS` | Log frames slower than this (default 33) |

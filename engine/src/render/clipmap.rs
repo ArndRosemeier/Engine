@@ -625,74 +625,75 @@ fn build_layer_bind(
     };
     let size = sets.first().map_or(1, |t| t.size);
     let count = sets.len().max(1) as u32;
-    let make = |kind: MapKind, pick: &dyn Fn(&crate::texgen::TextureLayer) -> Vec<u8>, flat: [u8; 4]| {
-        let maps: Vec<AlbedoMap> = if sets.is_empty() {
-            vec![AlbedoMap {
-                width: 1,
-                height: 1,
-                rgba: flat.to_vec(),
-            }]
-        } else {
-            sets.iter()
-                .map(|t| AlbedoMap {
+    let make =
+        |kind: MapKind, pick: &dyn Fn(&crate::texgen::TextureLayer) -> Vec<u8>, flat: [u8; 4]| {
+            let maps: Vec<AlbedoMap> = if sets.is_empty() {
+                vec![AlbedoMap {
+                    width: 1,
+                    height: 1,
+                    rgba: flat.to_vec(),
+                }]
+            } else {
+                sets.iter()
+                    .map(|t| AlbedoMap {
+                        width: size,
+                        height: size,
+                        rgba: pick(t),
+                    })
+                    .collect()
+            };
+            let chains: Vec<_> = maps.iter().map(|m| mip_chain(m, kind)).collect();
+            let format = if kind == MapKind::Color {
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            } else {
+                wgpu::TextureFormat::Rgba8Unorm
+            };
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("clipmap-ground-layers"),
+                size: wgpu::Extent3d {
                     width: size,
                     height: size,
-                    rgba: pick(t),
-                })
-                .collect()
-        };
-        let chains: Vec<_> = maps.iter().map(|m| mip_chain(m, kind)).collect();
-        let format = if kind == MapKind::Color {
-            wgpu::TextureFormat::Rgba8UnormSrgb
-        } else {
-            wgpu::TextureFormat::Rgba8Unorm
-        };
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("clipmap-ground-layers"),
-            size: wgpu::Extent3d {
-                width: size,
-                height: size,
-                depth_or_array_layers: count,
-            },
-            mip_level_count: chains[0].len() as u32,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        for (layer, chain) in chains.iter().enumerate() {
-            for (level, (w, h, data)) in chain.iter().enumerate() {
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &texture,
-                        mip_level: level as u32,
-                        origin: wgpu::Origin3d {
-                            x: 0,
-                            y: 0,
-                            z: layer as u32,
+                    depth_or_array_layers: count,
+                },
+                mip_level_count: chains[0].len() as u32,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            for (layer, chain) in chains.iter().enumerate() {
+                for (level, (w, h, data)) in chain.iter().enumerate() {
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &texture,
+                            mip_level: level as u32,
+                            origin: wgpu::Origin3d {
+                                x: 0,
+                                y: 0,
+                                z: layer as u32,
+                            },
+                            aspect: wgpu::TextureAspect::All,
                         },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    data,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(w * 4),
-                        rows_per_image: Some(*h),
-                    },
-                    wgpu::Extent3d {
-                        width: *w,
-                        height: *h,
-                        depth_or_array_layers: 1,
-                    },
-                );
+                        data,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(w * 4),
+                            rows_per_image: Some(*h),
+                        },
+                        wgpu::Extent3d {
+                            width: *w,
+                            height: *h,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
             }
-        }
-        texture.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        })
-    };
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            })
+        };
     let albedo = make(MapKind::Color, &|t| t.albedo.clone(), [255, 255, 255, 255]);
     let normal = make(MapKind::Normal, &|t| t.normal.clone(), [128, 128, 255, 255]);
     let orm = make(MapKind::Data, &|t| t.orm.clone(), [255, 235, 0, 255]);
@@ -1005,7 +1006,13 @@ impl ClipmapRenderer {
         {
             return;
         }
-        *self = Self::new(device, queue, format, config.clone(), &self.shadow_layout.clone());
+        *self = Self::new(
+            device,
+            queue,
+            format,
+            config.clone(),
+            &self.shadow_layout.clone(),
+        );
     }
 
     #[allow(clippy::too_many_arguments)]

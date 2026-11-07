@@ -15,6 +15,7 @@ mod skinned;
 mod sky_pipeline;
 mod ssao;
 mod stencil;
+mod taa;
 mod terrain_pipeline;
 mod terrain_shadow;
 mod voxel_terrain;
@@ -357,6 +358,11 @@ pub struct Renderer {
     particles: ParticleGpu,
     ribbons: RibbonGpu,
     postprocess: Postprocess,
+    taa: taa::Taa,
+    /// Frames rendered with TAA on (drives jitter and dither).
+    taa_frame: u32,
+    /// This frame's camera jitter in NDC (zero with TAA off).
+    taa_jitter: glam::Vec2,
 }
 
 impl Renderer {
@@ -492,6 +498,7 @@ impl Renderer {
         let particles = ParticleGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
         let ribbons = RibbonGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
         let postprocess = Postprocess::new(&device, format, config.width, config.height);
+        let taa = taa::Taa::new(&device, &depth_texture, config.width, config.height);
         Self {
             surface,
             device,
@@ -568,6 +575,9 @@ impl Renderer {
             particles,
             ribbons,
             postprocess,
+            taa,
+            taa_frame: 0,
+            taa_jitter: glam::Vec2::ZERO,
         }
     }
 
@@ -626,6 +636,12 @@ impl Renderer {
         self.portal.resize();
         self.postprocess
             .resize(&self.device, self.config.width, self.config.height);
+        self.taa.resize(
+            &self.device,
+            &self.depth_texture,
+            self.config.width,
+            self.config.height,
+        );
         self.last_color = None;
     }
 
@@ -669,7 +685,7 @@ impl Renderer {
             if let Some(clip) = self.clipmap.as_mut() {
                 clip.ensure_layers(&self.device, &self.queue, proc.layers);
                 let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-                let vp = world.camera().view_projection(aspect);
+                let vp = taa::jittered(world.camera().view_projection(aspect), self.taa_jitter);
                 let light_dir = world.light().direction.normalize_or_zero();
                 let torch_color = world.torch().map(|t| t.color.to_vec3()).unwrap_or_default();
                 let torch_radius_m = world.torch().map(|t| t.radius_m.max(0.0)).unwrap_or(0.0);
@@ -1091,8 +1107,33 @@ impl Renderer {
                 label: Some("frame-encoder"),
             });
         self.mark_gpu(&mut encoder, Mark::Start);
+        let taa_on = world.taa() && taa_env_enabled();
+        let (width, height) = (self.config.width.max(1), self.config.height.max(1));
+        self.taa_jitter = if taa_on {
+            self.taa_frame = self.taa_frame.wrapping_add(1);
+            let j = taa::jitter_pixels(self.taa_frame);
+            glam::Vec2::new(j.x * 2.0 / width as f32, j.y * 2.0 / height as f32)
+        } else {
+            glam::Vec2::ZERO
+        };
         let (scene_view, scene_resolve) = self.postprocess.scene_attachment();
         self.encode_world(&mut encoder, &scene_view, scene_resolve.as_ref(), world);
+        if taa_on {
+            let aspect = width as f32 / height as f32;
+            let vp = Self::main_scene_camera(world).view_projection(aspect);
+            let (view, texture) = self.postprocess.scene_target();
+            self.taa.encode(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                view,
+                texture,
+                vp,
+                self.taa_jitter,
+            );
+        } else {
+            self.taa.reset();
+        }
         self.mark_gpu(&mut encoder, Mark::WorldDone);
         self.postprocess
             .encode(&self.queue, &mut encoder, &view, world.bloom());
@@ -1305,6 +1346,7 @@ impl Renderer {
             Some((point, normal)) => oblique_view_projection(camera, aspect, point, normal),
             None => camera.view_projection(aspect),
         };
+        let vp = taa::jittered(vp, self.taa_jitter);
         self.frustum = Frustum::from_view_projection(vp);
         let light_dir = world.light().direction.normalize_or_zero();
         let eye = camera.eye();
@@ -1343,7 +1385,7 @@ impl Renderer {
             sky_up: sky_light.up,
             env_strength: 1.0,
             sky_horizon: sky_light.horizon,
-            _horizon_pad: 0.0,
+            dither_frame: (self.taa_frame % 64) as f32,
             sky_down: sky_light.down,
             season: world.season(),
         };
@@ -3183,6 +3225,12 @@ fn mesh_submit(compacted: &HashSet<EntityId>, id: EntityId) -> MeshSubmit {
     } else {
         MeshSubmit::Direct
     }
+}
+
+/// `ENGINE_TAA=0` switches temporal anti-aliasing off for comparisons.
+fn taa_env_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ENGINE_TAA").map_or(true, |v| v.trim() != "0"))
 }
 
 fn create_depth(

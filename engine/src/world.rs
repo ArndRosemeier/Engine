@@ -656,6 +656,7 @@ pub struct World {
     particles: ParticleWorld,
     ribbons: RibbonWorld,
     quality: crate::quality::Quality,
+    taa: bool,
     auto_tune: Option<crate::quality::AutoTune>,
 }
 
@@ -732,6 +733,7 @@ impl Default for World {
             particles: ParticleWorld::default(),
             ribbons: RibbonWorld::default(),
             quality: crate::quality::Quality::High,
+            taa: true,
             auto_tune: None,
         }
     }
@@ -913,6 +915,17 @@ impl World {
         if let Some(t) = &mut self.auto_tune {
             t.max_bias = s.lod_bias;
         }
+    }
+
+    /// Temporal anti-aliasing (on by default): smooths edges, shimmer and
+    /// the LOD cross-fade by blending each frame with the last ones.
+    /// `ENGINE_TAA=0` also switches it off.
+    pub fn set_taa(&mut self, on: bool) {
+        self.taa = on;
+    }
+
+    pub fn taa(&self) -> bool {
+        self.taa
     }
 
     /// The last preset given to [`Self::set_quality`].
