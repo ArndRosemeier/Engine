@@ -358,8 +358,7 @@ pub struct Renderer {
     next_scene_uniform_slot: usize,
     gpu_profiler: Option<GpuProfiler>,
     instance_cull: InstanceCull,
-    joint_locals: Vec<(glam::Vec3, glam::Quat, glam::Vec3)>,
-    joint_global: Vec<glam::Mat4>,
+    pose_scratch: crate::anim::PoseScratch,
     joint_out: Vec<glam::Mat4>,
     /// Last frame after overlay passes (egui). For capture_png.
     last_color: Option<wgpu::Texture>,
@@ -607,8 +606,7 @@ impl Renderer {
             next_scene_uniform_slot: 0,
             gpu_profiler,
             instance_cull,
-            joint_locals: Vec::new(),
-            joint_global: Vec::new(),
+            pose_scratch: Default::default(),
             joint_out: Vec::new(),
             last_color: None,
             capture_next_frame: false,
@@ -799,14 +797,8 @@ impl Renderer {
             .retain(|k, _| live_models.contains(k));
 
         for (id, anim) in world.animated_entities() {
-            crate::anim::write_joint_matrices(
-                anim.animator.model(),
-                anim.animator.clip_index(),
-                anim.animator.time(),
-                &mut self.joint_locals,
-                &mut self.joint_global,
-                &mut self.joint_out,
-            );
+            anim.animator
+                .write_pose(&mut self.pose_scratch, &mut self.joint_out);
             let joints = std::mem::take(&mut self.joint_out);
             match self.gpu_skinned.get_mut(id) {
                 Some(gpu) => {

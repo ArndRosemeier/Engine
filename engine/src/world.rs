@@ -2282,6 +2282,119 @@ impl World {
         for e in self.animated.values_mut() {
             e.animator.tick(dt);
         }
+        self.tick_foot_ik(dt);
+    }
+
+    /// Cross-fade time between clips for one animated entity (default 0.2 s,
+    /// 0 switches at once).
+    pub fn set_animation_blend(&mut self, id: EntityId, seconds: f32) -> EngineResult<()> {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return Err(EngineError::InvalidValue(format!(
+                "animation blend must be finite and >= 0, got {seconds}"
+            )));
+        }
+        self.animated
+            .get_mut(&id)
+            .ok_or(EngineError::UnknownEntity)?
+            .animator
+            .set_blend_time(seconds);
+        Ok(())
+    }
+
+    /// Let a character's feet find the ground (slopes, steps, rocks, other
+    /// bodies), or `None` to switch it off. Finds the legs by bone name
+    /// (UE, Mixamo and Blender style rigs); errors if it can't.
+    pub fn set_foot_ik(
+        &mut self,
+        id: EntityId,
+        ik: Option<crate::anim::FootIk>,
+    ) -> EngineResult<()> {
+        let e = self
+            .animated
+            .get_mut(&id)
+            .ok_or(EngineError::UnknownEntity)?;
+        let Some(settings) = ik else {
+            e.animator.ik = None;
+            return Ok(());
+        };
+        if !(settings.max_step.is_finite() && settings.max_step >= 0.0)
+            || !(settings.response.is_finite() && settings.response > 0.0)
+        {
+            return Err(EngineError::InvalidValue(
+                "foot IK max_step must be >= 0 and response > 0".into(),
+            ));
+        }
+        let skeleton = &e.animator.model().skeleton;
+        let legs = skeleton.find_legs().ok_or_else(|| {
+            EngineError::InvalidValue(
+                "no legs found (looked for foot_l/foot_r, LeftFoot/RightFoot, foot.L/foot.R)"
+                    .into(),
+            )
+        })?;
+        let hips = (skeleton.parents[legs[0].thigh] == skeleton.parents[legs[1].thigh])
+            .then_some(skeleton.parents[legs[0].thigh])
+            .flatten();
+        let (feet, drop) = e
+            .animator
+            .ik
+            .as_ref()
+            .map_or(([Vec3::ZERO; 2], Vec3::ZERO), |old| (old.feet, old.drop));
+        e.animator.ik = Some(crate::anim::IkState {
+            settings,
+            legs,
+            hips,
+            feet,
+            drop,
+        });
+        Ok(())
+    }
+
+    fn tick_foot_ik(&mut self, dt: f32) {
+        let mut updates = Vec::new();
+        for (id, e) in &self.animated {
+            let Some(ik) = e.animator.ik.as_ref() else {
+                continue;
+            };
+            let t = e.transform;
+            let to_model = t.inverse();
+            let globals = e.animator.fk_globals();
+            let root = t.w_axis.truncate();
+            let ground = |x: f32, z: f32, from: f32| {
+                self.cast_ray(Vec3::new(x, from + 1.0, z), Vec3::NEG_Y, 3.0)
+                    .map(|h| h.point.y)
+            };
+            let base = ground(root.x, root.z, root.y);
+            let max = ik.settings.max_step;
+            let dy = ik.legs.map(|leg| {
+                let foot = t.transform_point3(globals[leg.foot].w_axis.truncate());
+                match (base, ground(foot.x, foot.z, root.y.max(foot.y))) {
+                    (Some(b), Some(g)) => (g - b).clamp(-max, max),
+                    _ => 0.0,
+                }
+            });
+            let drop = if ik.settings.drop_hips {
+                dy[0].min(dy[1]).min(0.0)
+            } else {
+                0.0
+            };
+            let k = 1.0 - (-ik.settings.response * dt.max(0.0)).exp();
+            let feet = [0, 1].map(|i| {
+                let want = to_model.transform_vector3(Vec3::Y * dy[i]);
+                ik.feet[i] + (want - ik.feet[i]) * k
+            });
+            let want = to_model.transform_vector3(Vec3::Y * drop);
+            updates.push((*id, feet, ik.drop + (want - ik.drop) * k));
+        }
+        for (id, feet, drop) in updates {
+            if let Some(ik) = self
+                .animated
+                .get_mut(&id)
+                .and_then(|e| e.animator.ik.as_mut())
+            {
+                ik.feet = feet;
+                ik.drop = drop;
+            }
+        }
     }
 
     /// Look up one skinned/animated entity by its typed render identity.
