@@ -211,8 +211,8 @@ pub struct Water {
     /// Upstream and downstream link along the same axis (θ smoothing).
     link_prev: Vec<u32>,
     link_next: Vec<u32>,
-    cell_link_start: Vec<u32>,
-    cell_links: Vec<u32>,
+    pub(crate) cell_link_start: Vec<u32>,
+    pub(crate) cell_links: Vec<u32>,
     // Scratch.
     pub(crate) head: Vec<f32>,
     pub(crate) q_new: Vec<f32>,
@@ -228,11 +228,13 @@ pub struct Water {
     sea_out: Vec<f32>,
     /// Next sub-step size from the CFL limit of the previous one.
     next_dt: f32,
-    time: f64,
+    pub(crate) time: f64,
     stats: WaterStats,
     /// Bumped whenever cells or links change (renderers rebuild topology).
     pub(crate) topology_rev: u64,
     pub(crate) activity: super::active::Activity,
+    /// Per cell: foam, when the foam was set, when the cell was last wet.
+    pub(crate) marks: Vec<[f32; 4]>,
 }
 
 impl std::fmt::Debug for Water {
@@ -290,6 +292,7 @@ impl Water {
             sea_depth: 10.0,
             sea_out: Vec::new(),
             activity: Default::default(),
+            marks: Vec::new(),
             next_dt: 1.0 / 120.0,
             time: 0.0,
             stats: WaterStats::default(),
@@ -520,6 +523,7 @@ impl Water {
                 }
             }
         }
+        self.foam_at(at, radius);
         self.wake_near(Vec2::new(at.x, at.z), radius);
         self.time_step_reset();
     }
@@ -559,7 +563,7 @@ impl Water {
     }
 
     /// Highest cell of the column whose floor is below `p`.
-    fn cell_below(&self, p: Vec3) -> Option<u32> {
+    pub(crate) fn cell_below(&self, p: Vec3) -> Option<u32> {
         let (cx, cz) = self.region.column_at(p.x, p.z)?;
         let c = (cz * self.region.cells_x + cx) as usize;
         (self.col_start[c]..self.col_start[c + 1])
@@ -568,7 +572,7 @@ impl Water {
     }
 
     /// Lowest cell of the column whose floor is above `p`, else the top one.
-    fn cell_above(&self, p: Vec3) -> Option<u32> {
+    pub(crate) fn cell_above(&self, p: Vec3) -> Option<u32> {
         let (cx, cz) = self.region.column_at(p.x, p.z)?;
         let c = (cz * self.region.cells_x + cx) as usize;
         let range = self.col_start[c]..self.col_start[c + 1];
@@ -734,6 +738,7 @@ impl Water {
             steps += 1;
         }
         self.time += simulated as f64;
+        self.update_marks();
         self.settle_activity();
         self.stats = WaterStats {
             substeps: steps,
@@ -979,6 +984,8 @@ impl Water {
     /// Replace all cells: per column, (span, depth) bottom to top.
     fn set_cells(&mut self, columns: Vec<Vec<(Span, f32)>>) {
         let total: usize = columns.iter().map(|c| c.len()).sum();
+        let old_start = std::mem::take(&mut self.col_start);
+        let old_marks = std::mem::take(&mut self.marks);
         self.col_start = Vec::with_capacity(columns.len() + 1);
         self.floor = Vec::with_capacity(total);
         self.ceil = Vec::with_capacity(total);
@@ -997,6 +1004,17 @@ impl Water {
         self.head = vec![0.0; total];
         self.scale = vec![1.0; total];
         self.sea_out = vec![0.0; total];
+        // Foam and wetness stay where a column kept its cells.
+        self.marks = vec![super::marks::NO_MARKS; total];
+        if old_start.len() == self.col_start.len() {
+            for c in 0..old_start.len() - 1 {
+                let (o0, o1) = (old_start[c] as usize, old_start[c + 1] as usize);
+                let (n0, n1) = (self.col_start[c] as usize, self.col_start[c + 1] as usize);
+                if o1 - o0 == n1 - n0 && o1 <= old_marks.len() {
+                    self.marks[n0..n1].copy_from_slice(&old_marks[o0..o1]);
+                }
+            }
+        }
         self.topology_rev += 1;
     }
 
