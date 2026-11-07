@@ -22,6 +22,8 @@ pub struct Shatter {
     pub seed: u32,
     /// Colour multiplier for the broken inside faces.
     pub interior_shade: f32,
+    /// Density relative to water: stone (2.4) sinks, wood (0.6) floats.
+    pub density: f32,
 }
 
 impl Default for Shatter {
@@ -32,6 +34,7 @@ impl Default for Shatter {
             keep_seconds: Some(25.0),
             seed: 1,
             interior_shade: 0.6,
+            density: 2.4,
         }
     }
 }
@@ -46,6 +49,11 @@ impl Shatter {
         if !self.speed.is_finite() || self.speed < 0.0 {
             return Err(EngineError::InvalidValue(
                 "shatter speed must be finite and >= 0".into(),
+            ));
+        }
+        if !self.density.is_finite() || self.density <= 0.0 {
+            return Err(EngineError::InvalidValue(
+                "shatter density must be finite and > 0".into(),
             ));
         }
         if self.keep_seconds.is_some_and(|s| !s.is_finite() || s < 0.0) {
@@ -84,6 +92,10 @@ pub(crate) struct Piece {
     pub keep: Option<f32>,
     pub still_for: f32,
     pub asleep: bool,
+    /// Relative to water (see [`Shatter::density`]).
+    pub density: f32,
+    /// Was in water last step (for splashes).
+    pub wet: bool,
 }
 
 impl Piece {
@@ -126,13 +138,30 @@ pub(crate) fn support_points(positions: &[Vec3]) -> Vec<Vec3> {
 /// Ground contact: how deep `p` is below the ground and the ground's normal.
 pub(crate) trait Ground {
     fn depth(&self, p: Vec3) -> Option<(f32, Vec3)>;
+
+    /// Water surface height and current (X, Z) at `p`, if there is water.
+    fn water(&self, _p: Vec3) -> Option<(f32, glam::Vec2)> {
+        None
+    }
 }
 
-/// Advance every awake piece by `dt`. Returns whether any moved, and the
-/// pieces whose time is up.
-pub(crate) fn step(pieces: &mut [Piece], dt: f32, ground: &impl Ground) -> (bool, Vec<EntityId>) {
+/// A piece hitting the water: where, and how fast it was going down.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Splash {
+    pub at: Vec3,
+    pub speed: f32,
+}
+
+/// Advance every awake piece by `dt`. Returns whether any moved, the pieces
+/// whose time is up, and splashes into water.
+pub(crate) fn step(
+    pieces: &mut [Piece],
+    dt: f32,
+    ground: &impl Ground,
+) -> (bool, Vec<EntityId>, Vec<Splash>) {
     let mut moved = false;
     let mut expired = Vec::new();
+    let mut splashes = Vec::new();
     let steps = (dt / (1.0 / 120.0)).ceil().clamp(1.0, 8.0) as usize;
     let h = dt.min(0.1) / steps as f32;
     for piece in pieces.iter_mut() {
@@ -154,8 +183,37 @@ pub(crate) fn step(pieces: &mut [Piece], dt: f32, ground: &impl Ground) -> (bool
             continue;
         }
         moved = true;
+        let mut floating = false;
         for _ in 0..steps {
             piece.velocity.y -= GRAVITY * h;
+            // In water: buoyancy by the share of the piece under the
+            // surface, drag toward the current, damped spin.
+            if let Some((surface, current)) = ground.water(piece.position) {
+                let n = piece.support.len().max(1) as f32;
+                let under = piece
+                    .support
+                    .iter()
+                    .filter(|&&l| (piece.position + piece.rotation * l).y < surface)
+                    .count() as f32;
+                let centre = f32::from(piece.position.y < surface);
+                let frac = (under + centre * 2.0) / (n + 2.0);
+                if frac > 0.0 {
+                    if !piece.wet && piece.velocity.y < -1.5 {
+                        splashes.push(Splash {
+                            at: piece.position,
+                            speed: -piece.velocity.y,
+                        });
+                    }
+                    piece.wet = true;
+                    piece.velocity.y += GRAVITY * frac / piece.density * h;
+                    let rel = piece.velocity - Vec3::new(current.x, 0.0, current.y);
+                    piece.velocity -= rel * (1.0 - (-3.0 * frac * h).exp());
+                    piece.spin *= (-2.0 * frac * h).exp();
+                    floating |= piece.density < 1.0;
+                } else {
+                    piece.wet = false;
+                }
+            }
             piece.position += piece.velocity * h;
             let angle = piece.spin.length() * h;
             if angle > 0.0 {
@@ -187,13 +245,15 @@ pub(crate) fn step(pieces: &mut [Piece], dt: f32, ground: &impl Ground) -> (bool
                 piece.spin *= 0.97;
             }
         }
-        let resting = piece.velocity.length() < SLEEP_SPEED && piece.spin.length() < 0.6;
+        // Floating pieces keep drifting with the water.
+        let resting =
+            !floating && piece.velocity.length() < SLEEP_SPEED && piece.spin.length() < 0.6;
         piece.still_for = if resting { piece.still_for + dt } else { 0.0 };
         if piece.still_for > 0.4 || piece.position.y < -1000.0 {
             piece.asleep = true;
         }
     }
-    (moved, expired)
+    (moved, expired, splashes)
 }
 
 #[cfg(test)]
@@ -223,6 +283,8 @@ mod tests {
             keep: None,
             still_for: 0.0,
             asleep: false,
+            density: 2.4,
+            wet: false,
         }];
         for _ in 0..600 {
             step(&mut pieces, 1.0 / 60.0, &Flat);

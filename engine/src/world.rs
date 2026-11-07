@@ -2397,6 +2397,8 @@ impl World {
                 keep: settings.keep_seconds,
                 still_for: 0.0,
                 asleep: false,
+                density: settings.density,
+                wet: false,
             });
             ids.push(piece_id);
         }
@@ -2418,8 +2420,14 @@ impl World {
         let ground = DebrisGround {
             voxels: self.voxel_terrain.as_ref(),
             heights: self.height_field.as_ref(),
+            water: self.water.as_ref(),
         };
-        let (moved, expired) = crate::debris::step(&mut self.debris, dt, &ground);
+        let (moved, expired, splashes) = crate::debris::step(&mut self.debris, dt, &ground);
+        if let Some(water) = self.water.as_mut() {
+            for s in splashes {
+                water.disturb(s.at, 1.5, (s.speed * 0.3).min(4.0));
+            }
+        }
         if moved {
             for piece in &self.debris {
                 if let Some(e) = self.entities.get_mut(&piece.id) {
@@ -3065,6 +3073,7 @@ mod vsync_tests {
 struct DebrisGround<'a> {
     voxels: Option<&'a crate::voxel_terrain::VoxelTerrain>,
     heights: Option<&'a HeightField>,
+    water: Option<&'a crate::water::Water>,
 }
 
 impl crate::debris::Ground for DebrisGround<'_> {
@@ -3082,5 +3091,17 @@ impl crate::debris::Ground for DebrisGround<'_> {
         }
         let h = self.heights.map_or(0.0, |f| f.height_at(p.x, p.z));
         Some((h - p.y, Vec3::Y))
+    }
+
+    fn water(&self, p: Vec3) -> Option<(f32, glam::Vec2)> {
+        let w = self.water?;
+        let surface = w.surface_at(p + Vec3::Y * 2.0)?;
+        (surface > p.y - 3.0).then(|| {
+            (
+                surface,
+                w.sample(p.min(Vec3::new(p.x, surface - 0.05, p.z)))
+                    .map_or(glam::Vec2::ZERO, |s| s.current),
+            )
+        })
     }
 }

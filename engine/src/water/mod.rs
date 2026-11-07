@@ -37,6 +37,7 @@
 mod look;
 mod render_data;
 mod sim;
+mod swimmer;
 mod terrain;
 
 #[cfg(test)]
@@ -45,4 +46,5 @@ mod tests;
 pub use look::WaterLook;
 pub(crate) use sim::mark_columns;
 pub use sim::{SourceId, Water, WaterRegion, WaterSample, WaterSettings, WaterSource, WaterStats};
+pub use swimmer::{SwimEvents, SwimInput, SwimState, Swimmer, SwimmerSettings};
 pub use terrain::{scan_column, HeightMapTerrain, Span, WaterTerrain};

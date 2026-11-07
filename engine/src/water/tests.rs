@@ -1,3 +1,4 @@
+use super::swimmer::*;
 use super::*;
 use crate::volume::Volume;
 use glam::{Vec2, Vec3};
@@ -386,4 +387,142 @@ fn bench_water_384() {
         s.substeps,
         s.wet_cells
     );
+}
+
+fn pool() -> (HeightMapTerrain<impl Fn(f32, f32) -> f32 + Sync>, Water) {
+    // 40 x 40 m, 6 m deep in the middle, a beach rising toward +x from x = 25.
+    let ground = HeightMapTerrain(|x: f32, _z: f32| {
+        if x < 25.0 {
+            -6.0
+        } else {
+            -6.0 + (x - 25.0) * 0.6
+        }
+    });
+    let region = WaterRegion::new(Vec2::ZERO, Vec2::splat(40.0), 1.0, -8.0, 20.0);
+    let mut water = Water::new(region, &ground);
+    water.flood(Vec3::new(10.0, -5.0, 20.0), 0.0);
+    (ground, water)
+}
+
+fn swim(
+    body: &mut Swimmer,
+    ground: &dyn WaterTerrain,
+    water: &Water,
+    input: SwimInput,
+    seconds: f32,
+) {
+    for _ in 0..(seconds * 60.0) as usize {
+        body.step(ground, Some(water), input, 1.0 / 60.0);
+    }
+}
+
+#[test]
+fn a_swimmer_treads_water_with_the_eyes_above_the_surface() {
+    let (ground, water) = pool();
+    let mut body = Swimmer::new((10.0, -1.0, 20.0), 0.0);
+    swim(&mut body, &ground, &water, SwimInput::default(), 8.0);
+    let eye = body.eye().y;
+    assert!(eye > 0.0 && eye < 0.4, "eye at {eye}");
+    assert_eq!(body.state(), SwimState::Swimming);
+    assert!(body.breath_fraction() > 0.99);
+}
+
+#[test]
+fn a_swimmer_dives_looking_down_loses_breath_and_comes_back_up() {
+    let (ground, water) = pool();
+    let mut body = Swimmer::new((10.0, -1.0, 20.0), 0.0);
+    body.pitch_deg = -80.0;
+    let down = SwimInput {
+        forward: 1.0,
+        ..SwimInput::default()
+    };
+    swim(&mut body, &ground, &water, down, 3.0);
+    assert_eq!(body.state(), SwimState::Diving);
+    assert!(
+        body.eye().y < -2.0,
+        "should be deep, eye at {}",
+        body.eye().y
+    );
+    assert!(body.breath_fraction() < 1.0);
+    assert!(
+        body.feet.y > -6.05,
+        "went through the floor: {}",
+        body.feet.y
+    );
+    body.pitch_deg = 0.0;
+    let up = SwimInput {
+        up: 1.0,
+        ..SwimInput::default()
+    };
+    swim(&mut body, &ground, &water, up, 6.0);
+    swim(&mut body, &ground, &water, SwimInput::default(), 2.0);
+    assert_eq!(body.state(), SwimState::Swimming);
+}
+
+#[test]
+fn a_swimmer_climbs_out_onto_the_beach_and_walks() {
+    let (ground, water) = pool();
+    let mut body = Swimmer::new((18.0, -1.5, 20.0), 90.0);
+    let ahead = SwimInput {
+        forward: 1.0,
+        ..SwimInput::default()
+    };
+    swim(&mut body, &ground, &water, ahead, 15.0);
+    let floor = -6.0 + (body.feet.x - 25.0) * 0.6;
+    assert!(body.feet.x > 36.0, "stuck at x = {}", body.feet.x);
+    assert!(
+        matches!(body.state(), SwimState::OnGround | SwimState::Wading),
+        "{:?}",
+        body.state()
+    );
+    assert!(
+        (body.feet.y - floor).abs() < 0.3,
+        "feet {} vs ground {floor}",
+        body.feet.y
+    );
+}
+
+#[test]
+fn a_current_carries_a_swimmer_downstream() {
+    // A long channel fed at one end and drained at the other.
+    let ground = HeightMapTerrain(|x: f32, _| -3.0 - x * 0.01);
+    let region = WaterRegion::new(Vec2::ZERO, Vec2::new(80.0, 6.0), 1.0, -6.0, 10.0);
+    let mut water = Water::new(region, &ground);
+    water.flood(Vec3::new(40.0, -3.0, 3.0), -0.5);
+    water.add_source(WaterSource {
+        position: Vec3::new(0.5, 0.0, 3.0),
+        rate: 12.0,
+    });
+    water.add_source(WaterSource {
+        position: Vec3::new(79.5, -3.5, 3.0),
+        rate: -12.0,
+    });
+    run(&mut water, 40.0);
+    let mut body = Swimmer::new((30.0, -2.3, 3.0), 0.0);
+    let start = body.feet.x;
+    for _ in 0..240 {
+        body.step(&ground, Some(&water), SwimInput::default(), 1.0 / 60.0);
+        water.update(1.0 / 60.0);
+    }
+    assert!(
+        body.feet.x > start + 0.5,
+        "not carried: {} -> {}",
+        start,
+        body.feet.x
+    );
+}
+
+#[test]
+fn a_disturbance_makes_waves_without_changing_the_volume() {
+    let (_ground, mut water) = pool();
+    let v0 = water.total_volume();
+    water.disturb(Vec3::new(12.0, 0.0, 20.0), 2.5, 3.0);
+    run(&mut water, 1.0);
+    assert_sane(&water);
+    assert!(rel_change(v0, water.total_volume()) < 1e-5);
+    let dev = wet_heads(&water)
+        .iter()
+        .map(|h| h.abs())
+        .fold(0.0, f32::max);
+    assert!(dev > 0.02, "no waves: {dev}");
 }
