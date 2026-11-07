@@ -38,6 +38,8 @@ mod nav;
 
 #[path = "world_buildings.rs"]
 mod world_buildings;
+#[path = "world_decals.rs"]
+mod world_decals;
 #[path = "world_ragdolls.rs"]
 mod world_ragdolls;
 #[path = "world_rooms.rs"]
@@ -751,6 +753,7 @@ pub struct World {
     /// Indoor culling: rooms, openings, and what is in which room.
     rooms: crate::rooms::Rooms,
     reflection_probes: crate::reflections::ReflectionProbes,
+    decals: world_decals::DecalPool,
     ssr: Option<crate::reflections::ScreenSpaceReflections>,
     entity_rooms: HashMap<EntityId, crate::rooms::RoomId>,
     /// Surface presentation sync. Engine default stays on so demos never tear;
@@ -865,6 +868,7 @@ impl Default for World {
             ragdolls: Default::default(),
             rooms: crate::rooms::Rooms::new(),
             reflection_probes: Default::default(),
+            decals: Default::default(),
             ssr: Some(Default::default()),
             entity_rooms: HashMap::new(),
             vsync: true,

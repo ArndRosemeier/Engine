@@ -232,6 +232,17 @@ rough surfaces read blurrier mips. `.dynamic()` re-captures continuously,
 changed); up to 8 probes, smaller boxes win where they overlap. Outside
 every probe, surfaces reflect the sky. See `examples/reflections`.
 
+**Decals:** `world.spawn_decal(Decal::new(DecalKind::Scorch, hit.point,
+hit.normal, 1.5).on(hit.entity))?` paints a mark onto whatever is there:
+terrain, walls, moving bodies and animated characters (it sticks to the
+nearest bone). Built-in kinds are `Scorch`, `Crack`, `Frost`, `Impact`,
+`Splat` (tint it) and `Power` (a glowing ring; tint and `.emission(..)`),
+or your own image with `add_decal_image(rgba, w, h, roughness)`. Each one
+changes albedo, normal, roughness and metalness, so scorch is matte and
+dented and frost glossy. `.lifetime(s)` and `.fade(in, out)` make it fade;
+the pool holds `set_decal_budget(n)` decals (256 by default, up to 512) and
+the oldest make room. See `examples/decals`.
+
 **Lamps:** `world.add_lamp(Lamp::fire(pos))?`, `Lamp::street_lamp(pos)`, or
 `Lamp::point(pos, color, intensity, range)` and
 `Lamp::spot(pos, direction, angle_deg, color, intensity, range)` for your own;
@@ -353,6 +364,7 @@ cargo run --release -p <name>
 | `prefabs` | Carts built from parts driving with spinning wheels, a windmill turning its sails, a lantern carried in a hand; C drops carts that tumble whole, X removes them |
 | `buildings` | A block of breakable towers: punch panels (click), blast (F), topple (T), pancake (P), rebuild (R) |
 | `ragdolls` | People strolling about: click knocks one flying, F a blast; they tumble, settle and get up (K keeps them down, G gets everyone up) |
+| `decals` | Scorch marks, cracks, frost, impacts, paint and glowing power marks sprayed on terrain, a wall, a sliding block and people walking by (click sprays, 1-6 pick the kind, B the budget) |
 | `interiors` | A city block of office towers, every floor furnished (about a million triangles); from the street only the rooms you can see through windows are drawn (C toggles culling, I interiors, click punches a wall open) |
 | `reflections` | A rain-wet street between glass towers at dusk mirrors lamps, windows and chrome spheres; a polished hall's chrome ball shows the hall from a reflection probe (R toggles SSR, P the probe) |
 | `fixed_tick` | A 30 Hz simulation drawn smoothly at any frame rate, next to the raw steps; I toggles interpolation, 1/2/3 change the rate |

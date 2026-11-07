@@ -133,15 +133,20 @@ fn shade_surface(
 // `shade_surface` with baked ambient occlusion (an occlusion map), which
 // dims sky and probe light but not the sun.
 fn shade_surface_occluded(
-    base: vec3<f32>,
-    n: vec3<f32>,
+    base_in: vec3<f32>,
+    n_in: vec3<f32>,
     world_p: vec3<f32>,
-    roughness: f32,
-    metallic: f32,
+    roughness_in: f32,
+    metallic_in: f32,
     vis: f32,
     sun_diffuse: f32,
     occlusion: f32,
 ) -> vec3<f32> {
+    let ds = apply_decals(world_p, n_in, base_in, roughness_in, metallic_in, u.eye);
+    let base = ds.base;
+    let n = ds.n;
+    let roughness = ds.roughness;
+    let metallic = ds.metallic;
     var light: SceneLight;
     light.dir = normalize(u.light_dir);
     light.color = u.light_color;
@@ -158,7 +163,7 @@ fn shade_surface_occluded(
     let frag = clip.xy / max(clip.w, 1e-4) * vec2<f32>(960.0, 540.0);
     light.reflection = scene_reflection(world_p, n, v, roughness, base, metallic, frag);
     return pbr_shade(base, n, v, light, roughness, metallic, vis, sun_diffuse)
-        + lamp_light(base, n, v, world_p, roughness, metallic);
+        + lamp_light(base, n, v, world_p, roughness, metallic) + ds.emit;
 }
 
 // Light from the viewer's own lantern. A point light at the eye with a
@@ -347,7 +352,7 @@ fn veg_wind(p: vec3<f32>, n: vec3<f32>, w: f32, flutter: f32, seed: f32,
 
 pub fn scene_shader_prefix() -> String {
     format!(
-        "{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}",
         super::shadow::element_dead_wgsl(0, 15),
         VEG_WIND_WGSL,
         crate::lod::LOD_DITHER_WGSL,
@@ -358,6 +363,7 @@ pub fn scene_shader_prefix() -> String {
         super::shadow::SHADOW_EVAL_WGSL,
         super::lights::LAMP_EVAL_WGSL,
         super::reflect::reflect_wgsl(),
+        super::decals::decal_wgsl(0, 20, 17, false),
     )
 }
 

@@ -84,6 +84,7 @@ VARIANTS: list[Launch] = [
     Launch("ragdolls: demo (knocks people over by itself)", "ragdolls", {"ENGINE_RAGDOLLS_DEMO": "1"}),
     Launch("interiors: culling off (compare)", "interiors", {"ENGINE_INTERIORS_CULL": "0"}),
     Launch("interiors: no interiors (compare)", "interiors", {"ENGINE_INTERIORS_FURNISH": "0"}),
+    Launch("decals: without automatic spraying", "decals", {"ENGINE_DECALS_SPRAY": "0"}),
     Launch("reflections: in the hall", "reflections", {"ENGINE_REFLECTIONS_VIEW": "hall"}),
     Launch("reflections: without SSR (compare)", "reflections", {"ENGINE_REFLECTIONS_SSR": "0"}),
     Launch("starter with ACES tone mapping (compare)", "starter", {"ENGINE_TONEMAP": "aces"}),
