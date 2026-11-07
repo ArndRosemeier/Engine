@@ -32,6 +32,7 @@ members = [
     "examples/crowds",
     "examples/decals",
     "examples/fog_volumes",
+    "examples/moons",
     "examples/interiors",
     "examples/reflections",
     "examples/buildings",

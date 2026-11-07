@@ -243,6 +243,14 @@ dented and frost glossy. `.lifetime(s)` and `.fade(in, out)` make it fade;
 the pool holds `set_decal_budget(n)` decals (256 by default, up to 512) and
 the oldest make room. See `examples/decals`.
 
+**Several moons:** `world.set_moons(vec![MoonSpec::new(2.2, 29.5, 0.38),
+MoonSpec::new(0.8, 3.1, 0.27).tilt(-10.0).color(rgb(255, 150, 120))])?` gives
+the physical sky up to four moons, each with its size, phase cycle (days),
+starting phase, path tilt, brightness and colour. Each is drawn with its own
+phase and surface, bigger ones in front; at night their light adds up, comes
+from where the brightest stand and takes on their colours. An empty list
+keeps the one usual moon. See `examples/moons`.
+
 **Crowds:** `let crowd = world.add_crowd(model, CrowdProfile::new("idle",
 "walk").walk_speed(1.2))?`, then `add_crowd_agent(crowd, place)?` per person
 and `set_crowd_agent(crowd, agent, place, speed_mps)?` as they move. Far
@@ -388,6 +396,7 @@ cargo run --release -p <name>
 | `buildings` | A block of breakable towers: punch panels (click), blast (F), topple (T), pancake (P), rebuild (R) |
 | `ragdolls` | People strolling about: click knocks one flying, F a blast; they tumble, settle and get up (K keeps them down, G gets everyone up) |
 | `crowds` | A thousand people walking about a town square: far ones instanced and GPU-animated, near ones full characters (N: near characters on/off, F: far mesh) |
+| `moons` | A night under three moons of different sizes, colours, cycles and paths (Space: time, arrows: hour and day, M: one moon to compare) |
 | `fog_volumes` | Colour grading and fog by zone: the camera flies from a warm old town into a smog-choked factory district and back (T: transition time, G: volumes on/off) |
 | `decals` | Scorch marks, cracks, frost, impacts, paint and glowing power marks sprayed on terrain, a wall, a sliding block and people walking by (click sprays, 1-6 pick the kind, B the budget) |
 | `interiors` | A city block of office towers, every floor furnished (about a million triangles); from the street only the rooms you can see through windows are drawn (C toggles culling, I interiors, click punches a wall open) |

@@ -1548,7 +1548,7 @@ impl Renderer {
             let mut sky_u =
                 SkyUniforms::from_scene(&sky, camera, world.light(), aspect, world.time());
             if let Some(physical) = world.physical_sky() {
-                sky_u = sky_u.with_physical(&physical, camera, world.time());
+                sky_u = sky_u.with_physical(&physical, world.moons(), camera, world.time());
             }
             self.queue
                 .write_buffer(&self.sky.uniform_bufs[slot], 0, bytemuck::bytes_of(&sky_u));
