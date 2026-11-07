@@ -17,6 +17,7 @@ members = [
     "examples/model_viewer",
     "examples/lod_forest",
     "examples/sky_day",
+    "examples/texgen",
     "examples/vegetation",
 ]
 default-members = ["engine"]

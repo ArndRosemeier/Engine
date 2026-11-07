@@ -9,9 +9,11 @@
 //!
 //! The same `(shape, seed)` gives the same rock at every detail, so
 //! [`rock_model`] returns three LOD meshes for
-//! [`crate::world::World::spawn_lod`]. Vertex colours carry the stone tint
-//! darkened in the cut corners and toward the foot, and the surface uses the
-//! engine's procedural [`SurfaceMaterial::STONE`].
+//! [`crate::world::World::spawn_lod`]. Rocks are textured with a
+//! [`crate::texgen`] layer (weathered rock, or banded strata for slabs and
+//! spires) projected triplanar, so the texture follows the rock however it is
+//! placed. Vertex colours darken the cut corners and the foot, and vary the
+//! tint a little from rock to rock.
 //!
 //! ```no_run
 //! use engine::rocks::{rock_model, RockShape};
@@ -27,6 +29,7 @@ use crate::color::Color;
 use crate::error::EngineResult;
 use crate::lod::LodLevel;
 use crate::mesh::{Mesh, SurfaceMaterial};
+use crate::texgen::{natural_layer, NaturalLayer};
 use crate::vegetation::rng::{noise3, Rng};
 
 /// The four kinds of rock.
@@ -51,6 +54,14 @@ impl RockShape {
             Self::Block => "block",
             Self::Slab => "slab",
             Self::Spire => "spire",
+        }
+    }
+
+    /// The texture a rock of this shape wears by default.
+    pub fn default_texture(self) -> NaturalLayer {
+        match self {
+            Self::Boulder | Self::Block => NaturalLayer::RockFace,
+            Self::Slab | Self::Spire => NaturalLayer::CliffStrata,
         }
     }
 
@@ -164,11 +175,21 @@ impl RockModel {
     }
 }
 
-/// The rock of `shape` and `seed` at three detail levels.
+/// The rock of `shape` and `seed` at three detail levels, in its
+/// [`RockShape::default_texture`].
 pub fn rock_model(shape: RockShape, seed: u32) -> EngineResult<RockModel> {
-    let near = rock_mesh(shape, seed, 2)?;
-    let mid = rock_mesh(shape, seed, 1)?;
-    let far = rock_mesh(shape, seed, 0)?;
+    rock_model_with(shape, seed, Some(shape.default_texture()))
+}
+
+/// The rock of `shape` and `seed` in `texture` (`None`: plain grey stone).
+pub fn rock_model_with(
+    shape: RockShape,
+    seed: u32,
+    texture: Option<NaturalLayer>,
+) -> EngineResult<RockModel> {
+    let near = rock_mesh(shape, seed, 2, texture)?;
+    let mid = rock_mesh(shape, seed, 1, texture)?;
+    let far = rock_mesh(shape, seed, 0, texture)?;
     Ok(RockModel {
         near: near.mesh,
         mid: mid.mesh,
@@ -180,21 +201,29 @@ pub fn rock_model(shape: RockShape, seed: u32) -> EngineResult<RockModel> {
 }
 
 /// The rock of `shape` and `seed` at `detail` (0..=4 sphere subdivisions:
-/// 80, 320, 1280, 5120, 20480 triangles).
-pub fn rock_mesh(shape: RockShape, seed: u32, detail: u32) -> EngineResult<RockMesh> {
+/// 80, 320, 1280, 5120, 20480 triangles), in `texture` (`None`: plain
+/// grey stone).
+pub fn rock_mesh(
+    shape: RockShape,
+    seed: u32,
+    detail: u32,
+    texture: Option<NaturalLayer>,
+) -> EngineResult<RockMesh> {
     let g = generate(shape, seed, detail.min(4));
+    // A texture carries the stone's colour; plain rocks get a grey.
+    let base = if texture.is_some() { 1.0 } else { 0.235 };
     let mut mesh = Mesh::new();
     let mut ids = Vec::with_capacity(g.pos.len());
     for i in 0..g.pos.len() {
         let id = mesh.add_point(g.pos[i])?;
         mesh.set_point_normal(id, g.normals[i])?;
-        let ao = g.ao[i];
+        let k = base * g.ao[i];
         mesh.set_point_color(
             id,
             Color {
-                r: g.tint[0] * ao,
-                g: g.tint[1] * ao,
-                b: g.tint[2] * ao,
+                r: g.tint[0] * k,
+                g: g.tint[1] * k,
+                b: g.tint[2] * k,
                 a: 1.0,
             },
         )?;
@@ -208,6 +237,11 @@ pub fn rock_mesh(shape: RockShape, seed: u32, detail: u32) -> EngineResult<RockM
         material.strata_strength = 0.1;
     }
     mesh.set_surface_material(material);
+    if let Some(layer) = texture {
+        let layer = natural_layer(layer);
+        // A little finer than the layer's own tile, to suit a 2 m rock.
+        layer.apply_scaled(&mut mesh, layer.tile_metres * 0.6)?;
+    }
     Ok(RockMesh {
         mesh,
         foot: g.foot,
@@ -271,13 +305,13 @@ fn generate(shape: RockShape, seed: u32, detail: u32) -> Generated {
         let n = Vec3::new(nx, ny, nz).try_normalize().unwrap_or(Vec3::Y);
         cuts.push((n, rng.range(rule.keep.0, rule.keep.1)));
     }
-    // A stone tint per rock: warm to cool greys.
+    // A tint per rock: a little warmer or cooler, lighter or darker.
     let warm = rng.range(-1.0, 1.0);
     let light = rng.range(0.85, 1.15);
     let tint = [
-        (0.25 + 0.02 * warm) * light,
-        0.235 * light,
-        (0.215 - 0.02 * warm) * light,
+        (1.06 + 0.08 * warm) * light,
+        light,
+        (0.92 - 0.08 * warm) * light,
     ];
 
     let m = rule.exponent;

@@ -1591,6 +1591,7 @@ impl World {
                 m.normal_scale.to_bits().hash(&mut h);
                 m.roughness.to_bits().hash(&mut h);
                 m.metallic.to_bits().hash(&mut h);
+                m.triplanar.to_bits().hash(&mut h);
             }
             h.finish()
         });

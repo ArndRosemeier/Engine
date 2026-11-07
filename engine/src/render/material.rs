@@ -19,6 +19,8 @@ pub struct MaterialParams {
     pub has_normal: f32,
     /// Normal map UV scale (xy) and offset (zw).
     pub normal_uv: [f32; 4],
+    /// x: tiles per metre for triplanar mapping (0: mesh UVs).
+    pub triplanar: [f32; 4],
 }
 
 impl MaterialParams {
@@ -35,6 +37,16 @@ impl MaterialParams {
             emissive: maps.emissive_factor,
             has_normal: if maps.normal.is_some() { 1.0 } else { 0.0 },
             normal_uv: maps.normal_uv,
+            triplanar: [
+                if maps.triplanar > 0.0 {
+                    1.0 / maps.triplanar
+                } else {
+                    0.0
+                },
+                0.0,
+                0.0,
+                0.0,
+            ],
         }
     }
 }
@@ -52,6 +64,7 @@ struct MaterialParams {{
     emissive: vec3<f32>,
     has_normal: f32,
     normal_uv: vec4<f32>,
+    triplanar: vec4<f32>,
 }};
 @group({group}) @binding(2) var normal_tex: texture_2d<f32>;
 @group({group}) @binding(3) var orm_tex: texture_2d<f32>;
