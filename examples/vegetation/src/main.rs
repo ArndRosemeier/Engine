@@ -2,12 +2,12 @@
 //!
 //! A row of every species stands in front of a mixed wood of about 3000
 //! trees (per-instance LOD: full detail, mid, far canopy hulls). The camera
-//! drifts along the row.
+//! drifts along the row; rocks of every shape lie in front and in the wood.
 //!
 //! `ENGINE_WIND=1.5` blows harder (0 calm .. 2 storm), `ENGINE_SEASON=0.8`
-//! turns the leaves, `ENGINE_SKY_HOUR=17.5` sets the time of day.
+//! turns the leaves, `ENGINE_SKY_HOUR=17.5` sets the time of day,
+//! `ENGINE_ROCKS_CLOSE=1` looks at the rocks up close.
 use engine::prelude::*;
-use engine::vegetation::{shrub_model, tree_model, TreeSpecies};
 
 fn env(name: &str, default: f32) -> f32 {
     std::env::var(name)
@@ -53,6 +53,34 @@ fn main() -> EngineResult<()> {
                 let mine: Vec<Place> = shrubs.iter().skip(v as usize).step_by(2).copied().collect();
                 let id = world.spawn_lod(shrub_model(v)?.lod_levels())?;
                 world.set_lod_places(id, &mine)?;
+            }
+            // Rocks: every shape twice in front, then strewn through the wood.
+            for (i, shape) in RockShape::ALL.iter().enumerate() {
+                for seed in 0..2u32 {
+                    let rock = rock_model(*shape, seed)?;
+                    let scale = 0.8 + seed as f32 * 0.5;
+                    let id = world.spawn_lod(rock.lod_levels_scaled(scale))?;
+                    let x = -58.0 + (i * 2 + seed as usize) as f32 * 4.5;
+                    world.set_lod_places(
+                        id,
+                        &[Place::at(x, 0.0, 12.0 + seed as f32 * 2.5)?
+                            .yaw_deg(i as f32 * 67.0 + seed as f32 * 131.0)?
+                            .scale(scale)?],
+                    )?;
+                }
+            }
+            for k in 0..8u32 {
+                let rocks = (0..60)
+                    .map(|i| {
+                        let h = |j: u32| (i * 7919 + k * 104_729 + j * 15_485_863) % 1000;
+                        Place::at(h(1) as f32 - 500.0, 0.0, 25.0 + h(2) as f32 * 0.55)?
+                            .yaw_deg(h(3) as f32 * 0.36)?
+                            .scale(0.5 + h(4) as f32 / 1000.0 * 1.6)
+                    })
+                    .collect::<EngineResult<Vec<Place>>>()?;
+                let rock = rock_model(RockShape::ALL[k as usize % 4], 10 + k)?;
+                let id = world.spawn_lod(rock.lod_levels_scaled(1.3))?;
+                world.set_lod_places(id, &rocks)?;
             }
             // The wood behind: a few individuals per species, scattered.
             let positions = scatter_on_xz(
@@ -102,7 +130,9 @@ fn main() -> EngineResult<()> {
         let t = if screenshot { 0.0 } else { frame.time };
         let close = std::env::var_os("ENGINE_VEG_CLOSE").is_some();
         let x = -70.0 + (t * 0.03).sin() * 60.0;
-        if close {
+        if std::env::var_os("ENGINE_ROCKS_CLOSE").is_some() {
+            world.look_first_person(Vec3::new(-44.0, 1.6, 6.5), 0.0, -12.0);
+        } else if close {
             world.look_first_person(Vec3::new(-40.0, 3.0, 8.0), 20.0, 12.0);
         } else {
             world.look_first_person(Vec3::new(x, 4.0, -12.0), 8.0, 4.0);
