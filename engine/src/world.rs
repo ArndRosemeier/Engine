@@ -3280,37 +3280,8 @@ impl World {
                     }
                 }
                 if let Some(f) = self.height_field.as_ref() {
-                    // March, then refine by bisection.
-                    let step = 0.5;
-                    let mut t0 = 0.0;
-                    let mut t = 0.0;
-                    while t <= max {
-                        let p = origin + dir * t;
-                        if p.y <= f.height_at(p.x, p.z) {
-                            let (mut lo, mut hi) = (t0, t);
-                            for _ in 0..16 {
-                                let mid = (lo + hi) * 0.5;
-                                let q = origin + dir * mid;
-                                if q.y <= f.height_at(q.x, q.z) {
-                                    hi = mid;
-                                } else {
-                                    lo = mid;
-                                }
-                            }
-                            let p = origin + dir * hi;
-                            let e = 0.25;
-                            let n = Vec3::new(
-                                f.height_at(p.x - e, p.z) - f.height_at(p.x + e, p.z),
-                                2.0 * e,
-                                f.height_at(p.x, p.z - e) - f.height_at(p.x, p.z + e),
-                            )
-                            .normalize();
-                            return Some(hit(p, n));
-                        }
-                        t0 = t;
-                        t += step;
-                    }
-                    return None;
+                    return crate::physics::height_ray(&|x, z| f.height_at(x, z), origin, dir, max)
+                        .map(|(p, n)| hit(p, n));
                 }
                 plane(0.0)
             }
@@ -3337,9 +3308,11 @@ impl World {
 
     /// Step physics. The engine calls this every frame.
     pub fn tick_physics(&mut self, dt: f32) {
+        let field = self.height_field.as_ref();
+        let height = |x: f32, z: f32| field.map_or(0.0, |f| f.height_at(x, z));
         let around = crate::physics::Surroundings {
             voxels: self.voxel_terrain.as_ref(),
-            heights: self.height_field.as_ref(),
+            heights: field.map(|f| (f as *const _ as usize, &height as crate::physics::HeightFn)),
             water: self.water.as_ref(),
         };
         let entities = &self.entities;

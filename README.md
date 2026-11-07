@@ -155,6 +155,17 @@ and `.ccd(true)` for small fast things. Then `push`, `push_at`,
 becomes colliders around moving bodies (flat floor at y = 0 without terrain;
 `set_physics_settings` changes that and gravity). See `examples/physics`.
 
+**Physics without a window (game servers, tools, tests):** `PhysicsWorld::new()`
+runs the same bodies, shapes and ground with no `World` and no GPU.
+`add(&body, transform)` for boxes, balls and capsules, `add_mesh(&body,
+transform, &mesh)` for hulls and triangle meshes, and you keep the returned
+`BodyId` (send it as `id.raw()`). `step(dt)` runs the fixed steps that are due,
+`step_once()` exactly one; read `transform(id)` (interpolated, for drawing) or
+`pose(id)` (last whole step, for sending). Ground comes from
+`set_height_terrain(HeightField)`, `set_height_fn(|x, z| ..)` or
+`set_voxel_terrain(..)`. Built in the same order, it gives the same result as
+the same scene inside `World`.
+
 **Lamps:** `world.add_lamp(Lamp::fire(pos))?`, `Lamp::street_lamp(pos)`, or
 `Lamp::point(pos, color, intensity, range)` and
 `Lamp::spot(pos, direction, angle_deg, color, intensity, range)` for your own;

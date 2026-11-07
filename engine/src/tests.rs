@@ -1466,6 +1466,106 @@ mod physics_world {
         );
     }
 
+    /// A pile of crates and balls tumbling down height terrain, built once in
+    /// `World` and once in a standalone `PhysicsWorld`, stepped 10 s.
+    #[test]
+    fn standalone_physics_matches_the_world() {
+        use crate::physics::{BodyShape, PhysicsWorld};
+        let rules = crate::proc_terrain::demo_terrain_rules();
+        let field = crate::proc_terrain::HeightField::new(rules.clone());
+        let mut world = World::new();
+        world.set_proc_terrain(crate::proc_terrain::ProcTerrain::gpu_clipmap(
+            rules.clone(),
+            Default::default(),
+        ));
+        let mut alone = PhysicsWorld::new();
+        alone.set_height_terrain(crate::proc_terrain::HeightField::new(rules));
+        let mut pairs = Vec::new();
+        for i in 0..12 {
+            let x = (i % 4) as f32 * 1.3 - 2.0;
+            let z = (i / 4) as f32 * 1.3 + 3.0;
+            let p = Vec3::new(x, field.height_at(x, z) + 2.0 + i as f32 * 0.7, z);
+            let mesh = Mesh::box_at(Vec3::ZERO, Vec3::ONE, rgb(150, 100, 50)).unwrap();
+            let body = if i % 3 == 0 {
+                Body::dynamic().shape(BodyShape::Ball(0.5)).bounce(0.4)
+            } else {
+                Body::dynamic().density(0.8 + i as f32 * 0.1)
+            };
+            let id = world.spawn(mesh.clone());
+            world.set_place(id, Place::new(p.x, p.y, p.z)).unwrap();
+            world.add_body(id, body.clone()).unwrap();
+            let transform = world.entity(id).unwrap().transform();
+            let b = alone.add_mesh(&body, transform, &mesh).unwrap();
+            pairs.push((id, b, p));
+        }
+        for frame in 0..600 {
+            if frame == 120 {
+                world.blast(Vec3::new(-1.0, field.height_at(-1.0, 4.0), 4.0), 6.0, 8.0);
+                alone.blast(Vec3::new(-1.0, field.height_at(-1.0, 4.0), 4.0), 6.0, 8.0);
+            }
+            world.tick_physics(1.0 / 60.0);
+            alone.step(1.0 / 60.0);
+        }
+        let mut travelled = 0.0f32;
+        for (id, b, start) in pairs {
+            let w = world.entity(id).unwrap().transform();
+            let a = alone.transform(b).unwrap();
+            assert!(
+                w.abs_diff_eq(a, 1e-5),
+                "body {b:?} differs:\nworld {w:?}\nalone {a:?}"
+            );
+            travelled = travelled.max(a.w_axis.truncate().distance(start));
+        }
+        assert!(travelled > 2.0, "the pile should have tumbled: {travelled}");
+        assert!(alone.body_count().0 == 12);
+    }
+
+    #[test]
+    fn standalone_physics_runs_rays_impacts_and_one_step_at_a_time() {
+        use crate::physics::{BodyShape, PhysicsWorld};
+        let mut p = PhysicsWorld::new();
+        let ball = p
+            .add(
+                &Body::dynamic().shape(BodyShape::Ball(0.5)),
+                glam::Mat4::from_translation(Vec3::new(0.0, 3.0, 0.0)),
+            )
+            .unwrap();
+        assert!(
+            p.add(&Body::dynamic(), glam::Mat4::IDENTITY).is_err(),
+            "a hull needs a mesh"
+        );
+        for _ in 0..90 {
+            p.step_once();
+        }
+        let (pos, _) = p.pose(ball).unwrap();
+        assert!((pos.y - 0.5).abs() < 0.05, "{pos}");
+        assert_eq!(
+            p.position(ball).unwrap(),
+            pos,
+            "step_once shows the last step"
+        );
+        assert!(p
+            .take_impacts()
+            .iter()
+            .any(|i| i.a == ball && i.b.is_none()));
+        let hit = p
+            .cast_ray(Vec3::new(0.0, 5.0, 0.0), -Vec3::Y, 10.0)
+            .unwrap();
+        assert_eq!(hit.body, Some(ball));
+        let floor = p
+            .cast_ray(Vec3::new(4.0, 5.0, 0.0), -Vec3::Y, 10.0)
+            .unwrap();
+        assert_eq!(floor.body, None);
+        assert!((floor.point.y).abs() < 1e-4);
+        assert_eq!(crate::physics::BodyId::from_raw(ball.raw()), ball);
+        p.set_transform(ball, glam::Mat4::from_translation(Vec3::new(5.0, 0.5, 0.0)))
+            .unwrap();
+        p.step_once();
+        assert!((p.position(ball).unwrap().x - 5.0).abs() < 1e-3);
+        p.remove(ball);
+        assert!(!p.contains(ball));
+    }
+
     #[test]
     fn a_crate_lands_on_height_terrain() {
         let mut world = World::new();
