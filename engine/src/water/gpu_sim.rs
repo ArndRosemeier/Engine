@@ -1541,4 +1541,72 @@ mod tests {
         let foam = gpu.marks.iter().fold(0.0f32, |m, v| m.max(v[0]));
         assert!(foam > 0.1, "no foam on the GPU, max {foam}");
     }
+
+    /// GPU vs CPU on a 1 km² landscape, first mostly still, then with
+    /// everything flowing after heavy rain. Run with
+    /// `ENGINE_GPU_TESTS=1 cargo test --release -p engine --lib bench_gpu_water -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bench_gpu_water() {
+        if !gpu_tests_enabled() {
+            return;
+        }
+        let (device, queue) = device();
+        let noise = crate::proc::Noise::new(11);
+        let terrain = HeightMapTerrain(move |x: f32, z: f32| {
+            noise.fbm2(x * 0.004, z * 0.004, 5, 2.0, 0.5) * 40.0 + 10.0
+        });
+        for size in [512.0f32, 1024.0] {
+            let region = WaterRegion::new(Vec2::ZERO, Vec2::splat(size), 1.0, -40.0, 80.0);
+            let base = Water::new(region, &terrain);
+            let setup = |backend| {
+                let mut w = base.clone();
+                w.flood_sea(0.0);
+                w.add_source(crate::water::WaterSource {
+                    position: Vec3::new(size * 0.5, 70.0, size * 0.5),
+                    rate: 5.0,
+                });
+                w.set_backend(backend);
+                w
+            };
+            let mut cpu = setup(WaterBackend::Cpu);
+            let mut gpu = setup(WaterBackend::Gpu);
+            let mut sim = GpuWaterSim::new(&device);
+            let gpu_frame = |sim: &mut GpuWaterSim, w: &mut Water| {
+                w.update(1.0 / 60.0);
+                let mut encoder = device.create_command_encoder(&Default::default());
+                sim.encode_frame(&device, &queue, &mut encoder, w);
+                queue.submit([encoder.finish()]);
+                device.poll(wgpu::PollType::Wait).expect("poll");
+            };
+            for phase in ["mostly still", "everything flowing"] {
+                if phase == "everything flowing" {
+                    cpu.rain(0.05);
+                    gpu.rain(0.05);
+                }
+                for _ in 0..30 {
+                    cpu.update(1.0 / 60.0);
+                    gpu_frame(&mut sim, &mut gpu);
+                }
+                let frames = 120;
+                let t = std::time::Instant::now();
+                for _ in 0..frames {
+                    cpu.update(1.0 / 60.0);
+                }
+                let cpu_ms = t.elapsed().as_secs_f64() * 1e3 / frames as f64;
+                let t = std::time::Instant::now();
+                for _ in 0..frames {
+                    gpu_frame(&mut sim, &mut gpu);
+                }
+                let gpu_ms = t.elapsed().as_secs_f64() * 1e3 / frames as f64;
+                eprintln!(
+                    "{size} m, {} cells, {phase}: CPU {cpu_ms:.2} ms/frame ({} substeps), \
+                     GPU {gpu_ms:.2} ms/frame incl. read-back (x{:.1})",
+                    cpu.cell_count(),
+                    cpu.stats().substeps,
+                    cpu_ms / gpu_ms
+                );
+            }
+        }
+    }
 }
