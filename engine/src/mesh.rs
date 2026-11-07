@@ -53,6 +53,11 @@ pub struct MaterialMaps {
     /// (skinned characters). Static meshes use their [`SurfaceMaterial`].
     pub roughness: f32,
     pub metallic: f32,
+    /// Metres per texture tile for triplanar mapping, 0 to use the mesh UVs.
+    /// Triplanar maps project the textures along the mesh's own axes (scaled
+    /// to world size), so procedural meshes without UVs (rocks, cliffs,
+    /// shattered pieces) texture seamlessly and the texture moves with them.
+    pub triplanar: f32,
 }
 
 impl Default for MaterialMaps {
@@ -67,6 +72,7 @@ impl Default for MaterialMaps {
             emissive_factor: [0.0; 3],
             roughness: 0.65,
             metallic: 0.0,
+            triplanar: 0.0,
         }
     }
 }
@@ -78,6 +84,7 @@ impl MaterialMaps {
             && self.orm.is_none()
             && self.emissive.is_none()
             && self.emissive_factor == [0.0; 3]
+            && self.triplanar == 0.0
     }
 
     pub fn validate(&self) -> EngineResult<()> {
@@ -109,6 +116,7 @@ impl MaterialMaps {
             self.normal_uv[3],
             self.roughness,
             self.metallic,
+            self.triplanar,
         ]
         .into_iter()
         .chain(self.emissive_factor)

@@ -374,6 +374,11 @@ struct VsOut {
     @location(3) uv: vec2<f32>,
     @location(4) surface: vec4<f32>,
     @location(5) surface2: vec4<f32>,
+    // Object-space position scaled to world size, and the object's x and y
+    // axes in world space: triplanar texturing that moves with the mesh.
+    @location(6) obj_p: vec3<f32>,
+    @location(7) @interpolate(flat) obj_x: vec3<f32>,
+    @location(8) @interpolate(flat) obj_y: vec3<f32>,
     @location(11) surface3: vec4<f32>,
     @location(12) surface4: vec4<f32>,
     @location(13) surface5: vec4<f32>,
@@ -503,6 +508,9 @@ fn vs_main(v: VsIn) -> VsOut {
     out.lod_fade = v.tint.a;
     out.world_p = world.xyz;
     out.uv = v.uv;
+    out.obj_p = local * vec3<f32>(length(v.m0.xyz), length(v.m1.xyz), length(v.m2.xyz));
+    out.obj_x = v.m0.xyz;
+    out.obj_y = v.m1.xyz;
     out.surface = v.surface;
     out.surface2 = v.surface2;
     out.surface3 = v.surface3;
@@ -686,6 +694,56 @@ fn fs_depth(in: VsOut) {
     }
 }
 
+// ---- Triplanar texturing (MaterialMaps::triplanar) ----
+struct TriSurface {
+    albedo: vec4<f32>,
+    n: vec3<f32>,
+    orm: vec3<f32>,
+};
+
+// Albedo, normal and occlusion-roughness-metallic projected along the
+// object's three axes and blended by the normal. Normals use the whiteout
+// blend (after Ben Golus); maps follow the glTF convention, so the sample
+// v is negated to make +v run up the image like the projected axis.
+fn triplanar_surface(in: VsOut, geo_n: vec3<f32>) -> TriSurface {
+    let ax = normalize(in.obj_x);
+    let ay = normalize(in.obj_y);
+    let az = cross(ax, ay);
+    let on = vec3<f32>(dot(geo_n, ax), dot(geo_n, ay), dot(geo_n, az));
+    var w = pow(abs(on), vec3<f32>(4.0));
+    w = w / max(w.x + w.y + w.z, 1e-5);
+    let sg = select(vec3<f32>(-1.0), vec3<f32>(1.0), on >= vec3<f32>(0.0));
+    let p = in.obj_p * mat.triplanar.x;
+    let uvx = vec2<f32>(p.z * sg.x, -p.y);
+    let uvy = vec2<f32>(p.x * sg.y, -p.z);
+    let uvz = vec2<f32>(-p.x * sg.z, -p.y);
+    var out: TriSurface;
+    out.albedo = textureSample(albedo_tex, albedo_sampler, uvx) * w.x
+        + textureSample(albedo_tex, albedo_sampler, uvy) * w.y
+        + textureSample(albedo_tex, albedo_sampler, uvz) * w.z;
+    out.orm = material_orm(uvx) * w.x + material_orm(uvy) * w.y + material_orm(uvz) * w.z;
+    if mat.has_normal < 0.5 {
+        out.n = geo_n;
+        return out;
+    }
+    let k = vec2<f32>(mat.normal_scale);
+    var tx = textureSample(normal_tex, albedo_sampler, uvx).xyz * 2.0 - 1.0;
+    var ty = textureSample(normal_tex, albedo_sampler, uvy).xyz * 2.0 - 1.0;
+    var tz = textureSample(normal_tex, albedo_sampler, uvz).xyz * 2.0 - 1.0;
+    tx = vec3<f32>(tx.xy * k, tx.z);
+    ty = vec3<f32>(ty.xy * k, ty.z);
+    tz = vec3<f32>(tz.xy * k, tz.z);
+    tx.x *= sg.x;
+    ty.x *= sg.y;
+    tz.x *= -sg.z;
+    tx = vec3<f32>(tx.xy + on.zy, abs(tx.z) * on.x);
+    ty = vec3<f32>(ty.xy + on.xz, abs(ty.z) * on.y);
+    tz = vec3<f32>(tz.xy + on.xy, abs(tz.z) * on.z);
+    let n_obj = normalize(tx.zyx * w.x + ty.xzy * w.y + tz.xyz * w.z);
+    out.n = normalize(ax * n_obj.x + ay * n_obj.y + az * n_obj.z);
+    return out;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if !lod_dither_keep(in.lod_fade, in.clip.xy) {
@@ -701,12 +759,23 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let geo_n = normalize(in.world_n);
         // Normal, occlusion-roughness-metallic and emissive maps; neutral
         // 1x1 texels for meshes without them.
-        let n = mapped_normal(geo_n, in.world_p, in.uv);
-        let orm = material_orm(in.uv);
+        var n: vec3<f32>;
+        var orm: vec3<f32>;
+        var texel: vec4<f32>;
+        if mat.triplanar.x > 0.0 {
+            let t = triplanar_surface(in, geo_n);
+            n = t.n;
+            orm = t.orm;
+            texel = t.albedo;
+        } else {
+            n = mapped_normal(geo_n, in.world_p, in.uv);
+            orm = material_orm(in.uv);
+            texel = textureSample(albedo_tex, albedo_sampler, in.uv);
+        }
         let l = normalize(u.light_dir);
         let ndl = max(dot(n, l), 0.0);
         let wrap = ndl * 0.65 + 0.35;
-        let base = in.color * textureSample(albedo_tex, albedo_sampler, in.uv);
+        let base = in.color * texel;
         let vis = sun_visibility(in.world_p, geo_n, u.eye);
         let lit = shade_surface_occluded(base.rgb, n, in.world_p, in.surface.x * orm.y,
                 in.surface.y * orm.z, vis, wrap * wrap, orm.x)

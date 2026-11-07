@@ -34,6 +34,7 @@ pub mod space;
 pub mod surface;
 pub mod surface_terrain;
 pub mod terrain;
+pub mod texgen;
 pub mod texture;
 
 pub mod tree;
