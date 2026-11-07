@@ -3,6 +3,7 @@ pub(crate) mod frustum;
 mod gi;
 mod gpu_mesh;
 mod gpu_profile;
+mod grass;
 mod instance_cull;
 mod material;
 mod particles_gpu;
@@ -707,6 +708,11 @@ impl Renderer {
                         0.0
                     },
                     proc,
+                    clipmap::GrassFrame {
+                        scale: world.grass_scale(),
+                        time: world.time(),
+                        wind: world.wind(),
+                    },
                 );
             }
         } else {
@@ -2054,6 +2060,9 @@ impl Renderer {
         if draw_environment {
             if let Some(clip) = self.clipmap.as_ref() {
                 clip.draw_land(pass, &self.shadow.resource_bind, portal_mask);
+                if !portal_mask {
+                    clip.draw_grass(pass, &self.shadow.resource_bind);
+                }
                 // The clipmap owns group 0 while it draws; give it back.
                 pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
             }

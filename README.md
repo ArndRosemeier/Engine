@@ -13,7 +13,7 @@ render loop.
   (glTF metallic-roughness, normal, occlusion and emissive maps), three shadow
   cascades with soft filtering, SSAO, voxel-probe global illumination, a
   physical sky with day/night, clouds and weather, distance haze.
-- **Big worlds:** per-instance LOD with dithered cross-fades, GPU frustum
+- **Big worlds:** grass blades grown on the GPU around the camera, per-instance LOD with dithered cross-fades, GPU frustum
   culling, an endless GPU clipmap terrain, chunk streaming, a floating origin
   for kilometre-scale coordinates, portals between separate spaces.
 - **Generated assets:** ten tree species and shrubs that sway in the wind and
@@ -147,11 +147,11 @@ solid pieces.
 
 ```rust
 world.set_quality(Quality::Medium);   // Low, Medium, High (default), Ultra
-world.set_target_fps(Some(60.0))?;    // keep 60 FPS: pull LOD in, then drop GI, then AO
+world.set_target_fps(Some(60.0))?;    // keep 60 FPS: pull LOD and grass in, then drop GI, then AO
 world.set_vsync(false);               // uncapped frame rate (title bar shows FPS)
 ```
 
-Finer knobs: `set_shadows`, `set_ambient_occlusion`, `set_global_illumination`,
+Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_global_illumination`,
 `set_bloom`, `set_tone_map`, `set_haze`, `set_lod_bias`, `set_view_distance`.
 
 ## Generators
@@ -162,7 +162,7 @@ Finer knobs: `set_shadows`, `set_ambient_occlusion`, `set_global_illumination`,
 | `rocks` | `rock_model(shape, seed)`: boulders, blocks, slabs, spires with LOD |
 | `texgen` | `texture_layer(layer)`: 61 tileable albedo/normal/roughness layers |
 | `scatter` | `Scatter`: deterministic places with clumping, ground snapping, filters |
-| `proc_terrain` | `ProcTerrain::gpu_clipmap`: endless terrain with lakes, painted with texgen layers (`with_layers(Some(TerrainLayers { .. }))`), `HeightField` to query it |
+| `proc_terrain` | `ProcTerrain::gpu_clipmap`: endless terrain with lakes, painted with texgen layers (`with_layers(Some(TerrainLayers { .. }))`) and grown with grass (`with_grass(Some(Grass { height, density, distance }))`), `HeightField` to query it |
 | `landscape` | `Landscape::new(seed)`: hills and caves as a mesh |
 | `voxel_terrain` | Smooth, diggable voxel ground meshed on the GPU |
 | `fracture` / `debris` | Shatter meshes into solid chunks |

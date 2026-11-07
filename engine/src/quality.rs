@@ -64,6 +64,11 @@ impl Quality {
                 Quality::High => 1.0,
                 Quality::Ultra => 1.5,
             },
+            grass: match self {
+                Quality::Low => 0.0,
+                Quality::Medium => 0.7,
+                Quality::High | Quality::Ultra => 1.0,
+            },
         }
     }
 }
@@ -75,6 +80,8 @@ pub struct QualitySettings {
     pub ambient_occlusion: Option<AmbientOcclusion>,
     pub global_illumination: Option<GlobalIllumination>,
     pub lod_bias: f32,
+    /// Grass distance factor (0: no grass). The LOD bias scales it further.
+    pub grass: f32,
 }
 
 /// Lowest LOD bias the tuner goes to before it drops features.

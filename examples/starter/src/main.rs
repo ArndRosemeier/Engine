@@ -122,9 +122,7 @@ fn main() -> EngineResult<()> {
                 ProcTerrain::gpu_clipmap(rules.clone(), ClipmapConfig::default())
                     .with_focus(camera.position),
             );
-            let t = std::time::Instant::now();
             populate(world, &ground, start)?;
-            eprintln!("TIMING populate {:?}", t.elapsed());
         }
         camera.update_above(world, frame, |x, z| ground.height_at(x, z));
         world.set_proc_focus(camera.position);

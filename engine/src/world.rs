@@ -709,6 +709,7 @@ pub struct World {
     quality: crate::quality::Quality,
     taa: bool,
     tone_map: ToneMap,
+    grass: f32,
     auto_tune: Option<crate::quality::AutoTune>,
 }
 
@@ -789,6 +790,7 @@ impl Default for World {
             quality: crate::quality::Quality::High,
             taa: true,
             tone_map: ToneMap::default(),
+            grass: 1.0,
             auto_tune: None,
         }
     }
@@ -980,9 +982,28 @@ impl World {
         self.ambient_occlusion = s.ambient_occlusion;
         self.global_illumination = s.global_illumination;
         self.lod_bias = s.lod_bias;
+        self.grass = s.grass;
         if let Some(t) = &mut self.auto_tune {
             t.max_bias = s.lod_bias;
         }
+    }
+
+    /// How far grass reaches, as a factor on the terrain's
+    /// [`crate::proc_terrain::Grass::distance`] (0 hides it). Quality presets
+    /// set it; the LOD bias (and so the frame-rate tuner) scales it further.
+    pub fn set_grass_scale(&mut self, scale: f32) -> EngineResult<()> {
+        if !scale.is_finite() || !(0.0..=4.0).contains(&scale) {
+            return Err(EngineError::InvalidValue(format!(
+                "grass scale {scale} must be within 0..=4"
+            )));
+        }
+        self.grass = scale;
+        Ok(())
+    }
+
+    /// The grass distance factor actually used: the scale times the LOD bias.
+    pub fn grass_scale(&self) -> f32 {
+        self.grass * self.lod_bias
     }
 
     /// Temporal anti-aliasing (on by default): smooths edges, shimmer and
