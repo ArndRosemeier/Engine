@@ -2266,14 +2266,11 @@ impl World {
             return Err(EngineError::UnknownEntity);
         }
         let tick = self.sim_tick;
-        let pose = self
-            .sim_poses
-            .entry(id)
-            .or_insert(crate::sim::SimPose {
-                prev: m,
-                cur: m,
-                tick,
-            });
+        let pose = self.sim_poses.entry(id).or_insert(crate::sim::SimPose {
+            prev: m,
+            cur: m,
+            tick,
+        });
         if pose.tick != tick {
             pose.prev = pose.cur;
             pose.tick = tick;
@@ -2284,7 +2281,12 @@ impl World {
 
     /// Both poses at once, for a client that keeps the previous and current
     /// simulation state itself: drawn between them by the frame's blend.
-    pub fn set_sim_poses(&mut self, id: EntityId, previous: Mat4, current: Mat4) -> EngineResult<()> {
+    pub fn set_sim_poses(
+        &mut self,
+        id: EntityId,
+        previous: Mat4,
+        current: Mat4,
+    ) -> EngineResult<()> {
         crate::place::ensure_finite_mat(previous)?;
         self.set_sim_transform(id, current)?;
         if let Some(p) = self.sim_poses.get_mut(&id) {
@@ -2332,6 +2334,7 @@ impl World {
 
     /// Everything the windowed loop ticks that makes sense with no screen.
     pub(crate) fn tick_headless(&mut self, dt: f32) {
+        self.tick_nav(dt);
         self.tick_animations(dt);
         self.tick_physics(dt);
         self.tick_interpolation();

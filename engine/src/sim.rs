@@ -120,7 +120,11 @@ impl SimClock {
 
     /// Add `dt` seconds of real time.
     pub fn advance(&mut self, dt: f32) -> SimSteps {
-        let dt = if dt.is_finite() { dt.clamp(0.0, 1.0) } else { 0.0 };
+        let dt = if dt.is_finite() {
+            dt.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         self.accumulator += dt;
         // A hair of slack so 1/30 s frames at 30 Hz don't alternate 0 and 2.
         let due = ((self.accumulator + self.step * 1e-4) / self.step).floor() as u32;
@@ -264,7 +268,11 @@ impl Headless {
         dt: f32,
         mut update: impl FnMut(&mut World, &Frame) -> EngineResult<()>,
     ) -> EngineResult<()> {
-        let dt = if dt.is_finite() { dt.clamp(0.0, 1.0) } else { 0.0 };
+        let dt = if dt.is_finite() {
+            dt.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let sim = self.world.advance_sim(dt);
         let frame = Frame {
             dt,

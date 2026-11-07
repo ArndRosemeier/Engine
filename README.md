@@ -166,6 +166,16 @@ transform, &mesh)` for hulls and triangle meshes, and you keep the returned
 `set_voxel_terrain(..)`. Built in the same order, it gives the same result as
 the same scene inside `World`.
 
+**Fixed simulation tick:** `world.set_sim_rate(Some(30.0))?` and every frame's
+`frame.sim.steps` says how many fixed steps are due (`frame.sim.dt` long). Run
+your simulation that many times; in each step call `world.begin_sim_step()`
+and `world.set_sim_place(id, place)?` for what moved. The world draws those
+entities between their last two steps (`frame.sim.alpha`), so a 30 Hz game
+looks smooth at 144 FPS. A client that keeps previous and current state itself
+calls `world.set_sim_poses(id, prev, cur)` instead. `Headless::new()` runs the
+same update closure with no window or GPU (`frame(dt, update)` for one frame,
+`run(HeadlessRun { .. }, update)` for a server loop). See `examples/fixed_tick`.
+
 **Lamps:** `world.add_lamp(Lamp::fire(pos))?`, `Lamp::street_lamp(pos)`, or
 `Lamp::point(pos, color, intensity, range)` and
 `Lamp::spot(pos, direction, angle_deg, color, intensity, range)` for your own;
@@ -285,6 +295,7 @@ cargo run --release -p <name>
 | `characters` | Walk, run and idle blending into each other, speed-matched; feet planted on stone steps by foot IK (I toggles IK, B blending) |
 | `navigation` | Villagers find their own way around houses, walls, a fountain and crates and up stairs to a terrace; click sends everyone there, N shows the walkable area |
 | `prefabs` | Carts built from parts driving with spinning wheels, a windmill turning its sails, a lantern carried in a hand; C drops carts that tumble whole, X removes them |
+| `fixed_tick` | A 30 Hz simulation drawn smoothly at any frame rate, next to the raw steps; I toggles interpolation, 1/2/3 change the rate |
 | `physics` | Crates, a brick wall, dominoes, rolling boulders and a sweeper; throw balls (click), blow things up (F), shatter (X) |
 | `model_viewer` | Any glTF/GLB or `.fmpk` file: `-- path/to/model.glb` |
 | `animated_animal` | Skinned glTF animation |
