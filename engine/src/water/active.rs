@@ -140,8 +140,8 @@ impl Water {
             }
         }
         // Tiles going to rest keep no flow on their links.
-        for t in 0..tx * tz {
-            if a.run[t] && !run[t] {
+        for (t, &runs_now) in run.iter().enumerate() {
+            if a.run[t] && !runs_now {
                 let (x0, z0) = ((t % tx) * TILE, (t / tx) * TILE);
                 let x1 = (x0 + TILE).min(nx);
                 for row in z0..(z0 + TILE).min(nz) {
