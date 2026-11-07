@@ -181,16 +181,14 @@ fn main() -> EngineResult<()> {
                 }
             };
         }
-        let (eye, aim) = match body.as_mut() {
+        match body.as_mut() {
             Some(b) => {
                 b.update(world, frame);
-                (b.eye(), Camera::direction(b.yaw_deg, b.pitch_deg))
             }
-            None => {
-                camera.update(world, frame);
-                (camera.position, camera.forward())
-            }
-        };
+            None => camera.update(world, frame),
+        }
+        // Dig, build and pour under the mouse cursor.
+        let (eye, aim) = world.cursor_ray(frame);
         let input = &frame.input;
         if let Some(hit) = world
             .voxel_terrain()
