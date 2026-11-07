@@ -13,6 +13,7 @@ pub use crate::debris::Shatter;
 pub use crate::error::{EngineError, EngineResult};
 pub use crate::fly::FlyCamera;
 pub use crate::input::{Input, Key, MouseButton};
+pub use crate::lamps::{Lamp, LampId, LampShape};
 pub use crate::landscape::Landscape;
 pub use crate::limits::EngineLimits;
 pub use crate::lod::{LodId, LodLevel};
@@ -23,7 +24,9 @@ pub use crate::particles::{
     EmitterId, ParticleBlend, ParticleEmitter, ParticleForce, ParticleMode, ParticleShape,
     ParticleSilhouette, ParticleWorld, SizeOverLife,
 };
-pub use crate::physics::{Body, BodyKind, BodyShape, Impact, PhysicsGround, PhysicsSettings, RayHit};
+pub use crate::physics::{
+    Body, BodyKind, BodyShape, Impact, PhysicsGround, PhysicsSettings, RayHit,
+};
 pub use crate::place::{GlobalPlace, MeshInstance, Place};
 pub use crate::portal::{Portal, PortalId, PortalSettings, SpaceId};
 pub use crate::proc::{scatter_on_xz, Noise};

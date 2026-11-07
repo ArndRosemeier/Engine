@@ -5,6 +5,7 @@ mod gpu_mesh;
 mod gpu_profile;
 mod grass;
 mod instance_cull;
+mod lights;
 mod material;
 mod particles_gpu;
 mod pipeline;
@@ -342,8 +343,9 @@ pub struct Renderer {
     shadow_source_epoch: u64,
     shadow_mesh_sources: Vec<EntityId>,
     shadow_batch_sources: Vec<EntityId>,
-    shadow_bundle_keys: [ShadowBundleKey; 3],
-    shadow_bundles: [Option<wgpu::RenderBundle>; 3],
+    /// Sun cascades first, then lamp shadow layers.
+    shadow_bundle_keys: Vec<ShadowBundleKey>,
+    shadow_bundles: Vec<Option<wgpu::RenderBundle>>,
     draw_opaque: Vec<EntityId>,
     draw_terrain: Vec<EntityId>,
     draw_transparent: Vec<EntityId>,
@@ -589,8 +591,10 @@ impl Renderer {
             shadow_source_epoch: 0,
             shadow_mesh_sources: Vec::new(),
             shadow_batch_sources: Vec::new(),
-            shadow_bundle_keys: std::array::from_fn(|_| ShadowBundleKey::default()),
-            shadow_bundles: std::array::from_fn(|_| None),
+            shadow_bundle_keys: (0..3 + lights::SHADOW_LAYERS)
+                .map(|_| ShadowBundleKey::default())
+                .collect(),
+            shadow_bundles: (0..3 + lights::SHADOW_LAYERS).map(|_| None).collect(),
             draw_opaque: Vec::new(),
             draw_terrain: Vec::new(),
             draw_transparent: Vec::new(),
@@ -1491,7 +1495,8 @@ impl Renderer {
     }
 
     fn write_shadows(&mut self, world: &World) {
-        self.shadow_vp = self.shadow.prepare(&self.queue, world);
+        let eye = Self::main_scene_camera(world).eye();
+        self.shadow_vp = self.shadow.prepare(&self.queue, world, eye, &self.frustum);
         self.gpu_stats.shadow_atlas = self.shadow.atlas_wrote();
     }
 
@@ -2488,7 +2493,12 @@ impl Renderer {
                     sample_count: 1,
                     multiview: None,
                 });
-        bundle.set_bind_group(0, &self.shadow.cascade_binds[cascade], &[]);
+        let view_bind = if cascade < 3 {
+            &self.shadow.cascade_binds[cascade]
+        } else {
+            &self.shadow.lamps.layer_binds[cascade - 3]
+        };
+        bundle.set_bind_group(0, view_bind, &[]);
         // Untextured casters first on the cheap depth-only pipeline, then the
         // textured ones through the alpha test.
         for cutout in [false, true] {
@@ -2539,17 +2549,27 @@ impl Renderer {
     }
 
     fn encode_shadow_pass(&mut self, encoder: &mut wgpu::CommandEncoder, world: &World) {
-        if world.shadows().is_none() {
+        let sun = world.shadows().is_some();
+        let lamp_views = self.shadow.lamps.frame_views.clone();
+        if !sun && lamp_views.is_empty() {
             return;
         }
         let far = world.shadows().map(|s| s.cascade_end_m[2]).unwrap_or(120.0);
         let focus = world.camera().target();
         let submit = world.instance_submit();
-        let frustums = self.shadow_vp.map(Frustum::from_view_projection);
+        // One frustum per view: the sun's cascades (when on), then lamp layers.
+        let mut frustums: Vec<Frustum> = Vec::new();
+        let mut slots: Vec<usize> = Vec::new();
+        if sun {
+            frustums.extend(self.shadow_vp.map(Frustum::from_view_projection));
+            slots.extend(0..3);
+        }
+        for (i, vp) in lamp_views.iter().enumerate() {
+            frustums.push(Frustum::from_view_projection(*vp));
+            slots.push(3 + i);
+        }
         let selections = self.select_shadow_culls(world, &frustums);
-        for i in 0..3 {
-            let frustum = &frustums[i];
-            let selection = &selections[i];
+        for ((frustum, selection), &slot) in frustums.iter().zip(&selections).zip(&slots) {
             if submit == InstanceSubmit::GpuIndirect {
                 self.dispatch_instance_cull(
                     encoder,
@@ -2558,7 +2578,7 @@ impl Renderer {
                     CullView::Shadow,
                 );
             }
-            self.prepare_shadow_bundle(i, selection);
+            self.prepare_shadow_bundle(slot, selection);
             self.gpu_stats.indirect_draws += u32::try_from(
                 selection
                     .batch_draws
@@ -2567,11 +2587,26 @@ impl Renderer {
                     .count(),
             )
             .expect("shadow indirect draw count exceeds u32");
+            let (target, view_bind) = if slot < 3 {
+                (
+                    &self.shadow.layer_views[slot],
+                    &self.shadow.cascade_binds[slot],
+                )
+            } else {
+                (
+                    &self.shadow.lamps.layer_views[slot - 3],
+                    &self.shadow.lamps.layer_binds[slot - 3],
+                )
+            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("shadow-csm"),
+                label: Some(if slot < 3 {
+                    "shadow-csm"
+                } else {
+                    "shadow-lamp"
+                }),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow.layer_views[i],
+                    view: target,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -2581,17 +2616,17 @@ impl Renderer {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            if let Some(bundle) = self.shadow_bundles[i].as_ref() {
+            if let Some(bundle) = self.shadow_bundles[slot].as_ref() {
                 pass.execute_bundles(std::iter::once(bundle));
             }
             if world.living_in() == SpaceId::DEFAULT && self.voxel.is_drawing() {
                 let draws = self.voxel.visible_in(frustum);
                 pass.set_pipeline(&self.shadow.voxel_pipeline);
-                pass.set_bind_group(0, &self.shadow.cascade_binds[i], &[]);
+                pass.set_bind_group(0, view_bind, &[]);
                 self.voxel.draw(&mut pass, &draws);
             }
             pass.set_pipeline(&self.shadow.skinned_pipeline);
-            pass.set_bind_group(0, &self.shadow.cascade_binds[i], &[]);
+            pass.set_bind_group(0, view_bind, &[]);
             for (id, anim) in world.animated_entities() {
                 if anim.space() != world.living_in() {
                     continue;
@@ -2600,7 +2635,12 @@ impl Renderer {
                     continue;
                 };
                 let t = anim.transform().w_axis.truncate();
-                if t.distance(focus) > far + 16.0 {
+                let near = if slot < 3 {
+                    t.distance(focus) <= far + 16.0
+                } else {
+                    frustum.intersects_sphere(t + glam::Vec3::Y, 1.5)
+                };
+                if !near {
                     continue;
                 }
                 pass.set_bind_group(1, &gpu.joint_bind, &[]);
@@ -2662,17 +2702,20 @@ impl Renderer {
     fn select_shadow_culls(
         &mut self,
         world: &World,
-        light_frustums: &[Frustum; 3],
-    ) -> [ShadowCullSelection; 3] {
+        light_frustums: &[Frustum],
+    ) -> Vec<ShadowCullSelection> {
         if self.shadow_source_epoch != world.render_epoch() {
             self.rebuild_shadow_sources(world);
             self.shadow_source_epoch = world.render_epoch();
         }
-        let mut selections = std::array::from_fn(|_| ShadowCullSelection {
-            draws: Vec::new(),
-            batch_draws: Vec::new(),
-            compact_batches: Vec::new(),
-        });
+        let mut selections: Vec<ShadowCullSelection> = light_frustums
+            .iter()
+            .map(|_| ShadowCullSelection {
+                draws: Vec::new(),
+                batch_draws: Vec::new(),
+                compact_batches: Vec::new(),
+            })
+            .collect();
         for &id in &self.shadow_mesh_sources {
             if !entity_in_space(world, id, world.living_in()) {
                 continue;
@@ -2836,11 +2879,8 @@ impl Renderer {
         if world.instance_submit() != InstanceSubmit::GpuIndirect {
             return;
         }
-        let views = if world.shadows().is_some() {
-            4usize
-        } else {
-            1usize
-        };
+        let sun = if world.shadows().is_some() { 3 } else { 0 };
+        let views = 1 + sun + self.shadow.lamps.frame_views.len();
         let active_ranges = self
             .gpu_instance_batches
             .values()

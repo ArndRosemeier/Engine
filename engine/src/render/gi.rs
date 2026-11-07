@@ -170,7 +170,7 @@ fn uniform_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGrou
 /// group (0, after its uniform at binding 0) to the shadow resource group 1.
 fn shadow_resources_as_group1() -> String {
     let mut wgsl = super::shadow::SCENE_SHADOW_WGSL.to_string();
-    for binding in (1..=12).rev() {
+    for binding in (1..=14).rev() {
         wgsl = wgsl.replace(
             &format!("@group(0) @binding({binding})"),
             &format!("@group(1) @binding({})", binding - 1),
@@ -220,11 +220,12 @@ impl GiVolume {
             label: Some("gi-shader"),
             source: wgpu::ShaderSource::Wgsl(
                 format!(
-                    "{}{}{}{}{PARAMS_WGSL}{GI_WGSL}",
+                    "{}{}{}{}{}{PARAMS_WGSL}{GI_WGSL}",
                     super::pipeline::LIGHTING_WGSL,
                     super::shadow::SHADOW_UNIFORMS_WGSL,
                     shadow_resources_as_group1(),
                     super::shadow::SHADOW_EVAL_WGSL,
+                    super::lights::LAMP_EVAL_WGSL,
                 )
                 .replace("RAYS", &RAYS.to_string())
                 .replace("MAX_STEPS", &MAX_STEPS.to_string())

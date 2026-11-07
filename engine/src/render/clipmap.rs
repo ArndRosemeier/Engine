@@ -529,11 +529,13 @@ fn fs_land(in: VsOut) -> @location(0) vec4<f32> {
         let surf = ground_surface(in, n, grads);
         light.ao *= surf.orh.x;
         let lit = pbr_shade(surf.albedo, surf.n, v, light, surf.orh.y, 0.0, vis, sun_diffuse)
-            + surf.albedo * torch_light(in.world_p, surf.n);
+            + surf.albedo * torch_light(in.world_p, surf.n)
+            + lamp_light(surf.albedo, surf.n, v, in.world_p, surf.orh.y, 0.0);
         return vec4(lit, 1.0);
     }
     let lit = pbr_shade(in.color.rgb, n, v, light, 0.92, 0.0, vis, sun_diffuse)
-        + in.color.rgb * torch_light(in.world_p, n);
+        + in.color.rgb * torch_light(in.world_p, n)
+        + lamp_light(in.color.rgb, n, v, in.world_p, 0.92, 0.0);
     return vec4(lit, 1.0);
 }
 
@@ -572,7 +574,8 @@ fn fs_water(in: WaterVsOut) -> @location(0) vec4<f32> {
     let wrap = ndl * 0.5 + 0.5;
     let vis = sun_visibility(in.world_p, n, frame.eye);
     let lit = in.color.rgb * (frame.ambient + wrap * wrap * vis * frame.light_color)
-        + in.color.rgb * torch_light(in.world_p, n);
+        + in.color.rgb * torch_light(in.world_p, n)
+        + lamp_light(in.color.rgb, n, view, in.world_p, 0.1, 0.0);
     var alpha = in.color.a;
     alpha = mix(alpha, min(alpha + 0.18, 0.55), fresnel * 0.65);
     return vec4(lit, alpha);
@@ -833,11 +836,12 @@ impl ClipmapRenderer {
             label: Some("clipmap-shader"),
             source: wgpu::ShaderSource::Wgsl(
                 format!(
-                    "{}{SHADER}{}{}{}{}",
+                    "{}{SHADER}{}{}{}{}{}",
                     super::pipeline::LIGHTING_WGSL,
                     super::shadow::SHADOW_UNIFORMS_WGSL,
                     super::shadow::CLIPMAP_SHADOW_WGSL,
                     super::shadow::SHADOW_EVAL_WGSL,
+                    super::lights::LAMP_EVAL_WGSL,
                     super::grass::GRASS_WGSL
                 )
                 .into(),

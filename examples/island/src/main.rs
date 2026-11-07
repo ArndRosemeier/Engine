@@ -121,9 +121,7 @@ fn populate(world: &mut World, island: &Island) -> EngineResult<()> {
         .patch_size(40.0)
         .scale_range(0.75, 1.1)
         .on_ground(ground)
-        .only_where(|x, z| {
-            island.inland(x, z) > 20.0 && island.slope(x, z) < 1.8 && open(x, z)
-        })
+        .only_where(|x, z| island.inland(x, z) > 20.0 && island.slope(x, z) < 1.8 && open(x, z))
         .places()?;
     let kinds = [
         (TreeSpecies::Oak, 1),
@@ -153,7 +151,10 @@ fn populate(world: &mut World, island: &Island) -> EngineResult<()> {
     {
         world.spawn_lod_at(tree.lod_levels(), &places)?;
     }
-    for (tree, places) in models[kinds.len()..].iter().zip(Scatter::split(&palms, 2, 2)) {
+    for (tree, places) in models[kinds.len()..]
+        .iter()
+        .zip(Scatter::split(&palms, 2, 2))
+    {
         world.spawn_lod_at(tree.lod_levels(), &places)?;
     }
 
