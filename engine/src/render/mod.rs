@@ -281,6 +281,10 @@ pub struct Renderer {
     /// Last vsync preference applied to the surface, so capability queries
     /// and reconfiguration only run when the preference changes.
     synced_vsync: Option<bool>,
+    /// When the last swapchain image was acquired, and the time since the
+    /// one before (the display's frame rhythm).
+    last_acquire: Option<std::time::Instant>,
+    acquire_interval: Option<f32>,
     pipelines: Pipelines,
     terrain: TerrainPipelines,
     water: WaterPipelines,
@@ -471,7 +475,10 @@ impl Renderer {
             present_mode,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            // One frame in flight: with two, a vsynced CPU ran several frames
+            // ahead and then stalled, so frame times went 5, 5, 6, 50 ms and
+            // movement jumped every fourth frame. One also cuts input lag.
+            desired_maximum_frame_latency: 1,
         };
         surface.configure(&device, &config);
 
@@ -517,6 +524,8 @@ impl Renderer {
             config,
             env_present_mode,
             synced_vsync: None,
+            last_acquire: None,
+            acquire_interval: None,
             pipelines,
             terrain,
             water,
@@ -1115,6 +1124,12 @@ impl Renderer {
         after: impl FnOnce(&wgpu::Device, &wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView),
     ) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
+        // Acquiring waits for the display, so the time between acquires is
+        // the even rhythm frames reach the screen at.
+        let acquired = std::time::Instant::now();
+        if let Some(last) = self.last_acquire.replace(acquired) {
+            self.acquire_interval = Some((acquired - last).as_secs_f32());
+        }
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -1454,6 +1469,12 @@ impl Renderer {
     fn write_shadows(&mut self, world: &World) {
         self.shadow_vp = self.shadow.prepare(&self.queue, world);
         self.gpu_stats.shadow_atlas = self.shadow.atlas_wrote();
+    }
+
+    /// Seconds between the last two swapchain acquires: how often frames
+    /// actually reach the display (None before two frames).
+    pub fn acquire_interval(&self) -> Option<f32> {
+        self.acquire_interval
     }
 
     fn main_scene_camera(world: &World) -> Camera {

@@ -141,8 +141,6 @@ fn main() -> EngineResult<()> {
     let mut pitch = -4.0_f32;
 
     Engine::run("material_showcase", move |world, frame| {
-        // Uncapped so the title bar shows the real frame rate.
-        world.set_vsync(false);
         if frame.first {
             world.set_clear_color(rgb(10, 12, 18));
             world.set_sun((-0.4, -1.0, -0.25), 0.65);
@@ -302,9 +300,9 @@ fn main() -> EngineResult<()> {
             world.set_pointer_lock(true);
         }
         if world.pointer_lock() {
-            let mouse = frame.input.mouse_delta();
-            yaw -= mouse.x * 0.12;
-            pitch = (pitch - mouse.y * 0.12).clamp(-88.0, 88.0);
+            let (dyaw, dpitch) = frame.input.look_delta(0.12);
+            yaw += dyaw;
+            pitch = (pitch + dpitch).clamp(-88.0, 88.0);
         }
         let move_dir = frame.input.move_dir_xz(yaw);
         let speed = if frame.input.down(Key::Shift) {

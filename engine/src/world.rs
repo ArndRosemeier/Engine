@@ -1973,6 +1973,29 @@ impl World {
         self.pointer_lock
     }
 
+    /// The ray under the mouse cursor, `(origin, unit direction)`, for
+    /// picking, digging and placing. With the pointer locked or the cursor
+    /// outside the window it is the ray through the screen centre.
+    ///
+    /// ```no_run
+    /// # use engine::prelude::*;
+    /// # fn f(world: &mut World, frame: &Frame) {
+    /// let (eye, dir) = world.cursor_ray(frame);
+    /// if let Some(hit) = world.voxel_terrain().and_then(|t| t.raycast(eye, dir, 300.0)) {
+    ///     world.voxel_terrain_mut().unwrap().dig_sphere(hit, 3.0);
+    /// }
+    /// # }
+    /// ```
+    pub fn cursor_ray(&self, frame: &Frame) -> (Vec3, Vec3) {
+        let (w, h) = (frame.width as f32, frame.height as f32);
+        let at = frame
+            .input
+            .cursor()
+            .filter(|_| !self.pointer_lock)
+            .unwrap_or(glam::Vec2::new(w * 0.5, h * 0.5));
+        self.camera().ray_through(at.x, at.y, w, h)
+    }
+
     /// While true, Escape cancels bind-listen only: no modal close, unlock, or quit.
     pub fn set_bind_listen(&mut self, listening: bool) {
         self.bind_listen = listening;
