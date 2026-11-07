@@ -37,6 +37,7 @@ pub use crate::proc_terrain::{
 };
 pub use crate::props::{PropModel, PropPack};
 pub use crate::quality::Quality;
+pub use crate::ragdoll::{Knock, RagdollEvent, RagdollSettings, RagdollState};
 pub use crate::ribbons::{RibbonId, RibbonProfile, RibbonStyle, RibbonWorld};
 pub use crate::rocks::{rock_model, rock_model_with, RockModel, RockShape};
 pub use crate::scatter::Scatter;

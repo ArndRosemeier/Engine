@@ -280,6 +280,7 @@ impl App {
             self.world.tick_nav(dt);
             self.world.tick_animations(dt);
             self.world.tick_physics(dt);
+            self.world.tick_ragdolls(dt);
             self.world.tick_buildings(dt);
             self.world.tick_interpolation();
             self.world.tick_hierarchy();

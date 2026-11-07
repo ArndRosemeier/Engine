@@ -1083,6 +1083,8 @@ impl World {
             }
             alive
         });
+        // Knocked-down characters don't walk until they are up again.
+        ids.retain(|id| !self.is_ragdoll(*id));
         // Replan when the walkable area changed or an agent got stuck.
         for &id in &ids {
             let a = &self.nav.agents[&id];

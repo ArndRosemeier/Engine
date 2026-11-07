@@ -68,6 +68,7 @@ pub mod proc;
 pub mod proc_terrain;
 pub mod props;
 pub mod quality;
+pub mod ragdoll;
 pub mod ribbons;
 pub mod rocks;
 pub mod scatter;
@@ -140,6 +141,7 @@ pub use proc_terrain::{
     demo_terrain_rules, ClipmapConfig, Grass, HeightField, ProcTerrain, TerrainLayers,
 };
 pub use props::{PropModel, PropPack};
+pub use ragdoll::{Knock, RagdollEvent, RagdollSettings, RagdollState};
 pub use ribbons::{RibbonId, RibbonProfile, RibbonStyle, RibbonWorld};
 /// For your save data: `#[derive(engine::serde::Serialize, engine::serde::Deserialize)]`
 /// with `#[serde(crate = "engine::serde")]`, or add serde to your own crate.
