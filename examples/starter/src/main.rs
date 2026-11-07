@@ -115,6 +115,8 @@ fn main() -> EngineResult<()> {
     .with_speed(12.0);
 
     Engine::run("starter", move |world, frame| {
+        // Uncapped so the title bar shows the real frame rate.
+        world.set_vsync(false);
         if frame.first {
             world.set_quality(quality);
             if let Some(grass) = grass {

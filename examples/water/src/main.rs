@@ -114,6 +114,8 @@ fn main() -> EngineResult<()> {
     let mut crates = 0u32;
 
     Engine::run("water", move |world, frame| {
+        // Uncapped so the title bar shows the real frame rate.
+        world.set_vsync(false);
         if frame.first {
             let noise = Noise::new(5);
             let mut terrain = VoxelTerrain::new(Volume::new(1.0))

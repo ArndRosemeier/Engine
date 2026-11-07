@@ -137,6 +137,7 @@ fn main() -> EngineResult<()> {
     let mut animated = None;
 
     Engine::run("model_viewer", move |world, frame| {
+        world.set_vsync(false);
         if frame.first {
             world.set_clear_color(rgb(150, 180, 210));
             world.set_sun((0.5, 0.8, 0.35), 0.3);

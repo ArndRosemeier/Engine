@@ -31,6 +31,8 @@ fn main() -> EngineResult<()> {
     let atlas = checker_rgba(128, 96);
 
     Engine::run("ui_modal", move |world, frame| {
+        // Uncapped so the title bar shows the real frame rate.
+        world.set_vsync(false);
         if frame.first {
             world.spawn(
                 Shape::box_at(Vec3::ZERO, Vec3::new(2.0, 0.4, 2.0), rgb(180, 140, 90)).unwrap(),

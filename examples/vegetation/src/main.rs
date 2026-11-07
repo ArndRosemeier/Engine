@@ -23,6 +23,7 @@ fn main() -> EngineResult<()> {
     let screenshot = std::env::var_os("ENGINE_SCREENSHOT").is_some();
 
     Engine::run("vegetation", move |world, frame| {
+        world.set_vsync(false);
         if frame.first {
             world.spawn(Shape::box_at(
                 (0.0, -0.05, 0.0),

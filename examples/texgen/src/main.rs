@@ -47,6 +47,8 @@ fn main() -> EngineResult<()> {
     let walls = family == "facade" || family == "medieval";
     let roofs = family == "roof";
     Engine::run("texgen", move |world, frame| {
+        // Uncapped so the title bar shows the real frame rate.
+        world.set_vsync(false);
         if frame.first {
             world.spawn(Shape::box_at(
                 (0.0, -0.05, 0.0),

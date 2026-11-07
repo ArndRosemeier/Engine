@@ -40,6 +40,7 @@ fn main() -> EngineResult<()> {
 
     let mut models = Some(models);
     Engine::run("lod_forest", move |world, frame| {
+        world.set_vsync(false);
         if let Some(models) = models.take() {
             world.set_physical_sky(Some(PhysicalSky::at_hour(15.5)));
             world.spawn(Shape::box_at(
