@@ -1078,6 +1078,9 @@ pub struct Pipelines {
     pub opaque: wgpu::RenderPipeline,
     /// Voxel terrain through the same lit shader (compact vertex layout).
     pub voxel_opaque: wgpu::RenderPipeline,
+    /// After a depth prepass: same shading, depth test only (EXPERIMENT).
+    pub opaque_nowrite: wgpu::RenderPipeline,
+    pub voxel_nowrite: wgpu::RenderPipeline,
     pub voxel_depth_prepass: wgpu::RenderPipeline,
     pub transparent: wgpu::RenderPipeline,
     pub opaque_portal: wgpu::RenderPipeline,
@@ -1208,13 +1211,14 @@ pub fn create_pipelines(
 
     let make = |label: &str,
                 blend: wgpu::BlendState,
-                depth_write: bool,
+                _depth_write: bool,
                 cull: Option<wgpu::Face>,
                 depth_stencil: wgpu::DepthStencilState,
                 buffers: &[wgpu::VertexBufferLayout<'static>],
                 fs_entry: &str| {
-        // Opaque draws (the only ones writing depth) turn foliage alpha into coverage.
-        let alpha_to_coverage = depth_write;
+        // Opaque draws turn foliage alpha into coverage.
+        let alpha_to_coverage = blend == wgpu::BlendState::REPLACE
+            && !(fs_entry == "fs_voxel" && exp_flag("ENGINE_EXP_VOXEL_A2C_OFF"));
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&pipeline_layout),
@@ -1234,7 +1238,7 @@ pub fn create_pipelines(
                 })],
                 // See-through surfaces are not in the depth the AO came from.
                 compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: if depth_write {
+                    constants: if blend == wgpu::BlendState::REPLACE {
                         &[]
                     } else {
                         &[("SCENE_AO", 0.0)]
@@ -1301,6 +1305,24 @@ pub fn create_pipelines(
         &super::voxel_terrain::VOXEL_BUFFERS,
         "fs_voxel",
     );
+    let opaque_nowrite = make(
+        "opaque-nowrite-pipeline",
+        wgpu::BlendState::REPLACE,
+        false,
+        Some(wgpu::Face::Back),
+        super::stencil::scene_depth_stencil_unmasked_write(false),
+        &MESH_BUFFERS,
+        "fs_main",
+    );
+    let voxel_nowrite = make(
+        "voxel-nowrite-pipeline",
+        wgpu::BlendState::REPLACE,
+        false,
+        Some(wgpu::Face::Back),
+        super::stencil::scene_depth_stencil_unmasked_write(false),
+        &super::voxel_terrain::VOXEL_BUFFERS,
+        "fs_voxel",
+    );
     let depth_prepass_for = |label: &str, buffers: &[wgpu::VertexBufferLayout<'static>]| {
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
@@ -1336,6 +1358,8 @@ pub fn create_pipelines(
     Pipelines {
         opaque,
         voxel_opaque,
+        opaque_nowrite,
+        voxel_nowrite,
         voxel_depth_prepass,
         transparent,
         opaque_portal,
@@ -1349,4 +1373,9 @@ pub fn create_pipelines(
         neutral_maps,
         white_albedo,
     }
+}
+
+/// Temporary performance experiments switched by environment variables.
+pub(crate) fn exp_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| v.trim() == "1")
 }

@@ -2127,6 +2127,7 @@ impl Renderer {
         } = view;
         // Profile only the top-level view (portal views reuse this code).
         let stamp = !portal_mask && use_cull;
+        let nowrite = stamp && self.ao_active && pipeline::exp_flag("ENGINE_EXP_NOWRITE");
         self.mark_scene(pass, stamp, SceneMark::Begin);
         pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
 
@@ -2145,7 +2146,12 @@ impl Renderer {
         if draw_environment {
             if let Some(clip) = self.clipmap.as_ref() {
                 clip.draw_land(pass, &self.shadow.resource_bind, portal_mask);
-                self.mark_scene(pass, stamp, SceneMark::Land);
+            }
+        }
+        // Every stamp is written each frame: the readback waits for all.
+        self.mark_scene(pass, stamp, SceneMark::Land);
+        if draw_environment {
+            if let Some(clip) = self.clipmap.as_ref() {
                 if !portal_mask {
                     clip.draw_grass(pass, &self.shadow.resource_bind);
                 }
@@ -2157,7 +2163,11 @@ impl Renderer {
         self.mark_scene(pass, stamp, SceneMark::Grass);
         if !portal_mask && space == SpaceId::DEFAULT && self.voxel.is_drawing() {
             let draws = self.voxel.visible_in(&self.frustum);
-            pass.set_pipeline(&self.pipelines.voxel_opaque);
+            pass.set_pipeline(if nowrite {
+                &self.pipelines.voxel_nowrite
+            } else {
+                &self.pipelines.voxel_opaque
+            });
             pass.set_bind_group(1, &self.pipelines.white_albedo, &[]);
             self.voxel.draw(pass, &draws);
         }
@@ -2165,6 +2175,8 @@ impl Renderer {
         self.mark_scene(pass, stamp, SceneMark::Voxel);
         pass.set_pipeline(if portal_mask {
             &self.pipelines.opaque_portal
+        } else if nowrite {
+            &self.pipelines.opaque_nowrite
         } else {
             &self.pipelines.opaque
         });
