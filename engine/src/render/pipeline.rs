@@ -1021,10 +1021,18 @@ fn fs_voxel(in: VsOut) -> @location(0) vec4<f32> {
     let strata = fbm3(vec3<f32>(p.x * 0.04, p.y * 0.85, p.z * 0.04) + vec3<f32>(seed * 0.3), 0.55);
     let n = normalize(n0 + (vec3<f32>(fine, fbm3(p * 1.7 + 11.0, 0.5), fbm3(p * 1.7 + 23.0, 0.5)) - 0.5) * 0.18);
 
-    let rock = in.color.rgb * (0.62 + 0.5 * strata) * (0.86 + 0.28 * fine);
-    let earth = vec3<f32>(0.33, 0.25, 0.17) * (0.8 + 0.35 * broad) * (0.9 + 0.2 * fine);
-    let grass = mix(vec3<f32>(0.20, 0.33, 0.10), vec3<f32>(0.36, 0.42, 0.16), broad)
+    var rock = in.color.rgb * (0.62 + 0.5 * strata) * (0.86 + 0.28 * fine);
+    var earth = vec3<f32>(0.33, 0.25, 0.17) * (0.8 + 0.35 * broad) * (0.9 + 0.2 * fine);
+    var grass = mix(vec3<f32>(0.20, 0.33, 0.10), vec3<f32>(0.36, 0.42, 0.16), broad)
         * (0.85 + 0.3 * fine);
+    // Sand material: sand (the terrain colour) where grass would grow,
+    // weathered grey-brown rock on the steep faces.
+    if i32(round(in.surface3.w)) == 2 {
+        let sand = in.color.rgb * (0.9 + 0.2 * broad) * (0.9 + 0.2 * fine);
+        grass = sand;
+        earth = sand * 0.88;
+        rock = vec3<f32>(0.40, 0.37, 0.33) * (0.62 + 0.5 * strata) * (0.86 + 0.28 * fine);
+    }
     let up = n0.y + (broad - 0.5) * 0.3;
     let grass_w = smoothstep(0.72, 0.84, up);
     let earth_w = smoothstep(0.42, 0.62, up);

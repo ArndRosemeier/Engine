@@ -345,6 +345,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "coast"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "glam",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

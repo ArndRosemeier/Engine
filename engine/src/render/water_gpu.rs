@@ -40,7 +40,19 @@ struct Params {
     screen: [f32; 4],
     /// surface height above the eye, eye under water (0/1), time, wind.
     eye_water: [f32; 4],
+    /// Open sea: level, sea time, mean depth, 1 if there is a sea.
+    sea: [f32; 4],
+    /// Region max x, max z, unused, unused.
+    region_max: [f32; 4],
+    /// Swell trains: height (ramped), period, direction degrees, 0.
+    swell: [[f32; 4]; SWELLS],
 }
+
+/// Swell trains the far sea draws.
+const SWELLS: usize = 4;
+/// The far sea: rings around the region, segments per ring side.
+const SEA_RINGS: u32 = 100;
+const SEA_SEGMENTS: u32 = 64;
 
 /// What a frame of water drawing needs from the renderer.
 pub struct WaterFrame<'a> {
@@ -74,6 +86,7 @@ struct Buffers {
 
 pub struct WaterGpu {
     surface_pipeline: wgpu::RenderPipeline,
+    sea_pipeline: wgpu::RenderPipeline,
     resolve_pipeline: wgpu::RenderPipeline,
     under_pipeline: wgpu::RenderPipeline,
     surface_layout: wgpu::BindGroupLayout,
@@ -196,18 +209,18 @@ impl WaterGpu {
                 write_mask: wgpu::ColorWrites::ALL,
             })
         };
-        let surface_pipeline = {
+        let surface_like = |label: &str, vs: &str| {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("water-surface-pipeline-layout"),
                 bind_group_layouts: &[scene_layout, &surface_layout],
                 push_constant_ranges: &[],
             });
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("water-surface"),
+                label: Some(label),
                 layout: Some(&layout),
                 vertex: wgpu::VertexState {
                     module: &surface_shader,
-                    entry_point: Some("vs_surface"),
+                    entry_point: Some(vs),
                     buffers: &[],
                     compilation_options: Default::default(),
                 },
@@ -234,6 +247,8 @@ impl WaterGpu {
                 cache: None,
             })
         };
+        let surface_pipeline = surface_like("water-surface", "vs_surface");
+        let sea_pipeline = surface_like("water-sea", "vs_sea");
         let fullscreen = |label: &str,
                           shader: &wgpu::ShaderModule,
                           layouts: &[&wgpu::BindGroupLayout],
@@ -303,6 +318,7 @@ impl WaterGpu {
         });
         Self {
             surface_pipeline,
+            sea_pipeline,
             resolve_pipeline,
             under_pipeline,
             surface_layout,
@@ -492,13 +508,23 @@ impl WaterGpu {
 
         // Is the eye in water, and how high is the surface above it?
         let sample = water.sample(frame.eye);
-        let (eye_surface, eye_under) = match sample {
-            Some(s) if s.submerged() => (s.surface_y, 1.0),
-            Some(s) => (s.surface_y, 0.0),
-            None => (frame.eye.y - 1e4, 0.0),
-        };
-        let look = water.look();
         let region = water.region();
+        let outside = {
+            let (lo, hi) = (region.min_xz, region.max_xz());
+            frame.eye.x < lo.x || frame.eye.z < lo.y || frame.eye.x > hi.x || frame.eye.z > hi.y
+        };
+        let open_sea = water.sea().filter(|_| outside).map(|sea| {
+            let xz = glam::Vec2::new(frame.eye.x, frame.eye.z);
+            sea.level + sea.incoming(xz, water.sea_time(), water.sea_depth())
+        });
+        let (eye_surface, eye_under) = match (sample, open_sea) {
+            (_, Some(y)) => (y, if frame.eye.y < y { 1.0 } else { 0.0 }),
+            (Some(s), _) if s.submerged() => (s.surface_y, 1.0),
+            (Some(s), _) => (s.surface_y, 0.0),
+            (None, None) => (frame.eye.y - 1e4, 0.0),
+        };
+        let in_water = sample.is_some() || open_sea.is_some();
+        let look = water.look();
         let params = Params {
             inv_view_proj: frame.view_proj.inverse().to_cols_array_2d(),
             region: [
@@ -532,6 +558,21 @@ impl WaterGpu {
                 1.0 / size[1] as f32,
             ],
             eye_water: [eye_surface, eye_under, frame.time, frame.wind],
+            sea: match water.sea() {
+                Some(sea) => [sea.level, water.sea_time(), water.sea_depth(), 1.0],
+                None => [0.0; 4],
+            },
+            region_max: [region.max_xz().x, region.max_xz().y, 0.0, 0.0],
+            swell: {
+                let mut out = [[0.0; 4]; SWELLS];
+                if let Some(sea) = water.sea() {
+                    let ramp = sea.ramp(water.sea_time());
+                    for (o, s) in out.iter_mut().zip(&sea.swell) {
+                        *o = [s.height * ramp, s.period, s.direction_deg, 0.0];
+                    }
+                }
+                out
+            },
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
 
@@ -620,8 +661,9 @@ impl WaterGpu {
             pass.draw(0..3, 0..1);
         }
 
-        // 2. The surface.
-        if !self.draw.is_empty() {
+        // 2. The surface, then the open sea around it.
+        let has_sea = water.sea().is_some();
+        if !self.draw.is_empty() || has_sea {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("water-surface"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -643,14 +685,20 @@ impl WaterGpu {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.surface_pipeline);
             pass.set_bind_group(0, frame.scene_bind, &[]);
             pass.set_bind_group(1, surface_bind, &[]);
-            pass.draw(0..6, 0..self.draw.len() as u32);
+            if !self.draw.is_empty() {
+                pass.set_pipeline(&self.surface_pipeline);
+                pass.draw(0..6, 0..self.draw.len() as u32);
+            }
+            if has_sea {
+                pass.set_pipeline(&self.sea_pipeline);
+                pass.draw(0..6, 0..SEA_RINGS * SEA_SEGMENTS * 4);
+            }
         }
 
         // 3. Under water: fog by distance through water.
-        if eye_surface > frame.eye.y - 2.0 && sample.is_some() {
+        if eye_surface > frame.eye.y - 2.0 && in_water {
             copy_scene(encoder);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("water-under"),
@@ -684,7 +732,32 @@ struct WaterParams {
     look: vec4<f32>,
     screen: vec4<f32>,
     eye_water: vec4<f32>,
+    sea: vec4<f32>,
+    region_max: vec4<f32>,
+    swell: array<vec4<f32>, 4>,
 };
+
+// Incoming swell above sea level at `p` (matches water::Sea::incoming);
+// xyz = height, d/dx, d/dz. Waves shorter than `fade_len` fade out.
+fn swell_at(p: vec2<f32>, fade_len: f32) -> vec3<f32> {
+    let t = wp.sea.y;
+    let c = sqrt(9.81 * max(wp.sea.z, 0.5));
+    var out = vec3<f32>(0.0);
+    for (var i = 0; i < 4; i++) {
+        let s = wp.swell[i];
+        if s.x == 0.0 {
+            continue;
+        }
+        let omega = 6.2831853 / max(s.y, 0.5);
+        let a = radians(s.z);
+        let k = vec2<f32>(sin(a), cos(a)) * (omega / c);
+        let wavelength = 6.2831853 / length(k);
+        let amp = 0.5 * s.x * smoothstep(0.5 * wavelength, 0.25 * wavelength, fade_len);
+        let phase = omega * t - dot(k, p) + f32(i) * 1.3;
+        out += vec3<f32>(amp * cos(phase), amp * sin(phase) * k);
+    }
+    return out;
+}
 
 // World position of a pixel (uv 0..1, y down) at a raw depth.
 fn world_at(uv: vec2<f32>, raw_depth: f32) -> vec3<f32> {
@@ -776,6 +849,7 @@ const SURFACE_WGSL: &str = r#"
 
 const NO_CELL: u32 = 0xffffffffu;
 const DRAW_DEPTH: f32 = 0.004;
+const SEA_SEGMENTS: u32 = 64u;
 
 fn is_wet(i: u32) -> bool {
     if i == NO_CELL {
@@ -875,6 +949,49 @@ fn vs_surface(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) 
     return out;
 }
 
+// Distance of far-sea ring `r` outside the region: 3 m first, then
+// growing by 7 % per ring (100 rings reach about 40 km).
+fn sea_ring(r: f32) -> f32 {
+    return 3.0 * (pow(1.07, r) - 1.0) / 0.07;
+}
+
+// A point on ring `r` at perimeter segment `s` (four sides, corner to corner).
+fn sea_point(s: u32, r: u32) -> vec2<f32> {
+    let n = SEA_SEGMENTS;
+    let side = (s / n) % 4u;
+    let t = f32(s % n) / f32(n);
+    let e = sea_ring(f32(r));
+    let lo = wp.region.xy - vec2<f32>(e);
+    let hi = wp.region_max.xy + vec2<f32>(e);
+    switch side {
+        case 0u: { return vec2<f32>(mix(lo.x, hi.x, t), lo.y); }
+        case 1u: { return vec2<f32>(hi.x, mix(lo.y, hi.y, t)); }
+        case 2u: { return vec2<f32>(mix(hi.x, lo.x, t), hi.y); }
+        default: { return vec2<f32>(lo.x, mix(hi.y, lo.y, t)); }
+    }
+}
+
+// The open sea beyond the simulated region, with the incoming swell.
+@vertex
+fn vs_sea(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VsOut {
+    var order = array<u32, 6>(0u, 1u, 3u, 0u, 3u, 2u);
+    let k = order[vi];
+    let per_ring = SEA_SEGMENTS * 4u;
+    let s = ii % per_ring + (k & 1u);
+    let r = ii / per_ring + (k >> 1u);
+    let xz = sea_point(s, r);
+    // Spacing of the mesh here: waves much shorter only alias.
+    let spacing = max(sea_ring(f32(r) + 1.0) - sea_ring(f32(r)), distance(sea_point(s + 1u, r), xz));
+    let w = swell_at(xz, spacing);
+    var out: VsOut;
+    out.world_p = vec3<f32>(xz.x, wp.sea.x + w.x, xz.y);
+    out.clip = u.view_proj * vec4<f32>(out.world_p, 1.0);
+    out.grad = w.yz;
+    out.flow = vec2<f32>(0.0);
+    out.depth = max(wp.sea.z, 2.0);
+    return out;
+}
+
 // Slope of a handful of travelling deep-water waves around the wind.
 // `footprint` is the size of a pixel on the surface: waves much shorter
 // than that only alias, so they fade out.
@@ -923,6 +1040,27 @@ fn scene_depth(pix: vec2<f32>) -> f32 {
     return textureLoad(depth_tex, c, 0).r;
 }
 
+// The sky as drawn on screen in direction `r`: the pixel where that
+// direction lies (clamped to the screen edge), if it shows sky. Matches the
+// drawn sky far better than evaluating a sky model. w = 0 if not found.
+fn screen_sky(r: vec3<f32>) -> vec4<f32> {
+    let c = u.view_proj * vec4<f32>(r, 0.0);
+    if c.w <= 1e-4 {
+        return vec4<f32>(0.0);
+    }
+    let ndc = c.xy / c.w;
+    let uv = clamp(vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5), vec2<f32>(0.002), vec2<f32>(0.998));
+    // Step toward the top of the screen until the sky shows.
+    var q = uv;
+    for (var i = 0; i < 6; i++) {
+        if scene_depth(q * wp.screen.xy) <= 0.0 {
+            return vec4<f32>(textureSampleLevel(refract_tex, lin, q, 0.0).rgb, 1.0);
+        }
+        q.y = max(q.y - 0.08, 0.002);
+    }
+    return vec4<f32>(0.0);
+}
+
 // Screen-space reflection: march the reflected ray against the scene depth.
 // Returns colour and confidence (0 = fall back to the sky).
 fn reflect_ray(p: vec3<f32>, r: vec3<f32>) -> vec4<f32> {
@@ -946,16 +1084,20 @@ fn reflect_ray(p: vec3<f32>, r: vec3<f32>) -> vec4<f32> {
             if ray_dist > scene_dist && ray_dist - scene_dist < t * 0.35 + 0.3 {
                 let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
                 let conf = smoothstep(0.0, 0.08, edge);
-                return vec4<f32>(textureSampleLevel(refract_tex, lin, uv, 0.0).rgb, conf);
+                let hit = textureSampleLevel(refract_tex, lin, uv, 0.0).rgb;
+                let sky = screen_sky(r);
+                if sky.w > 0.0 {
+                    return vec4<f32>(mix(sky.rgb, hit, conf), 1.0);
+                }
+                return vec4<f32>(hit, conf);
             }
         } else if t > 30.0 {
             // Reached open sky on screen: the sky drawn there is the reflection.
-            let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-            return vec4<f32>(textureSampleLevel(refract_tex, lin, uv, 0.0).rgb, smoothstep(0.0, 0.08, edge));
+            return vec4<f32>(textureSampleLevel(refract_tex, lin, uv, 0.0).rgb, 1.0);
         }
         t *= 1.22;
     }
-    return vec4<f32>(0.0);
+    return screen_sky(r);
 }
 
 fn scene_light() -> SceneLight {
