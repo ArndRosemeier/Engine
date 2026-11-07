@@ -19,6 +19,7 @@ mod taa;
 mod terrain_pipeline;
 mod terrain_shadow;
 mod voxel_terrain;
+mod water_gpu;
 mod water_pipeline;
 
 use crate::camera::Camera;
@@ -290,6 +291,9 @@ pub struct Renderer {
     portal: PortalGpu,
     depth_view: wgpu::TextureView,
     depth_texture: wgpu::Texture,
+    water_gpu: water_gpu::WaterGpu,
+    /// Scene uniform slot of the main view this frame.
+    main_uniform_slot: usize,
     /// Ambient occlusion from the depth prepass.
     ssao: ssao::Ssao,
     /// This frame ran the depth prepass and SSAO.
@@ -499,6 +503,11 @@ impl Renderer {
         let ribbons = RibbonGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
         let postprocess = Postprocess::new(&device, format, config.width, config.height);
         let taa = taa::Taa::new(&device, &depth_texture, config.width, config.height);
+        let water_gpu = water_gpu::WaterGpu::new(
+            &device,
+            &pipelines.bind_layout,
+            depth_texture.sample_count() > 1,
+        );
         Self {
             surface,
             device,
@@ -518,6 +527,8 @@ impl Renderer {
             portal,
             depth_view,
             depth_texture,
+            water_gpu,
+            main_uniform_slot: 0,
             ssao,
             ao_active: false,
             gi,
@@ -643,6 +654,7 @@ impl Renderer {
             self.config.height,
         );
         self.last_color = None;
+        self.water_gpu.resize();
     }
 
     pub fn take_gpu_stats(&mut self) -> GpuFrameStats {
@@ -1118,6 +1130,28 @@ impl Renderer {
         };
         let (scene_view, scene_resolve) = self.postprocess.scene_attachment();
         self.encode_world(&mut encoder, &scene_view, scene_resolve.as_ref(), world);
+        if let Some(water) = world.water() {
+            let camera = Self::main_scene_camera(world);
+            let aspect = width as f32 / height as f32;
+            let view_proj = taa::jittered(camera.view_projection(aspect), self.taa_jitter);
+            let (scene_view, scene_texture) = self.postprocess.scene_target();
+            self.water_gpu.encode(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &self.depth_texture,
+                water,
+                water_gpu::WaterFrame {
+                    scene_view,
+                    scene_texture,
+                    scene_bind: self.pipelines.scene_bind_group(self.main_uniform_slot),
+                    view_proj,
+                    eye: camera.eye(),
+                    time: world.time(),
+                    wind: world.wind(),
+                },
+            );
+        }
         if taa_on {
             let aspect = width as f32 / height as f32;
             let vp = Self::main_scene_camera(world).view_projection(aspect);
@@ -1448,6 +1482,7 @@ impl Renderer {
         self.ao_active = ao.is_some();
         let main_uniform_slot =
             self.write_scene_uniforms(world, &scene_camera, None, SceneUniformTarget::Main);
+        self.main_uniform_slot = main_uniform_slot;
         let gi_placement = world
             .global_illumination()
             .map(|gi| gi::GiPlacement::around(scene_camera.eye(), gi.probe_spacing_m()));

@@ -3130,6 +3130,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "water"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "glam",
+]
+
+[[package]]
 name = "wayland-backend"
 version = "0.3.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"

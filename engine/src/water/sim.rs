@@ -196,6 +196,7 @@ pub struct WaterStats {
 pub struct Water {
     pub(crate) region: WaterRegion,
     pub(crate) settings: WaterSettings,
+    look: super::WaterLook,
     // Topology: cells of column c are col_start[c]..col_start[c + 1].
     pub(crate) col_start: Vec<u32>,
     pub(crate) floor: Vec<f32>,
@@ -256,6 +257,7 @@ impl Water {
         let mut water = Self {
             region,
             settings,
+            look: super::WaterLook::default(),
             col_start: Vec::new(),
             floor: Vec::new(),
             ceil: Vec::new(),
@@ -298,6 +300,21 @@ impl Water {
 
     pub fn set_settings(&mut self, settings: WaterSettings) {
         self.settings = settings;
+    }
+
+    /// How the water is drawn.
+    pub fn look(&self) -> &super::WaterLook {
+        &self.look
+    }
+
+    pub fn set_look(&mut self, look: super::WaterLook) {
+        self.look = look;
+    }
+
+    /// Builder form of [`Water::set_look`].
+    pub fn with_look(mut self, look: super::WaterLook) -> Self {
+        self.look = look;
+        self
     }
 
     pub fn stats(&self) -> WaterStats {
@@ -592,7 +609,7 @@ impl Water {
 
     /// The neighbour of `cell` one column over (dx or dz is ±1) joined to it
     /// by the widest link.
-    fn linked_cell(&self, cell: usize, dx: i32, dz: i32) -> Option<usize> {
+    pub(crate) fn linked_cell(&self, cell: usize, dx: i32, dz: i32) -> Option<usize> {
         let axis = if dx != 0 { 0 } else { 1 };
         let positive = dx + dz > 0;
         let (from, to) = (

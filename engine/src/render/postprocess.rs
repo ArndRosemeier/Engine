@@ -48,9 +48,11 @@ impl Target {
             wgpu::TextureUsages::RENDER_ATTACHMENT
         } else {
             // Copy destination: the TAA pass writes its result back here.
+            // Copy source: water copies the scene to refract it.
             wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
