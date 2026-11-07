@@ -15,7 +15,7 @@
 
 mod atlas;
 mod grow;
-mod rng;
+pub(crate) mod rng;
 mod species;
 
 pub use species::TreeSpecies;

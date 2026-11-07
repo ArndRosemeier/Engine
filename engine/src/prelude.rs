@@ -27,6 +27,7 @@ pub use crate::proc::{scatter_on_xz, Noise};
 pub use crate::proc_terrain::{demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain};
 pub use crate::props::{PropModel, PropPack};
 pub use crate::ribbons::{RibbonId, RibbonProfile, RibbonStyle, RibbonWorld};
+pub use crate::rocks::{rock_model, RockModel, RockShape};
 pub use crate::sky::{PhysicalSky, SkyWeather};
 pub use crate::space::{
     ChunkCoord, ChunkId, ChunkLayer, ChunkLevel, ChunkSpan, GlobalPosition, GlobalXZ, RenderOrigin,
@@ -40,6 +41,7 @@ pub use crate::texture::{
     TerrainMaterialDesc, TextureId,
 };
 pub use crate::ui::{UiFrame, UiPanel};
+pub use crate::vegetation::{shrub_model, tree_model, TreeModel, TreeSpecies};
 pub use crate::vfx::{Delivery, EffectHandle, EffectSpec, VfxPalette, VfxSystem, VisualKind};
 pub use crate::voxel_terrain::VoxelTerrain;
 pub use crate::water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
