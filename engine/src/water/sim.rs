@@ -443,6 +443,93 @@ impl Water {
         self.total_volume() - before
     }
 
+    /// Fill every column open to the sky up to `level(x, z)` (no water
+    /// where it returns `None`): seas and lakes laid down from a world
+    /// generator. Returns the cubic metres added.
+    pub fn fill_levels(&mut self, level: impl Fn(f32, f32) -> Option<f32>) -> f64 {
+        let before = self.total_volume();
+        let (nx, nz) = (self.region.cells_x, self.region.cells_z);
+        for z in 0..nz {
+            for x in 0..nx {
+                let c = (z * nx + x) as usize;
+                let (from, to) = (self.col_start[c] as usize, self.col_start[c + 1] as usize);
+                if from == to {
+                    continue;
+                }
+                let p = self.region.column_centre(x, z);
+                let Some(level) = level(p.x, p.y) else {
+                    continue;
+                };
+                // The top cell, if it is open to the sky.
+                let top = to - 1;
+                if self.ceil[top].is_finite() && self.ceil[top] < self.region.y_max {
+                    continue;
+                }
+                let target = self.depth_for_head(top, level);
+                if target > self.depth[top] {
+                    self.depth[top] = target;
+                }
+            }
+        }
+        self.time_step_reset();
+        self.wake_all();
+        self.state_rev += 1;
+        self.total_volume() - before
+    }
+
+    /// Take over the water of `old` (a window this one replaces) wherever
+    /// the two overlap: each cell copies the depth and marks of the old cell
+    /// whose span it overlaps most. Flow restarts from rest there.
+    pub fn adopt_state(&mut self, old: &Water) {
+        if old.region.cell_size != self.region.cell_size {
+            return;
+        }
+        let (nx, nz) = (self.region.cells_x, self.region.cells_z);
+        let mut adopted = false;
+        for z in 0..nz {
+            for x in 0..nx {
+                let p = self.region.column_centre(x, z);
+                let Some((ox, oz)) = old.region.column_at(p.x, p.y) else {
+                    continue;
+                };
+                let c = (z * nx + x) as usize;
+                let oc = (oz * old.region.cells_x + ox) as usize;
+                let (of, ot) = (old.col_start[oc] as usize, old.col_start[oc + 1] as usize);
+                for cell in self.col_start[c] as usize..self.col_start[c + 1] as usize {
+                    let (lo, hi) = (self.floor[cell], self.ceil[cell].min(1.0e6));
+                    let best = (of..ot)
+                        .map(|o| {
+                            let overlap = hi.min(old.ceil[o].min(1.0e6)) - lo.max(old.floor[o]);
+                            (overlap, o)
+                        })
+                        .filter(|(overlap, _)| *overlap > 0.0)
+                        .max_by(|a, b| a.0.total_cmp(&b.0));
+                    if let Some((_, o)) = best {
+                        // Keep the same surface height, not the same depth.
+                        let head = old.floor[o] + old.depth[o];
+                        let depth = self.depth_for_head(cell, head);
+                        self.depth[cell] = depth.max(0.0);
+                        if let (Some(m), Some(om)) = (self.marks.get_mut(cell), old.marks.get(o)) {
+                            *m = *om;
+                        }
+                        adopted = true;
+                    }
+                }
+            }
+        }
+        if adopted {
+            if self.sea.is_none() && old.sea.is_some() {
+                self.set_sea(old.sea.clone());
+            }
+            // The swell carries on where it was instead of ramping up again.
+            self.sea_clock = old.sea_clock;
+            self.time = old.time;
+            self.time_step_reset();
+            self.wake_all();
+            self.state_rev += 1;
+        }
+    }
+
     /// Depth that gives cell `i` the head `level` (pressurised if needed).
     fn depth_for_head(&self, i: usize, level: f32) -> f32 {
         let cap = self.ceil[i] - self.floor[i];

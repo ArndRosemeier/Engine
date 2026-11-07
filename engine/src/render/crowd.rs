@@ -328,7 +328,10 @@ impl CrowdGpu {
                 cache: None,
             })
         };
-        let opaque = make("crowd-opaque", super::stencil::scene_depth_stencil_unmasked());
+        let opaque = make(
+            "crowd-opaque",
+            super::stencil::scene_depth_stencil_unmasked(),
+        );
         let opaque_portal = make(
             "crowd-opaque-portal",
             super::stencil::scene_depth_stencil_masked(),
@@ -555,7 +558,10 @@ mod tests {
             }
         }
         assert_eq!(b.clips[IDLE].0, 0);
-        assert_eq!(b.rows.len(), (b.clips[0].1 + b.clips[1].1) as usize * joints * 3);
+        assert_eq!(
+            b.rows.len(),
+            (b.clips[0].1 + b.clips[1].1) as usize * joints * 3
+        );
         assert_eq!(std::mem::size_of::<CrowdInstanceRaw>(), 96);
     }
 }

@@ -25,6 +25,9 @@ pub const CHUNK_SIZE: i32 = 32;
 
 #[derive(Clone, Debug)]
 struct Chunk {
+    /// Changed by an edit or written by the owner (not just a copy of the
+    /// [`VolumeSource`]). Only these must be kept when the chunk is evicted.
+    edited: bool,
     /// Density samples at cell corners: (CHUNK_SIZE+1)^3
     /// Positive = solid, negative = empty. Surface at 0.
     samples: Vec<f32>,
@@ -40,6 +43,7 @@ impl Chunk {
     fn new() -> Self {
         let n = (CHUNK_SIZE + 1) as usize;
         Self {
+            edited: true,
             samples: vec![-1.0; n * n * n],
             materials: None,
             dirty: true,
@@ -63,6 +67,43 @@ impl Chunk {
     }
 }
 
+/// Where a [`Volume`] reads density that no chunk holds: a procedural world
+/// the chunks are a cache of (plus edits). Without one, missing chunks are
+/// empty space.
+pub trait VolumeSource: Send + Sync {
+    /// Density at a world position, in voxels (positive solid, surface at 0).
+    fn density(&self, p: Vec3) -> f32;
+
+    /// Fill `out` with the `n`³ corner densities starting at world position
+    /// `origin`, `step` metres apart, x fastest then z then y. Override when
+    /// the world is cheaper to sample a column at a time (height fields).
+    fn fill(&self, origin: Vec3, step: f32, n: usize, out: &mut Vec<f32>) {
+        out.clear();
+        out.reserve(n * n * n);
+        for y in 0..n {
+            for z in 0..n {
+                for x in 0..n {
+                    let p = origin + Vec3::new(x as f32, y as f32, z as f32) * step;
+                    let d = self.density(p);
+                    out.push(if d.is_finite() { d } else { -1.0 });
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SourceRef(std::sync::Arc<dyn VolumeSource>);
+
+impl std::fmt::Debug for SourceRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VolumeSource")
+    }
+}
+
+/// Removals remembered for [`Volume::removed_since`].
+const REMOVED_LOG: usize = 4096;
+
 /// Chunked scalar volume for caves, overhangs, and landscapes.
 #[derive(Clone, Debug)]
 pub struct Volume {
@@ -72,6 +113,22 @@ pub struct Volume {
     rev: u64,
     /// Revision of the last chunk removal (removals leave no chunk to stamp).
     removed_rev: u64,
+    /// Recent removals as (revision, key), oldest first.
+    removed_log: std::collections::VecDeque<(u64, IVec3)>,
+    /// Revision of the newest removal dropped from the log.
+    removed_dropped: u64,
+    /// Bumped when the set of chunks changes without the density changing
+    /// (a cached copy of the source loaded or dropped).
+    layout_rev: u64,
+    source: Option<SourceRef>,
+}
+
+/// An edited chunk taken out of a [`Volume`] by [`Volume::evict`].
+#[derive(Clone, Debug)]
+pub struct EditedChunk {
+    pub key: IVec3,
+    pub(crate) samples: Vec<f32>,
+    pub(crate) materials: Option<Vec<u8>>,
 }
 
 impl Default for Volume {
@@ -99,7 +156,146 @@ impl Volume {
             chunks: HashMap::new(),
             rev: 1,
             removed_rev: 0,
+            removed_log: std::collections::VecDeque::new(),
+            removed_dropped: 0,
+            layout_rev: 0,
+            source: None,
         })
+    }
+
+    /// Read missing chunks from `source` instead of treating them as empty,
+    /// and start new chunks (from edits) as a copy of it. The chunks become
+    /// a cache of a procedural world: load the ones near the camera with
+    /// [`Self::insert_generated`], drop far ones with [`Self::evict`].
+    pub fn with_source(mut self, source: std::sync::Arc<dyn VolumeSource>) -> Self {
+        self.source = Some(SourceRef(source));
+        self
+    }
+
+    pub fn has_source(&self) -> bool {
+        self.source.is_some()
+    }
+
+    /// Density where no chunk is stored.
+    fn missing(&self, g: IVec3) -> f32 {
+        match &self.source {
+            Some(s) => {
+                let d = s.0.density(g.as_vec3() * self.voxel_size);
+                if d.is_finite() {
+                    d
+                } else {
+                    -1.0
+                }
+            }
+            None => -1.0,
+        }
+    }
+
+    /// A new chunk: a copy of the source, or empty.
+    fn fresh_chunk(&self, key: IVec3) -> Chunk {
+        let mut chunk = Chunk::new();
+        if let Some(s) = &self.source {
+            let n = (CHUNK_SIZE + 1) as usize;
+            let origin = (key * CHUNK_SIZE).as_vec3() * self.voxel_size;
+            s.0.fill(origin, self.voxel_size, n, &mut chunk.samples);
+            if chunk.samples.len() != n * n * n {
+                chunk.samples.resize(n * n * n, -1.0);
+            }
+        }
+        chunk
+    }
+
+    /// Store a chunk generated from the source (a cached copy, not an edit).
+    /// A chunk already held (edited, or loaded) is kept. `samples` are the
+    /// `(CHUNK_SIZE + 1)`³ corners in [`VolumeSource::fill`] order. Returns
+    /// whether it was stored.
+    pub fn insert_generated(&mut self, key: IVec3, samples: Vec<f32>) -> bool {
+        let n = ((CHUNK_SIZE + 1) as usize).pow(3);
+        if samples.len() != n || self.chunks.contains_key(&key) {
+            return false;
+        }
+        self.layout_rev += 1;
+        self.chunks.insert(
+            key,
+            Chunk {
+                edited: false,
+                samples,
+                materials: None,
+                dirty: true,
+                rev: 0,
+            },
+        );
+        true
+    }
+
+    /// Drop a chunk. An edited one is returned (samples and materials) so
+    /// the caller can keep the edit and put it back later with
+    /// [`Self::restore_edited`]; a plain cached copy returns `None`.
+    pub fn evict(&mut self, key: IVec3) -> Option<EditedChunk> {
+        let chunk = self.chunks.remove(&key)?;
+        if chunk.edited {
+            self.note_removed(key);
+            Some(EditedChunk {
+                key,
+                samples: chunk.samples,
+                materials: chunk.materials,
+            })
+        } else {
+            self.layout_rev += 1;
+            None
+        }
+    }
+
+    /// Put an evicted edit back.
+    pub fn restore_edited(&mut self, chunk: EditedChunk) -> bool {
+        self.put_chunk_raw(chunk.key, chunk.samples, chunk.materials)
+    }
+
+    /// Whether `key` holds an edit (or owner-written data), not a cached copy.
+    pub fn is_edited(&self, key: IVec3) -> bool {
+        self.chunks.get(&key).is_some_and(|c| c.edited)
+    }
+
+    /// Every chunk holding an edit.
+    pub fn edited_chunks(&self) -> impl Iterator<Item = IVec3> + '_ {
+        self.chunks
+            .iter()
+            .filter(|(_, c)| c.edited)
+            .map(|(k, _)| *k)
+    }
+
+    /// Changes when chunks are loaded or dropped without the density changing.
+    pub fn layout_rev(&self) -> u64 {
+        self.layout_rev
+    }
+
+    /// Keys removed after revision `since`, or `None` when that is too long
+    /// ago to know (treat it as "anything may have gone").
+    pub fn removed_since(&self, since: u64) -> Option<Vec<IVec3>> {
+        if self.removed_rev <= since {
+            return Some(Vec::new());
+        }
+        if since < self.removed_dropped {
+            return None;
+        }
+        Some(
+            self.removed_log
+                .iter()
+                .filter(|(rev, _)| *rev > since)
+                .map(|(_, k)| *k)
+                .collect(),
+        )
+    }
+
+    fn note_removed(&mut self, key: IVec3) {
+        self.rev += 1;
+        self.removed_rev = self.rev;
+        if self.removed_log.len() == REMOVED_LOG {
+            if let Some((rev, _)) = self.removed_log.pop_front() {
+                self.removed_dropped = rev;
+            }
+        }
+        self.removed_log.push_back((self.rev, key));
     }
 
     fn estimate_samples(min: Vec3, max: Vec3, step: f32) -> EngineResult<u64> {
@@ -155,9 +351,13 @@ impl Volume {
             return false;
         }
         self.rev += 1;
+        if !self.chunks.contains_key(&key) {
+            self.layout_rev += 1;
+        }
         self.chunks.insert(
             key,
             Chunk {
+                edited: true,
                 samples,
                 materials,
                 dirty: true,
@@ -169,8 +369,8 @@ impl Volume {
 
     pub fn remove_chunk_data(&mut self, key: IVec3) {
         if self.chunks.remove(&key).is_some() {
-            self.rev += 1;
-            self.removed_rev = self.rev;
+            self.note_removed(key);
+            self.layout_rev += 1;
         }
     }
 
@@ -203,8 +403,14 @@ impl Volume {
     fn ensure_chunk(&mut self, key: IVec3) -> &mut Chunk {
         self.rev += 1;
         let rev = self.rev;
-        let chunk = self.chunks.entry(key).or_insert_with(Chunk::new);
+        if !self.chunks.contains_key(&key) {
+            let fresh = self.fresh_chunk(key);
+            self.chunks.insert(key, fresh);
+            self.layout_rev += 1;
+        }
+        let chunk = self.chunks.get_mut(&key).expect("just ensured");
         chunk.rev = rev;
+        chunk.edited = true;
         chunk
     }
 
@@ -233,7 +439,7 @@ impl Volume {
         let (chunk_key, local) = self.world_to_grid(world.into());
         match self.chunks.get(&chunk_key) {
             Some(c) => c.get(local.x, local.y, local.z),
-            None => -1.0,
+            None => self.missing(chunk_key * CHUNK_SIZE + local),
         }
     }
 
@@ -492,9 +698,11 @@ impl Volume {
             }
             keep
         });
+        for &key in &removed {
+            self.note_removed(key);
+        }
         if !removed.is_empty() {
-            self.rev += 1;
-            self.removed_rev = self.rev;
+            self.layout_rev += 1;
         }
         removed
     }
@@ -567,9 +775,13 @@ impl Volume {
             .collect();
         self.rev += 1;
         for (key, samples) in built {
+            if !self.chunks.contains_key(&key) {
+                self.layout_rev += 1;
+            }
             self.chunks.insert(
                 key,
                 Chunk {
+                    edited: true,
                     samples,
                     materials: None,
                     dirty: true,
@@ -621,7 +833,7 @@ impl Volume {
             for cz in ck_lo.z..=ck_hi.z {
                 for cx in ck_lo.x..=ck_hi.x {
                     let key = IVec3::new(cx, cy, cz);
-                    if !add && !self.chunks.contains_key(&key) {
+                    if !add && self.source.is_none() && !self.chunks.contains_key(&key) {
                         continue; // missing chunks are already empty
                     }
                     let base = key * CHUNK_SIZE;
@@ -631,7 +843,15 @@ impl Volume {
                         continue;
                     }
                     let mut touched = false;
-                    let chunk = self.chunks.entry(key).or_insert_with(Chunk::new);
+                    if !self.chunks.contains_key(&key) {
+                        let fresh = self.fresh_chunk(key);
+                        if !add && fresh.samples.iter().all(|&d| d <= -SMOOTH_EDIT * 2.0) {
+                            continue; // open air stays open
+                        }
+                        self.chunks.insert(key, fresh);
+                        self.layout_rev += 1;
+                    }
+                    let chunk = self.chunks.get_mut(&key).expect("just ensured");
                     for y in from.y..=to.y {
                         for z in from.z..=to.z {
                             for x in from.x..=to.x {
@@ -663,6 +883,7 @@ impl Volume {
                         self.rev += 1;
                         chunk.rev = self.rev;
                         chunk.dirty = true;
+                        chunk.edited = true;
                         changed += 1;
                     }
                 }
@@ -671,13 +892,15 @@ impl Volume {
         changed
     }
 
-    /// Density at a global grid corner (outside any chunk: empty, -1).
+    /// Density at a global grid corner (outside any chunk: the source, or
+    /// empty, -1).
     pub fn corner(&self, g: IVec3) -> f32 {
         let key = g.div_euclid(IVec3::splat(CHUNK_SIZE));
         let local = g.rem_euclid(IVec3::splat(CHUNK_SIZE));
-        self.chunks
-            .get(&key)
-            .map_or(-1.0, |c| c.get(local.x, local.y, local.z))
+        match self.chunks.get(&key) {
+            Some(c) => c.get(local.x, local.y, local.z),
+            None => self.missing(g),
+        }
     }
 
     /// Trilinear density at a world position.
@@ -760,7 +983,7 @@ impl Volume {
                                 None => pack_material(d, 0),
                             }
                         }
-                        None => pack_material(-1.0, 0),
+                        None => pack_material(self.missing(g), 0),
                     });
                 }
             }

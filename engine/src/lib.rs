@@ -50,9 +50,9 @@ pub mod decals;
 pub mod error;
 pub mod fly;
 pub mod fracture;
-pub mod grading;
 mod frame_clock;
 pub mod gpu_field;
+pub mod grading;
 pub mod hierarchy;
 pub mod input;
 pub mod lamps;
@@ -87,6 +87,7 @@ pub mod terrain;
 pub mod texgen;
 pub mod texture;
 
+pub mod stream;
 pub mod tree;
 pub mod ui;
 pub mod vegetation;

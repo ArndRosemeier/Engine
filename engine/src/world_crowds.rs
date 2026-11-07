@@ -77,7 +77,11 @@ impl World {
     /// A person in the crowd, standing at `place`.
     pub fn add_crowd_agent(&mut self, crowd: CrowdId, place: Place) -> EngineResult<CrowdAgentId> {
         let c = self.crowd_mut(crowd)?;
-        let slot = c.agents.iter().position(|a| a.is_none()).unwrap_or(c.agents.len());
+        let slot = c
+            .agents
+            .iter()
+            .position(|a| a.is_none())
+            .unwrap_or(c.agents.len());
         let agent = CrowdAgent {
             place,
             speed: 0.0,
@@ -148,7 +152,11 @@ impl World {
     /// How many agents are full characters right now.
     pub fn crowd_near_count(&self, crowd: CrowdId) -> usize {
         self.crowd_ref(crowd).map_or(0, |c| {
-            c.agents.iter().flatten().filter(|a| a.near.is_some()).count()
+            c.agents
+                .iter()
+                .flatten()
+                .filter(|a| a.near.is_some())
+                .count()
         })
     }
 
@@ -298,7 +306,9 @@ mod tests {
         let crowd = world
             .add_crowd(
                 character(),
-                CrowdProfile::new("idle", "walk").near(16.0, 2).walk_speed(1.3),
+                CrowdProfile::new("idle", "walk")
+                    .near(16.0, 2)
+                    .walk_speed(1.3),
             )
             .unwrap();
         let agents: Vec<_> = (0..5)
@@ -332,7 +342,11 @@ mod tests {
         let c = world.crowds().next().unwrap().1;
         let back = c.agents[0].as_ref().unwrap();
         assert_eq!(back.clip, crate::crowd::WALK);
-        assert!((back.time - step - dt * 1.0).abs() < 0.02, "{step} -> {}", back.time);
+        assert!(
+            (back.time - step - dt * 1.0).abs() < 0.02,
+            "{step} -> {}",
+            back.time
+        );
         assert_eq!(world.crowd_agent_count(crowd), 5);
         assert!(world.remove_crowd(crowd));
     }

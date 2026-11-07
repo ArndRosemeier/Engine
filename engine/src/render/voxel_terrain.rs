@@ -13,11 +13,12 @@
 //! its regions are meshed, so the view never has holes while moving.
 
 use super::frustum::{Bounds, Frustum};
-use crate::voxel_terrain::VoxelTerrain;
-use glam::{IVec3, Mat4, Vec3};
+use crate::voxel_terrain::{FarTileKey, FarTileMesh, VoxelTerrain};
+use glam::{IVec2, IVec3, Mat4, Vec3};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use wgpu::util::DeviceExt;
 
 const CHUNK: i32 = crate::volume::CHUNK_SIZE;
 /// Samples per axis that one region uploads: corners -3..=34 (in region steps).
@@ -543,6 +544,8 @@ pub struct VoxelTerrainGpu {
     drawn: Vec<NodeKey>,
     /// Volume revision already folded into node dirtiness.
     seen_rev: u64,
+    /// Volume layout revision already folded into the occupancy.
+    seen_layout_rev: u64,
     occupancy: Vec<HashSet<IVec3>>,
     dirty: HashSet<NodeKey>,
     instance_key: Option<[u32; 8]>,
@@ -550,6 +553,23 @@ pub struct VoxelTerrainGpu {
     /// Bumped whenever what is drawn changes (for the GI rebuild).
     epoch: u64,
     present: bool,
+    /// Far height-field tiles, drawn where no voxel region covers them.
+    far: HashMap<FarTileKey, FarNode>,
+    seen_far_rev: u64,
+    /// Whether far tiles must be re-checked against the drawn voxel regions.
+    far_cover_stale: bool,
+}
+
+struct FarNode {
+    /// Identity of the mesh uploaded (the `Arc` pointer).
+    mesh: usize,
+    origin: Vec3,
+    vertices: Range<u64>,
+    indices: Range<u64>,
+    slot: u32,
+    bounds: Bounds,
+    footprint: [f32; 4],
+    hidden: bool,
 }
 
 impl VoxelTerrainGpu {
@@ -654,12 +674,16 @@ impl VoxelTerrainGpu {
             nodes: HashMap::new(),
             drawn: Vec::new(),
             seen_rev: 0,
+            seen_layout_rev: u64::MAX,
             occupancy: Vec::new(),
             dirty: HashSet::new(),
             instance_key: None,
             voxel_size: 0.0,
             epoch: 0,
             present: false,
+            far: HashMap::new(),
+            seen_far_rev: u64::MAX,
+            far_cover_stale: true,
         }
     }
 
@@ -669,7 +693,7 @@ impl VoxelTerrainGpu {
     }
 
     pub fn is_drawing(&self) -> bool {
-        self.present && !self.drawn.is_empty()
+        self.present && (!self.drawn.is_empty() || self.far.values().any(|f| !f.hidden))
     }
 
     fn clear(&mut self) {
@@ -677,10 +701,16 @@ impl VoxelTerrainGpu {
         for key in keys {
             self.free_node(key);
         }
+        let far: Vec<FarTileKey> = self.far.keys().copied().collect();
+        for key in far {
+            self.free_far(key);
+        }
+        self.seen_far_rev = u64::MAX;
         self.drawn.clear();
         self.dirty.clear();
         self.occupancy.clear();
         self.seen_rev = 0;
+        self.seen_layout_rev = u64::MAX;
         self.instance_key = None;
         if self.present {
             self.epoch += 1;
@@ -693,6 +723,162 @@ impl VoxelTerrainGpu {
             self.vertex_arena.alloc.release(node.vertices);
             self.index_arena.alloc.release(node.indices);
             self.free_slots.push(node.slot);
+        }
+    }
+
+    fn free_far(&mut self, key: FarTileKey) {
+        if let Some(node) = self.far.remove(&key) {
+            self.vertex_arena.alloc.release(node.vertices);
+            self.index_arena.alloc.release(node.indices);
+            self.free_slots.push(node.slot);
+        }
+    }
+
+    /// Upload new far tiles and free removed ones. Returns whether an arena
+    /// grew (the meshing bind group must be rebuilt).
+    fn sync_far(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        terrain: &VoxelTerrain,
+        max_bytes: u64,
+    ) -> bool {
+        let far = terrain.far_tiles();
+        if far.rev == self.seen_far_rev {
+            return false;
+        }
+        self.seen_far_rev = far.rev;
+        self.far_cover_stale = true;
+        self.epoch += 1;
+        let gone: Vec<FarTileKey> = self
+            .far
+            .iter()
+            .filter(|(k, n)| {
+                far.tiles
+                    .get(k)
+                    .is_none_or(|m| std::sync::Arc::as_ptr(m) as usize != n.mesh)
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        for key in gone {
+            self.free_far(key);
+        }
+        let mut grew = false;
+        let mut new: Vec<(FarTileKey, &std::sync::Arc<FarTileMesh>)> = far
+            .tiles
+            .iter()
+            .filter(|(k, _)| !self.far.contains_key(k))
+            .map(|(k, m)| (*k, m))
+            .collect();
+        new.sort_by_key(|(k, _)| *k);
+        for (key, mesh) in new {
+            let vcount = mesh.vertex_count() as u64;
+            let icount = mesh.indices.len() as u64;
+            if vcount == 0 || icount == 0 {
+                continue;
+            }
+            let v = self.vertex_arena.alloc(device, encoder, vcount, max_bytes);
+            let i = self.index_arena.alloc(device, encoder, icount, max_bytes);
+            let (vertices, indices) = match (v, i) {
+                (Some((v, gv)), Some((i, gi))) => {
+                    grew |= gv || gi;
+                    (v, i)
+                }
+                (v, i) => {
+                    if let Some((v, _)) = v {
+                        self.vertex_arena.alloc.release(v);
+                    }
+                    if let Some((i, _)) = i {
+                        self.index_arena.alloc.release(i);
+                    }
+                    eprintln!("voxel terrain: GPU mesh arena is full (far tiles)");
+                    continue;
+                }
+            };
+            // Copy through the encoder so the data lands after any arena
+            // growth copy recorded above.
+            let staging = |label: &str, data: &[u32]| {
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents: bytemuck::cast_slice(data),
+                    usage: wgpu::BufferUsages::COPY_SRC,
+                })
+            };
+            let vs = staging("far-tile-vertices", &mesh.vertices);
+            let is = staging("far-tile-indices", &mesh.indices);
+            encoder.copy_buffer_to_buffer(
+                &vs,
+                0,
+                &self.vertex_arena.buffer,
+                vertices.start * VERTEX_BYTES,
+                vcount * VERTEX_BYTES,
+            );
+            encoder.copy_buffer_to_buffer(
+                &is,
+                0,
+                &self.index_arena.buffer,
+                indices.start * 4,
+                icount * 4,
+            );
+            let slot = self.take_slot(device, encoder);
+            queue.write_buffer(
+                &self.instances,
+                slot as u64 * std::mem::size_of::<VoxelInstance>() as u64,
+                bytemuck::bytes_of(&Self::instance_for(terrain, mesh.origin)),
+            );
+            self.far.insert(
+                key,
+                FarNode {
+                    mesh: std::sync::Arc::as_ptr(mesh) as usize,
+                    origin: mesh.origin,
+                    vertices,
+                    indices,
+                    slot,
+                    bounds: Bounds {
+                        centre: (mesh.min + mesh.max) * 0.5,
+                        radius: (mesh.max - mesh.min).length() * 0.5,
+                    },
+                    footprint: mesh.footprint,
+                    hidden: false,
+                },
+            );
+        }
+        grew
+    }
+
+    /// Hide far tiles whose whole area is covered by drawn voxel regions.
+    fn update_far_cover(&mut self, chunk_world: f32) {
+        if !self.far_cover_stale {
+            return;
+        }
+        self.far_cover_stale = false;
+        let mut covered: HashSet<IVec2> = HashSet::new();
+        for node in &self.drawn {
+            let n = node.chunks();
+            for dz in 0..n {
+                for dx in 0..n {
+                    covered.insert(IVec2::new(node.key.x + dx, node.key.z + dz));
+                }
+            }
+        }
+        let (lo, hi) = covered.iter().fold(
+            (IVec2::splat(i32::MAX), IVec2::splat(i32::MIN)),
+            |(lo, hi), c| (lo.min(*c), hi.max(*c)),
+        );
+        for node in self.far.values_mut() {
+            let [x0, z0, x1, z1] = node.footprint;
+            // Chunk columns the tile spans (a hair inside its edges).
+            let a = (glam::Vec2::new(x0, z0) / chunk_world + 1e-3)
+                .floor()
+                .as_ivec2();
+            let b = (glam::Vec2::new(x1, z1) / chunk_world - 1e-3)
+                .floor()
+                .as_ivec2();
+            node.hidden = !covered.is_empty()
+                && a.cmpge(lo).all()
+                && b.cmple(hi).all()
+                && (a.y..=b.y).all(|z| (a.x..=b.x).all(|x| covered.contains(&IVec2::new(x, z))));
         }
     }
 
@@ -854,22 +1040,36 @@ impl VoxelTerrainGpu {
             self.voxel_size = volume.voxel_size();
         }
         self.present = true;
+        if volume.layout_rev() != self.seen_layout_rev {
+            // Chunks were loaded or dropped as cached copies of the source:
+            // the density is the same, so meshes stay valid; only which
+            // regions exist changes.
+            self.rebuild_occupancy(terrain);
+            self.seen_layout_rev = volume.layout_rev();
+        }
         if volume.rev() != self.seen_rev {
-            let (changed, removed) = volume.changed_since(self.seen_rev);
+            let (changed, _) = volume.changed_since(self.seen_rev);
+            let removed = volume.removed_since(self.seen_rev);
             let new_chunk = changed.iter().any(|k| {
                 self.occupancy
                     .first()
                     .is_none_or(|level0| !level0.contains(k))
             });
-            if removed || new_chunk || self.occupancy.is_empty() {
+            let any_removed = removed.as_ref().is_none_or(|r| !r.is_empty());
+            if any_removed || new_chunk || self.occupancy.is_empty() {
                 self.rebuild_occupancy(terrain);
             }
-            if removed {
-                self.dirty.extend(self.nodes.keys().copied());
-            } else {
-                for &key in self.nodes.keys() {
-                    if changed.iter().any(|&c| key.reads_chunk(c)) {
-                        self.dirty.insert(key);
+            match removed {
+                None => self.dirty.extend(self.nodes.keys().copied()),
+                Some(removed) => {
+                    for &key in self.nodes.keys() {
+                        if changed
+                            .iter()
+                            .chain(removed.iter())
+                            .any(|&c| key.reads_chunk(c))
+                        {
+                            self.dirty.insert(key);
+                        }
                     }
                 }
             }
@@ -1023,7 +1223,16 @@ impl VoxelTerrainGpu {
             self.epoch += 1;
         }
 
+        grew |= self.sync_far(device, queue, encoder, terrain, max_bytes);
+
         if rewrite_instances {
+            for node in self.far.values() {
+                queue.write_buffer(
+                    &self.instances,
+                    node.slot as u64 * std::mem::size_of::<VoxelInstance>() as u64,
+                    bytemuck::bytes_of(&Self::instance_for(terrain, node.origin)),
+                );
+            }
             for (key, node) in &self.nodes {
                 let origin = key.key.as_vec3() * chunk_world;
                 queue.write_buffer(
@@ -1089,6 +1298,7 @@ impl VoxelTerrainGpu {
         if ready && self.drawn != desired {
             self.drawn = desired;
             self.epoch += 1;
+            self.far_cover_stale = true;
             if std::env::var_os("ENGINE_VOXEL_STATS").is_some() {
                 let mut per_level = vec![0usize; max_level as usize + 1];
                 let mut triangles = 0u64;
@@ -1114,8 +1324,10 @@ impl VoxelTerrainGpu {
             if !partial.is_empty() {
                 self.drawn = partial;
                 self.epoch += 1;
+                self.far_cover_stale = true;
             }
         }
+        self.update_far_cover(chunk_world);
         let keep: HashSet<NodeKey> = self
             .drawn
             .iter()
@@ -1139,7 +1351,8 @@ impl VoxelTerrainGpu {
         if !self.present {
             return Vec::new();
         }
-        self.drawn
+        let mut out: Vec<(Range<u32>, i32, u32)> = self
+            .drawn
             .iter()
             .filter_map(|key| {
                 let node = self.nodes.get(key)?;
@@ -1153,7 +1366,17 @@ impl VoxelTerrainGpu {
                     node.slot,
                 ))
             })
-            .collect()
+            .collect();
+        out.extend(self.far.values().filter_map(|node| {
+            (!node.hidden && test(node.bounds)).then(|| {
+                (
+                    node.indices.start as u32..node.indices.end as u32,
+                    node.vertices.start as i32,
+                    node.slot,
+                )
+            })
+        }));
+        out
     }
 
     pub fn visible_in(&self, frustum: &Frustum) -> Vec<(Range<u32>, i32, u32)> {

@@ -86,6 +86,12 @@ pub(crate) struct LodSet {
     pub places: Vec<MeshInstance>,
     /// Camera position and bias the levels were last assigned for.
     pub assigned_for: Option<(Vec3, f32)>,
+    /// Sphere around every instance position (centre, radius).
+    pub bounds: Option<(Vec3, f32)>,
+    /// At the last assignment, every instance lay between the same two
+    /// level thresholds: their index. While that still holds the levels
+    /// cannot have changed, so far sets skip the work entirely.
+    pub assigned_zone: Option<usize>,
 }
 
 impl LodSet {
@@ -106,6 +112,56 @@ impl LodSet {
             last = d;
         }
         Ok(())
+    }
+
+    /// Recompute [`Self::bounds`] after the places changed.
+    pub fn update_bounds(&mut self) {
+        if self.places.is_empty() {
+            self.bounds = None;
+            return;
+        }
+        let n = self.places.len() as f32;
+        let centre = self
+            .places
+            .iter()
+            .map(|p| p.transform.w_axis.truncate())
+            .sum::<Vec3>()
+            / n;
+        let radius = self
+            .places
+            .iter()
+            .map(|p| p.transform.w_axis.truncate().distance(centre))
+            .fold(0.0, f32::max);
+        self.bounds = Some((centre, radius));
+        self.assigned_zone = None;
+    }
+
+    /// Distances where some instance changes level or fade (sorted).
+    fn thresholds(&self, bias: f32, fade: f32) -> Vec<f32> {
+        let mut out = Vec::with_capacity(self.levels.len() * 2);
+        let mut start = 0.0;
+        for (_, d) in &self.levels {
+            let end = d * bias;
+            if end.is_finite() {
+                let band = (end * fade).min((end - start) * 0.5);
+                out.push(end - band.max(0.0));
+                out.push(end);
+            }
+            start = end;
+        }
+        out
+    }
+
+    /// The threshold zone every instance is in for a camera at `eye`, or
+    /// `None` when the set straddles a threshold.
+    pub fn zone(&self, eye: Vec3, bias: f32, fade: f32) -> Option<usize> {
+        let (c, r) = self.bounds?;
+        let d = c.distance(eye);
+        let (near, far) = ((d - r).max(0.0), d + r);
+        let t = self.thresholds(bias, fade);
+        let a = t.iter().filter(|&&x| x <= near).count();
+        let b = t.iter().filter(|&&x| x < far).count();
+        (a == b).then_some(a)
     }
 
     /// Smallest camera move that can change an assignment noticeably.

@@ -1,4 +1,5 @@
 mod clipmap;
+mod crowd;
 mod decals;
 pub(crate) mod frustum;
 mod gi;
@@ -16,7 +17,6 @@ mod reflect;
 mod ribbons_gpu;
 mod shadow;
 mod skinned;
-mod crowd;
 mod sky_pipeline;
 mod ssao;
 mod stencil;
@@ -192,8 +192,21 @@ struct ShadowBundleKey {
 struct GpuInstanceBatch {
     gpu: GpuMesh,
     slots: Vec<BatchSlot>,
+    /// Unused instance ranges (filled with [`DEAD_INSTANCE`]), sorted.
+    free: Vec<std::ops::Range<usize>>,
+    /// End of the highest slot; everything after it is free.
+    used_end: usize,
     active_ranges: Vec<ActiveInstanceRange>,
 }
+
+/// Fills unused instance entries: zero scale, far below the world, so the
+/// GPU cull drops it and a direct draw makes no pixels.
+const DEAD_INSTANCE: glam::Mat4 = glam::Mat4::from_cols(
+    glam::Vec4::ZERO,
+    glam::Vec4::ZERO,
+    glam::Vec4::ZERO,
+    glam::Vec4::new(0.0, -1.0e9, 0.0, 1.0),
+);
 
 impl GpuInstanceBatch {
     fn rebuild_active_ranges(&mut self) {
@@ -201,11 +214,41 @@ impl GpuInstanceBatch {
     }
 }
 
+/// Take `len` entries from a sorted free list (first fit).
+fn take_free(free: &mut Vec<std::ops::Range<usize>>, len: usize) -> Option<usize> {
+    let i = free.iter().position(|r| r.end - r.start >= len)?;
+    let start = free[i].start;
+    free[i].start += len;
+    if free[i].is_empty() {
+        free.remove(i);
+    }
+    Some(start)
+}
+
+/// Return a range to a sorted free list, merging neighbours.
+fn give_free(free: &mut Vec<std::ops::Range<usize>>, r: std::ops::Range<usize>) {
+    if r.is_empty() {
+        return;
+    }
+    let i = free.partition_point(|f| f.start < r.start);
+    free.insert(i, r);
+    if i + 1 < free.len() && free[i].end == free[i + 1].start {
+        free[i].end = free[i + 1].end;
+        free.remove(i + 1);
+    }
+    if i > 0 && free[i - 1].end == free[i].start {
+        free[i - 1].end = free[i].end;
+        free.remove(i);
+    }
+}
+
 impl GpuInstanceBatch {
     fn has_holes(&self) -> bool {
-        self.slots
-            .iter()
-            .any(|slot| slot.active_count < slot.capacity)
+        !self.free.is_empty()
+            || self
+                .slots
+                .iter()
+                .any(|slot| slot.active_count < slot.capacity)
     }
 }
 
@@ -218,16 +261,32 @@ struct BatchSlot {
     bounds: Option<Bounds>,
 }
 
+/// Instance ranges to cull or draw. Unused entries hold [`DEAD_INSTANCE`]
+/// (dropped by the cull, invisible when drawn), so slots are merged into
+/// one range unless that would add mostly dead entries: one dispatch per
+/// batch instead of one per streamed tile.
 fn active_instance_ranges(slots: &[BatchSlot]) -> Vec<ActiveInstanceRange> {
-    slots
+    let mut live: Vec<(usize, usize)> = slots
         .iter()
-        .filter_map(|slot| {
-            (slot.active_count > 0).then(|| ActiveInstanceRange {
-                start: u32::try_from(slot.start)
-                    .expect("instance batch start exceeds GPU u32 range"),
-                count: u32::try_from(slot.active_count)
-                    .expect("instance batch active count exceeds GPU u32 range"),
-            })
+        .filter(|slot| slot.active_count > 0)
+        .map(|slot| (slot.start, slot.start + slot.active_count))
+        .collect();
+    live.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (a, b) in live {
+        match merged.last_mut() {
+            // Bridge gaps of dead entries up to the size of what is joined.
+            Some(last) if a <= last.1 + (last.1 - last.0).max(b - a).max(256) => {
+                last.1 = last.1.max(b)
+            }
+            _ => merged.push((a, b)),
+        }
+    }
+    merged
+        .into_iter()
+        .map(|(a, b)| ActiveInstanceRange {
+            start: u32::try_from(a).expect("instance batch start exceeds GPU u32 range"),
+            count: u32::try_from(b - a).expect("instance batch active count exceeds GPU u32 range"),
         })
         .collect()
 }
@@ -995,6 +1054,130 @@ impl Renderer {
         }
     }
 
+    /// Bring a batch up to date without a new buffer: keep the slots that
+    /// still fit, free the ones whose entity is gone, place new or grown
+    /// entities in free space. False when it no longer fits (rebuild it).
+    fn update_batch_in_place(
+        &mut self,
+        world: &World,
+        batch: &mut GpuInstanceBatch,
+        build: &BatchBuild,
+    ) -> bool {
+        let unchanged = batch.slots.len() == build.sources.len()
+            && batch
+                .slots
+                .iter()
+                .zip(&build.sources)
+                .all(|(slot, source)| {
+                    slot.id == source.id
+                        && slot.xform_rev == source.xform_rev
+                        && slot.active_count == source.instance_count
+                });
+        if unchanged {
+            return true;
+        }
+        let wanted: HashMap<EntityId, &BatchBuildSource> =
+            build.sources.iter().map(|s| (s.id, s)).collect();
+        // Plan first, so a batch that cannot fit is left untouched.
+        let mut free = batch.free.clone();
+        let mut used_end = batch.used_end;
+        let mut kept: Vec<BatchSlot> = Vec::with_capacity(build.sources.len());
+        let mut freed: Vec<std::ops::Range<usize>> = Vec::new();
+        for slot in batch.slots.drain(..) {
+            match wanted.get(&slot.id) {
+                Some(source)
+                    if source.instance_count <= slot.capacity
+                        && source.instance_reserve <= slot.capacity =>
+                {
+                    kept.push(slot)
+                }
+                _ => freed.push(slot.start..slot.start + slot.capacity),
+            }
+        }
+        for r in &freed {
+            give_free(&mut free, r.clone());
+        }
+        let kept_ids: HashSet<EntityId> = kept.iter().map(|s| s.id).collect();
+        let mut placed: Vec<BatchSlot> = Vec::new();
+        for source in &build.sources {
+            if kept_ids.contains(&source.id) {
+                continue;
+            }
+            let capacity = batch_slot_capacity(source.instance_count.max(source.instance_reserve));
+            let Some(start) = take_free(&mut free, capacity) else {
+                // Put the kept slots back so the caller can rebuild cleanly.
+                batch.slots = kept;
+                return false;
+            };
+            used_end = used_end.max(start + capacity);
+            placed.push(BatchSlot {
+                id: source.id,
+                xform_rev: u64::MAX,
+                start,
+                capacity,
+                active_count: 0,
+                bounds: None,
+            });
+        }
+        // Shrink the used end past trailing free space.
+        if let Some(last) = free.last() {
+            if last.end >= batch.gpu.instance_capacity && last.start < used_end {
+                used_end = last.start;
+            }
+        }
+        batch.free = free;
+        batch.used_end = used_end;
+        // Freed ranges go dead so the merged ranges never draw stale data.
+        for r in freed {
+            let dead = vec![InstanceRaw::from_matrix(DEAD_INSTANCE); r.end - r.start];
+            batch.gpu.write_instances_at(&self.queue, r.start, &dead);
+        }
+        kept.extend(placed);
+        // Keep the source order so the next frame's quick check matches.
+        let order: HashMap<EntityId, usize> = build
+            .sources
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.id, i))
+            .collect();
+        kept.sort_by_key(|slot| order[&slot.id]);
+        for (slot, source) in kept.iter_mut().zip(&build.sources) {
+            if slot.xform_rev == source.xform_rev && slot.active_count == source.instance_count {
+                continue;
+            }
+            let entity = world
+                .entity(source.id)
+                .unwrap_or_else(|_| panic!("instance batch source {} disappeared", source.id));
+            self.instance_scratch.clear();
+            self.instance_scratch
+                .extend(entity.instances.iter().map(|inst| {
+                    InstanceRaw::from_matrix_tint(entity.transform * inst.transform, inst.tint)
+                }));
+            slot.bounds = batch.gpu.bounds_for_instances(&self.instance_scratch);
+            // Pad to the old count with dead entries so a shrink leaves no
+            // stale instances behind.
+            let n = self.instance_scratch.len();
+            if slot.active_count > n {
+                self.instance_scratch
+                    .resize(slot.active_count, InstanceRaw::from_matrix(DEAD_INSTANCE));
+            }
+            batch
+                .gpu
+                .write_instances_at(&self.queue, slot.start, &self.instance_scratch);
+            slot.xform_rev = source.xform_rev;
+            slot.active_count = source.instance_count;
+            self.gpu_stats.batch_partial_writes += 1;
+        }
+        batch.slots = kept;
+        batch.rebuild_active_ranges();
+        batch.gpu.bounds = batch
+            .slots
+            .iter()
+            .filter_map(|slot| slot.bounds)
+            .reduce(|combined, bounds| combined.union(bounds));
+        true
+    }
+
     fn sync_gpu_instance_batches(&mut self, world: &World) {
         self.gpu_batch_source_scratch.clear();
         for (id, entity) in world.entities() {
@@ -1052,50 +1235,7 @@ impl Renderer {
         let mut shadow_buffers_changed = self.gpu_instance_batches.len() != batch_count_before;
         for (prototype, build) in builds {
             if let Some(mut batch) = self.gpu_instance_batches.remove(&prototype) {
-                let layout_fits = batch.slots.len() == build.sources.len()
-                    && batch
-                        .slots
-                        .iter()
-                        .zip(&build.sources)
-                        .all(|(slot, source)| {
-                            slot.id == source.id
-                                && source.instance_count <= slot.capacity
-                                && source.instance_reserve <= slot.capacity
-                        });
-                if layout_fits {
-                    for (slot, source) in batch.slots.iter_mut().zip(&build.sources) {
-                        if slot.xform_rev == source.xform_rev
-                            && slot.active_count == source.instance_count
-                        {
-                            continue;
-                        }
-                        let entity = world.entity(source.id).unwrap_or_else(|_| {
-                            panic!("instance batch source {} disappeared", source.id)
-                        });
-                        self.instance_scratch.clear();
-                        self.instance_scratch
-                            .extend(entity.instances.iter().map(|inst| {
-                                InstanceRaw::from_matrix_tint(
-                                    entity.transform * inst.transform,
-                                    inst.tint,
-                                )
-                            }));
-                        slot.bounds = batch.gpu.bounds_for_instances(&self.instance_scratch);
-                        batch.gpu.write_instances_at(
-                            &self.queue,
-                            slot.start,
-                            &self.instance_scratch,
-                        );
-                        slot.xform_rev = source.xform_rev;
-                        slot.active_count = source.instance_count;
-                        self.gpu_stats.batch_partial_writes += 1;
-                    }
-                    batch.rebuild_active_ranges();
-                    batch.gpu.bounds = batch
-                        .slots
-                        .iter()
-                        .filter_map(|slot| slot.bounds)
-                        .reduce(|combined, bounds| combined.union(bounds));
+                if self.update_batch_in_place(world, &mut batch, &build) {
                     self.gpu_instance_batches.insert(prototype, batch);
                     continue;
                 }
@@ -1118,10 +1258,8 @@ impl Renderer {
                 let bounds = prototype_gpu.bounds_for_instances(&self.instance_scratch[start..]);
                 let capacity =
                     batch_slot_capacity(source.instance_count.max(source.instance_reserve));
-                self.instance_scratch.resize(
-                    start + capacity,
-                    InstanceRaw::from_matrix(glam::Mat4::IDENTITY),
-                );
+                self.instance_scratch
+                    .resize(start + capacity, InstanceRaw::from_matrix(DEAD_INSTANCE));
                 slots.push(BatchSlot {
                     id: source.id,
                     xform_rev: source.xform_rev,
@@ -1131,6 +1269,12 @@ impl Renderer {
                     bounds,
                 });
             }
+            // Room to grow, so streamed tiles coming and going reuse this
+            // buffer instead of rebuilding it.
+            let used = self.instance_scratch.len();
+            let headroom = (used / 2).max(64);
+            self.instance_scratch
+                .resize(used + headroom, InstanceRaw::from_matrix(DEAD_INSTANCE));
             let mut gpu = GpuMesh::share_vertices(
                 &self.device,
                 prototype_gpu,
@@ -1146,6 +1290,8 @@ impl Renderer {
                 GpuInstanceBatch {
                     gpu,
                     slots,
+                    free: vec![used..used + headroom],
+                    used_end: used,
                     active_ranges: Vec::new(),
                 },
             );
@@ -1603,16 +1749,23 @@ impl Renderer {
         self.main_uniform_slot = main_uniform_slot;
         {
             let (device, queue, p) = (&self.device, &self.queue, &self.pipelines);
-            self.crowd.prepare(device, queue, world, &self.frustum, scene_camera.eye(), |m| {
-                GpuSkinnedMesh::upload(
-                    device,
-                    queue,
-                    &p.albedo_layout,
-                    &p.material_sampler,
-                    &p.neutral_maps,
-                    m,
-                )
-            });
+            self.crowd.prepare(
+                device,
+                queue,
+                world,
+                &self.frustum,
+                scene_camera.eye(),
+                |m| {
+                    GpuSkinnedMesh::upload(
+                        device,
+                        queue,
+                        &p.albedo_layout,
+                        &p.material_sampler,
+                        &p.neutral_maps,
+                        m,
+                    )
+                },
+            );
         }
         let gi_placement = world
             .global_illumination()

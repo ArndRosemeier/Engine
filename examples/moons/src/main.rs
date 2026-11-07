@@ -51,8 +51,12 @@ fn main() -> EngineResult<()> {
     let mut hour = env("ENGINE_MOONS_HOUR", 23.5);
     let mut day = env("ENGINE_MOONS_DAY", 0.0);
     let ground = HeightField::new(rules());
-    let mut camera = FlyCamera::new((0.0, ground.height_at(0.0, -30.0) + 6.0, -30.0), -12.0, 26.0)
-        .with_speed(10.0);
+    let mut camera = FlyCamera::new(
+        (0.0, ground.height_at(0.0, -30.0) + 6.0, -30.0),
+        -12.0,
+        26.0,
+    )
+    .with_speed(10.0);
     let mut running = true;
     let mut three = std::env::var("ENGINE_MOONS_ONE").map_or(true, |v| v != "1");
 
