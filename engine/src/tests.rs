@@ -2254,3 +2254,213 @@ mod save_load {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+mod animation_blending {
+    use crate::anim::{AnimatedModel, AnimationProfile, FootIk, Locomotion};
+    use crate::color::rgb;
+    use crate::mesh::Mesh;
+    use crate::physics::{Body, PhysicsGround, PhysicsSettings};
+    use crate::place::Place;
+    use crate::world::{EntityId, World};
+    use glam::Vec3;
+    use std::sync::Arc;
+
+    fn character() -> Option<Arc<AnimatedModel>> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../examples/model_viewer/assets/character.glb"
+        );
+        let examples = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples");
+        match AnimatedModel::load_with(path, examples, &crate::limits::EngineLimits::default()) {
+            Ok(m) => Some(Arc::new(m)),
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                None
+            }
+        }
+    }
+
+    fn joint(world: &World, id: EntityId, bone: &str) -> Vec3 {
+        world.bone_transform(id, bone).unwrap().w_axis.truncate()
+    }
+
+    #[test]
+    fn switching_clips_fades_instead_of_jumping() {
+        let Some(model) = character() else { return };
+        let mut world = World::default();
+        let id = world
+            .spawn_animated_shared(model.clone(), Place::default())
+            .unwrap();
+        world.play_animation(id, "walk").unwrap();
+        world.tick_animations(0.37);
+        let before = joint(&world, id, "hand_r");
+        world.play_animation(id, "idle").unwrap();
+        let right_after = joint(&world, id, "hand_r");
+        assert!(
+            before.distance(right_after) < 1e-4,
+            "no pop: {before} {right_after}"
+        );
+
+        // Halfway through the fade the hand is between the two poses.
+        let mut idle_only = World::default();
+        let solo = idle_only
+            .spawn_animated_shared(model.clone(), Place::default())
+            .unwrap();
+        idle_only.set_animation_blend(solo, 0.0).unwrap();
+        idle_only.play_animation(solo, "idle").unwrap();
+        world.tick_animations(0.25);
+        idle_only.tick_animations(0.25);
+        let done = joint(&world, id, "hand_r");
+        assert!(
+            done.distance(joint(&idle_only, solo, "hand_r")) < 1e-4,
+            "fade finished"
+        );
+
+        // Blend 0 switches at once.
+        let mut snap = World::default();
+        let s = snap.spawn_animated_shared(model, Place::default()).unwrap();
+        snap.set_animation_blend(s, 0.0).unwrap();
+        snap.play_animation(s, "walk").unwrap();
+        snap.tick_animations(0.37);
+        let a = joint(&snap, s, "hand_r");
+        snap.play_animation(s, "idle").unwrap();
+        assert!(a.distance(joint(&snap, s, "hand_r")) > 1e-3);
+        assert!(snap.set_animation_blend(s, -1.0).is_err());
+    }
+
+    #[test]
+    fn walk_and_run_follow_the_real_speed() {
+        let Some(model) = character() else { return };
+        let mut world = World::default();
+        let id = world
+            .spawn_animated_shared(model, Place::default())
+            .unwrap();
+        world
+            .configure_animation(
+                id,
+                AnimationProfile::new()
+                    .idle("idle")
+                    .walk("walk")
+                    .run("jog")
+                    .walk_speed(1.4)
+                    .run_speed(3.0),
+            )
+            .unwrap();
+        world
+            .set_locomotion(id, Locomotion::Moving { speed_mps: 0.7 })
+            .unwrap();
+        let t0 = world.animated_entity(id).unwrap().animator.time();
+        world.tick_animations(0.2);
+        let walked = world.animated_entity(id).unwrap().animator.time() - t0;
+        assert!(
+            (walked - 0.1).abs() < 1e-4,
+            "half speed walk plays at half rate: {walked}"
+        );
+
+        // Switching to the run keeps the step phase.
+        world.tick_animations(0.3);
+        let a = &world.animated_entity(id).unwrap().animator;
+        let phase = a.time() / a.clip_duration().unwrap();
+        world
+            .set_locomotion(id, Locomotion::Moving { speed_mps: 3.0 })
+            .unwrap();
+        let a = &world.animated_entity(id).unwrap().animator;
+        assert_eq!(a.clip_name(), "jog");
+        assert!((a.time() / a.clip_duration().unwrap() - phase).abs() < 1e-4);
+    }
+
+    #[test]
+    fn feet_stand_on_steps_and_the_hips_drop_for_a_lower_foot() {
+        let Some(model) = character() else { return };
+        let mut world = World::default();
+        world
+            .set_physics_settings(PhysicsSettings {
+                ground: PhysicsGround::Plane(0.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let id = world
+            .spawn_animated_shared(model.clone(), Place::default())
+            .unwrap();
+        world.play_animation(id, "idle").unwrap();
+        let flat_l = joint(&world, id, "foot_l");
+        let flat_r = joint(&world, id, "foot_r");
+        let flat_hips = joint(&world, id, "pelvis");
+
+        // A 20 cm step under the left foot only.
+        let step = world.spawn(
+            Mesh::box_at(
+                Vec3::new(flat_l.x, 0.1, flat_l.z),
+                Vec3::new(0.18, 0.2, 0.5),
+                rgb(90, 90, 90),
+            )
+            .unwrap(),
+        );
+        world.add_body(step, Body::fixed()).unwrap();
+        assert!(world.set_foot_ik(id, Some(FootIk::default())).is_ok());
+        for _ in 0..60 {
+            world.tick_physics(1.0 / 60.0);
+            world.tick_animations(1.0 / 60.0);
+        }
+        let (l, r) = (joint(&world, id, "foot_l"), joint(&world, id, "foot_r"));
+        assert!(
+            (l.y - flat_l.y - 0.2).abs() < 0.02,
+            "left foot up the step: {} -> {}",
+            flat_l.y,
+            l.y
+        );
+        assert!(
+            (r.y - flat_r.y).abs() < 0.02,
+            "right foot stays: {} -> {}",
+            flat_r.y,
+            r.y
+        );
+        assert!((joint(&world, id, "pelvis").y - flat_hips.y).abs() < 0.02);
+
+        // Now stand on a block with the right foot hanging over an edge 15 cm lower.
+        let mut world = World::default();
+        world
+            .set_physics_settings(PhysicsSettings {
+                ground: PhysicsGround::Plane(-0.15),
+                ..Default::default()
+            })
+            .unwrap();
+        let id = world
+            .spawn_animated_shared(model, Place::default())
+            .unwrap();
+        world.play_animation(id, "idle").unwrap();
+        let block = world.spawn(
+            Mesh::box_at(
+                Vec3::new(flat_l.x * 0.5 + 0.3 * flat_l.x.signum(), -0.075, 0.0),
+                Vec3::new(0.6 + flat_l.x.abs(), 0.15, 1.0),
+                rgb(90, 90, 90),
+            )
+            .unwrap(),
+        );
+        world.add_body(block, Body::fixed()).unwrap();
+        world.set_foot_ik(id, Some(FootIk::default())).unwrap();
+        for _ in 0..60 {
+            world.tick_physics(1.0 / 60.0);
+            world.tick_animations(1.0 / 60.0);
+        }
+        let (l, r) = (joint(&world, id, "foot_l"), joint(&world, id, "foot_r"));
+        assert!(
+            (r.y - flat_r.y + 0.15).abs() < 0.02,
+            "right foot down: {} -> {}",
+            flat_r.y,
+            r.y
+        );
+        assert!(
+            (l.y - flat_l.y).abs() < 0.02,
+            "left foot stays: {} -> {}",
+            flat_l.y,
+            l.y
+        );
+        assert!(
+            (joint(&world, id, "pelvis").y - flat_hips.y + 0.15).abs() < 0.02,
+            "hips drop"
+        );
+
+        world.set_foot_ik(id, None).unwrap();
+    }
+}

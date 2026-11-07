@@ -167,9 +167,24 @@ pub struct AnimationProfile {
     cast: Option<String>,
     hit: Option<String>,
     death: Option<String>,
+    /// How fast the walk and run clips move (m/s), for matching playback to
+    /// the real speed so feet don't slide.
+    walk_mps: Option<f32>,
+    run_mps: Option<f32>,
 }
 
 impl AnimationProfile {
+    /// How fast the walk clip moves the character, in m/s (about 1.4 for a
+    /// stroll). Playback then follows the real speed: no sliding feet.
+    pub fn walk_speed(mut self, mps: f32) -> Self {
+        self.walk_mps = (mps.is_finite() && mps > 0.0).then_some(mps);
+        self
+    }
+    /// How fast the run clip moves the character, in m/s (about 3.5 to 5).
+    pub fn run_speed(mut self, mps: f32) -> Self {
+        self.run_mps = (mps.is_finite() && mps > 0.0).then_some(mps);
+        self
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -215,6 +230,106 @@ pub struct Animator {
     profile: Option<AnimationProfile>,
     locomotion: Locomotion,
     action_resume: Option<Locomotion>,
+    /// Playback rate from locomotion speed matching (1 without speeds).
+    locomotion_rate: f32,
+    /// Seconds to cross-fade from one clip to the next.
+    blend_time: f32,
+    /// The clip being faded out.
+    fade: Option<Fade>,
+    /// Feet on uneven ground; see [`FootIk`].
+    pub(crate) ik: Option<IkState>,
+}
+
+/// A clip fading out under the one now playing.
+#[derive(Clone, Copy, Debug)]
+struct Fade {
+    clip_index: usize,
+    time: f32,
+    looping: bool,
+    rate: f32,
+    elapsed: f32,
+    duration: f32,
+}
+
+/// Feet that find the ground: on slopes and steps the legs bend so each
+/// foot stands on what is under it instead of floating or sinking, and the
+/// hips drop when one foot needs to reach lower. Turn on with
+/// [`crate::world::World::set_foot_ik`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FootIk {
+    /// Most a foot is moved up or down, in metres.
+    pub max_step: f32,
+    /// How quickly feet follow changes in the ground (per second; higher is
+    /// snappier, lower is smoother).
+    pub response: f32,
+    /// Lower the hips so the lower foot can reach.
+    pub drop_hips: bool,
+}
+
+impl Default for FootIk {
+    fn default() -> Self {
+        Self {
+            max_step: 0.5,
+            response: 14.0,
+            drop_hips: true,
+        }
+    }
+}
+
+/// One leg: hip, knee and ankle joints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Leg {
+    pub thigh: usize,
+    pub calf: usize,
+    pub foot: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct IkState {
+    pub settings: FootIk,
+    pub legs: [Leg; 2],
+    /// Joint lowered with the hips (parent of both thighs).
+    pub hips: Option<usize>,
+    /// Model-space offsets each foot is moved by, and the hips' drop.
+    pub feet: [Vec3; 2],
+    pub drop: Vec3,
+}
+
+impl Skeleton {
+    /// Find both legs by common bone names (UE `thigh_l/calf_l/foot_l`,
+    /// Mixamo `LeftUpLeg/LeftLeg/LeftFoot`, Blender `thigh.L/shin.L/foot.L`
+    /// ...): the foot by name, then knee and hip as its parents.
+    pub(crate) fn find_legs(&self) -> Option<[Leg; 2]> {
+        let leg = |names: &[&str]| -> Option<Leg> {
+            let foot = names.iter().find_map(|n| self.joint_index(n))?;
+            let calf = self.parents[foot]?;
+            let thigh = self.parents[calf]?;
+            Some(Leg { thigh, calf, foot })
+        };
+        let left = leg(&[
+            "foot_l",
+            "foot.l",
+            "leftfoot",
+            "mixamorig:leftfoot",
+            "l_foot",
+            "foot_left",
+            "lfoot",
+            "ankle_l",
+            "leftankle",
+        ])?;
+        let right = leg(&[
+            "foot_r",
+            "foot.r",
+            "rightfoot",
+            "mixamorig:rightfoot",
+            "r_foot",
+            "foot_right",
+            "rfoot",
+            "ankle_r",
+            "rightankle",
+        ])?;
+        (left.foot != right.foot).then_some([left, right])
+    }
 }
 
 impl Animator {
@@ -228,7 +343,22 @@ impl Animator {
             profile: None,
             locomotion: Locomotion::Idle,
             action_resume: None,
+            locomotion_rate: 1.0,
+            blend_time: 0.2,
+            fade: None,
+            ik: None,
         })
+    }
+
+    /// Seconds to cross-fade between clips (0 switches at once). Default 0.2.
+    pub fn set_blend_time(&mut self, seconds: f32) {
+        if seconds.is_finite() {
+            self.blend_time = seconds.max(0.0);
+        }
+    }
+
+    pub fn blend_time(&self) -> f32 {
+        self.blend_time
     }
 
     pub fn play(&mut self, clip_name: &str) -> EngineResult<()> {
@@ -309,10 +439,43 @@ impl Animator {
             }
         };
         self.action_resume = None;
+        self.locomotion_rate = self.rate_for(state, &clip);
         if self.clip_name() == clip {
             return Ok(());
         }
-        self.play_clip(&clip, true)
+        // Walk to run and back: keep the step phase so feet don't skip.
+        let walking = |name: &str| {
+            self.profile
+                .as_ref()
+                .is_some_and(|p| p.walk.as_deref() == Some(name) || p.run.as_deref() == Some(name))
+        };
+        let phase = (walking(self.clip_name()) && walking(&clip))
+            .then(|| {
+                self.clip_duration()
+                    .filter(|d| *d > 0.0)
+                    .map(|d| self.time / d)
+            })
+            .flatten();
+        self.play_clip(&clip, true)?;
+        if let (Some(phase), Some(d)) = (phase, self.clip_duration()) {
+            self.time = phase * d;
+        }
+        Ok(())
+    }
+
+    /// Playback rate that makes `clip` move at the locomotion speed.
+    fn rate_for(&self, state: Locomotion, clip: &str) -> f32 {
+        let (Locomotion::Moving { speed_mps }, Some(p)) = (state, self.profile.as_ref()) else {
+            return 1.0;
+        };
+        let authored = if p.run.as_deref() == Some(clip) {
+            p.run_mps
+        } else if p.walk.as_deref() == Some(clip) {
+            p.walk_mps
+        } else {
+            None
+        };
+        authored.map_or(1.0, |a| (speed_mps / a).clamp(0.5, 2.0))
     }
 
     pub fn play_action(&mut self, action: AnimationAction) -> EngineResult<()> {
@@ -340,9 +503,6 @@ impl Animator {
 
     pub(crate) fn model(&self) -> &Arc<AnimatedModel> {
         &self.model
-    }
-    pub(crate) fn clip_index(&self) -> usize {
-        self.clip_index
     }
     /// Jump to `time` seconds into the current clip (for loading saves).
     pub fn seek(&mut self, time: f32) {
@@ -381,10 +541,27 @@ impl Animator {
             .iter()
             .position(|c| c.name == clip_name)
             .ok_or_else(|| EngineError::Model(format!("unknown animation clip '{clip_name}'")))?;
+        if self.blend_time > 0.0 && (idx != self.clip_index || !looping) {
+            self.fade = Some(Fade {
+                clip_index: self.clip_index,
+                time: self.time,
+                looping: self.looping,
+                rate: self.rate(),
+                elapsed: 0.0,
+                duration: self.blend_time,
+            });
+        }
         self.clip_index = idx;
         self.time = 0.0;
         self.looping = looping;
+        if !looping {
+            self.locomotion_rate = 1.0;
+        }
         Ok(())
+    }
+
+    fn rate(&self) -> f32 {
+        self.speed * self.locomotion_rate
     }
 
     pub fn is_looping(&self) -> bool {
@@ -414,7 +591,26 @@ impl Animator {
         if clip.duration <= 0.0 {
             return;
         }
-        self.time += dt * self.speed;
+        if let Some(f) = self.fade.as_mut() {
+            f.elapsed += dt;
+            let d = self
+                .model
+                .clips
+                .get(f.clip_index)
+                .map_or(0.0, |c| c.duration);
+            f.time += dt * f.rate;
+            if d > 0.0 {
+                f.time = if f.looping {
+                    f.time.rem_euclid(d)
+                } else {
+                    f.time.min(d)
+                };
+            }
+            if f.elapsed >= f.duration {
+                self.fade = None;
+            }
+        }
+        self.time += dt * self.rate();
         if self.looping {
             self.time = self.time.rem_euclid(clip.duration);
         } else {
@@ -432,33 +628,58 @@ impl Animator {
     /// Where each joint is in model space this frame (for holding things in
     /// a hand, say). Index with [`Skeleton::joint_index`].
     pub fn joint_globals(&self) -> Vec<Mat4> {
-        let mut locals = Vec::new();
-        let mut global = Vec::new();
+        let mut scratch = PoseScratch::default();
         let mut out = Vec::new();
-        write_joint_matrices(
-            &self.model,
-            self.clip_index,
-            self.time,
-            &mut locals,
-            &mut global,
-            &mut out,
+        self.write_pose(&mut scratch, &mut out);
+        scratch.global
+    }
+
+    /// Where each joint is with foot IK left out (what the clips alone say).
+    pub(crate) fn fk_globals(&self) -> Vec<Mat4> {
+        let mut scratch = PoseScratch::default();
+        self.blend_locals(&mut scratch);
+        globals_from_locals(&self.model.skeleton, &scratch.locals, &mut scratch.global);
+        scratch.global
+    }
+
+    fn blend_locals(&self, s: &mut PoseScratch) {
+        sample_locals(&self.model, self.clip_index, self.time, &mut s.locals);
+        let Some(f) = self.fade else {
+            return;
+        };
+        sample_locals(&self.model, f.clip_index, f.time, &mut s.other);
+        let w = (f.elapsed / f.duration.max(1e-6)).clamp(0.0, 1.0);
+        let w = w * w * (3.0 - 2.0 * w);
+        for (cur, old) in s.locals.iter_mut().zip(&s.other) {
+            cur.0 = old.0.lerp(cur.0, w);
+            cur.1 = old.1.slerp(cur.1, w);
+            cur.2 = old.2.lerp(cur.2, w);
+        }
+    }
+
+    /// The final pose: clips cross-faded, then feet put on the ground.
+    /// `out` gets skinning matrices; `scratch.global` the joint places.
+    pub fn write_pose(&self, scratch: &mut PoseScratch, out: &mut Vec<Mat4>) {
+        self.blend_locals(scratch);
+        let skeleton = &self.model.skeleton;
+        globals_from_locals(skeleton, &scratch.locals, &mut scratch.global);
+        if let Some(ik) = self.ik.as_ref() {
+            apply_foot_ik(skeleton, ik, &mut scratch.locals, &mut scratch.global);
+        }
+        out.clear();
+        out.extend(
+            scratch
+                .global
+                .iter()
+                .zip(&skeleton.inverse_bind)
+                .map(|(g, ib)| *g * *ib),
         );
-        global
     }
 
     /// Skinning matrices: `global * inverse_bind` per joint.
     pub fn joint_matrices(&self) -> Vec<Mat4> {
         let mut out = Vec::new();
-        let mut locals = Vec::new();
-        let mut global = Vec::new();
-        write_joint_matrices(
-            &self.model,
-            self.clip_index,
-            self.time,
-            &mut locals,
-            &mut global,
-            &mut out,
-        );
+        self.write_pose(&mut PoseScratch::default(), &mut out);
         out
     }
 }
@@ -471,20 +692,25 @@ pub fn sample_joint_matrices(model: &AnimatedModel, clip_index: usize, time: f32
     out
 }
 
-/// Fill `out` without allocating when the scratches already have capacity.
-pub fn write_joint_matrices(
+/// Reusable buffers for [`Animator::write_pose`].
+#[derive(Default, Debug)]
+pub struct PoseScratch {
+    locals: Vec<(Vec3, Quat, Vec3)>,
+    other: Vec<(Vec3, Quat, Vec3)>,
+    pub global: Vec<Mat4>,
+}
+
+/// Local TRS of every joint for one clip at `time` (bind pose where the clip
+/// has no channel).
+fn sample_locals(
     model: &AnimatedModel,
     clip_index: usize,
     time: f32,
     locals: &mut Vec<(Vec3, Quat, Vec3)>,
-    global: &mut Vec<Mat4>,
-    out: &mut Vec<Mat4>,
 ) {
-    let skeleton = &model.skeleton;
-    let n = skeleton.joint_names.len();
+    let n = model.skeleton.joint_names.len();
     locals.clear();
     locals.extend_from_slice(&model.bind_local);
-
     if let Some(clip) = model.clips.get(clip_index) {
         for (ji, channels) in clip.channels.iter().enumerate() {
             if ji >= n {
@@ -502,7 +728,10 @@ pub fn write_joint_matrices(
             }
         }
     }
+}
 
+fn globals_from_locals(skeleton: &Skeleton, locals: &[(Vec3, Quat, Vec3)], global: &mut Vec<Mat4>) {
+    let n = skeleton.joint_names.len();
     global.clear();
     global.resize(n, Mat4::IDENTITY);
     for i in 0..n {
@@ -520,9 +749,145 @@ pub fn write_joint_matrices(
             }
         };
     }
+}
 
+/// Recompute the globals of `joint` and everything below it.
+fn refresh_below(
+    skeleton: &Skeleton,
+    locals: &[(Vec3, Quat, Vec3)],
+    global: &mut [Mat4],
+    joint: usize,
+) {
+    // Joints are stored parents first, so one pass from `joint` on suffices.
+    let mut inside = vec![false; global.len()];
+    inside[joint] = true;
+    for i in joint..global.len() {
+        if i != joint && !skeleton.parents[i].is_some_and(|p| inside[p]) {
+            continue;
+        }
+        inside[i] = true;
+        let (t, r, s) = locals[i];
+        let local = Mat4::from_scale_rotation_translation(s, r, t);
+        global[i] = match skeleton.parents[i] {
+            Some(p) => global[p] * local,
+            None => {
+                skeleton
+                    .root_transforms
+                    .get(i)
+                    .copied()
+                    .unwrap_or(Mat4::IDENTITY)
+                    * local
+            }
+        };
+    }
+}
+
+fn rotation_of(m: Mat4) -> Quat {
+    m.to_scale_rotation_translation().1.normalize()
+}
+
+/// Two-bone IK (hip, knee, ankle) reaching for `target`, bending in the
+/// plane the leg already bends in. All positions in model space.
+fn two_bone_ik(
+    skeleton: &Skeleton,
+    leg: Leg,
+    target: Vec3,
+    locals: &mut [(Vec3, Quat, Vec3)],
+    global: &mut [Mat4],
+) {
+    let a = global[leg.thigh].w_axis.truncate();
+    let b = global[leg.calf].w_axis.truncate();
+    let c = global[leg.foot].w_axis.truncate();
+    let (lab, lcb) = ((b - a).length(), (c - b).length());
+    if lab < 1e-5 || lcb < 1e-5 {
+        return;
+    }
+    let eps = 1e-3 * (lab + lcb);
+    let lat = (target - a)
+        .length()
+        .clamp((lab - lcb).abs() + eps, lab + lcb - eps);
+    let angle = |u: Vec3, v: Vec3| {
+        u.normalize_or_zero()
+            .dot(v.normalize_or_zero())
+            .clamp(-1.0, 1.0)
+            .acos()
+    };
+    let ac_ab_0 = angle(c - a, b - a);
+    let ba_bc_0 = angle(a - b, c - b);
+    let ac_at_0 = angle(c - a, target - a);
+    let ac_ab_1 = ((lcb * lcb - lab * lab - lat * lat) / (-2.0 * lab * lat))
+        .clamp(-1.0, 1.0)
+        .acos();
+    let ba_bc_1 = ((lat * lat - lab * lab - lcb * lcb) / (-2.0 * lab * lcb))
+        .clamp(-1.0, 1.0)
+        .acos();
+    // Bend axis: the knee's own plane; fall back to the hip's side axis
+    // when the leg is straight.
+    let mut axis0 = (c - a).cross(b - a);
+    if axis0.length_squared() < 1e-10 {
+        axis0 = global[leg.thigh].x_axis.truncate();
+    }
+    let axis0 = axis0.normalize();
+    let axis1 = (c - a).cross(target - a);
+    let a_gr = rotation_of(global[leg.thigh]);
+    let b_gr = rotation_of(global[leg.calf]);
+    let r0 = Quat::from_axis_angle(a_gr.inverse() * axis0, ac_ab_1 - ac_ab_0);
+    let r1 = Quat::from_axis_angle(b_gr.inverse() * axis0, ba_bc_1 - ba_bc_0);
+    let r2 = if axis1.length_squared() > 1e-10 {
+        Quat::from_axis_angle(a_gr.inverse() * axis1.normalize(), ac_at_0)
+    } else {
+        Quat::IDENTITY
+    };
+    locals[leg.thigh].1 = (locals[leg.thigh].1 * (r0 * r2)).normalize();
+    locals[leg.calf].1 = (locals[leg.calf].1 * r1).normalize();
+    refresh_below(skeleton, locals, global, leg.thigh);
+}
+
+fn apply_foot_ik(
+    skeleton: &Skeleton,
+    ik: &IkState,
+    locals: &mut [(Vec3, Quat, Vec3)],
+    global: &mut [Mat4],
+) {
+    let feet: [Vec3; 2] = [0, 1].map(|i| global[ik.legs[i].foot].w_axis.truncate() + ik.feet[i]);
+    if let Some(hips) = ik.hips.filter(|_| ik.drop.length_squared() > 1e-10) {
+        // Move the hips in their parent's frame.
+        let parent = skeleton.parents[hips].map_or_else(
+            || {
+                skeleton
+                    .root_transforms
+                    .get(hips)
+                    .copied()
+                    .unwrap_or(Mat4::IDENTITY)
+            },
+            |p| global[p],
+        );
+        locals[hips].0 += parent.inverse().transform_vector3(ik.drop);
+        refresh_below(skeleton, locals, global, hips);
+    }
+    for (leg, target) in ik.legs.iter().zip(feet) {
+        two_bone_ik(skeleton, *leg, target, locals, global);
+    }
+}
+
+/// Fill `out` without allocating when the scratches already have capacity.
+pub fn write_joint_matrices(
+    model: &AnimatedModel,
+    clip_index: usize,
+    time: f32,
+    locals: &mut Vec<(Vec3, Quat, Vec3)>,
+    global: &mut Vec<Mat4>,
+    out: &mut Vec<Mat4>,
+) {
+    sample_locals(model, clip_index, time, locals);
+    globals_from_locals(&model.skeleton, locals, global);
     out.clear();
-    out.extend((0..n).map(|i| global[i] * skeleton.inverse_bind[i]));
+    out.extend(
+        global
+            .iter()
+            .zip(&model.skeleton.inverse_bind)
+            .map(|(g, ib)| *g * *ib),
+    );
 }
 
 fn sample_vec3(track: &Vec3Track, time: f32) -> Vec3 {

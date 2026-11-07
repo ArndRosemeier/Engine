@@ -192,6 +192,16 @@ and map saved ids with `loaded.entity(old)`. `save_to_bytes` /
 `#[serde(crate = "engine::serde")]`, or add serde to your crate. See K and L in
 `examples/voxel_destruction`.
 
+**Character animation:** switching clips cross-fades (0.2 s;
+`set_animation_blend(id, seconds)`, 0 snaps). With an `AnimationProfile` that
+says how fast the clips move (`.walk_speed(1.4).run_speed(3.2)`),
+`set_locomotion(id, Locomotion::Moving { speed_mps })` plays walk or run at the
+rate that matches the real speed and keeps the step phase when switching, so
+feet don't slide or skip. `set_foot_ik(id, Some(FootIk::default()))` makes feet
+stand on what is under them (slopes, steps, rocks, bodies): knees bend, hips
+drop for a lower foot. Legs are found by bone name (UE, Mixamo, Blender rigs).
+See `examples/characters`.
+
 **Particles:** `world.particles_mut().start(ParticleEmitter::new(pos).with_..())`
 runs by itself; call `particles_mut().advance(dt)` only for slow motion or
 fixed steps.
@@ -249,6 +259,7 @@ cargo run --release -p <name>
 | `texgen` | The texture layers (`ENGINE_TEXGEN_FAMILY=natural/ground/facade/roof/medieval`) |
 | `voxel_destruction` | Digging terrain and shattering towers; K saves, L loads |
 | `lamps` | A hamlet at night: street lamps, a camp fire, lit windows, a lantern walker and a sweeping searchlight, all casting shadows (L your own lantern, T shadows, N/M the hour) |
+| `characters` | Walk, run and idle blending into each other, speed-matched; feet planted on stone steps by foot IK (I toggles IK, B blending) |
 | `prefabs` | Carts built from parts driving with spinning wheels, a windmill turning its sails, a lantern carried in a hand; C drops carts that tumble whole, X removes them |
 | `physics` | Crates, a brick wall, dominoes, rolling boulders and a sweeper; throw balls (click), blow things up (F), shatter (X) |
 | `model_viewer` | Any glTF/GLB or `.fmpk` file: `-- path/to/model.glb` |

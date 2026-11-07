@@ -1,6 +1,6 @@
 //! Everyday imports for the friendly API.
 
-pub use crate::anim::AnimatedModel;
+pub use crate::anim::{AnimatedModel, AnimationProfile, FootIk, Locomotion};
 pub use crate::audio::{Audio, ClipId, Play, VoiceId};
 pub use crate::camera::Camera;
 pub use crate::chunk_stream::{ChunkBuilder, ChunkPayload, ChunkStream};

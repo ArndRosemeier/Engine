@@ -73,6 +73,9 @@ VARIANTS: list[Launch] = [
     Launch("prefabs: windmill", "prefabs", {"ENGINE_PREFABS_VIEW": "mill"}),
     Launch("prefabs: lantern in hand", "prefabs", {"ENGINE_PREFABS_VIEW": "walker"}),
     Launch("prefabs: carts dropped from the sky", "prefabs", {"ENGINE_PREFABS_DROP": "1"}),
+    Launch("characters: from the side", "characters", {"ENGINE_CHARACTERS_VIEW": "side"}),
+    Launch("characters: without foot IK (compare)", "characters",
+           {"ENGINE_CHARACTERS_VIEW": "side", "ENGINE_CHARACTERS_IK": "0"}),
     Launch("physics: demo (a throw, dominoes, a blast)", "physics", {"ENGINE_PHYSICS_DEMO": "1"}),
     Launch("starter with ACES tone mapping (compare)", "starter", {"ENGINE_TONEMAP": "aces"}),
 ]

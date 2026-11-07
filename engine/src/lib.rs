@@ -97,7 +97,8 @@ pub(crate) mod volume;
 mod tint_proof;
 
 pub use anim::{
-    AnimatedModel, AnimationAction, AnimationClip, AnimationProfile, Animator, Locomotion,
+    AnimatedModel, AnimationAction, AnimationClip, AnimationProfile, Animator, FootIk, Locomotion,
+    PoseScratch,
 };
 pub use audio::{Audio, ClipId, Play, VoiceId};
 pub use camera::Camera;
