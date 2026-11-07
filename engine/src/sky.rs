@@ -59,20 +59,125 @@ pub struct Moon {
 /// The moon at `hour` of a day `hours` into the game: it runs the sun's
 /// path, lagging by its phase.
 pub fn moon_at(hour: f32, hours: f32, sun: Vec3) -> Moon {
-    let phase = moon_phase(hours, 0.3);
-    let dir = sky_path(hour - phase * 24.0);
-    let pa = phase * std::f32::consts::TAU;
-    let mut perp = sun - dir * sun.dot(dir);
-    if perp.length_squared() < 1e-6 {
-        perp = Vec3::new(-dir.x * dir.y, 1.0 - dir.y * dir.y, -dir.z * dir.y);
+    MoonSpec::default().at(hour, hours, sun).moon
+}
+
+/// Most moons in a sky.
+pub const MAX_MOONS: usize = 4;
+
+/// One moon of a world with several (see
+/// [`crate::world::World::set_moons`]): how big it looks, how fast it goes
+/// through its phases, where in its cycle it starts and how its path is
+/// tilted against the sun's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MoonSpec {
+    /// Disc size, 1 = the usual moon (0.1..8).
+    pub size: f32,
+    /// Days from one new moon to the next (Earth's: 29.53).
+    pub period_days: f32,
+    /// Where in its cycle it is on day 0 (0 new, 0.5 full).
+    pub phase: f32,
+    /// Its path turned this many degrees about the east-west line from the
+    /// sun's (it rides higher or lower in the sky).
+    pub tilt_deg: f32,
+    /// Light it reflects, 1 = the usual moon.
+    pub brightness: f32,
+    /// Colour of its surface (and its light).
+    pub color: Vec3,
+}
+
+impl Default for MoonSpec {
+    fn default() -> Self {
+        Self {
+            size: 1.0,
+            period_days: SYNODIC_DAYS,
+            phase: 0.3,
+            tilt_deg: 0.0,
+            brightness: 1.0,
+            color: Vec3::ONE,
+        }
     }
-    let perp = perp.normalize_or_zero();
-    let s = pa.sin() * if pa > std::f32::consts::PI { -1.0 } else { 1.0 };
-    Moon {
-        dir,
-        sun_side: dir * pa.cos() + perp * s,
-        lit: (1.0 - pa.cos()) * 0.5,
+}
+
+impl MoonSpec {
+    pub fn new(size: f32, period_days: f32, phase: f32) -> Self {
+        Self {
+            size,
+            period_days,
+            phase,
+            ..Self::default()
+        }
     }
+
+    pub fn tilt(mut self, degrees: f32) -> Self {
+        self.tilt_deg = degrees;
+        self
+    }
+
+    pub fn brightness(mut self, b: f32) -> Self {
+        self.brightness = b;
+        self
+    }
+
+    /// Surface colour as linear RGB (white: none).
+    pub fn color(mut self, color: crate::color::Color) -> Self {
+        self.color = color.to_vec3();
+        self
+    }
+
+    pub fn validate(&self) -> crate::error::EngineResult<()> {
+        let ok = |v: f32, lo: f32, hi: f32| v.is_finite() && (lo..=hi).contains(&v);
+        if !ok(self.size, 0.1, 8.0)
+            || !ok(self.period_days, 0.1, 10_000.0)
+            || !self.phase.is_finite()
+            || !ok(self.tilt_deg, -80.0, 80.0)
+            || !ok(self.brightness, 0.0, 10.0)
+            || !self.color.is_finite()
+            || self.color.min_element() < 0.0
+        {
+            return Err(crate::error::EngineError::InvalidValue(
+                "moon out of range (size 0.1..8, period 0.1..10000 days, tilt -80..80, \
+                 brightness 0..10)"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// This moon at `hour` of a day `hours` into the game.
+    pub fn at(&self, hour: f32, hours: f32, sun: Vec3) -> MoonView {
+        let phase = (hours / 24.0 / self.period_days + self.phase).rem_euclid(1.0);
+        let dir = glam::Quat::from_rotation_x(self.tilt_deg.to_radians())
+            * sky_path(hour - phase * 24.0);
+        let pa = phase * std::f32::consts::TAU;
+        let mut perp = sun - dir * sun.dot(dir);
+        if perp.length_squared() < 1e-6 {
+            perp = Vec3::new(-dir.x * dir.y, 1.0 - dir.y * dir.y, -dir.z * dir.y);
+        }
+        let perp = perp.normalize_or_zero();
+        let s = pa.sin() * if pa > std::f32::consts::PI { -1.0 } else { 1.0 };
+        MoonView {
+            moon: Moon {
+                dir,
+                sun_side: dir * pa.cos() + perp * s,
+                lit: (1.0 - pa.cos()) * 0.5,
+            },
+            radius: MOON_RADIUS * self.size,
+            light: self.brightness * self.size * self.size,
+            color: self.color,
+        }
+    }
+}
+
+/// A moon as it stands in the sky right now.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MoonView {
+    pub moon: Moon,
+    /// Angular radius of its disc.
+    pub radius: f32,
+    /// Light it gives when full and high, 1 = the usual moon.
+    pub light: f32,
+    pub color: Vec3,
 }
 
 /// Weather as the sky sees it.
@@ -168,6 +273,24 @@ impl PhysicalSky {
     pub fn lighting(&self) -> SkyLighting {
         sky_lighting(self.sun(), self.moon(), self.weather)
     }
+
+    /// Each of `moons` as it stands now (the usual single moon if empty).
+    pub fn moon_views(&self, moons: &[MoonSpec]) -> Vec<MoonView> {
+        let hours = self.day * 24.0 + self.hour;
+        if moons.is_empty() {
+            return vec![MoonSpec::default().at(self.hour, hours, self.sun())];
+        }
+        moons
+            .iter()
+            .map(|m| m.at(self.hour, hours, self.sun()))
+            .collect()
+    }
+
+    /// The lighting with several moons: their light adds up, coming from
+    /// where the brightest stand, tinted by their colours.
+    pub fn lighting_with(&self, moons: &[MoonView]) -> SkyLighting {
+        sky_lighting_moons(self.sun(), moons, self.weather)
+    }
 }
 
 /// How much of the sun's light gets through the air to the ground, per
@@ -216,13 +339,36 @@ pub struct SkyLighting {
 }
 
 pub fn sky_lighting(sun: Vec3, moon: Moon, wx: SkyWeather) -> SkyLighting {
+    let view = MoonView {
+        moon,
+        radius: MOON_RADIUS,
+        light: 1.0,
+        color: Vec3::ONE,
+    };
+    sky_lighting_moons(sun, &[view], wx)
+}
+
+pub fn sky_lighting_moons(sun: Vec3, moons: &[MoonView], wx: SkyWeather) -> SkyLighting {
     let sun_up = sun.y;
     let day = smoothstep(-0.12, 0.15, sun_up);
     let night = 1.0 - smoothstep(-0.2, 0.02, sun_up);
     let golden = smoothstep(0.35, 0.02, sun_up) * day;
     let overcast = smoothstep(0.55, 1.0, wx.cover) * 0.9;
     let sky_fog = (wx.fog * 1.1 + wx.rain * 0.25).clamp(0.0, 1.0);
-    let moon_up = smoothstep(-0.03, 0.2, moon.dir.y);
+    // Moonlight: each moon by how high and how bright it is; the light
+    // comes from where the moons are (weighted), tinted by their colours.
+    let mut toward = Vec3::ZERO;
+    let mut reach = 0.0;
+    let mut lit = 0.0;
+    let mut tint = Vec3::ZERO;
+    for m in moons {
+        let up = smoothstep(-0.03, 0.2, m.moon.dir.y);
+        toward += m.moon.dir * up * m.light;
+        reach += up * m.light;
+        lit += m.moon.lit * up * m.light;
+        tint += m.color * (m.moon.lit * up * m.light + 1e-4);
+    }
+    let tint = tint / tint.max_element().max(1e-4);
     // A high sun in a clear sky gives most of the light, so shadows read at
     // midday; a low or clouded sun leaves the sky to light the shade.
     let high = smoothstep(0.2, 0.7, sun_up) * wx.sun;
@@ -238,13 +384,14 @@ pub fn sky_lighting(sun: Vec3, moon: Moon, wx: SkyWeather) -> SkyLighting {
             3.2 * smoothstep(-0.05, 0.12, sun_up) * wx.sun * (1.0 + 0.4 * high),
         )
     } else {
-        // Night: the moon while it is up, else a faint glow from overhead.
-        let n = Vec3::new(moon.dir.x * 0.5, 1.0, moon.dir.z * 0.5).normalize();
-        let d = n.lerp(moon.dir, moon_up).normalize_or_zero();
+        // Night: the moons while they are up, else a faint glow from overhead.
+        let to = toward.normalize_or(Vec3::Y);
+        let n = Vec3::new(to.x * 0.5, 1.0, to.z * 0.5).normalize();
+        let d = n.lerp(to, reach.min(1.0)).normalize_or_zero();
         (
             d,
-            Vec3::new(0.55, 0.65, 0.9),
-            0.25 * night * wx.sun * (0.45 + 0.75 * moon.lit * moon_up),
+            Vec3::new(0.55, 0.65, 0.9) * tint,
+            0.25 * night * wx.sun * (0.45 + 0.75 * lit.min(4.0)),
         )
     };
     let dull = 1.0 - wx.sun;
@@ -325,6 +472,28 @@ mod tests {
             .lighting();
         assert!(storm.light_intensity < noon.light_intensity * 0.2);
         assert!(storm.fog_density > noon.fog_density * 5.0);
+    }
+
+    #[test]
+    fn several_moons_add_their_light() {
+        let sky = PhysicalSky::at_hour(0.0);
+        let one = sky.lighting_with(&sky.moon_views(&[]));
+        assert_eq!(one, sky.lighting(), "no moons listed: the usual one");
+        // Two full moons high at midnight light more than one.
+        let full = |size: f32, tilt: f32| {
+            MoonSpec::new(size, 10.0, 0.5).tilt(tilt)
+        };
+        let a = sky.moon_views(&[full(1.0, 0.0)]);
+        let b = sky.moon_views(&[full(1.0, 0.0), full(2.0, -20.0)]);
+        assert!(a[0].moon.lit > 0.99 && a[0].moon.dir.y > 0.3);
+        let la = sky.lighting_with(&a);
+        let lb = sky.lighting_with(&b);
+        assert!(lb.light_intensity > la.light_intensity * 1.5, "{} {}", la.light_intensity, lb.light_intensity);
+        // A red moon tints the night light.
+        let red = sky.moon_views(&[full(1.5, 0.0).color(crate::color::Color::rgb(255, 120, 90))]);
+        let lr = sky.lighting_with(&red);
+        assert!(lr.light_color.x / lr.light_color.z > la.light_color.x / la.light_color.z);
+        assert!(MoonSpec::new(20.0, 1.0, 0.0).validate().is_err());
     }
 
     #[test]

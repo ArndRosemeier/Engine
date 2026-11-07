@@ -86,6 +86,7 @@ VARIANTS: list[Launch] = [
     Launch("interiors: no interiors (compare)", "interiors", {"ENGINE_INTERIORS_FURNISH": "0"}),
     Launch("crowds: seen from above", "crowds", {"ENGINE_CROWD_VIEW": "above"}),
     Launch("crowds: 3,000 people", "crowds", {"ENGINE_CROWD_COUNT": "3000"}),
+    Launch("moons: the one usual moon (compare)", "moons", {"ENGINE_MOONS_ONE": "1"}),
     Launch("fog_volumes: parked in the smog", "fog_volumes", {"ENGINE_FOG_AT": "smog"}),
     Launch("decals: without automatic spraying", "decals", {"ENGINE_DECALS_SPRAY": "0"}),
     Launch("reflections: in the hall", "reflections", {"ENGINE_REFLECTIONS_VIEW": "hall"}),

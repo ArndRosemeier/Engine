@@ -707,6 +707,7 @@ pub struct World {
     sky: Option<Sky>,
     /// Time of day and weather driving sun, sky, haze and exposure.
     physical_sky: Option<crate::sky::PhysicalSky>,
+    moons: Vec<crate::sky::MoonSpec>,
     wind: f32,
     season: f32,
     /// Albedo textures by content, so meshes that share an atlas (every
@@ -849,6 +850,7 @@ impl Default for World {
             haze: None,
             sky: None,
             physical_sky: None,
+            moons: Vec::new(),
             wind: 0.5,
             season: 0.0,
             texture_by_content: HashMap::new(),
@@ -3710,6 +3712,27 @@ impl World {
         self.physical_sky
     }
 
+    /// The physical sky's moons (up to [`crate::sky::MAX_MOONS`]), each with
+    /// its own size, cycle and path; their light adds up at night. Empty
+    /// (the default) keeps the one usual moon.
+    pub fn set_moons(&mut self, moons: Vec<crate::sky::MoonSpec>) -> EngineResult<()> {
+        if moons.len() > crate::sky::MAX_MOONS {
+            return Err(EngineError::InvalidValue(format!(
+                "at most {} moons",
+                crate::sky::MAX_MOONS
+            )));
+        }
+        for m in &moons {
+            m.validate()?;
+        }
+        self.moons = moons;
+        Ok(())
+    }
+
+    pub fn moons(&self) -> &[crate::sky::MoonSpec] {
+        &self.moons
+    }
+
     /// Wind for swaying vegetation (see [`crate::vegetation`]): 0 calm,
     /// 1 a strong breeze, 2 a storm. Default 0.5.
     pub fn set_wind(&mut self, strength: f32) -> EngineResult<()> {
@@ -3748,7 +3771,7 @@ impl World {
         let Some(sky) = self.physical_sky else {
             return;
         };
-        let l = sky.lighting();
+        let l = sky.lighting_with(&sky.moon_views(&self.moons));
         // AssetGenerator's sun is 3.2 at a clear low sun, ~4.5 at noon, under
         // an exposure of 0.55; the engine's daylight is 1.0 under exposure 1.
         self.light.direction = l.light_dir;

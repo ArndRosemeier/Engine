@@ -39,6 +39,11 @@ pub struct SkyUniforms {
     pub cloud_cover: f32,
     /// Cloud density, storm darkness, layer height (m), drift time.
     pub cloud: [f32; 4],
+    /// Per moon, smallest first: (dir, radius), (sun side, brightness),
+    /// (colour, surface seed).
+    pub moons: [[f32; 4]; 3 * crate::sky::MAX_MOONS],
+    /// Moon count, then unused.
+    pub moon_info: [f32; 4],
 }
 
 impl SkyUniforms {
@@ -82,6 +87,8 @@ impl SkyUniforms {
             cloud_origin: [0.0; 3],
             cloud_cover: 0.0,
             cloud: [0.0; 4],
+            moons: [[0.0; 4]; 3 * crate::sky::MAX_MOONS],
+            moon_info: [0.0; 4],
         }
     }
 
@@ -89,11 +96,26 @@ impl SkyUniforms {
     pub fn with_physical(
         mut self,
         sky: &crate::sky::PhysicalSky,
+        moons: &[crate::sky::MoonSpec],
         camera: &Camera,
         time: f32,
     ) -> Self {
-        let light = sky.lighting();
-        let moon = sky.moon();
+        let mut views = sky.moon_views(moons);
+        let light = sky.lighting_with(&views);
+        let moon = views[0].moon;
+        // Seeds follow the list, so each moon keeps its face when sorted.
+        let mut seeded: Vec<(crate::sky::MoonView, f32)> =
+            views.drain(..).enumerate().map(|(i, v)| (v, i as f32)).collect();
+        // Small ones first: the bigger (nearer) ones are drawn over them.
+        seeded.sort_by(|a, b| a.0.radius.total_cmp(&b.0.radius));
+        for (i, (v, seed)) in seeded.iter().take(crate::sky::MAX_MOONS).enumerate() {
+            let d = v.moon.dir;
+            let ss = v.moon.sun_side;
+            self.moons[i * 3] = [d.x, d.y, d.z, v.radius];
+            self.moons[i * 3 + 1] = [ss.x, ss.y, ss.z, v.light / (v.radius / crate::sky::MOON_RADIUS).powi(2)];
+            self.moons[i * 3 + 2] = [v.color.x, v.color.y, v.color.z, *seed];
+        }
+        self.moon_info = [seeded.len().min(crate::sky::MAX_MOONS) as f32, 0.0, 0.0, 0.0];
         self.physical = 1.0;
         self.sun_dir = sky.sun().into();
         self.sun_cos = crate::sky::SUN_RADIUS.cos();
@@ -161,6 +183,8 @@ struct SkyUniforms {
     cloud_origin: vec3<f32>,
     cloud_cover: f32,
     cloud: vec4<f32>,
+    moons: array<vec4<f32>, 12>,
+    moon_info: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> s: SkyUniforms;
@@ -285,14 +309,76 @@ fn twilight(direction: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
     return (band + blue + belt) * glow * 0.5 * smoothstep(-0.12, 0.0, direction.y);
 }
 
-// The night once twilight has gone: deep blue, lighter at the horizon and under the moon.
-fn night_sky(direction: vec3<f32>, sun: vec3<f32>, moon: vec3<f32>) -> vec3<f32> {
+// The night once twilight has gone: deep blue, lighter at the horizon and under the moons.
+fn night_sky(direction: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
     let dark = 1.0 - smoothstep(-0.2, -0.06, sun.y);
     let h = max(direction.y, 0.0);
     let base = mix(vec3<f32>(0.022, 0.03, 0.055), vec3<f32>(0.006, 0.011, 0.03), pow(h, 0.5));
-    let moon_up = smoothstep(-0.05, 0.25, moon.y);
-    let halo = vec3<f32>(0.05, 0.06, 0.08) * pow(max(dot(direction, moon), 0.0), 12.0) * moon_up;
+    var moon_up = 0.0;
+    var halo = vec3<f32>(0.0);
+    for (var i = 0; i < i32(s.moon_info.x); i++) {
+        let m = s.moons[i * 3];
+        let size = m.w / 0.024;
+        // Light it gives: brightness times disc area.
+        let light = s.moons[i * 3 + 1].w * size * size;
+        let up = smoothstep(-0.05, 0.25, m.y) * min(light, 1.5);
+        moon_up += up;
+        // A bigger moon has a somewhat wider halo.
+        let spread = 12.0 / sqrt(max(size, 0.2));
+        halo += vec3<f32>(0.05, 0.06, 0.08) * s.moons[i * 3 + 2].rgb
+            * pow(max(dot(direction, m.xyz), 0.0), spread) * up;
+    }
+    moon_up = min(moon_up, 1.4);
     return (base * (moon_up * 1.2 + 0.6) + halo) * dark * smoothstep(-0.15, 0.0, direction.y);
+}
+
+// Every moon over `color`: spheres lit from the sun's side (their phases),
+// maria and craters (different on each), reddened low down; nearer (bigger)
+// ones cover those behind.
+fn draw_moons(color_in: vec3<f32>, direction: vec3<f32>) -> vec3<f32> {
+    var layer = vec3<f32>(0.0);
+    var cover = 0.0;
+    for (var i = 0; i < i32(s.moon_info.x); i++) {
+        let m = s.moons[i * 3];
+        let moon_r = m.w;
+        let dir = m.xyz;
+        let cos_m = dot(direction, dir);
+        if cos_m <= cos(moon_r * 1.05) {
+            continue;
+        }
+        let sun_side = s.moons[i * 3 + 1].xyz;
+        let bright = s.moons[i * 3 + 1].w;
+        let tint = s.moons[i * 3 + 2].rgb;
+        let seed = s.moons[i * 3 + 2].w * 13.7;
+        let m_right = normalize(cross(dir, vec3<f32>(0.0, 1.0, 0.0)) + vec3<f32>(1e-5, 0.0, 0.0));
+        let m_up = cross(m_right, dir);
+        let mp = vec2<f32>(dot(direction, m_right), dot(direction, m_up)) / moon_r;
+        let mr2 = dot(mp, mp);
+        let m_disc = 1.0 - smoothstep(0.92, 1.0, mr2);
+        let m_n = mp.x * m_right + mp.y * m_up - sqrt(max(0.0, 1.0 - mr2)) * dir;
+        let m_lit = smoothstep(-0.04, 0.12, dot(m_n, sun_side));
+        let maria = smoothstep(0.05, 0.45, pnoise(mp * 1.7 + vec2<f32>(3.1 + seed, 7.4)) * 0.7 + pnoise(mp * 3.9 + vec2<f32>(1.3, 2.9 + seed)) * 0.3);
+        let craters = smoothstep(0.35, 0.7, pnoise(mp * 6.0 + vec2<f32>(5.7 + seed, 0.4))) * 0.14;
+        let albedo = (1.0 - maria * 0.38) * (1.0 - craters);
+        let m_col = vec3<f32>(0.92, 0.9, 0.85) * tint * albedo * (m_lit + 0.006) * bright
+            * mix(vec3<f32>(1.0, 0.62, 0.38), vec3<f32>(1.0), smoothstep(0.0, 0.22, direction.y));
+        layer = mix(layer, m_col, m_disc);
+        cover = max(cover, m_disc);
+    }
+    let shown = s.moon_bright * (1.0 - s.overcast) * smoothstep(-0.01, 0.02, direction.y);
+    // The dark side of a moon hides the stars and sky glow behind it a little.
+    return color_in * (1.0 - cover * 0.5 * shown) + layer * shown;
+}
+
+// Inside any moon's disc (stars stay hidden there).
+fn behind_moon(direction: vec3<f32>) -> bool {
+    for (var i = 0; i < i32(s.moon_info.x); i++) {
+        let m = s.moons[i * 3];
+        if dot(direction, m.xyz) > cos(m.w) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Stars: one per cell of a cube-mapped grid, twinkling a little.
@@ -371,31 +457,15 @@ fn physical_sky(direction: vec3<f32>) -> vec3<f32> {
 
     let twi = twilight(direction, sun);
     color += twi * (1.0 - s.overcast * 0.6);
-    let night = night_sky(direction, sun, s.moon_dir);
+    let night = night_sky(direction, sun);
     color += night * (1.0 - s.overcast * 0.5);
 
-    // Stars, hidden behind the moon's disc.
-    let cos_m = dot(direction, s.moon_dir);
-    if s.stars > 0.0 && cos_m < cos(0.024) {
+    // Stars, hidden behind the moons' discs.
+    if s.stars > 0.0 && !behind_moon(direction) {
         color += star_field(direction) * s.stars * 0.6 * smoothstep(0.0, 0.08, direction.y);
     }
-
-    // The moon: a sphere lit from the sun's side (its phase), maria, craters, reddened low down.
-    let moon_r = 0.024;
-    if s.moon_bright > 0.0 && cos_m > cos(moon_r * 1.05) {
-        let m_right = normalize(cross(s.moon_dir, vec3<f32>(0.0, 1.0, 0.0)) + vec3<f32>(1e-5, 0.0, 0.0));
-        let m_up = cross(m_right, s.moon_dir);
-        let mp = vec2<f32>(dot(direction, m_right), dot(direction, m_up)) / moon_r;
-        let mr2 = dot(mp, mp);
-        let m_disc = 1.0 - smoothstep(0.92, 1.0, mr2);
-        let m_n = mp.x * m_right + mp.y * m_up - sqrt(max(0.0, 1.0 - mr2)) * s.moon_dir;
-        let m_lit = smoothstep(-0.04, 0.12, dot(m_n, s.moon_sun));
-        let maria = smoothstep(0.05, 0.45, pnoise(mp * 1.7 + vec2<f32>(3.1, 7.4)) * 0.7 + pnoise(mp * 3.9 + vec2<f32>(1.3, 2.9)) * 0.3);
-        let craters = smoothstep(0.35, 0.7, pnoise(mp * 6.0 + vec2<f32>(5.7, 0.4))) * 0.14;
-        let albedo = (1.0 - maria * 0.38) * (1.0 - craters);
-        let m_col = vec3<f32>(0.92, 0.9, 0.85) * albedo * (m_lit + 0.006)
-            * mix(vec3<f32>(1.0, 0.62, 0.38), vec3<f32>(1.0), smoothstep(0.0, 0.22, direction.y));
-        color += m_col * m_disc * s.moon_bright * (1.0 - s.overcast) * smoothstep(-0.01, 0.02, direction.y);
+    if s.moon_bright > 0.0 {
+        color = draw_moons(color, direction);
     }
 
     // Clouds: a layer `cloud.z` metres up, drifting.
@@ -551,6 +621,8 @@ pub fn create_sky_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) 
         cloud_origin: [0.0; 3],
         cloud_cover: 0.0,
         cloud: [0.0; 4],
+        moons: [[0.0; 4]; 3 * crate::sky::MAX_MOONS],
+        moon_info: [0.0; 4],
     };
 
     let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
