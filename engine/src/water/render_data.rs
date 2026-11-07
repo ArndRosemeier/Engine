@@ -6,6 +6,8 @@ use rayon::prelude::*;
 /// Water thinner than this (metres) is not drawn.
 pub(crate) const DRAW_DEPTH: f32 = 0.004;
 pub(crate) const NO_CELL: u32 = u32::MAX;
+/// Draw-list flag: draw the cell as wet ground, not as water.
+pub(crate) const SAND_BIT: u32 = 1 << 31;
 
 impl Water {
     /// Per cell: surface height, water depth (-1 when the cell is full to its
@@ -70,7 +72,8 @@ impl Water {
         &self.cell_col
     }
 
-    /// Cells to draw: wet ones and their dry neighbours (whose quads carry
+    /// Cells to draw (returns how many are water; wet ground follows,
+    /// flagged with `SAND_BIT`): wet ones and their dry neighbours (whose quads carry
     /// the surface into the bank, so the shoreline is where water meets
     /// ground, with no gap). Full cells have no surface.
     pub(crate) fn render_draw_list(
@@ -78,22 +81,32 @@ impl Water {
         state: &[[f32; 4]],
         corners: &[[u32; 16]],
         out: &mut Vec<u32>,
-    ) {
+    ) -> usize {
         let open_wet = |i: u32| {
             i != NO_CELL && {
                 let d = state[i as usize][1];
                 d > DRAW_DEPTH
             }
         };
+        let t = self.time as f32;
+        let wet_ground = |i: usize| {
+            (0.0..=DRAW_DEPTH).contains(&state[i][1])
+                && t - self.marks[i][2] < super::marks::DRYING_SECONDS * 4.0
+        };
         *out = (0..state.len() as u32)
             .into_par_iter()
             .filter(|&i| {
                 let d = state[i as usize][1];
-                if d < 0.0 {
-                    return false;
-                }
-                d > DRAW_DEPTH || corners[i as usize].iter().any(|&n| open_wet(n))
+                d >= 0.0 && (d > DRAW_DEPTH || corners[i as usize].iter().any(|&n| open_wet(n)))
             })
             .collect();
+        let water = out.len();
+        let ground: Vec<u32> = (0..state.len() as u32)
+            .into_par_iter()
+            .filter(|&i| wet_ground(i as usize))
+            .map(|i| i | SAND_BIT)
+            .collect();
+        out.extend(ground);
+        water
     }
 }

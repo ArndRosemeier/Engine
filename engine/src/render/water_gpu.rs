@@ -42,7 +42,7 @@ struct Params {
     eye_water: [f32; 4],
     /// Open sea: level, sea time, mean depth, 1 if there is a sea.
     sea: [f32; 4],
-    /// Region max x, max z, unused, unused.
+    /// Region max x, max z, simulation time, unused.
     region_max: [f32; 4],
     /// Swell trains: height (ramped), period, direction degrees, 0.
     swell: [[f32; 4]; SWELLS],
@@ -80,6 +80,7 @@ struct Buffers {
     corners: wgpu::Buffer,
     columns: wgpu::Buffer,
     draw: wgpu::Buffer,
+    marks: wgpu::Buffer,
     cell_capacity: usize,
     draw_capacity: usize,
 }
@@ -87,6 +88,7 @@ struct Buffers {
 pub struct WaterGpu {
     surface_pipeline: wgpu::RenderPipeline,
     sea_pipeline: wgpu::RenderPipeline,
+    ground_pipeline: wgpu::RenderPipeline,
     resolve_pipeline: wgpu::RenderPipeline,
     under_pipeline: wgpu::RenderPipeline,
     surface_layout: wgpu::BindGroupLayout,
@@ -182,6 +184,7 @@ impl WaterGpu {
                 texture(5, float, false),
                 texture(6, unfilterable, false),
                 sampler_entry(7),
+                storage(8),
             ],
         });
         let resolve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -209,7 +212,7 @@ impl WaterGpu {
                 write_mask: wgpu::ColorWrites::ALL,
             })
         };
-        let surface_like = |label: &str, vs: &str| {
+        let surface_like = |label: &str, vs: &str, depth_write: bool| {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("water-surface-pipeline-layout"),
                 bind_group_layouts: &[scene_layout, &surface_layout],
@@ -237,7 +240,7 @@ impl WaterGpu {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: WATER_DEPTH_FORMAT,
-                    depth_write_enabled: true,
+                    depth_write_enabled: depth_write,
                     depth_compare: super::DEPTH_COMPARE,
                     stencil: Default::default(),
                     bias: Default::default(),
@@ -247,8 +250,10 @@ impl WaterGpu {
                 cache: None,
             })
         };
-        let surface_pipeline = surface_like("water-surface", "vs_surface");
-        let sea_pipeline = surface_like("water-sea", "vs_sea");
+        let surface_pipeline = surface_like("water-surface", "vs_surface", true);
+        let sea_pipeline = surface_like("water-sea", "vs_sea", true);
+        // Wet ground only darkens what is there; it must not hide water.
+        let ground_pipeline = surface_like("water-wet-ground", "vs_surface", false);
         let fullscreen = |label: &str,
                           shader: &wgpu::ShaderModule,
                           layouts: &[&wgpu::BindGroupLayout],
@@ -319,6 +324,7 @@ impl WaterGpu {
         Self {
             surface_pipeline,
             sea_pipeline,
+            ground_pipeline,
             resolve_pipeline,
             under_pipeline,
             surface_layout,
@@ -456,6 +462,7 @@ impl WaterGpu {
             corners: make("water-corners", cell_capacity * 64),
             columns: make("water-columns", cell_capacity * 4),
             draw: make("water-draw", draw_capacity * 4),
+            marks: make("water-marks", cell_capacity * 16),
             cell_capacity,
             draw_capacity,
         });
@@ -486,7 +493,7 @@ impl WaterGpu {
             self.corners = water.render_corners();
         }
         let mut draw = std::mem::take(&mut self.draw);
-        water.render_draw_list(&self.state, &self.corners, &mut draw);
+        let water_draws = water.render_draw_list(&self.state, &self.corners, &mut draw) as u32;
         self.draw = draw;
         self.ensure_buffers(device, self.state.len(), self.draw.len());
         let buffers = self.buffers.as_ref().expect("buffers");
@@ -501,6 +508,7 @@ impl WaterGpu {
         }
         if !self.state.is_empty() {
             queue.write_buffer(&buffers.state, 0, bytemuck::cast_slice(&self.state));
+            queue.write_buffer(&buffers.marks, 0, bytemuck::cast_slice(&water.marks));
         }
         if !self.draw.is_empty() {
             queue.write_buffer(&buffers.draw, 0, bytemuck::cast_slice(&self.draw));
@@ -562,7 +570,12 @@ impl WaterGpu {
                 Some(sea) => [sea.level, water.sea_time(), water.sea_depth(), 1.0],
                 None => [0.0; 4],
             },
-            region_max: [region.max_xz().x, region.max_xz().y, 0.0, 0.0],
+            region_max: [
+                region.max_xz().x,
+                region.max_xz().y,
+                water.time() as f32,
+                0.0,
+            ],
             swell: {
                 let mut out = [[0.0; 4]; SWELLS];
                 if let Some(sea) = water.sea() {
@@ -614,6 +627,10 @@ impl WaterGpu {
                     wgpu::BindGroupEntry {
                         binding: 7,
                         resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: buffers.marks.as_entire_binding(),
                     },
                 ],
             }));
@@ -687,9 +704,14 @@ impl WaterGpu {
             });
             pass.set_bind_group(0, frame.scene_bind, &[]);
             pass.set_bind_group(1, surface_bind, &[]);
-            if !self.draw.is_empty() {
+            // Wet ground first, so water drawn over it stays on top.
+            if (self.draw.len() as u32) > water_draws {
+                pass.set_pipeline(&self.ground_pipeline);
+                pass.draw(0..6, water_draws..self.draw.len() as u32);
+            }
+            if water_draws > 0 {
                 pass.set_pipeline(&self.surface_pipeline);
-                pass.draw(0..6, 0..self.draw.len() as u32);
+                pass.draw(0..6, 0..water_draws);
             }
             if has_sea {
                 pass.set_pipeline(&self.sea_pipeline);
@@ -846,8 +868,22 @@ const SURFACE_WGSL: &str = r#"
 @group(1) @binding(5) var refract_tex: texture_2d<f32>;
 @group(1) @binding(6) var depth_tex: texture_2d<f32>;
 @group(1) @binding(7) var lin: sampler;
+// Per cell: foam, when it was set, when the cell was last wet.
+@group(1) @binding(8) var<storage, read> marks: array<vec4<f32>>;
 
 const NO_CELL: u32 = 0xffffffffu;
+const SAND_BIT: u32 = 0x80000000u;
+const FOAM_SECONDS: f32 = 5.0;
+const DRYING_SECONDS: f32 = 30.0;
+
+fn foam_of(i: u32) -> f32 {
+    let m = marks[i];
+    return m.x * exp(-(wp.region_max.z - m.y) / FOAM_SECONDS);
+}
+
+fn wetness_of(i: u32) -> f32 {
+    return exp(-max(wp.region_max.z - marks[i].z, 0.0) / DRYING_SECONDS);
+}
 const DRAW_DEPTH: f32 = 0.004;
 const SEA_SEGMENTS: u32 = 64u;
 
@@ -864,11 +900,14 @@ struct VsOut {
     @location(1) grad: vec2<f32>,
     @location(2) flow: vec2<f32>,
     @location(3) depth: f32,
+    // Foam (water) or wetness (wet ground, where depth < 0).
+    @location(4) foam: f32,
 };
 
 @vertex
 fn vs_surface(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VsOut {
-    let cell = draw_list[ii];
+    let entry = draw_list[ii];
+    let cell = entry & ~SAND_BIT;
     var order = array<u32, 6>(0u, 1u, 3u, 0u, 3u, 2u);
     let k = order[vi];
     let cells_x = u32(wp.region.w);
@@ -876,6 +915,30 @@ fn vs_surface(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) 
     let cx = col % cells_x;
     let cz = col / cells_x;
     let xz = wp.region.xy + vec2<f32>(f32(cx + (k & 1u)), f32(cz + (k >> 1u))) * wp.region.z;
+
+    // Wet ground: a quad a little above the ground that darkens what is
+    // behind it (the fragment shader checks it is the ground).
+    if (entry & SAND_BIT) != 0u {
+        var ground = 0.0;
+        var wet = 0.0;
+        var n = 0.0;
+        for (var j = 0u; j < 4u; j++) {
+            let c = corners[cell * 16u + k * 4u + j];
+            if c != NO_CELL && cells[c].y >= 0.0 && cells[c].y <= DRAW_DEPTH {
+                ground += cells[c].x - cells[c].y;
+                wet += wetness_of(c);
+                n += 1.0;
+            }
+        }
+        var sand: VsOut;
+        sand.world_p = vec3<f32>(xz.x, ground / max(n, 1.0) + 0.25, xz.y);
+        sand.clip = u.view_proj * vec4<f32>(sand.world_p, 1.0);
+        sand.grad = vec2<f32>(0.0);
+        sand.flow = vec2<f32>(0.0);
+        sand.depth = -1.0;
+        sand.foam = wet / max(n, 1.0);
+        return sand;
+    }
 
     // A dry quad beside water sits at its neighbour's level and runs into
     // the bank, where the depth test trims it to the true shoreline.
@@ -895,6 +958,7 @@ fn vs_surface(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) 
     var wet_count = 0.0;
     var flow = vec2<f32>(0.0);
     var depth = 0.0;
+    var foam = 0.0;
     for (var j = 0u; j < 4u; j++) {
         let n = corners[cell * 16u + k * 4u + j];
         if is_wet(n) {
@@ -903,12 +967,14 @@ fn vs_surface(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) 
             wet_count += 1.0;
             flow += c.zw;
             depth += c.y;
+            foam += foam_of(n);
         }
     }
     if wet_count > 0.0 {
         level /= wet_count;
         flow /= wet_count;
         depth /= wet_count;
+        foam /= wet_count;
     } else {
         level = fallback;
     }
@@ -946,6 +1012,7 @@ fn vs_surface(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) 
     out.grad = grad;
     out.flow = flow;
     out.depth = depth;
+    out.foam = foam;
     return out;
 }
 
@@ -989,6 +1056,7 @@ fn vs_sea(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> V
     out.grad = w.yz;
     out.flow = vec2<f32>(0.0);
     out.depth = max(wp.sea.z, 2.0);
+    out.foam = 0.0;
     return out;
 }
 
@@ -1114,11 +1182,40 @@ fn scene_light() -> SceneLight {
     return light;
 }
 
+// Ground that water has just left: darker and a little glossy, drying out.
+fn wet_ground(in: VsOut, uv: vec2<f32>) -> vec4<f32> {
+    let d = scene_depth(in.clip.xy);
+    if d <= 0.0 || in.foam < 0.02 {
+        discard;
+    }
+    let ground = world_at(uv, d);
+    // Only the ground itself, not things standing on it.
+    if abs(ground.y - (in.world_p.y - 0.25)) > 0.3 {
+        discard;
+    }
+    let scene = textureSampleLevel(refract_tex, lin, uv, 0.0).rgb;
+    let wet = clamp(in.foam, 0.0, 1.0);
+    // Water in the pores: darker, more saturated; a sheen while very wet.
+    let grey = dot(scene, vec3<f32>(0.333));
+    var color = mix(scene, mix(vec3<f32>(grey), scene, 1.25) * 0.55, wet);
+    let v = normalize(u.eye - ground);
+    let r = reflect(-v, vec3<f32>(0.0, 1.0, 0.0));
+    let sky = screen_sky(r);
+    let fresnel = 0.02 + 0.98 * pow(1.0 - max(v.y, 0.0), 5.0);
+    if sky.w > 0.0 {
+        color = mix(color, sky.rgb, fresnel * smoothstep(0.7, 1.0, wet) * 0.15);
+    }
+    return vec4<f32>(color, 1.0);
+}
+
 @fragment
 fn fs_surface(in: VsOut) -> @location(0) vec4<f32> {
     let p = in.world_p;
     let pix = in.clip.xy;
     let uv = pix * wp.screen.zw;
+    if in.depth < 0.0 {
+        return wet_ground(in, uv);
+    }
     let to_eye = u.eye - p;
     let dist = length(to_eye);
     let v = to_eye / max(dist, 1e-4);
@@ -1205,23 +1302,29 @@ fn fs_surface(in: VsOut) -> @location(0) vec4<f32> {
         }
         color = mix(body, refl, fresnel) + spec;
 
+        // A film of water at the very edge shows only what is under it.
+        let film = smoothstep(0.0, 0.04, pix_depth);
+        let plain = textureSampleLevel(refract_tex, lin, uv, 0.0).rgb;
+        color = mix(plain, color, film);
         // Foam: breaking fronts, fast water, shorelines.
         // Supercritical flow (Froude number above 1) is where water breaks:
         // rapids, hydraulic jumps, bores and fronts running up a beach.
         let froude = speed / sqrt(9.81 * max(in.depth, 0.01));
         let turbulence = smoothstep(0.7, 1.8, froude) * smoothstep(0.02, 0.15, in.depth)
             + smoothstep(2.5, 6.0, speed);
-        let shore = 1.0 - smoothstep(0.0, 0.35, pix_depth);
-        let amount = clamp((turbulence * 0.9 + shore * 0.55) * wp.look.z, 0.0, 1.0);
-        let pattern = flowing_noise(p.xz * 1.3, in.flow * 1.3, t);
-        let foam = amount * smoothstep(0.55, 0.85, pattern + amount * 0.45);
-        let foam_light = (u.light_color * max(nl, 0.0) * (1.0 - u.ambient) * vis + sky_irradiance(vec3<f32>(0.0, 1.0, 0.0), light) * u.ambient) * 0.85;
-        color = mix(color, foam_light, clamp(foam, 0.0, 1.0));
+        let shore = 1.0 - smoothstep(0.0, 0.25, pix_depth);
+        let amount = clamp((turbulence * 0.7 + shore * 0.25 + in.foam) * wp.look.z, 0.0, 1.0);
+        // Lacy whitewater: broad patches broken into bubbly strands, which
+        // close up into solid white where the foam is thick.
+        let broad = flowing_noise(p.xz * 0.9, in.flow * 0.9, t);
+        let fine = flowing_noise(p.xz * 4.1 + 13.7, in.flow * 4.1, t * 1.3);
+        let lace = broad * 0.55 + (1.0 - abs(fine * 2.0 - 1.0)) * 0.45;
+        let edge = 0.86 - amount * 0.42;
+        let foam = smoothstep(edge, edge + 0.1, lace) * min(amount * 1.5, 0.95);
+        let foam_light = (u.light_color * max(nl, 0.0) * (1.0 - u.ambient) * vis + sky_irradiance(vec3<f32>(0.0, 1.0, 0.0), light) * u.ambient) * 0.95;
+        // Foam rides even the thinnest swash.
+        color = mix(color, foam_light, clamp(foam, 0.0, 1.0) * smoothstep(0.0, 0.01, pix_depth));
 
-        // A film of water at the very edge shows only what is under it.
-        let film = smoothstep(0.0, 0.04, pix_depth);
-        let plain = textureSampleLevel(refract_tex, lin, uv, 0.0).rgb;
-        color = mix(plain, color, film);
         color = haze(color, p);
     } else {
         // Seen from below: Snell's window to the air, mirror outside it.
