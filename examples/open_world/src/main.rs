@@ -12,7 +12,9 @@
 //!
 //! `ENGINE_AUTOFLY=1` flies on its own; `ENGINE_OPEN_WORLD_SPEED=300` sets
 //! the speed (m/s) for that; `ENGINE_SKY_HOUR=19` sets the time of day;
-//! `ENGINE_OPEN_WORLD_SEED=7` another world.
+//! `ENGINE_OPEN_WORLD_SEED=7` another world. `ENGINE_OPEN_WORLD_BENCH=30`
+//! records frame times for 30 seconds (best with `ENGINE_AUTOFLY=1`), prints
+//! them and quits.
 use engine::prelude::*;
 use engine::stream::{StreamSettings, Tile, WorldGenerator, WorldStream};
 
@@ -197,6 +199,59 @@ fn models(world: &mut World) -> EngineResult<Models> {
     })
 }
 
+/// Frame times and streaming cost while flying (`ENGINE_OPEN_WORLD_BENCH`).
+#[derive(Default)]
+struct Bench {
+    time: f32,
+    frames: Vec<f32>,
+    stream_ms: Vec<f32>,
+    start: Option<Vec3>,
+    end: Vec3,
+    last: engine::stream::StreamStats,
+}
+
+impl Bench {
+    fn add(&mut self, dt: f32, stats: engine::stream::StreamStats, at: Vec3) {
+        self.time += dt;
+        self.frames.push(dt * 1000.0);
+        self.stream_ms.push(stats.install_ms);
+        self.start.get_or_insert(at);
+        self.end = at;
+        self.last = stats;
+    }
+
+    fn report(&mut self) {
+        let pct = |v: &mut Vec<f32>, p: f32| {
+            v.sort_by(f32::total_cmp);
+            v[((v.len() - 1) as f32 * p).round() as usize]
+        };
+        let n = self.frames.len().max(1);
+        let avg = self.frames.iter().sum::<f32>() / n as f32;
+        let over = |ms: f32| self.frames.iter().filter(|&&f| f > ms).count();
+        let (h25, h50) = (over(25.0), over(50.0));
+        let mut f = self.frames.clone();
+        let mut s = self.stream_ms.clone();
+        let dist = self.start.map_or(0.0, |a| (self.end - a).length());
+        println!(
+            "open_world bench: {n} frames in {:.1} s, flew {dist:.0} m\n  \
+             frame ms: avg {avg:.2} ({:.0} FPS)  p50 {:.2}  p95 {:.2}  p99 {:.2}  max {:.2}\n  \
+             frames over 25 ms: {h25}, over 50 ms: {h50}\n  \
+             stream main-thread ms: p50 {:.3}  p99 {:.3}  max {:.3}\n  \
+             at the end: {:?}",
+            self.time,
+            1000.0 / avg,
+            pct(&mut f, 0.5),
+            pct(&mut f, 0.95),
+            pct(&mut f, 0.99),
+            pct(&mut f, 1.0),
+            pct(&mut s, 0.5),
+            pct(&mut s, 0.99),
+            pct(&mut s, 1.0),
+            self.last,
+        );
+    }
+}
+
 fn main() -> EngineResult<()> {
     let seed = setting("ENGINE_OPEN_WORLD_SEED")
         .and_then(|s| s.parse::<u32>().ok())
@@ -205,6 +260,8 @@ fn main() -> EngineResult<()> {
         .and_then(|h| h.parse::<f32>().ok())
         .unwrap_or(15.5);
     let auto_speed = setting("ENGINE_OPEN_WORLD_SPEED").and_then(|s| s.parse::<f32>().ok());
+    let bench_seconds = setting("ENGINE_OPEN_WORLD_BENCH").and_then(|s| s.parse::<f32>().ok());
+    let mut bench = Bench::default();
     // Height function for the camera before the stream exists.
     let probe = Continents {
         shape: Noise::new(seed),
@@ -281,6 +338,17 @@ fn main() -> EngineResult<()> {
                 } else {
                     t.add_sphere(p + dir * -1.0, 3.0);
                 }
+            }
+        }
+
+        if let (Some(seconds), Some(stream)) = (bench_seconds, world.stream()) {
+            // Skip the first second (shader warm-up), then record.
+            if frame.time > 1.0 {
+                bench.add(frame.dt, stream.stats(), camera.position);
+            }
+            if bench.time >= seconds {
+                bench.report();
+                world.request_exit();
             }
         }
 
