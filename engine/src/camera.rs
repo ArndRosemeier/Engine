@@ -192,4 +192,36 @@ impl Camera {
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
         self.projection_matrix(aspect) * self.view_matrix()
     }
+
+    /// The ray from the eye through pixel `(x, y)` of a `width` x `height`
+    /// view (pixels from the top left): `(origin, unit direction)`.
+    pub fn ray_through(&self, x: f32, y: f32, width: f32, height: f32) -> (Vec3, Vec3) {
+        let (w, h) = (width.max(1.0), height.max(1.0));
+        let ndc_x = (x / w) * 2.0 - 1.0;
+        let ndc_y = 1.0 - (y / h) * 2.0;
+        let inv = self.view_projection(w / h).inverse();
+        // Reversed depth: 1 is the near plane; 0.5 is well inside the view.
+        let near = inv.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
+        let mid = inv.project_point3(Vec3::new(ndc_x, ndc_y, 0.5));
+        let dir = (mid - near)
+            .try_normalize()
+            .unwrap_or_else(|| (self.target - self.eye).normalize_or(Vec3::Z));
+        (self.eye, dir)
+    }
+}
+
+#[cfg(test)]
+mod ray_tests {
+    use super::*;
+
+    #[test]
+    fn centre_ray_is_forward_and_corners_lean_out() {
+        let cam = Camera::look_at((0.0, 2.0, 0.0), (0.0, 2.0, 10.0));
+        let (o, d) = cam.ray_through(960.0, 540.0, 1920.0, 1080.0);
+        assert!((o - Vec3::new(0.0, 2.0, 0.0)).length() < 1e-5);
+        assert!(d.dot(Vec3::Z) > 0.9999, "{d}");
+        // Top-right of the screen: up, and to the right (-X when facing +Z).
+        let (_, d) = cam.ray_through(1919.0, 0.0, 1920.0, 1080.0);
+        assert!(d.y > 0.1 && d.x < -0.1, "{d}");
+    }
 }

@@ -239,6 +239,7 @@ pub struct Input {
     mouse_down: HashSet<MouseButton>,
     mouse_clicked: HashSet<MouseButton>,
     mouse_delta: Vec2,
+    cursor: Option<Vec2>,
     last_key_down: Option<Key>,
 }
 
@@ -278,6 +279,17 @@ impl Input {
     }
 
     /// Accumulate raw pointer motion (device counts, not window pixels).
+    pub(crate) fn set_cursor(&mut self, at: Option<(f32, f32)>) {
+        self.cursor = at.map(|(x, y)| Vec2::new(x, y));
+    }
+
+    /// Where the mouse cursor is over the window, in pixels from the top
+    /// left (`None` while it is outside). [`crate::world::World::cursor_ray`]
+    /// turns it into a ray for picking.
+    pub fn cursor(&self) -> Option<Vec2> {
+        self.cursor
+    }
+
     pub(crate) fn add_mouse_delta(&mut self, dx: f32, dy: f32) {
         self.mouse_delta += Vec2::new(dx, dy);
     }
@@ -318,6 +330,15 @@ impl Input {
     /// Only meaningful while the pointer is locked
     /// ([`crate::world::World::set_pointer_lock`]); otherwise it is whatever
     /// motion the window happened to see.
+    /// Mouse-look turn for this frame as `(yaw, pitch)` in degrees, with the
+    /// usual feel: mouse right turns right, mouse up looks up. Add both to a
+    /// first-person camera's yaw and pitch (yaw 90 faces +X, so turning
+    /// right lowers it).
+    pub fn look_delta(&self, degrees_per_count: f32) -> (f32, f32) {
+        let d = self.mouse_delta * degrees_per_count;
+        (-d.x, -d.y)
+    }
+
     pub fn mouse_delta(&self) -> Vec2 {
         self.mouse_delta
     }
