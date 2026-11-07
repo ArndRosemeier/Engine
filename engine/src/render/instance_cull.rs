@@ -220,7 +220,7 @@ impl InstanceCull {
             module: &shader,
             entry_point: Some("compact"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
+            cache: crate::render::pipeline_cache::get(device).as_ref(),
         });
         let (params_buf, params_bind) = params_buffer(device, &params_layout, params_stride, 1);
         Self {

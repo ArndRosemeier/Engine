@@ -1358,7 +1358,7 @@ impl ShadowGpu {
             depth_stencil: Some(depth_state.clone()),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
-            cache: None,
+            cache: crate::render::pipeline_cache::get(device).as_ref(),
         });
         let voxel_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shadow-voxel-depth"),
@@ -1379,7 +1379,7 @@ impl ShadowGpu {
             depth_stencil: Some(depth_state.clone()),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
-            cache: None,
+            cache: crate::render::pipeline_cache::get(device).as_ref(),
         });
 
         let skinned_instance = wgpu::VertexBufferLayout {
@@ -1411,7 +1411,7 @@ impl ShadowGpu {
             depth_stencil: Some(depth_state.clone()),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
-            cache: None,
+            cache: crate::render::pipeline_cache::get(device).as_ref(),
         });
 
         Self {
@@ -1640,7 +1640,7 @@ impl ShadowGpu {
                 depth_stencil: Some(self.depth_state.clone()),
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
-                cache: None,
+                cache: crate::render::pipeline_cache::get(device).as_ref(),
             },
         ));
     }

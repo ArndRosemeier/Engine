@@ -283,7 +283,7 @@ impl GiVolume {
                 module: &shader,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
-                cache: None,
+                cache: crate::render::pipeline_cache::get(device).as_ref(),
             })
         };
         let fill_pipeline = compute("gi-fill", &[&fill_layout, shadow_layout], "cs_fill");
@@ -318,7 +318,7 @@ impl GiVolume {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
-            cache: None,
+            cache: crate::render::pipeline_cache::get(device).as_ref(),
         });
         let terrain_voxel_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -344,7 +344,7 @@ impl GiVolume {
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
-                cache: None,
+                cache: crate::render::pipeline_cache::get(device).as_ref(),
             });
         let raster_view = device
             .create_texture(&wgpu::TextureDescriptor {

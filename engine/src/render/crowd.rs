@@ -325,7 +325,7 @@ impl CrowdGpu {
                 depth_stencil: Some(depth),
                 multisample: super::stencil::scene_multisample(true),
                 multiview: None,
-                cache: None,
+                cache: crate::render::pipeline_cache::get(device).as_ref(),
             })
         };
         let opaque = make(
@@ -366,7 +366,7 @@ impl CrowdGpu {
             depth_stencil: Some(shadow_depth),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
-            cache: None,
+            cache: crate::render::pipeline_cache::get(device).as_ref(),
         });
         Self {
             anim_layout,

@@ -120,9 +120,17 @@ pub struct WaterGpu {
     depth_multisampled: bool,
     /// The simulation, when the water runs on the GPU.
     sim: Option<crate::water::gpu_sim::GpuWaterSim>,
+    /// The simulation's compute pipelines, built on a worker thread at
+    /// startup so the first frame with GPU water does not compile them.
+    sim_warm: super::pipeline_cache::Prewarm<crate::water::gpu_sim::GpuWaterSim>,
 }
 
 impl WaterGpu {
+    /// True once the startup worker building the simulation finished.
+    pub fn prewarm_ready(&self) -> bool {
+        self.sim_warm.is_ready()
+    }
+
     pub fn new(
         device: &wgpu::Device,
         scene_layout: &wgpu::BindGroupLayout,
@@ -263,7 +271,7 @@ impl WaterGpu {
                 }),
                 multisample: Default::default(),
                 multiview: None,
-                cache: None,
+                cache: crate::render::pipeline_cache::get(device).as_ref(),
             })
         };
         let surface_pipeline = surface_like("water-surface", "vs_surface", true);
@@ -299,7 +307,7 @@ impl WaterGpu {
                 depth_stencil: depth,
                 multisample: Default::default(),
                 multiview: None,
-                cache: None,
+                cache: crate::render::pipeline_cache::get(device).as_ref(),
             })
         };
         let resolve_pipeline = fullscreen(
@@ -339,6 +347,12 @@ impl WaterGpu {
         });
         Self {
             sim: None,
+            sim_warm: {
+                let device = device.clone();
+                super::pipeline_cache::Prewarm::spawn("water-sim", move || {
+                    crate::water::gpu_sim::GpuWaterSim::new(&device)
+                })
+            },
             ground_bind: None,
             bind_key: (u64::MAX, u64::MAX),
             synced_boundary: u64::MAX,
@@ -537,8 +551,16 @@ impl WaterGpu {
         let size = [ext.width.max(1), ext.height.max(1)];
         self.ensure_targets(device, size, main_depth);
         if water.on_gpu() {
+            if self.sim.is_none() {
+                self.sim = Some(
+                    self.sim_warm
+                        .take()
+                        .unwrap_or_else(|| crate::water::gpu_sim::GpuWaterSim::new(device)),
+                );
+            }
             self.sim
-                .get_or_insert_with(|| crate::water::gpu_sim::GpuWaterSim::new(device))
+                .as_mut()
+                .expect("sim")
                 .encode_frame(device, queue, encoder, water);
         }
 

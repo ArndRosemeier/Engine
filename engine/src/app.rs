@@ -394,6 +394,16 @@ impl App {
                 sync_ms,
                 render_ms,
             };
+            if self.frame_index < 5 && crate::render::pipeline_cache::log_enabled() {
+                // The first frames are where a lazily built shader would stall.
+                eprintln!(
+                    "[engine] frame {}: {:.1} ms of work (sync {:.1}, render {:.1})",
+                    self.frame_index,
+                    phases.work_ms(),
+                    phases.sync_ms,
+                    phases.render_ms
+                );
+            }
             if phases.work_ms() >= self.hitch_ms {
                 if let Some(path) = self.world.hitch_log() {
                     emit_hitch(
