@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Simple launcher UI for Engine examples.
+"""Launcher UI for Engine examples.
 
-Every folder under examples/ gets a button. VARIANTS adds extra buttons for
-examples that take environment variables or arguments (texture families,
-the character viewer, close-ups); add a line there for a new variant.
+Every folder under examples/ is listed (searchable, and it scrolls however
+many there are). Picking one shows its description, taken from the `//!`
+comment at the top of its main.rs, and a button for each way to start it.
+VARIANTS adds those extra buttons for examples that take environment
+variables or arguments; add a line there for a new variant, labelled
+"<example>: what it does".
 """
 
 from __future__ import annotations
@@ -28,12 +31,12 @@ class Launch:
     args: list[str] = field(default_factory=list)
 
 
-# Extra ways to start an example, shown after the plain ones.
+# Extra ways to start an example, shown as buttons next to its "Run".
 VARIANTS: list[Launch] = [
-    Launch("starter (low quality, 60 FPS target)", "starter",
+    Launch("starter: low quality, 60 FPS target", "starter",
            {"ENGINE_QUALITY": "low", "ENGINE_TARGET_FPS": "60"}),
-    Launch("starter (morning)", "starter", {"ENGINE_SKY_HOUR": "8.5"}),
-    Launch("starter without grass (compare)", "starter", {"ENGINE_GRASS": "0"}),
+    Launch("starter: morning", "starter", {"ENGINE_SKY_HOUR": "8.5"}),
+    Launch("starter: without grass (compare)", "starter", {"ENGINE_GRASS": "0"}),
     Launch("texgen: town ground", "texgen", {"ENGINE_TEXGEN_FAMILY": "ground"}),
     Launch("texgen: facades", "texgen", {"ENGINE_TEXGEN_FAMILY": "facade"}),
     Launch("texgen: roofs", "texgen", {"ENGINE_TEXGEN_FAMILY": "roof"}),
@@ -48,9 +51,9 @@ VARIANTS: list[Launch] = [
            ["examples/model_viewer/assets/character.glb"]),
     Launch("model_viewer: prop pack", "model_viewer", {},
            ["examples/model_viewer/assets/props.fmpk"]),
-    Launch("anything without TAA (starter)", "starter", {"ENGINE_TAA": "0"}),
-    Launch("starter with 4x MSAA on top of TAA (compare)", "starter", {"ENGINE_MSAA": "4"}),
-    Launch("vegetation with 4x MSAA on top of TAA (compare)", "vegetation", {"ENGINE_MSAA": "4"}),
+    Launch("starter: without TAA (compare)", "starter", {"ENGINE_TAA": "0"}),
+    Launch("starter: 4x MSAA on top of TAA (compare)", "starter", {"ENGINE_MSAA": "4"}),
+    Launch("vegetation: 4x MSAA on top of TAA (compare)", "vegetation", {"ENGINE_MSAA": "4"}),
     Launch("water: shore close up", "water", {"ENGINE_WATER_VIEW": "shore"}),
     Launch("water: under the lake", "water", {"ENGINE_WATER_VIEW": "bed"}),
     Launch("water: the stream", "water", {"ENGINE_WATER_VIEW": "river"}),
@@ -100,121 +103,237 @@ VARIANTS: list[Launch] = [
     Launch("decals: without automatic spraying", "decals", {"ENGINE_DECALS_SPRAY": "0"}),
     Launch("reflections: in the hall", "reflections", {"ENGINE_REFLECTIONS_VIEW": "hall"}),
     Launch("reflections: without SSR (compare)", "reflections", {"ENGINE_REFLECTIONS_SSR": "0"}),
-    Launch("starter with ACES tone mapping (compare)", "starter", {"ENGINE_TONEMAP": "aces"}),
+    Launch("starter: ACES tone mapping (compare)", "starter", {"ENGINE_TONEMAP": "aces"}),
     Launch("zfight: the fixed yard", "zfight", {"ENGINE_ZFIGHT_FIXED": "1"}),
     Launch("buildings: find z-fighting (magenta posts)", "buildings", {"ENGINE_ZFIGHT": "1"}),
     Launch("interiors: find z-fighting (magenta posts)", "interiors", {"ENGINE_ZFIGHT": "100"}),
 ]
 
 
-def discover_examples() -> list[Launch]:
+def discover_examples() -> list[str]:
     if not EXAMPLES_DIR.is_dir():
         raise FileNotFoundError(f"Examples folder not found: {EXAMPLES_DIR}")
-
-    names = [
+    return [
         entry.name
         for entry in sorted(EXAMPLES_DIR.iterdir(), key=lambda p: p.name.lower())
         if entry.is_dir() and (entry / "Cargo.toml").is_file()
     ]
-    known = set(names)
-    return [Launch(name, name) for name in names] + [
-        v for v in VARIANTS if v.package in known
-    ]
 
 
-def run_example(
-    window: tk.Tk,
-    launch: Launch,
-    status: tk.StringVar,
-    buttons: list[tk.Button],
-) -> None:
-    status.set(f"Running {launch.label}…")
-    for button in buttons:
-        button.configure(state=tk.DISABLED)
-
-    def on_done(returncode: int) -> None:
-        if returncode == 0:
-            status.set(f"Finished {launch.label}")
-        else:
-            status.set(f"{launch.label} exited with code {returncode}")
-        for button in buttons:
-            button.configure(state=tk.NORMAL)
-
-    # Release builds: the generators and renderer are far slower without
-    # optimisation.
-    command = ["cargo", "run", "--release", "-p", launch.package]
-    if launch.args:
-        command += ["--", *launch.args]
+def describe(name: str) -> str:
+    """The example's doc comment (the `//!` lines at the top of main.rs)."""
+    main_rs = EXAMPLES_DIR / name / "src" / "main.rs"
     try:
-        process = subprocess.Popen(
-            command,
-            cwd=ROOT,
-            env={**os.environ, **launch.env},
-            creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0,
-        )
-    except FileNotFoundError as exc:
-        status.set(f"Failed to start cargo: {exc}")
-        for button in buttons:
-            button.configure(state=tk.NORMAL)
-        return
+        lines = main_rs.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    doc: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("//!"):
+            text = stripped[3:]
+            doc.append(text[1:] if text.startswith(" ") else text)
+        elif doc or stripped:
+            break
+    return "\n".join(doc).strip()
 
-    def poll() -> None:
-        code = process.poll()
-        if code is None:
-            window.after(250, poll)
+
+def launches_for(name: str) -> list[Launch]:
+    """The plain launch first, then the example's variants."""
+    return [Launch("Run", name)] + [v for v in VARIANTS if v.package == name]
+
+
+def variant_title(launch: Launch) -> str:
+    # Variant labels start with "<example>: "; the example is already shown.
+    prefix = f"{launch.package}: "
+    return launch.label[len(prefix):] if launch.label.startswith(prefix) else launch.label
+
+
+class Launcher:
+    """A searchable list of examples on the left; on the right, what the
+    selected one does and a button for each way to start it."""
+
+    def __init__(self, names: list[str]) -> None:
+        self.names = names
+        self.docs = {n: describe(n) for n in names}
+
+        self.window = tk.Tk()
+        self.window.title("Engine Examples")
+        self.window.geometry("1080x680")
+        self.window.minsize(640, 360)
+
+        self.status = tk.StringVar(value="Ready")
+        tk.Label(
+            self.window, textvariable=self.status, font=("Segoe UI", 9), fg="#444", anchor="w"
+        ).pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(0, 6))
+
+        left = tk.Frame(self.window, padx=10, pady=10)
+        left.pack(side=tk.LEFT, fill=tk.Y)
+        tk.Label(left, text="Examples", font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        self.query = tk.StringVar()
+        search = tk.Entry(left, textvariable=self.query, font=("Segoe UI", 10))
+        search.pack(fill=tk.X, pady=(6, 6))
+        search.focus_set()
+        tk.Label(
+            left,
+            text="Type to filter, Enter or double-click to run",
+            font=("Segoe UI", 8),
+            fg="#666",
+        ).pack(side=tk.BOTTOM, anchor="w", pady=(6, 0))
+        list_frame = tk.Frame(left)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        scroll = tk.Scrollbar(list_frame)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.listbox = tk.Listbox(
+            list_frame,
+            font=("Segoe UI", 11),
+            width=26,
+            activestyle="none",
+            exportselection=False,
+            yscrollcommand=scroll.set,
+        )
+        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.configure(command=self.listbox.yview)
+        self.listbox.bind("<<ListboxSelect>>", lambda _: self.show())
+        self.listbox.bind("<Double-Button-1>", lambda _: self.run_selected())
+        self.listbox.bind("<Return>", lambda _: self.run_selected())
+        search.bind("<Return>", lambda _: self.run_selected())
+        search.bind("<Down>", lambda _: self.move(1))
+        search.bind("<Up>", lambda _: self.move(-1))
+
+        right = tk.Frame(self.window, padx=14, pady=10)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.title = tk.Label(right, text="", font=("Segoe UI", 14, "bold"))
+        self.title.pack(anchor="w")
+        self.buttons = tk.Frame(right)
+        self.buttons.pack(fill=tk.X, pady=(8, 8))
+        text_frame = tk.Frame(right)
+        text_frame.pack(fill=tk.BOTH, expand=True)
+        text_scroll = tk.Scrollbar(text_frame)
+        text_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.text = tk.Text(
+            text_frame,
+            wrap="word",
+            font=("Segoe UI", 10),
+            relief="flat",
+            padx=4,
+            background=self.window.cget("background"),
+            yscrollcommand=text_scroll.set,
+        )
+        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        text_scroll.configure(command=self.text.yview)
+
+        self.shown: list[str] = []
+        self.query.trace_add("write", lambda *_: self.refill())
+        self.refill()
+
+    def refill(self) -> None:
+        words = self.query.get().lower().split()
+        selected = self.selected()
+
+        def hit(name: str) -> bool:
+            variants = " ".join(v.label for v in VARIANTS if v.package == name)
+            hay = f"{name} {self.docs[name]} {variants}".lower()
+            return all(w in hay for w in words)
+
+        self.shown = [n for n in self.names if hit(n)]
+        self.listbox.delete(0, tk.END)
+        for name in self.shown:
+            extra = len(launches_for(name)) - 1
+            self.listbox.insert(tk.END, f"{name}   +{extra}" if extra else name)
+        if self.shown:
+            self.select(self.shown.index(selected) if selected in self.shown else 0)
+        else:
+            self.show()
+
+    def selected(self) -> str | None:
+        sel = self.listbox.curselection()
+        return self.shown[sel[0]] if sel and sel[0] < len(self.shown) else None
+
+    def select(self, index: int) -> None:
+        self.listbox.selection_clear(0, tk.END)
+        self.listbox.selection_set(index)
+        self.listbox.see(index)
+        self.show()
+
+    def move(self, step: int) -> str:
+        if self.shown:
+            sel = self.listbox.curselection()
+            index = (sel[0] if sel else 0) + step
+            self.select(max(0, min(len(self.shown) - 1, index)))
+        return "break"
+
+    def show(self) -> None:
+        name = self.selected()
+        for child in self.buttons.winfo_children():
+            child.destroy()
+        self.text.configure(state=tk.NORMAL)
+        self.text.delete("1.0", tk.END)
+        if name is None:
+            self.title.configure(text="No example matches")
+            self.text.configure(state=tk.DISABLED)
             return
-        on_done(code)
-
-    window.after(250, poll)
-
-
-def build_ui(launches: list[Launch]) -> tk.Tk:
-    window = tk.Tk()
-    window.title("Engine Examples")
-    window.minsize(320, 240)
-    window.configure(padx=16, pady=16)
-
-    tk.Label(window, text="Choose an example to run", font=("Segoe UI", 12, "bold")).grid(
-        row=0, column=0, columnspan=2, sticky="w", pady=(0, 12)
-    )
-
-    status = tk.StringVar(value="Ready")
-    buttons: list[tk.Button] = []
-    plain = [l for l in launches if not l.env and not l.args]
-    variants = [l for l in launches if l.env or l.args]
-    for column, (title, group) in enumerate((("Examples", plain), ("Variants", variants))):
-        tk.Label(window, text=title, font=("Segoe UI", 10, "bold"), fg="#444").grid(
-            row=1, column=column, sticky="w", padx=4
-        )
-        for row, launch in enumerate(group, start=2):
-            button = tk.Button(
-                window,
-                text=launch.label,
-                font=("Segoe UI", 10),
+        self.title.configure(text=name)
+        # Buttons wrap into rows of three, so any number of variants fits.
+        columns = 3
+        for i, launch in enumerate(launches_for(name)):
+            plain = not launch.env and not launch.args
+            tk.Button(
+                self.buttons,
+                text="Run" if plain else variant_title(launch),
+                font=("Segoe UI", 10, "bold" if plain else "normal"),
                 anchor="w",
                 padx=10,
-                pady=4,
-                command=lambda l=launch: run_example(window, l, status, buttons),
-            )
-            button.grid(row=row, column=column, sticky="ew", padx=4, pady=2)
-            buttons.append(button)
+                pady=3,
+                command=lambda l=launch: self.run(l),
+            ).grid(row=i // columns, column=i % columns, sticky="ew", padx=3, pady=2)
+        for c in range(columns):
+            self.buttons.columnconfigure(c, weight=1, uniform="variant")
+        self.text.insert("1.0", self.docs[name] or "(no description)")
+        self.text.configure(state=tk.DISABLED)
 
-    rows = max(len(plain), len(variants)) + 2
-    tk.Label(window, textvariable=status, font=("Segoe UI", 9), fg="#444").grid(
-        row=rows, column=0, columnspan=2, sticky="w", pady=(16, 0)
-    )
-    window.columnconfigure(0, weight=1)
-    window.columnconfigure(1, weight=1)
-    return window
+    def run_selected(self) -> str:
+        name = self.selected()
+        if name is not None:
+            self.run(launches_for(name)[0])
+        return "break"
+
+    def run(self, launch: Launch) -> None:
+        label = launch.package if launch.label == "Run" else launch.label
+        # Release builds: the generators and renderer are far slower without
+        # optimisation.
+        command = ["cargo", "run", "--release", "-p", launch.package]
+        if launch.args:
+            command += ["--", *launch.args]
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=ROOT,
+                env={**os.environ, **launch.env},
+                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0,
+            )
+        except FileNotFoundError as exc:
+            self.status.set(f"Failed to start cargo: {exc}")
+            return
+        self.status.set(f"Running {label}…")
+
+        def poll() -> None:
+            code = process.poll()
+            if code is None:
+                self.window.after(250, poll)
+            elif code == 0:
+                self.status.set(f"Finished {label}")
+            else:
+                self.status.set(f"{label} exited with code {code}")
+
+        self.window.after(250, poll)
 
 
 def main() -> None:
-    launches = discover_examples()
-    if not launches:
+    names = discover_examples()
+    if not names:
         raise SystemExit(f"No examples found in {EXAMPLES_DIR}")
-
-    window = build_ui(launches)
-    window.mainloop()
+    Launcher(names).window.mainloop()
 
 
 if __name__ == "__main__":
