@@ -1,7 +1,11 @@
 use crate::{Color, EngineError, EngineResult};
 use glam::Vec3;
 
-pub(crate) const MAX_PARTICLE_EMITTERS: usize = 64;
+/// Emitters that can run at once (fire-and-forget bursts from
+/// [`ParticleWorld::burst`] don't count: they free themselves).
+pub const MAX_PARTICLE_EMITTERS: usize = 1024;
+/// Particles alive at once, across all emitters.
+pub const MAX_PARTICLES: u32 = 1 << 18;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EmitterId {
@@ -39,6 +43,13 @@ pub enum ParticleSilhouette {
     RuneMote,
     Heart,
     Bubble,
+    /// A small solid piece (stone, wood, glass) that tumbles, bounces off the
+    /// ground and comes to rest: debris from destruction. Lit like the scene.
+    Chunk,
+    /// A soft, noisy puff: smoke, dust, steam, mist. Lit by sun and sky.
+    Puff,
+    /// A soft tongue of flame (use additive blend).
+    Fire,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParticleBlend {
@@ -51,6 +62,8 @@ pub enum SizeOverLife {
     FadeInOut,
     Shrink,
     GrowThenFade,
+    /// Grows to 2.5x its size over its life (smoke and dust spreading).
+    Expand,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -83,6 +96,29 @@ pub struct ParticleEmitter {
     velocity_stretch: f32,
     force: ParticleForce,
     emissive_intensity: f32,
+    velocity_jitter: Option<Vec3>,
+    size_variation: f32,
+    collision: Option<ParticleCollision>,
+    spin: f32,
+    lighting: Option<f32>,
+}
+
+/// How particles hit the ground and other scene surfaces (anything drawn
+/// on screen). Off-screen particles fly through.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ParticleCollision {
+    /// Bounciness: 0 sticks, 1 bounces back at full speed.
+    pub bounce: f32,
+    /// Speed lost along the surface on each hit, 0..1.
+    pub friction: f32,
+}
+impl Default for ParticleCollision {
+    fn default() -> Self {
+        Self {
+            bounce: 0.3,
+            friction: 0.4,
+        }
+    }
 }
 impl ParticleEmitter {
     pub fn new(position: Vec3) -> Self {
@@ -108,7 +144,44 @@ impl ParticleEmitter {
             velocity_stretch: 0.0,
             force: ParticleForce::None,
             emissive_intensity: 1.0,
+            velocity_jitter: None,
+            size_variation: 0.0,
+            collision: None,
+            spin: 0.0,
+            lighting: None,
         }
+    }
+    /// Random extra start speed per axis (m/s), on top of the velocity.
+    /// Without it the jitter is a quarter of the spread.
+    pub fn with_velocity_jitter(mut self, v: Vec3) -> Self {
+        self.velocity_jitter = Some(v);
+        self
+    }
+    /// Random size per particle: 0 all the same, 0.5 from half to 1.5x.
+    pub fn with_size_variation(mut self, v: f32) -> Self {
+        self.size_variation = v;
+        self
+    }
+    /// Let particles bounce off scene surfaces and settle on the ground.
+    pub fn with_collision(mut self, v: ParticleCollision) -> Self {
+        self.collision = Some(v);
+        self
+    }
+    /// Tumbling speed of chunks and rotating sprites, radians per second.
+    pub fn with_spin(mut self, v: f32) -> Self {
+        self.spin = v;
+        self
+    }
+    /// How much sun and sky light the particles: 0 glows by itself, 1 fully
+    /// lit. Defaults to 1 for alpha-blended and 0 for additive particles.
+    pub fn with_lighting(mut self, v: f32) -> Self {
+        self.lighting = Some(v);
+        self
+    }
+    /// Moves the emitter before it starts (handy for presets).
+    pub fn at(mut self, position: Vec3) -> Self {
+        self.position = position;
+        self
     }
     pub fn with_velocity(mut self, v: Vec3) -> Self {
         self.velocity = v;
@@ -226,6 +299,16 @@ impl ParticleEmitter {
             || !self.emissive_intensity.is_finite()
             || self.emissive_intensity < 0.0
             || self.burst_count == 0
+            || !self.size_variation.is_finite()
+            || !(0.0..=1.0).contains(&self.size_variation)
+            || !self.spin.is_finite()
+            || self
+                .velocity_jitter
+                .is_some_and(|v| !v.is_finite() || v.min_element() < 0.0)
+            || self.lighting.is_some_and(|l| !(0.0..=1.0).contains(&l))
+            || self.collision.is_some_and(|c| {
+                !(0.0..=1.0).contains(&c.bounce) || !(0.0..=1.0).contains(&c.friction)
+            })
         {
             return Err(EngineError::InvalidValue(
                 "invalid particle emitter profile".into(),
@@ -299,6 +382,24 @@ impl ParticleEmitter {
     pub(crate) fn force(self) -> ParticleForce {
         self.force
     }
+    pub(crate) fn velocity_jitter(self) -> Vec3 {
+        self.velocity_jitter.unwrap_or(self.spread * 0.25)
+    }
+    pub(crate) fn size_variation(self) -> f32 {
+        self.size_variation
+    }
+    pub(crate) fn collision(self) -> Option<ParticleCollision> {
+        self.collision
+    }
+    pub(crate) fn spin(self) -> f32 {
+        self.spin
+    }
+    pub(crate) fn lighting(self) -> f32 {
+        self.lighting.unwrap_or(match self.blend {
+            ParticleBlend::Alpha => 1.0,
+            ParticleBlend::Additive => 0.0,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -306,6 +407,8 @@ pub(crate) enum ParticleCommand {
     Start(EmitterId, ParticleEmitter),
     UpdatePosition(EmitterId, Vec3),
     Stop(EmitterId),
+    /// A burst that needs no handle: spawned once, then forgotten.
+    Burst(ParticleEmitter),
     Clear,
 }
 #[derive(Clone, Copy, Debug)]
@@ -411,6 +514,42 @@ impl ParticleWorld {
         self.commands.push(ParticleCommand::Start(id, emitter));
         Ok(id)
     }
+    /// Fire a one-off burst of `emitter.burst_count` particles (whatever the
+    /// emitter's mode). Needs no handle and frees itself, so bursts don't
+    /// use up emitter slots: use it for impacts, explosions and debris.
+    pub fn burst(&mut self, emitter: ParticleEmitter) -> EngineResult<()> {
+        let emitter = emitter.with_mode(ParticleMode::Burst).validate()?;
+        self.commands.push(ParticleCommand::Burst(emitter));
+        Ok(())
+    }
+    /// Start several emitters together (a preset like fire is flames, smoke
+    /// and embers). Stop them with [`Self::stop_all`].
+    pub fn start_group(
+        &mut self,
+        emitters: impl IntoIterator<Item = ParticleEmitter>,
+    ) -> EngineResult<Vec<EmitterId>> {
+        let mut ids = Vec::new();
+        for e in emitters {
+            match self.start(e) {
+                Ok(id) => ids.push(id),
+                Err(err) => {
+                    self.stop_all(&ids);
+                    return Err(err);
+                }
+            }
+        }
+        Ok(ids)
+    }
+    /// Stop every emitter in `ids` that is still running.
+    pub fn stop_all(&mut self, ids: &[EmitterId]) {
+        for id in ids {
+            let _ = self.stop(*id);
+        }
+    }
+    /// Emitters running now.
+    pub fn running(&self) -> usize {
+        self.slots.iter().filter(|s| s.allocated).count()
+    }
     pub fn set_emitter_position(&mut self, id: EmitterId, position: Vec3) -> EngineResult<()> {
         if !position.is_finite() {
             return Err(EngineError::InvalidValue(
@@ -456,6 +595,201 @@ impl ParticleWorld {
 fn next_generation(g: u32) -> u32 {
     g.checked_add(1)
         .expect("particle emitter generation exhausted")
+}
+
+/// A linear colour (values 0..1).
+const fn col(r: f32, g: f32, b: f32, a: f32) -> Color {
+    Color { r, g, b, a }
+}
+
+const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
+
+/// Ready-made emitters. Each is an ordinary [`ParticleEmitter`], so any
+/// setting can still be changed with the `with_*` methods.
+impl ParticleEmitter {
+    /// Flames of a fire about `size` metres across (keeps burning).
+    pub fn flames(at: Vec3, size: f32) -> Self {
+        let s = size.max(0.05);
+        Self::new(at)
+            .with_rate(70.0 * s.max(0.3))
+            .with_silhouette(ParticleSilhouette::Fire)
+            .with_blend(ParticleBlend::Additive)
+            .with_shape(ParticleShape::Sphere)
+            .with_spread(Vec3::new(0.32, 0.08, 0.32) * s)
+            .with_velocity(Vec3::new(0.0, 0.9 * s.sqrt(), 0.0))
+            .with_velocity_jitter(Vec3::new(0.2, 0.35, 0.2) * s.sqrt())
+            .with_acceleration(Vec3::new(0.0, 1.6 * s.sqrt(), 0.0))
+            .with_lifetime(0.75)
+            .with_size(0.42 * s)
+            .with_size_variation(0.45)
+            .with_size_over_life(SizeOverLife::Shrink)
+            .with_color(col(1.0, 0.7, 0.32, 0.65))
+            .with_secondary_color(col(0.85, 0.15, 0.03, 0.35))
+            .with_emissive_intensity(2.6)
+            .with_turbulence(1.4)
+            .with_drag(0.3)
+            .with_spin(1.5)
+    }
+
+    /// Smoke rising from a fire `size` metres across.
+    pub fn smoke(at: Vec3, size: f32) -> Self {
+        let s = size.max(0.05);
+        Self::new(at + Vec3::Y * 0.6 * s)
+            .with_rate(10.0 * s.max(0.4))
+            .with_silhouette(ParticleSilhouette::Puff)
+            .with_blend(ParticleBlend::Alpha)
+            .with_shape(ParticleShape::Sphere)
+            .with_spread(Vec3::splat(0.25 * s))
+            .with_velocity(Vec3::new(0.0, 1.3 * s.sqrt(), 0.0))
+            .with_velocity_jitter(Vec3::new(0.25, 0.2, 0.25) * s.sqrt())
+            .with_acceleration(Vec3::new(0.25, 0.35, 0.1))
+            .with_lifetime(6.0)
+            .with_size(0.55 * s)
+            .with_size_variation(0.4)
+            .with_size_over_life(SizeOverLife::Expand)
+            .with_color(col(0.16, 0.15, 0.14, 0.55))
+            .with_secondary_color(col(0.42, 0.42, 0.43, 0.25))
+            .with_turbulence(0.5)
+            .with_drag(0.25)
+            .with_spin(0.4)
+    }
+
+    /// Glowing embers drifting up from a fire.
+    pub fn embers(at: Vec3, size: f32) -> Self {
+        let s = size.max(0.05);
+        Self::new(at)
+            .with_rate(9.0 * s.max(0.3))
+            .with_silhouette(ParticleSilhouette::SoftOrb)
+            .with_blend(ParticleBlend::Additive)
+            .with_shape(ParticleShape::Sphere)
+            .with_spread(Vec3::new(0.3, 0.1, 0.3) * s)
+            .with_velocity(Vec3::new(0.0, 2.2 * s.sqrt(), 0.0))
+            .with_velocity_jitter(Vec3::new(0.7, 0.8, 0.7))
+            .with_acceleration(Vec3::new(0.0, 0.4, 0.0))
+            .with_lifetime(2.2)
+            .with_size(0.022)
+            .with_size_variation(0.5)
+            .with_size_over_life(SizeOverLife::Shrink)
+            .with_color(col(1.0, 0.65, 0.2, 1.0))
+            .with_secondary_color(col(1.0, 0.2, 0.02, 1.0))
+            .with_emissive_intensity(5.0)
+            .with_turbulence(2.5)
+            .with_drag(0.4)
+    }
+
+    /// A shower of sparks flying along `direction` (length = speed in m/s)
+    /// that bounce off the ground.
+    pub fn sparks(at: Vec3, direction: Vec3, count: u32) -> Self {
+        let speed = direction.length().max(0.5);
+        Self::new(at)
+            .with_mode(ParticleMode::Burst)
+            .with_burst_count(count.max(1))
+            .with_silhouette(ParticleSilhouette::SparkStreak)
+            .with_blend(ParticleBlend::Additive)
+            .with_shape(ParticleShape::Point)
+            .with_velocity(direction)
+            .with_velocity_jitter(Vec3::splat(speed * 0.6))
+            .with_acceleration(GRAVITY)
+            .with_lifetime(0.9)
+            .with_size(0.035)
+            .with_size_variation(0.5)
+            .with_size_over_life(SizeOverLife::Shrink)
+            .with_velocity_stretch(0.06)
+            .with_color(col(1.0, 0.92, 0.65, 1.0))
+            .with_secondary_color(col(1.0, 0.35, 0.05, 1.0))
+            .with_emissive_intensity(6.0)
+            .with_turbulence(0.0)
+            .with_drag(0.15)
+            .with_collision(ParticleCollision {
+                bounce: 0.45,
+                friction: 0.25,
+            })
+    }
+
+    /// A cloud of dust `radius` metres across, the colour of what broke.
+    pub fn dust(at: Vec3, radius: f32, color: Color) -> Self {
+        let r = radius.max(0.1);
+        let count = (24.0 * r * r).clamp(6.0, 600.0) as u32;
+        Self::new(at)
+            .with_mode(ParticleMode::Burst)
+            .with_burst_count(count)
+            .with_silhouette(ParticleSilhouette::Puff)
+            .with_blend(ParticleBlend::Alpha)
+            .with_shape(ParticleShape::Sphere)
+            .with_spread(Vec3::new(0.7, 0.4, 0.7) * r)
+            .with_velocity(Vec3::new(0.0, 0.5 * r.sqrt(), 0.0))
+            .with_velocity_jitter(Vec3::new(1.4, 0.7, 1.4) * r.sqrt())
+            .with_acceleration(Vec3::new(0.0, -0.25, 0.0))
+            .with_lifetime(4.0)
+            .with_size(0.55 * r.sqrt())
+            .with_size_variation(0.45)
+            .with_size_over_life(SizeOverLife::Expand)
+            .with_color(col(color.r, color.g, color.b, 0.6))
+            .with_secondary_color(col(
+                (color.r * 1.15).min(1.0),
+                (color.g * 1.15).min(1.0),
+                (color.b * 1.15).min(1.0),
+                0.3,
+            ))
+            .with_turbulence(0.35)
+            .with_drag(0.8)
+            .with_spin(0.5)
+    }
+
+    /// `count` solid pieces flung out at about `speed` m/s; they tumble,
+    /// bounce, come to rest on the ground and sink away after a few seconds.
+    pub fn debris(at: Vec3, color: Color, count: u32, speed: f32) -> Self {
+        let v = speed.max(0.1);
+        let shade = |k: f32| col(color.r * k, color.g * k, color.b * k, 1.0);
+        Self::new(at)
+            .with_mode(ParticleMode::Burst)
+            .with_burst_count(count.max(1))
+            .with_silhouette(ParticleSilhouette::Chunk)
+            .with_blend(ParticleBlend::Alpha)
+            .with_shape(ParticleShape::Sphere)
+            .with_spread(Vec3::splat(0.3))
+            .with_velocity(Vec3::new(0.0, 0.55 * v, 0.0))
+            .with_velocity_jitter(Vec3::new(v, 0.6 * v, v))
+            .with_acceleration(GRAVITY)
+            .with_lifetime(7.0)
+            .with_size(0.09)
+            .with_size_variation(0.7)
+            .with_size_over_life(SizeOverLife::Constant)
+            .with_color(shade(1.0))
+            .with_secondary_color(shade(0.65))
+            .with_turbulence(0.0)
+            .with_drag(0.03)
+            .with_spin(9.0)
+            .with_collision(ParticleCollision {
+                bounce: 0.25,
+                friction: 0.55,
+            })
+    }
+
+    /// The flash of fire at the heart of an explosion `radius` metres across.
+    pub fn fireball(at: Vec3, radius: f32) -> Self {
+        let r = radius.max(0.2);
+        Self::new(at)
+            .with_mode(ParticleMode::Burst)
+            .with_burst_count((12.0 * r).clamp(10.0, 120.0) as u32)
+            .with_silhouette(ParticleSilhouette::Fire)
+            .with_blend(ParticleBlend::Additive)
+            .with_shape(ParticleShape::Sphere)
+            .with_spread(Vec3::splat(0.35 * r))
+            .with_velocity(Vec3::new(0.0, 0.9 * r, 0.0))
+            .with_velocity_jitter(Vec3::splat(1.6 * r))
+            .with_acceleration(Vec3::new(0.0, 2.0, 0.0))
+            .with_lifetime(0.7)
+            .with_size(0.55 * r)
+            .with_size_variation(0.5)
+            .with_size_over_life(SizeOverLife::GrowThenFade)
+            .with_color(col(1.0, 0.62, 0.25, 0.75))
+            .with_secondary_color(col(0.55, 0.08, 0.02, 0.3))
+            .with_emissive_intensity(2.2)
+            .with_turbulence(1.0)
+            .with_drag(1.0)
+            .with_spin(2.0)
+    }
 }
 
 #[cfg(test)]

@@ -235,6 +235,7 @@ pub struct Tile {
     models: HashMap<LodId, Vec<Place>>,
     meshes: Vec<TileMesh>,
     lamps: Vec<Lamp>,
+    effects: Vec<crate::particles::ParticleEmitter>,
 }
 
 struct TileMesh {
@@ -256,6 +257,7 @@ impl Tile {
             models: HashMap::new(),
             meshes: Vec::new(),
             lamps: Vec::new(),
+            effects: Vec::new(),
         }
     }
 
@@ -336,9 +338,31 @@ impl Tile {
         self.lamps.push(lamp);
     }
 
+    /// Add a running particle emitter (chimney smoke, a waterfall's mist)
+    /// that lives with the tile.
+    pub fn add_effect(&mut self, emitter: crate::particles::ParticleEmitter) {
+        self.effects.push(emitter);
+    }
+
+    /// A camp fire `size` metres across: flames, smoke, embers and its light.
+    pub fn add_fire(&mut self, at: Vec3, size: f32) {
+        use crate::particles::ParticleEmitter as E;
+        self.effects.push(E::flames(at, size));
+        self.effects.push(E::smoke(at, size));
+        self.effects.push(E::embers(at, size));
+        self.lamps.push(
+            Lamp::fire(at + Vec3::Y * 0.5 * size)
+                .intensity(5.0 * size.max(0.1).sqrt())
+                .flicker(0.35),
+        );
+    }
+
     /// How many things the tile holds so far.
     pub fn len(&self) -> usize {
-        self.models.values().map(Vec::len).sum::<usize>() + self.meshes.len() + self.lamps.len()
+        self.models.values().map(Vec::len).sum::<usize>()
+            + self.meshes.len()
+            + self.lamps.len()
+            + self.effects.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -524,6 +548,7 @@ struct ResidentTile {
     lods: Vec<LodId>,
     entities: Vec<EntityId>,
     lamps: Vec<LampId>,
+    emitters: Vec<crate::particles::EmitterId>,
     things: usize,
 }
 
@@ -532,7 +557,6 @@ type BlockChunks = Vec<(IVec3, Vec<f32>)>;
 
 /// Streams a [`WorldGenerator`] around the camera. Hand it to
 /// [`World::set_stream`]; the engine updates it every frame.
-
 pub struct WorldStream {
     gen: Arc<dyn WorldGenerator>,
     settings: StreamSettings,
@@ -1208,6 +1232,7 @@ impl WorldStream {
             lods: Vec::new(),
             entities: Vec::new(),
             lamps: Vec::new(),
+            emitters: Vec::new(),
             things,
         };
         let mut models: Vec<(LodId, Vec<Place>)> = tile.models.into_iter().collect();
@@ -1243,6 +1268,12 @@ impl WorldStream {
                 Err(e) => self.errors.push(e),
             }
         }
+        for effect in tile.effects {
+            // Out of emitter slots: the tile just goes without.
+            if let Ok(id) = world.particles_mut().start(effect) {
+                resident.emitters.push(id);
+            }
+        }
         resident
     }
 
@@ -1257,6 +1288,7 @@ impl WorldStream {
             for l in t.lamps {
                 world.remove_lamp(l);
             }
+            world.particles_mut().stop_all(&t.emitters);
         }
     }
 

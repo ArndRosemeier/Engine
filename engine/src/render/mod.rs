@@ -607,7 +607,8 @@ impl Renderer {
             )
         });
 
-        let particles = ParticleGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
+        let particles =
+            ParticleGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout, &depth_texture);
         let ribbons = RibbonGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
         let postprocess = Postprocess::new(&device, format, config.width, config.height);
         let taa = taa::Taa::new(&device, &depth_texture, config.width, config.height);
@@ -745,6 +746,7 @@ impl Renderer {
             create_depth(&self.device, self.config.width, self.config.height);
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
+        self.particles.set_depth(&self.device, &self.depth_texture);
         self.ssao.resize(
             &self.device,
             &self.depth_texture,
@@ -1377,6 +1379,21 @@ impl Renderer {
             );
         }
         self.mark_gpu(&mut encoder, Mark::WaterDone);
+        {
+            let camera = Self::main_scene_camera(world);
+            let aspect = width as f32 / height as f32;
+            let view_proj = taa::jittered(camera.view_projection(aspect), self.taa_jitter);
+            let (scene_view, _) = self.postprocess.scene_target();
+            let scene_view = scene_view.clone();
+            self.particles.encode_draw(
+                &self.queue,
+                &mut encoder,
+                &scene_view,
+                self.pipelines.scene_bind_group(self.main_uniform_slot),
+                view_proj,
+                camera.eye(),
+            );
+        }
         {
             let camera = Self::main_scene_camera(world);
             let aspect = width as f32 / height as f32;
@@ -2788,8 +2805,6 @@ impl Renderer {
 
         self.mark_scene(pass, stamp, SceneMark::Transparent);
         self.ribbons
-            .draw(pass, self.pipelines.scene_bind_group(uniform_slot));
-        self.particles
             .draw(pass, self.pipelines.scene_bind_group(uniform_slot));
 
         if draw_environment {

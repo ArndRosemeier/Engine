@@ -178,19 +178,11 @@ fn main() -> EngineResult<()> {
             }
             let id = world.spawn(logs);
             world.set_place(id, Place::new(fire.x, fire.y, fire.z))?;
-            world.particles_mut().start(
-                ParticleEmitter::new(fire + Vec3::Y * 0.3)
-                    .with_velocity(Vec3::Y * 1.4)
-                    .with_spread(Vec3::new(0.25, 0.1, 0.25))
-                    .with_color(rgb(255, 170, 60))
-                    .with_secondary_color(rgb(255, 70, 20))
-                    .with_size(0.4)
-                    .with_lifetime(0.7)
-                    .with_rate(140.0)
-                    .with_turbulence(1.6)
-                    .with_size_over_life(SizeOverLife::Shrink)
-                    .with_emissive_intensity(4.0),
-            )?;
+            world.particles_mut().start_group([
+                ParticleEmitter::flames(fire + Vec3::Y * 0.15, 0.9),
+                ParticleEmitter::smoke(fire, 0.9),
+                ParticleEmitter::embers(fire, 0.9),
+            ])?;
             world.add_lamp(Lamp::fire(fire + Vec3::Y * 0.7))?;
 
             // Trees and rocks around the square, for shadows to fall from.

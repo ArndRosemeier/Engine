@@ -129,7 +129,8 @@ impl WorldGenerator for Continents {
                     hut()?,
                     Place::new(c.x, h - 0.3, c.y).with_yaw_deg((seed % 360) as f32),
                 );
-                tile.add_lamp(Lamp::fire(Vec3::new(c.x + 4.0, h + 0.6, c.y + 3.0)));
+                let fire_at = Vec3::new(c.x + 4.0, 0.0, c.y + 3.0);
+                tile.add_fire(fire_at.with_y(ground(fire_at.x, fire_at.z)), 0.8);
             }
         }
         Ok(())
@@ -332,11 +333,12 @@ fn main() -> EngineResult<()> {
             let hit = world
                 .voxel_terrain()
                 .and_then(|t| t.raycast(origin, dir, 400.0));
-            if let (Some(p), Some(t)) = (hit, world.voxel_terrain_mut()) {
+            if let Some(p) = hit {
+                // Both throw dust (and digging clods of earth) by themselves.
                 if dig {
-                    t.dig_sphere(p, 4.0);
+                    world.dig(p, 4.0);
                 } else {
-                    t.add_sphere(p + dir * -1.0, 3.0);
+                    world.add_ground(p + dir * -1.0, 3.0);
                 }
             }
         }

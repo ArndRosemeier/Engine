@@ -42,6 +42,8 @@ mod world_buildings;
 mod world_crowds;
 #[path = "world_decals.rs"]
 mod world_decals;
+#[path = "world_effects.rs"]
+pub mod world_effects;
 #[path = "world_grading.rs"]
 mod world_grading;
 #[path = "world_ragdolls.rs"]
@@ -807,6 +809,8 @@ pub struct World {
     /// Destination opening ignored for one frame after crossing (prevents ping-pong).
     travel_gate: Option<EntityId>,
     particles: ParticleWorld,
+    /// Dust and flying chunks when things are dug, shattered or hit.
+    destruction_effects: bool,
     ribbons: RibbonWorld,
     quality: crate::quality::Quality,
     taa: bool,
@@ -917,6 +921,7 @@ impl Default for World {
             travel_prev: None,
             travel_gate: None,
             particles: ParticleWorld::default(),
+            destruction_effects: true,
             ribbons: RibbonWorld::default(),
             quality: crate::quality::Quality::High,
             taa: true,
@@ -3490,6 +3495,16 @@ impl World {
             impact,
             settings.fracture_settings(),
         );
+        let dust_color = world_effects::mesh_color(&entity.mesh.colors);
+        let dust_size = {
+            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            for p in entity.mesh.positions.iter().step_by(7) {
+                let w = entity.transform.transform_point3(*p);
+                lo = lo.min(w);
+                hi = hi.max(w);
+            }
+            ((hi - lo).max_element() * 0.35).clamp(0.2, 6.0)
+        };
         let (material, albedo, casts_shadow, space) = (
             entity.material,
             entity.albedo,
@@ -3558,6 +3573,7 @@ impl World {
             ids.push(piece_id);
         }
         self.spawn_space = prev_space;
+        self.destruction_burst(impact, dust_size, dust_color, Vec3::Y);
         Ok(ids)
     }
 

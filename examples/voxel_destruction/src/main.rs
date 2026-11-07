@@ -269,29 +269,12 @@ fn main() -> EngineResult<()> {
                     )?;
                 }
                 (_, Some((_, hit))) => {
-                    let terrain = world.voxel_terrain_mut().expect("terrain");
                     if build {
-                        terrain.add_sphere(hit, 3.5);
+                        world.add_ground(hit, 3.5);
                     } else {
+                        // Digging throws dust and clods of earth by itself.
                         let radius = if screenshot { 7.0 } else { 4.0 };
-                        terrain.dig_sphere(hit, radius);
-                        // Rock and earth thrown out of the crater.
-                        let clod = world.spawn(Mesh::box_at(
-                            hit,
-                            Vec3::splat(radius * 0.7),
-                            rgb(112, 92, 70),
-                        )?);
-                        world.shatter(
-                            clod,
-                            hit - aim * radius * 0.5,
-                            Shatter {
-                                pieces: 16,
-                                speed: 11.0,
-                                keep_seconds: Some(12.0),
-                                seed: shots,
-                                ..Shatter::default()
-                            },
-                        )?;
+                        world.dig(hit, radius);
                     }
                 }
                 _ => {}

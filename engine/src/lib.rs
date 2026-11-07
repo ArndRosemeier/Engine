@@ -136,8 +136,9 @@ pub use limits::EngineLimits;
 pub use mesh::{AlbedoMap, BuiltMesh, MaterialMaps, Mesh, PointId, Shape, SurfaceMaterial};
 pub use model::{scatter_places, Model, ModelScene};
 pub use particles::{
-    EmitterId, ParticleBlend, ParticleEmitter, ParticleForce, ParticleMode, ParticleShape,
-    ParticleSilhouette, ParticleWorld, SizeOverLife,
+    EmitterId, ParticleBlend, ParticleCollision, ParticleEmitter, ParticleForce, ParticleMode,
+    ParticleShape, ParticleSilhouette, ParticleWorld, SizeOverLife, MAX_PARTICLES,
+    MAX_PARTICLE_EMITTERS,
 };
 pub use physics::{
     Body, BodyHit, BodyId, BodyImpact, BodyKind, BodyShape, BuildingColliders, Impact,
@@ -171,6 +172,7 @@ pub use tree::{BranchNode, LeafKind, TreeAsset, TreeKind, TreeLod, TreeProfile, 
 pub use ui::{egui, UiFrame, UiPanel};
 pub use vfx::{Delivery, EffectHandle, EffectSpec, VfxPalette, VfxSystem, VisualKind};
 pub use voxel_terrain::{VoxelTerrain, VOXEL_MAX_LOD};
+pub use world::world_effects::Fire;
 
 pub use water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use world::{
