@@ -1078,7 +1078,7 @@ pub struct Pipelines {
     pub opaque: wgpu::RenderPipeline,
     /// Voxel terrain through the same lit shader (compact vertex layout).
     pub voxel_opaque: wgpu::RenderPipeline,
-    /// After a depth prepass: same shading, depth test only (EXPERIMENT).
+    /// After a depth prepass: same shading, depth test only.
     pub opaque_nowrite: wgpu::RenderPipeline,
     pub voxel_nowrite: wgpu::RenderPipeline,
     pub voxel_depth_prepass: wgpu::RenderPipeline,
@@ -1217,8 +1217,8 @@ pub fn create_pipelines(
                 buffers: &[wgpu::VertexBufferLayout<'static>],
                 fs_entry: &str| {
         // Opaque draws turn foliage alpha into coverage.
-        let alpha_to_coverage = blend == wgpu::BlendState::REPLACE
-            && !(fs_entry == "fs_voxel" && exp_flag("ENGINE_EXP_VOXEL_A2C_OFF"));
+        // Voxel ground is always solid: no coverage from alpha.
+        let alpha_to_coverage = blend == wgpu::BlendState::REPLACE && fs_entry != "fs_voxel";
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&pipeline_layout),
@@ -1375,7 +1375,3 @@ pub fn create_pipelines(
     }
 }
 
-/// Temporary performance experiments switched by environment variables.
-pub(crate) fn exp_flag(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|v| v.trim() == "1")
-}

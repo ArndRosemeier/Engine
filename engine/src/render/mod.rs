@@ -2127,7 +2127,12 @@ impl Renderer {
         } = view;
         // Profile only the top-level view (portal views reuse this code).
         let stamp = !portal_mask && use_cull;
-        let nowrite = stamp && self.ao_active && pipeline::exp_flag("ENGINE_EXP_NOWRITE");
+        // After a depth prepass the opaque draws only test depth: with depth
+        // writes on, shaders that can discard (LOD dither, leaves) lose early
+        // depth testing and shade every hidden fragment (2.4 -> 1.2 ms for
+        // lod_forest on an RTX 5070). Leaf edges the prepass left out still
+        // draw, they just don't occlude each other.
+        let nowrite = stamp && self.ao_active;
         self.mark_scene(pass, stamp, SceneMark::Begin);
         pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
 
