@@ -263,6 +263,8 @@ fn main() -> EngineResult<()> {
     let mut walker = None;
 
     Engine::run("island", move |world, frame| {
+        // Uncapped so the title bar shows the real frame rate.
+        world.set_vsync(false);
         if frame.first {
             let started = std::time::Instant::now();
             let mut terrain = VoxelTerrain::new(Volume::new(1.0))

@@ -124,6 +124,8 @@ fn main() -> EngineResult<()> {
     });
 
     Engine::run("coast", move |world, frame| {
+        // Uncapped so the title bar shows the real frame rate.
+        world.set_vsync(false);
         if frame.first {
             let noise = Noise::new(11);
             let mut terrain = VoxelTerrain::new(Volume::new(1.0))

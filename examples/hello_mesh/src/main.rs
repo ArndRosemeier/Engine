@@ -57,6 +57,8 @@ fn main() -> EngineResult<()> {
     let mut yaw = -70.0_f32;
 
     Engine::run("hello_mesh", move |world, frame| {
+        // Uncapped so the title bar shows the real frame rate.
+        world.set_vsync(false);
         if frame.first {
             world.spawn(house());
             world.spawn(

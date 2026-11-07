@@ -34,6 +34,8 @@ fn main() -> EngineResult<()> {
     let places = scatter_places(&positions, 1.0, |i| i as f32 * 47.0);
 
     Engine::run("sky_day", move |world, frame| {
+        // Uncapped so the title bar shows the real frame rate.
+        world.set_vsync(false);
         if frame.first {
             world.spawn(Shape::box_at(
                 (0.0, -0.05, 0.0),
