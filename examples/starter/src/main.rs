@@ -90,8 +90,7 @@ fn populate(world: &mut World, ground: &HeightField, clearing: Vec3) -> EngineRe
 }
 
 fn main() -> EngineResult<()> {
-    let mut rules = demo_terrain_rules();
-    rules.grass = rgb(84, 112, 56);
+    let rules = demo_terrain_rules();
     let ground = HeightField::new(rules.clone());
     let quality = setting("ENGINE_QUALITY")
         .and_then(|q| Quality::from_name(&q))
