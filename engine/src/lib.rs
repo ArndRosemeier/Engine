@@ -114,7 +114,10 @@ pub use anim::{
     AnimatedModel, AnimationAction, AnimationClip, AnimationProfile, Animator, FootIk, Locomotion,
     PoseScratch,
 };
-pub use audio::{Audio, ClipId, Play, VoiceId};
+pub use audio::{
+    Acoustics, Audio, AudioScene, Bus, ClipId, MusicLayer, MusicTrack, Play, PlaySound, Reverb,
+    Sound, SoundId, Stock, VoiceId,
+};
 pub use camera::Camera;
 pub use chunk_stream::{ChunkBuilder, ChunkPayload, ChunkStream};
 pub use collision::{

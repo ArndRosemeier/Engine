@@ -54,6 +54,8 @@ struct App {
     /// ENGINE_PRESENT_MODE or a screenshot run: never pace.
     no_pacing: bool,
     fatal_error: Option<String>,
+    /// The sound device; `None` when there is none (the game runs silent).
+    _audio_out: Option<crate::audio::scene::AudioOutput>,
 }
 
 impl App {
@@ -95,6 +97,7 @@ impl App {
                 || std::env::var_os("ENGINE_SCREENSHOT").is_some()
                 || std::env::var("ENGINE_PACE").is_ok_and(|v| v.trim() == "0"),
             fatal_error: None,
+            _audio_out: None,
         })
     }
 
@@ -324,6 +327,7 @@ impl App {
             timed!(self, "tick.sky", self.world.tick_sky());
             timed!(self, "tick.grading", self.world.tick_grading(dt));
             timed!(self, "tick.zfight_watch", self.world.tick_zfight_watch(dt));
+            timed!(self, "tick.audio", self.world.tick_audio(dt));
         }
         let anim_ms = elapsed_ms(anim_t);
 
@@ -470,6 +474,12 @@ impl ApplicationHandler for App {
                 .create_window(attrs)
                 .expect("failed to create window"),
         );
+        // Sound starts while the pipelines build: the device opens and the
+        // engine's own sounds are synthesised on worker threads.
+        if self.screenshot_path.is_none() {
+            crate::audio::bank::warm();
+            self._audio_out = crate::audio::scene::AudioOutput::start(self.world.audio());
+        }
         let renderer = pollster::block_on(Renderer::new(window.clone()));
         let ui_backend = UiBackend::new(&window, renderer.device(), renderer.surface_format());
         self.window = Some(window);

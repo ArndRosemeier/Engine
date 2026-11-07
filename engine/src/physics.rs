@@ -784,6 +784,11 @@ impl Physics {
     }
 
     /// Bodies hit since the last call, hardest first.
+    /// Impacts not yet taken, without taking them.
+    pub(crate) fn pending_impacts(&self) -> &[Impact] {
+        &self.impacts
+    }
+
     pub fn take_impacts(&mut self) -> Vec<Impact> {
         let mut out = std::mem::take(&mut self.impacts);
         out.sort_by(|a, b| b.speed.total_cmp(&a.speed));

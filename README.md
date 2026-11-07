@@ -407,6 +407,42 @@ Fix an overlap by lifting the face a centimetre or cutting the hidden one away.
 Faces closer than 4 mm count (`Options::gap`); see `engine::zfight` and
 `examples/zfight`.
 
+### Sound
+
+Sounds are placed in the world: they come from their direction, get
+quieter and duller with distance, are muffled behind walls (a ray from the
+camera, plus rooms), shift pitch when they move fast, and echo like the
+space the camera is in. The engine works that space out by itself: open air,
+a room or a hall (from `Room`s and their size), a cave (ground on most
+sides) or under water (everything muffled).
+
+```rust
+let boom = Sound::load("assets/boom.ogg")?;               // wav, ogg, mp3, flac
+world.play_sound_at(&boom, [10.0, 0.0, -30.0]);           // one-shot in the world
+let engine = world.play_sound(&Sound::load("assets/motor.ogg")?,
+    PlaySound::following(car).looped().range(3.0, 200.0));
+world.play_sound(&click, PlaySound::ui());                 // straight to the speakers
+world.stop_sound(engine, 0.5);                             // fade out over 0.5 s
+
+// Music in layers that loop in step; intensity picks which ones play.
+world.play_music(MusicTrack::new()
+    .layer(Sound::load("music/pad.ogg")?)                  // always
+    .layer_between(Sound::load("music/drums.ogg")?, 0.6, 0.8), 2.0);
+world.set_music_intensity(0.9);                            // a fight: bring in the drums
+
+world.audio_mut().set_bus_volume(Bus::Music, 0.5);
+world.set_room_reverb(hall, Some(Reverb::HALL));           // instead of the guess from its size
+```
+
+No audio files needed to start: recorded explosions, crumbling, digging,
+knocks, splashes and loops for fire, streams, rivers, surf and wind are built
+in (`Sound::stock(Stock::Explosion, variant)`), and `Sound::explosion(seed)`,
+`knock`, `fire_loop` and friends plus `MusicTrack::procedural(seed, bpm)` are
+made in code. The engine also makes
+its own sounds for explosions, digging, crumbling and shattering, fires,
+splashes, hard impacts between bodies, and flowing water and surf near the
+camera; `world.set_auto_sounds(false)` turns them off. See `examples/audio`.
+
 ### Quality and performance
 
 ```rust
@@ -484,6 +520,7 @@ cargo run --release -p <name>
 | `portals`, `portal_pair` | Spaces joined by portals |
 | `material_showcase` | Procedural surface materials |
 | `particles` | A camp fire, a forge throwing sparks and explosions that dig craters and blow towers apart into dust and chunks (click: explosion, 1/2/3: sparks, dust, debris, F: fire) |
+| `audio` | Sound: a camp fire crackling from its direction, a cave and a stone hall that echo differently, a bell muffled by walls, explosions, and music in layers (click: explosion, 1-4: music intensity, M: music, K: knock, F: fire) |
 | `vfx_showcase` | Particles, ribbons and spell effects |
 | `procedural_caves`, `populate_world`, `gpu_field_demo`, `ui_modal` | Caves, prop scattering, GPU density fields, UI |
 
@@ -509,6 +546,7 @@ Every program built on the engine understands these:
 | `ENGINE_GPU_PROFILE_EVERY=N` | Print GPU timings every N frames: shadow, AO, scene, water, TAA, post; plus a split of the scene pass (sky, land, grass, voxel, meshes, ...) where the GPU supports it |
 | `ENGINE_HITCH_MS` | Log frames slower than this (default 33) |
 | `ENGINE_CPU_TRACE=1` | Print every 2 s where the CPU time of a frame went: game update, each world tick, renderer sync and drawing (average and worst ms) |
+| `ENGINE_AUDIO=0` | Run silent: do not open a sound device |
 | `ENGINE_LOG_PIPELINES=1` | Print how long pipeline building took, whether the disk pipeline cache was used, and the work time of the first 5 frames |
 | `ENGINE_PIPELINE_CACHE=0` | Do not keep a pipeline cache on disk (`ENGINE_PIPELINE_CACHE_DIR=<dir>` moves it) |
 | `ENGINE_WHATS_NEW=1` | Keep the "What's new" button in screenshot runs (`open` also opens the list) |
