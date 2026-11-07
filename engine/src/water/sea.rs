@@ -112,6 +112,7 @@ impl Water {
         self.sea = sea;
         self.sea_clock = 0.0;
         self.rebuild_boundary();
+        self.wake_all();
     }
 
     pub fn sea(&self) -> Option<&Sea> {
@@ -192,6 +193,10 @@ impl Water {
         let mut fastest: f32 = 0.0;
         for (k, b) in self.boundary.iter().enumerate() {
             let i = b.cell as usize;
+            if !self.cell_runs(i) {
+                self.boundary_q[k] = 0.0;
+                continue;
+            }
             let floor = self.floor[i];
             let still = (sea.level - floor).max(0.0);
             let head = self.head[i].min(self.ceil[i]);

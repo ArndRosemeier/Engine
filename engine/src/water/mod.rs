@@ -38,6 +38,7 @@
 //! assert!(water.is_submerged(Vec3::new(32.0, 1.0, 32.0)));
 //! ```
 
+mod active;
 mod look;
 mod render_data;
 mod sea;
