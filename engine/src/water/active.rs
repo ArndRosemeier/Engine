@@ -307,9 +307,11 @@ impl Water {
 
     /// Tiles running in the last frame and in total.
     pub fn active_tiles(&self) -> (usize, usize) {
-        (
-            self.activity.run.iter().filter(|r| **r).count(),
-            self.activity.run.len(),
-        )
+        let running = if self.on_gpu() {
+            self.gpu_running
+        } else {
+            self.activity.run.iter().filter(|r| **r).count()
+        };
+        (running, self.activity.run.len())
     }
 }

@@ -232,6 +232,8 @@ pub struct Water {
     stats: WaterStats,
     /// Bumped whenever cells or links change (renderers rebuild topology).
     pub(crate) topology_rev: u64,
+    /// GPU backend: tiles that ran in the newest frame read back.
+    pub(crate) gpu_running: usize,
     pub(crate) activity: super::active::Activity,
     /// Per cell: foam, when the foam was set, when the cell was last wet.
     pub(crate) marks: Vec<[f32; 4]>,
@@ -308,6 +310,7 @@ impl Water {
             time: 0.0,
             stats: WaterStats::default(),
             topology_rev: 1,
+            gpu_running: 0,
         };
         water.set_cells(
             spans

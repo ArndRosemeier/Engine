@@ -39,15 +39,55 @@ pub(crate) enum GpuEdit {
     Foam { cell: u32, amount: f32 },
 }
 
-/// The GPU state read back after a frame.
+/// What changed on the GPU in one frame, read back: the areas that ran,
+/// plus a slice of everything (so the whole copy refreshes every second).
+/// The values stay in one block as read; runs point into it.
 #[derive(Debug, Default)]
 pub(crate) struct Snapshot {
     /// The CPU state revision the GPU state descends from.
     pub generation: u64,
-    pub depth: Vec<f32>,
-    pub q: Vec<f32>,
-    pub marks: Option<Vec<[f32; 4]>>,
+    pub topology: u64,
+    pub raw: Vec<f32>,
+    /// `[first element, offset in raw, count]` runs of depths and currents.
+    pub depth: Vec<[u32; 3]>,
+    pub q: Vec<[u32; 3]>,
+    /// The slice of everything: cells as `[depth, head, scale, 0]`, and
+    /// marks, both `[first cell, offset in raw, count]`.
+    pub cells: [u32; 3],
+    pub marks: [u32; 3],
 }
+
+impl Snapshot {
+    fn apply(&self, water: &mut Water) {
+        let raw = &self.raw;
+        let fits = |to: usize, [d, s, n]: [u32; 3], stride: usize| {
+            let (d, s, n) = (d as usize, s as usize, n as usize);
+            (d + n <= to && s + n * stride <= raw.len()).then_some((d, s, n))
+        };
+        for (runs, to) in [(&self.depth, &mut water.depth), (&self.q, &mut water.q)] {
+            for &run in runs {
+                if let Some((d, s, n)) = fits(to.len(), run, 1) {
+                    to[d..d + n].copy_from_slice(&raw[s..s + n]);
+                }
+            }
+        }
+        if let Some((d, s, n)) = fits(water.depth.len(), self.cells, 4) {
+            for (o, v) in water.depth[d..d + n]
+                .iter_mut()
+                .zip(raw[s..].chunks_exact(4))
+            {
+                *o = v[0];
+            }
+        }
+        if let Some((d, s, n)) = fits(water.marks.len(), self.marks, 4) {
+            let m: &[[f32; 4]] = bytemuck::cast_slice(&raw[s..s + n * 4]);
+            water.marks[d..d + n].copy_from_slice(m);
+        }
+    }
+}
+
+/// Read-backs waiting for the CPU copy (older ones are dropped).
+pub(crate) const MAX_INBOX: usize = 120;
 
 #[derive(Debug, Default)]
 pub(crate) struct GpuLink {
@@ -55,7 +95,10 @@ pub(crate) struct GpuLink {
     pub pending_dt: f32,
     pub edits: Vec<GpuEdit>,
     pub rain: f32,
-    pub inbox: Option<Snapshot>,
+    /// Oldest first.
+    pub inbox: Vec<Snapshot>,
+    /// Tiles that ran on the GPU in the newest frame read back.
+    pub running_tiles: Option<usize>,
 }
 
 /// Shared between `Water` (CPU side) and the renderer, which only sees the
@@ -104,23 +147,21 @@ impl Water {
         }
     }
 
-    /// GPU backend: take the newest read-back and queue `dt` for the GPU.
+    /// GPU backend: apply the read-backs and queue `dt` for the GPU.
     pub(crate) fn update_gpu(&mut self, dt: f32) {
         let dt = dt.clamp(0.0, 0.1);
         let link = self.gpu.0.get_mut().unwrap_or_else(|e| e.into_inner());
-        if let Some(s) = link.inbox.take() {
-            if s.generation == self.state_rev
-                && s.depth.len() == self.depth.len()
-                && s.q.len() == self.q.len()
-            {
-                self.depth = s.depth;
-                self.q = s.q;
-                if let Some(m) = s.marks.filter(|m| m.len() == self.marks.len()) {
-                    self.marks = m;
-                }
+        link.pending_dt = (link.pending_dt + dt).min(0.1);
+        let running = link.running_tiles.take();
+        let inbox = std::mem::take(&mut link.inbox);
+        if let Some(n) = running {
+            self.gpu_running = n;
+        }
+        for s in inbox {
+            if s.generation == self.state_rev && s.topology == self.topology_rev {
+                s.apply(self);
             }
         }
-        link.pending_dt = (link.pending_dt + dt).min(0.1);
         self.time += dt as f64;
         self.sea_clock += dt as f64;
     }
