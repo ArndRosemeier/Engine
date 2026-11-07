@@ -144,7 +144,8 @@ impl App {
             .unwrap_or(cpu_dt);
         let time = (now - self.start).as_secs_f32();
         // Movement uses a steady step; the raw one only counts FPS.
-        let dt = self.clock.tick(raw_dt);
+        let vsynced = self.world.vsync() && !self.no_pacing;
+        let dt = self.clock.tick(raw_dt, self.refresh_hz.filter(|_| vsynced));
         if let Some(stats) = self.frame_stats.as_mut() {
             stats.add(raw_dt);
         }
@@ -377,7 +378,6 @@ impl App {
                             .unwrap_or_else(|error| panic!("{error}"));
                         eprintln!("wrote screenshot {}", path.display());
                         event_loop.exit();
-                        return;
                     }
                 }
             }
@@ -465,10 +465,8 @@ impl ApplicationHandler for App {
             // Frames run from `about_to_wait`: on Windows a burst of input
             // (a held key's auto-repeat) starves redraw requests, and the
             // view would only move at the key-repeat rate.
-            WindowEvent::RedrawRequested => {
-                if !self.first_update_done {
-                    self.run_frame(event_loop);
-                }
+            WindowEvent::RedrawRequested if !self.first_update_done => {
+                self.run_frame(event_loop);
             }
             _ => {}
         }

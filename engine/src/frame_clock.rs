@@ -19,6 +19,8 @@ pub(crate) struct FrameClock {
     debt: f32,
     /// Frames in a row that were far from the average.
     outliers: u32,
+    /// Slow average of the raw frame time (about the last second).
+    long: Option<f32>,
     enabled: bool,
 }
 
@@ -28,6 +30,7 @@ impl FrameClock {
             smooth: None,
             debt: 0.0,
             outliers: 0,
+            long: None,
             enabled,
         }
     }
@@ -38,10 +41,28 @@ impl FrameClock {
     }
 
     /// The step for a frame that really took `raw` seconds.
-    pub(crate) fn tick(&mut self, raw: f32) -> f32 {
+    /// `refresh_hz`: the display rate when frames are vsynced (None
+    /// otherwise). While the frame rate matches it, every step is one
+    /// refresh interval: the display shows frames evenly even when the
+    /// moments the CPU gets through bunch up (held keys on Windows did that).
+    pub(crate) fn tick(&mut self, raw: f32, refresh_hz: Option<f32>) -> f32 {
         let raw = if raw.is_finite() { raw.max(0.0) } else { 0.0 };
         if !self.enabled {
             return raw.min(MAX_DT);
+        }
+        let long = self.long.map_or(raw, |l| l + (raw - l) * 0.03);
+        self.long = Some(long);
+        if let Some(hz) = refresh_hz.filter(|hz| *hz > 20.0) {
+            let interval = 1.0 / hz;
+            if (long - interval).abs() < interval * 0.08 && raw < interval * 4.0 {
+                self.debt += raw - interval;
+                self.debt = self.debt.clamp(-interval * 4.0, interval * 4.0);
+                let repay = (self.debt * 0.05).clamp(-interval * 0.05, interval * 0.05);
+                self.debt -= repay;
+                self.smooth = Some(interval);
+                self.outliers = 0;
+                return (interval + repay).min(MAX_DT);
+            }
         }
         let Some(prev) = self.smooth else {
             self.smooth = Some(raw);
@@ -128,7 +149,7 @@ mod tests {
         for i in 0..600 {
             // 120 Hz with +-1.5 ms of wake-up noise.
             let raw = 1.0 / 120.0 + if i % 2 == 0 { 0.0015 } else { -0.0015 };
-            let used = clock.tick(raw);
+            let used = clock.tick(raw, None);
             raw_sum += raw;
             used_sum += used;
             if i > 100 {
@@ -142,15 +163,37 @@ mod tests {
     }
 
     #[test]
+    fn vsynced_bursts_become_even_refresh_steps() {
+        // Acquire times bunched by input: 16.5, 26.5, 7 ms (average 1/60 s).
+        let mut clock = FrameClock::new(true);
+        let pattern = [0.0165, 0.0265, 0.0070];
+        let mut steps = Vec::new();
+        let (mut raw_sum, mut used_sum) = (0.0, 0.0);
+        for i in 0..600 {
+            let raw = pattern[i % 3];
+            let used = clock.tick(raw, Some(60.0));
+            raw_sum += raw;
+            used_sum += used;
+            if i > 120 {
+                steps.push(used);
+            }
+        }
+        for s in &steps {
+            assert!((s - 1.0 / 60.0).abs() < 0.001, "uneven step {s}");
+        }
+        assert!((raw_sum - used_sum).abs() < 0.1);
+    }
+
+    #[test]
     fn hitches_pass_through_and_are_capped() {
         let mut clock = FrameClock::new(true);
         for _ in 0..50 {
-            clock.tick(1.0 / 60.0);
+            clock.tick(1.0 / 60.0, None);
         }
-        assert!((clock.tick(0.05) - 0.05).abs() < 1e-6);
-        assert_eq!(clock.tick(2.0), MAX_DT);
-        assert_eq!(FrameClock::new(false).tick(0.0123), 0.0123);
-        assert_eq!(clock.tick(f32::NAN), 0.0);
+        assert!((clock.tick(0.05, None) - 0.05).abs() < 1e-6);
+        assert_eq!(clock.tick(2.0, None), MAX_DT);
+        assert_eq!(FrameClock::new(false).tick(0.0123, None), 0.0123);
+        assert_eq!(clock.tick(f32::NAN, None), 0.0);
     }
 }
 
