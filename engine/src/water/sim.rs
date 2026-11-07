@@ -214,11 +214,18 @@ pub struct Water {
     cell_link_start: Vec<u32>,
     cell_links: Vec<u32>,
     // Scratch.
-    head: Vec<f32>,
+    pub(crate) head: Vec<f32>,
     q_new: Vec<f32>,
     scale: Vec<f32>,
     sources: Vec<(SourceId, WaterSource)>,
     next_source: u64,
+    pub(crate) sea: Option<super::Sea>,
+    pub(crate) sea_clock: f64,
+    pub(crate) boundary: Vec<super::sea::Boundary>,
+    pub(crate) boundary_q: Vec<f32>,
+    pub(crate) sea_depth: f32,
+    /// Per cell: outflow to the sea this step, then net exchange.
+    sea_out: Vec<f32>,
     /// Next sub-step size from the CFL limit of the previous one.
     next_dt: f32,
     time: f64,
@@ -275,6 +282,12 @@ impl Water {
             scale: Vec::new(),
             sources: Vec::new(),
             next_source: 1,
+            sea: None,
+            sea_clock: 0.0,
+            boundary: Vec::new(),
+            boundary_q: Vec::new(),
+            sea_depth: 10.0,
+            sea_out: Vec::new(),
             next_dt: 1.0 / 120.0,
             time: 0.0,
             stats: WaterStats::default(),
@@ -827,13 +840,19 @@ impl Water {
             })
             .reduce(|| 0.0f32, f32::max);
 
+        // Exchange with the open sea.
+        let mut sea_out = std::mem::take(&mut self.sea_out);
+        let sea_speed = self.sea_fluxes(dt, &mut sea_out);
+        let max_speed = max_speed.max(sea_speed);
+
         // 3. Outflow limit per cell so no cell goes below empty.
         {
-            let (cls, cl, q, depth) = (
+            let (cls, cl, q, depth, sea_out) = (
                 &self.cell_link_start,
                 &self.cell_links,
                 &self.q_new,
                 &self.depth,
+                &sea_out,
             );
             let k = dt / dx;
             self.scale.par_iter_mut().enumerate().for_each(|(i, sc)| {
@@ -847,7 +866,7 @@ impl Water {
                         out += give;
                     }
                 }
-                out *= k;
+                out = (out + sea_out[i]) * k;
                 *sc = if out > depth[i] && out > 0.0 {
                     depth[i] / out
                 } else {
@@ -864,12 +883,32 @@ impl Water {
             });
         }
 
+        // Sea outflow is limited like any other; then it becomes each
+        // boundary cell's net exchange (positive = inflow).
+        for b in &self.boundary {
+            sea_out[b.cell as usize] = 0.0;
+        }
+        for (k, b) in self.boundary.iter().enumerate() {
+            let i = b.cell as usize;
+            let mut q = self.boundary_q[k];
+            if q > 0.0 {
+                q *= self.scale[i];
+                self.boundary_q[k] = q;
+            }
+            sea_out[i] -= q;
+        }
+
         // 4. Move the water.
         {
-            let (cls, cl, q) = (&self.cell_link_start, &self.cell_links, &self.q_new);
+            let (cls, cl, q, sea_net) = (
+                &self.cell_link_start,
+                &self.cell_links,
+                &self.q_new,
+                &sea_out,
+            );
             let k = dt / dx;
             self.depth.par_iter_mut().enumerate().for_each(|(i, d)| {
-                let mut net = 0.0;
+                let mut net = sea_net[i];
                 for &entry in &cl[cls[i] as usize..cls[i + 1] as usize] {
                     let qv = q[(entry & !B_SIDE) as usize];
                     net += if entry & B_SIDE == 0 { -qv } else { qv };
@@ -877,6 +916,11 @@ impl Water {
                 *d = (*d + net * k).max(0.0);
             });
         }
+        for b in &self.boundary {
+            sea_out[b.cell as usize] = 0.0;
+        }
+        self.sea_out = sea_out;
+        self.sea_clock += dt as f64;
         std::mem::swap(&mut self.q, &mut self.q_new);
 
         let speed = max_speed.max(1e-3);
@@ -916,6 +960,7 @@ impl Water {
         self.col_start.push(self.floor.len() as u32);
         self.head = vec![0.0; total];
         self.scale = vec![1.0; total];
+        self.sea_out = vec![0.0; total];
         self.topology_rev += 1;
     }
 
@@ -1043,6 +1088,7 @@ impl Water {
             .unzip();
         self.link_prev = prev;
         self.link_next = next;
+        self.rebuild_boundary();
         self.topology_rev += 1;
     }
 

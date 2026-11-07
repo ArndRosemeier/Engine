@@ -13,7 +13,11 @@
 //!   shallows, run up beaches and pull back, so big water changes its extent.
 //! - Edges are guaranteed: water exists only in open space, only moves
 //!   through openings, never goes negative, and the total volume only changes
-//!   through sources, drains, rain and [`Water::pour`].
+//!   through sources, drains, rain, [`Water::pour`] and open sea edges.
+//! - Coasts: [`Water::set_sea`] opens chosen edges onto an ocean. Swell
+//!   ([`Swell`]) comes in through them and runs up the beaches; waves going
+//!   out pass through instead of bouncing back. The renderer draws the sea on
+//!   past the region to the horizon.
 //! - Flooded tunnels are pressurised, so water rises in the far shaft of a
 //!   U-bend and springs up where a cave opens below a lake's level.
 //!
@@ -36,6 +40,7 @@
 
 mod look;
 mod render_data;
+mod sea;
 mod sim;
 mod swimmer;
 mod terrain;
@@ -44,6 +49,7 @@ mod terrain;
 mod tests;
 
 pub use look::WaterLook;
+pub use sea::{Sea, SeaEdges, Swell};
 pub(crate) use sim::mark_columns;
 pub use sim::{SourceId, Water, WaterRegion, WaterSample, WaterSettings, WaterSource, WaterStats};
 pub use swimmer::{SwimEvents, SwimInput, SwimState, Swimmer, SwimmerSettings};

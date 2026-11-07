@@ -526,3 +526,106 @@ fn a_disturbance_makes_waves_without_changing_the_volume() {
         .fold(0.0, f32::max);
     assert!(dev > 0.02, "no waves: {dev}");
 }
+
+fn beach_shoreline(w: &Water, ground: impl Fn(f32) -> f32) -> f32 {
+    (0..w.region().cells_x)
+        .rev()
+        .find(|&x| {
+            let px = x as f32 + 0.5;
+            w.sample(Vec3::new(px, ground(px) + 0.01, 1.0))
+                .is_some_and(|s| s.water_depth > 0.02)
+        })
+        .map_or(0.0, |x| x as f32 + 0.5)
+}
+
+fn beach_ground(x: f32) -> f32 {
+    if x < 60.0 {
+        -5.0
+    } else {
+        -5.0 + (x - 60.0) * 0.08
+    }
+}
+
+#[test]
+fn a_calm_open_sea_stays_still() {
+    let beach = HeightMapTerrain(|x: f32, _| beach_ground(x));
+    let region = WaterRegion::new(Vec2::ZERO, Vec2::new(160.0, 2.0), 1.0, -8.0, 20.0);
+    let mut water = Water::new(region, &beach);
+    water.flood_sea(0.0);
+    water.set_sea(Some(Sea::calm(0.0)));
+    let v0 = water.total_volume();
+    run(&mut water, 60.0);
+    assert_sane(&water);
+    assert!(rel_change(v0, water.total_volume()) < 1e-3);
+    for h in wet_heads(&water) {
+        assert!(h.abs() < 0.01, "head {h}");
+    }
+}
+
+#[test]
+fn swell_from_the_open_sea_runs_up_the_beach_again_and_again() {
+    let beach = HeightMapTerrain(|x: f32, _| beach_ground(x));
+    let region = WaterRegion::new(Vec2::ZERO, Vec2::new(160.0, 2.0), 1.0, -8.0, 20.0);
+    let mut water = Water::new(region, &beach);
+    water.flood_sea(0.0);
+    let still = beach_shoreline(&water, beach_ground);
+    water.set_sea(Some(
+        Sea::calm(0.0)
+            .with_edges(SeaEdges {
+                min_x: true,
+                ..Default::default()
+            })
+            .with_swell(Swell {
+                height: 0.8,
+                period: 10.0,
+                direction_deg: 90.0,
+            }),
+    ));
+    let v0 = water.total_volume();
+    run(&mut water, 40.0);
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    let (mut vlo, mut vhi) = (f64::MAX, f64::MIN);
+    for _ in 0..60 * 60 {
+        water.update(1.0 / 60.0);
+        let s = beach_shoreline(&water, beach_ground);
+        lo = lo.min(s);
+        hi = hi.max(s);
+        let v = water.total_volume();
+        vlo = vlo.min(v);
+        vhi = vhi.max(v);
+    }
+    assert_sane(&water);
+    assert!(
+        hi - lo > 2.5 && hi > still + 2.0,
+        "shoreline should swing: {lo}..{hi} (still {still})"
+    );
+    // The swell brings water in and takes it out; it does not fill or drain.
+    let rel = |v: f64| (v - v0).abs() / v0;
+    assert!(
+        rel(vlo) < 0.05 && rel(vhi) < 0.05,
+        "volume {vlo}..{vhi} from {v0}"
+    );
+}
+
+#[test]
+fn waves_leave_through_an_open_edge_instead_of_bouncing_back() {
+    let flat = HeightMapTerrain(|_, _| -4.0);
+    let region = WaterRegion::new(Vec2::ZERO, Vec2::new(120.0, 2.0), 1.0, -6.0, 20.0);
+    let mut water = Water::new(region, &flat);
+    water.flood_sea(0.0);
+    water.set_sea(Some(Sea::calm(0.0)));
+    for x in 50..70 {
+        let t = (x as f32 - 60.0) / 10.0;
+        let h = 0.6 * (1.0 - t * t).max(0.0);
+        for z in 0..2 {
+            water.pour(Vec3::new(x as f32 + 0.5, -3.0, z as f32 + 0.5), h);
+        }
+    }
+    // Waves cross 60 m at √(g·4) ≈ 6.3 m/s in ~10 s.
+    run(&mut water, 30.0);
+    assert_sane(&water);
+    let worst = wet_heads(&water)
+        .into_iter()
+        .fold(0.0f32, |m, h| m.max(h.abs()));
+    assert!(worst < 0.05, "waves should be gone, still {worst} m");
+}

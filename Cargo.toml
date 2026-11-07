@@ -21,6 +21,7 @@ members = [
     "examples/vegetation",
     "examples/starter",
     "examples/water",
+    "examples/coast",
 ]
 default-members = ["engine"]
 

@@ -56,6 +56,12 @@ VARIANTS: list[Launch] = [
            {"ENGINE_WATER_VIEW": "shore", "ENGINE_WATER_BODY": "1"}),
     Launch("water: tropical colour", "water",
            {"ENGINE_WATER_VIEW": "shore", "ENGINE_WATER_LOOK": "tropical"}),
+    Launch("coast: on the beach", "coast", {"ENGINE_COAST_VIEW": "beach"}),
+    Launch("coast: surf from the water", "coast", {"ENGINE_COAST_VIEW": "surf"}),
+    Launch("coast: sea cave", "coast", {"ENGINE_COAST_VIEW": "cave"}),
+    Launch("coast: rough sea", "coast", {"ENGINE_COAST_SEA": "rough"}),
+    Launch("coast: swim in the surf (G toggles flying)", "coast",
+           {"ENGINE_COAST_VIEW": "beach", "ENGINE_WATER_BODY": "1"}),
     Launch("starter with ACES tone mapping (compare)", "starter", {"ENGINE_TONEMAP": "aces"}),
 ]
 
