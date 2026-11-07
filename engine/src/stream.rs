@@ -527,10 +527,11 @@ struct ResidentTile {
     things: usize,
 }
 
-/// Streams a [`WorldGenerator`] around the camera. Hand it to
-/// [`World::set_stream`]; the engine updates it every frame.
 /// Generated chunks of one voxel block: key and density samples.
 type BlockChunks = Vec<(IVec3, Vec<f32>)>;
+
+/// Streams a [`WorldGenerator`] around the camera. Hand it to
+/// [`World::set_stream`]; the engine updates it every frame.
 
 pub struct WorldStream {
     gen: Arc<dyn WorldGenerator>,
