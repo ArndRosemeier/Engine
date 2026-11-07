@@ -52,7 +52,6 @@ struct Params {
 const SWELLS: usize = 4;
 /// The far sea: rings around the region, segments per ring side.
 const SEA_RINGS: u32 = 100;
-const SEA_SEGMENTS: u32 = 64;
 
 /// What a frame of water drawing needs from the renderer.
 pub struct WaterFrame<'a> {
@@ -81,6 +80,12 @@ struct Buffers {
     columns: wgpu::Buffer,
     draw: wgpu::Buffer,
     marks: wgpu::Buffer,
+    /// GPU simulation only: wet ground cells, and the two indirect draws.
+    ground: wgpu::Buffer,
+    indirect: wgpu::Buffer,
+    /// Per cell along the region's edge, the cell whose surface the far
+    /// sea starts from (see `Water::render_edge_cells`).
+    edge: wgpu::Buffer,
     cell_capacity: usize,
     draw_capacity: usize,
 }
@@ -99,12 +104,22 @@ pub struct WaterGpu {
     targets: Option<Targets>,
     buffers: Option<Buffers>,
     surface_bind: Option<wgpu::BindGroup>,
+    /// GPU simulation only: the surface bind group reading the ground list.
+    ground_bind: Option<wgpu::BindGroup>,
+    /// What the bind groups were made for: buffers rev, GPU sim buffers rev.
+    bind_key: (u64, u64),
+    /// Bumped when `buffers` are replaced.
+    buffers_rev: u64,
+    /// Sea edge revision whose edge cells are on the GPU.
+    synced_boundary: u64,
     /// Topology revision whose corner table is on the GPU.
     synced_topology: u64,
     state: Vec<[f32; 4]>,
     corners: Vec<[u32; 16]>,
     draw: Vec<u32>,
     depth_multisampled: bool,
+    /// The simulation, when the water runs on the GPU.
+    sim: Option<crate::water::gpu_sim::GpuWaterSim>,
 }
 
 impl WaterGpu {
@@ -185,6 +200,7 @@ impl WaterGpu {
                 texture(6, unfilterable, false),
                 sampler_entry(7),
                 storage(8),
+                storage(9),
             ],
         });
         let resolve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -322,6 +338,11 @@ impl WaterGpu {
             mapped_at_creation: false,
         });
         Self {
+            sim: None,
+            ground_bind: None,
+            bind_key: (u64::MAX, u64::MAX),
+            synced_boundary: u64::MAX,
+            buffers_rev: 0,
             surface_pipeline,
             sea_pipeline,
             ground_pipeline,
@@ -439,36 +460,66 @@ impl WaterGpu {
         });
     }
 
-    fn ensure_buffers(&mut self, device: &wgpu::Device, cells: usize, draws: usize) {
+    fn ensure_buffers(
+        &mut self,
+        device: &wgpu::Device,
+        cells: usize,
+        draws: usize,
+        perimeter: usize,
+    ) {
         let fits = self
             .buffers
             .as_ref()
-            .is_some_and(|b| b.cell_capacity >= cells && b.draw_capacity >= draws);
+            .is_some_and(|b| b.cell_capacity >= cells.max(perimeter) && b.draw_capacity >= draws);
         if fits {
             return;
         }
-        let cell_capacity = cells.max(1).next_power_of_two();
+        let cell_capacity = cells.max(perimeter).max(1).next_power_of_two();
         let draw_capacity = draws.max(1).next_power_of_two();
-        let make = |label: &str, size: usize| {
+        let make_with = |label: &str, size: usize, extra: wgpu::BufferUsages| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
                 size: size as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | extra,
                 mapped_at_creation: false,
             })
         };
+        let make = |label: &str, size: usize| make_with(label, size, wgpu::BufferUsages::empty());
         self.buffers = Some(Buffers {
             state: make("water-state", cell_capacity * 16),
             corners: make("water-corners", cell_capacity * 64),
             columns: make("water-columns", cell_capacity * 4),
             draw: make("water-draw", draw_capacity * 4),
             marks: make("water-marks", cell_capacity * 16),
+            ground: make("water-ground", cell_capacity * 4),
+            indirect: make_with("water-indirect", 32, wgpu::BufferUsages::INDIRECT),
+            edge: make("water-edge", cell_capacity * 4),
             cell_capacity,
             draw_capacity,
         });
         self.surface_bind = None;
+        self.buffers_rev += 1;
         // New buffers start empty: upload the topology again.
         self.synced_topology = 0;
+    }
+
+    fn upload_topology(&mut self, queue: &wgpu::Queue, water: &Water) {
+        let buffers = self.buffers.as_ref().expect("buffers");
+        queue.write_buffer(
+            &buffers.edge,
+            0,
+            bytemuck::cast_slice(&water.render_edge_cells()),
+        );
+        self.synced_boundary = water.boundary_rev;
+        if !self.corners.is_empty() {
+            queue.write_buffer(&buffers.corners, 0, bytemuck::cast_slice(&self.corners));
+            queue.write_buffer(
+                &buffers.columns,
+                0,
+                bytemuck::cast_slice(water.render_cell_columns()),
+            );
+        }
+        self.synced_topology = water.topology_rev;
     }
 
     /// Draw the water onto the resolved scene.
@@ -485,34 +536,66 @@ impl WaterGpu {
         let ext = frame.scene_texture.size();
         let size = [ext.width.max(1), ext.height.max(1)];
         self.ensure_targets(device, size, main_depth);
+        if water.on_gpu() {
+            self.sim
+                .get_or_insert_with(|| crate::water::gpu_sim::GpuWaterSim::new(device))
+                .encode_frame(device, queue, encoder, water);
+        }
 
         // Simulation state for this frame.
-        water.render_state(&mut self.state);
         let topology = water.topology_rev;
-        if topology != self.synced_topology || self.corners.len() != self.state.len() {
+        if topology != self.synced_topology || self.corners.len() != water.cell_count() {
             self.corners = water.render_corners();
         }
-        let mut draw = std::mem::take(&mut self.draw);
-        let water_draws = water.render_draw_list(&self.state, &self.corners, &mut draw) as u32;
-        self.draw = draw;
-        self.ensure_buffers(device, self.state.len(), self.draw.len());
-        let buffers = self.buffers.as_ref().expect("buffers");
-        if topology != self.synced_topology {
-            queue.write_buffer(&buffers.corners, 0, bytemuck::cast_slice(&self.corners));
+        let on_gpu = self.sim.is_some() && water.on_gpu();
+        let region = water.region();
+        let perimeter = 2 * (region.cells_x + region.cells_z) as usize;
+        let water_draws = if on_gpu {
+            // Straight from the GPU state: no copies through the CPU.
+            let cells = water.cell_count().max(1);
+            self.ensure_buffers(device, cells, cells, perimeter);
+            if topology != self.synced_topology || self.synced_boundary != water.boundary_rev {
+                self.upload_topology(queue, water);
+            }
+            let buffers = self.buffers.as_ref().expect("buffers");
             queue.write_buffer(
-                &buffers.columns,
+                &buffers.indirect,
                 0,
-                bytemuck::cast_slice(water.render_cell_columns()),
+                bytemuck::cast_slice(&[6u32, 0, 0, 0, 6, 0, 0, 0]),
             );
-            self.synced_topology = topology;
-        }
-        if !self.state.is_empty() {
-            queue.write_buffer(&buffers.state, 0, bytemuck::cast_slice(&self.state));
-            queue.write_buffer(&buffers.marks, 0, bytemuck::cast_slice(&water.marks));
-        }
-        if !self.draw.is_empty() {
-            queue.write_buffer(&buffers.draw, 0, bytemuck::cast_slice(&self.draw));
-        }
+            let sim = self.sim.as_mut().expect("sim");
+            sim.encode_draw(
+                device,
+                encoder,
+                crate::water::gpu_sim::DrawTargets {
+                    state: &buffers.state,
+                    corners: &buffers.corners,
+                    water_list: &buffers.draw,
+                    ground_list: &buffers.ground,
+                    indirect: &buffers.indirect,
+                    rev: self.buffers_rev,
+                },
+            );
+            0
+        } else {
+            water.render_state(&mut self.state);
+            let mut draw = std::mem::take(&mut self.draw);
+            let water_draws = water.render_draw_list(&self.state, &self.corners, &mut draw) as u32;
+            self.draw = draw;
+            self.ensure_buffers(device, self.state.len(), self.draw.len(), perimeter);
+            if topology != self.synced_topology || self.synced_boundary != water.boundary_rev {
+                self.upload_topology(queue, water);
+            }
+            let buffers = self.buffers.as_ref().expect("buffers");
+            if !self.state.is_empty() {
+                queue.write_buffer(&buffers.state, 0, bytemuck::cast_slice(&self.state));
+                queue.write_buffer(&buffers.marks, 0, bytemuck::cast_slice(&water.marks));
+            }
+            if !self.draw.is_empty() {
+                queue.write_buffer(&buffers.draw, 0, bytemuck::cast_slice(&self.draw));
+            }
+            water_draws
+        };
 
         // Is the eye in water, and how high is the surface above it?
         let sample = water.sample(frame.eye);
@@ -591,49 +674,70 @@ impl WaterGpu {
 
         let targets = self.targets.as_ref().expect("targets");
         let buffers = self.buffers.as_ref().expect("buffers");
-        if self.surface_bind.is_none() {
-            self.surface_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("water-surface-bind"),
-                layout: &self.surface_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.params.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: buffers.state.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: buffers.corners.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: buffers.columns.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: buffers.draw.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::TextureView(&targets.refract_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::TextureView(&targets.depth_copy_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 8,
-                        resource: buffers.marks.as_entire_binding(),
-                    },
-                ],
-            }));
+        let sim_marks = self
+            .sim
+            .as_ref()
+            .filter(|_| on_gpu)
+            .and_then(|s| s.marks_buffer());
+        let key = (
+            self.buffers_rev,
+            sim_marks.map_or(u64::MAX, |_| {
+                self.sim.as_ref().map_or(0, |s| s.buffers_rev())
+            }),
+        );
+        if self.surface_bind.is_none() || self.bind_key != key {
+            let make = |draw: &wgpu::Buffer, marks: &wgpu::Buffer| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("water-surface-bind"),
+                    layout: &self.surface_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.params.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: buffers.state.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: buffers.corners.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: buffers.columns.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: draw.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(&targets.refract_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(&targets.depth_copy_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: marks.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: buffers.edge.as_entire_binding(),
+                        },
+                    ],
+                })
+            };
+            let marks = sim_marks.unwrap_or(&buffers.marks);
+            self.surface_bind = Some(make(&buffers.draw, marks));
+            self.ground_bind = sim_marks.map(|m| make(&buffers.ground, m));
+            self.bind_key = key;
         }
         let surface_bind = self.surface_bind.as_ref().expect("surface bind");
 
@@ -680,7 +784,7 @@ impl WaterGpu {
 
         // 2. The surface, then the open sea around it.
         let has_sea = water.sea().is_some();
-        if !self.draw.is_empty() || has_sea {
+        if on_gpu || !self.draw.is_empty() || has_sea {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("water-surface"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -705,7 +809,14 @@ impl WaterGpu {
             pass.set_bind_group(0, frame.scene_bind, &[]);
             pass.set_bind_group(1, surface_bind, &[]);
             // Wet ground first, so water drawn over it stays on top.
-            if (self.draw.len() as u32) > water_draws {
+            if let (true, Some(ground_bind)) = (on_gpu, self.ground_bind.as_ref()) {
+                pass.set_bind_group(1, ground_bind, &[]);
+                pass.set_pipeline(&self.ground_pipeline);
+                pass.draw_indirect(&buffers.indirect, 16);
+                pass.set_bind_group(1, surface_bind, &[]);
+                pass.set_pipeline(&self.surface_pipeline);
+                pass.draw_indirect(&buffers.indirect, 0);
+            } else if (self.draw.len() as u32) > water_draws {
                 pass.set_pipeline(&self.ground_pipeline);
                 pass.draw(0..6, water_draws..self.draw.len() as u32);
             }
@@ -715,7 +826,7 @@ impl WaterGpu {
             }
             if has_sea {
                 pass.set_pipeline(&self.sea_pipeline);
-                pass.draw(0..6, 0..SEA_RINGS * SEA_SEGMENTS * 4);
+                pass.draw(0..6, 0..SEA_RINGS * perimeter as u32);
             }
         }
 
@@ -870,6 +981,7 @@ const SURFACE_WGSL: &str = r#"
 @group(1) @binding(7) var lin: sampler;
 // Per cell: foam, when it was set, when the cell was last wet.
 @group(1) @binding(8) var<storage, read> marks: array<vec4<f32>>;
+@group(1) @binding(9) var<storage, read> edge_cells: array<u32>;
 
 const NO_CELL: u32 = 0xffffffffu;
 const SAND_BIT: u32 = 0x80000000u;
@@ -885,7 +997,6 @@ fn wetness_of(i: u32) -> f32 {
     return exp(-max(wp.region_max.z - marks[i].z, 0.0) / DRYING_SECONDS);
 }
 const DRAW_DEPTH: f32 = 0.004;
-const SEA_SEGMENTS: u32 = 64u;
 
 fn is_wet(i: u32) -> bool {
     if i == NO_CELL {
@@ -1022,15 +1133,41 @@ fn sea_ring(r: f32) -> f32 {
     return 3.0 * (pow(1.07, r) - 1.0) / 0.07;
 }
 
-// A point on ring `r` at perimeter segment `s` (four sides, corner to corner).
+fn cells_z() -> u32 {
+    return u32(round((wp.region_max.y - wp.region.y) / wp.region.z));
+}
+
+// The far sea has one segment per edge cell on every ring.
+fn perimeter() -> u32 {
+    return 2u * (u32(wp.region.w) + cells_z());
+}
+
+// Perimeter step `s` as (side, position along it, side length), walking
+// +x along z = min, +z along x = max, -x along z = max, -z along x = min.
+fn sea_side(s: u32) -> vec3<u32> {
+    let nx = u32(wp.region.w);
+    let nz = cells_z();
+    let p = s % perimeter();
+    if p < nx {
+        return vec3<u32>(0u, p, nx);
+    }
+    if p < nx + nz {
+        return vec3<u32>(1u, p - nx, nz);
+    }
+    if p < 2u * nx + nz {
+        return vec3<u32>(2u, p - nx - nz, nx);
+    }
+    return vec3<u32>(3u, p - 2u * nx - nz, nz);
+}
+
+// A point on ring `r` at perimeter step `s`.
 fn sea_point(s: u32, r: u32) -> vec2<f32> {
-    let n = SEA_SEGMENTS;
-    let side = (s / n) % 4u;
-    let t = f32(s % n) / f32(n);
+    let side = sea_side(s);
+    let t = f32(side.y) / f32(side.z);
     let e = sea_ring(f32(r));
     let lo = wp.region.xy - vec2<f32>(e);
     let hi = wp.region_max.xy + vec2<f32>(e);
-    switch side {
+    switch side.x {
         case 0u: { return vec2<f32>(mix(lo.x, hi.x, t), lo.y); }
         case 1u: { return vec2<f32>(hi.x, mix(lo.y, hi.y, t)); }
         case 2u: { return vec2<f32>(mix(hi.x, lo.x, t), hi.y); }
@@ -1038,20 +1175,45 @@ fn sea_point(s: u32, r: u32) -> vec2<f32> {
     }
 }
 
-// The open sea beyond the simulated region, with the incoming swell.
+// Surface of the simulated water where perimeter step `s` meets the edge,
+// exactly as the edge of the surface mesh has it (x = height, y = 1 if
+// there is water there).
+fn edge_surface(s: u32) -> vec2<f32> {
+    let n = perimeter();
+    var sum = 0.0;
+    var count = 0.0;
+    for (var j = 0u; j < 2u; j++) {
+        let c = edge_cells[(s + n - 1u + j) % n];
+        if is_wet(c) {
+            sum += cells[c].x;
+            count += 1.0;
+        }
+    }
+    return vec2<f32>(sum / max(count, 1.0), select(0.0, 1.0, count > 0.0));
+}
+
+// The open sea beyond the simulated region, with the incoming swell. The
+// first ring starts from the simulated surface, so there is no step.
 @vertex
 fn vs_sea(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VsOut {
     var order = array<u32, 6>(0u, 1u, 3u, 0u, 3u, 2u);
     let k = order[vi];
-    let per_ring = SEA_SEGMENTS * 4u;
+    let per_ring = perimeter();
     let s = ii % per_ring + (k & 1u);
     let r = ii / per_ring + (k >> 1u);
     let xz = sea_point(s, r);
     // Spacing of the mesh here: waves much shorter only alias.
     let spacing = max(sea_ring(f32(r) + 1.0) - sea_ring(f32(r)), distance(sea_point(s + 1u, r), xz));
     let w = swell_at(xz, spacing);
+    var y = wp.sea.x + w.x;
+    if r == 0u {
+        let e = edge_surface(s);
+        if e.y > 0.0 {
+            y = e.x;
+        }
+    }
     var out: VsOut;
-    out.world_p = vec3<f32>(xz.x, wp.sea.x + w.x, xz.y);
+    out.world_p = vec3<f32>(xz.x, y, xz.y);
     out.clip = u.view_proj * vec4<f32>(out.world_p, 1.0);
     out.grad = w.yz;
     out.flow = vec2<f32>(0.0);
@@ -1160,8 +1322,11 @@ fn reflect_ray(p: vec3<f32>, r: vec3<f32>) -> vec4<f32> {
                 return vec4<f32>(hit, conf);
             }
         } else if t > 30.0 {
-            // Reached open sky on screen: the sky drawn there is the reflection.
-            return vec4<f32>(textureSampleLevel(refract_tex, lin, uv, 0.0).rgb, 1.0);
+            // Reached open sky: nothing nearer is reflected. The sky is at
+            // infinity, so it is the sky in the ray's direction, not the
+            // sky behind this point on screen (that would be the haze at
+            // the horizon).
+            break;
         }
         t *= 1.22;
     }

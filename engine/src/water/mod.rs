@@ -39,6 +39,8 @@
 //! ```
 
 mod active;
+pub(crate) mod backend;
+pub(crate) mod gpu_sim;
 mod look;
 mod marks;
 mod render_data;
@@ -50,6 +52,7 @@ mod terrain;
 #[cfg(test)]
 mod tests;
 
+pub use backend::WaterBackend;
 pub use look::WaterLook;
 pub use sea::{Sea, SeaEdges, Swell};
 pub(crate) use sim::mark_columns;

@@ -1451,4 +1451,3 @@ pub fn create_pipelines(
         white_albedo,
     }
 }
-

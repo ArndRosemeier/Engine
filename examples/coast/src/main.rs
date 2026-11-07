@@ -12,7 +12,7 @@
 //! starts as the swimming body.
 use engine::advanced::Volume;
 use engine::prelude::*;
-use engine::water::{Sea, SeaEdges, Swell, SwimState, Swimmer, WaterLook};
+use engine::water::{Sea, SeaEdges, Swell, SwimState, Swimmer, WaterBackend, WaterLook};
 use glam::{Vec2, Vec3};
 
 const SIZE: f32 = 256.0;
@@ -144,6 +144,8 @@ fn main() -> EngineResult<()> {
             for _ in 0..60 * 30 {
                 water.update(1.0 / 60.0);
             }
+            // Warmed up on the CPU; from here on where it runs best.
+            water.set_backend(WaterBackend::preferred());
             eprintln!(
                 "coast: {} cells, warmed up in {:.1} s",
                 water.cell_count(),

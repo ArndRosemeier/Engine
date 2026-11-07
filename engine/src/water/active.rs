@@ -14,6 +14,8 @@ use rayon::prelude::*;
 pub(crate) const TILE: usize = 16;
 /// Discharge (m²/s) below which a tile counts as still.
 const STILL: f32 = 2e-5;
+/// Level difference (m) across a resting tile's border that wakes it.
+const LEVEL_STEP: f32 = 5e-4;
 
 /// Which tiles run this frame.
 #[derive(Clone, Debug, Default)]
@@ -208,6 +210,12 @@ impl Water {
                 self.activity.wet[t] = wet;
             }
         }
+        // A resting tile whose level no longer matches the running water
+        // next to it wakes up; otherwise the closed border between them
+        // would leave a step in the surface.
+        for t in self.mismatched_resting_tiles() {
+            self.activity.awake[t] = true;
+        }
         // Sources keep their tiles going; so do sea edges with swell or flow.
         let sources: Vec<Vec2> = self
             .sources
@@ -231,6 +239,62 @@ impl Water {
         for t in marks {
             self.activity.awake[t] = true;
         }
+    }
+
+    /// Resting tiles next to running ones whose water level differs across
+    /// the border.
+    fn mismatched_resting_tiles(&self) -> Vec<usize> {
+        let nx = self.region.cells_x as usize;
+        let nz = self.region.cells_z as usize;
+        let a = &self.activity;
+        let tx = a.tiles_x;
+        let tile = |cell: u32| a.tile_of_column(nx, self.cell_col[cell as usize] as usize);
+        let differs = |id: usize| {
+            let l = self.links[id];
+            let (ha, hb) = (self.cell_head(l.a as usize), self.cell_head(l.b as usize));
+            ha.max(hb) > l.lo + DRY && (ha.max(l.lo) - hb.max(l.lo)).abs() > LEVEL_STEP
+        };
+        // Links of column c whose other end lies in a resting tile.
+        let check_column = |c: usize, out: &mut Vec<usize>| {
+            let (s, e) = (
+                self.link_group[2 * c] as usize,
+                self.link_group[2 * c + 2] as usize,
+            );
+            for id in s..e {
+                let l = self.links[id];
+                let (ta, tb) = (tile(l.a), tile(l.b));
+                if ta == tb || a.run[ta] == a.run[tb] {
+                    continue;
+                }
+                if differs(id) {
+                    out.push(if a.run[ta] { tb } else { ta });
+                }
+            }
+        };
+        (0..a.run.len())
+            .into_par_iter()
+            .filter(|&t| a.run[t])
+            .flat_map_iter(|t| {
+                let mut out = Vec::new();
+                let (x0, z0) = ((t % tx) * TILE, (t / tx) * TILE);
+                let (x1, z1) = ((x0 + TILE).min(nx), (z0 + TILE).min(nz));
+                // Links leave a column towards +x and +z: the tile's last
+                // column and row, plus the column and row just before it.
+                for z in z0..z1 {
+                    check_column(z * nx + x1 - 1, &mut out);
+                    if x0 > 0 {
+                        check_column(z * nx + x0 - 1, &mut out);
+                    }
+                }
+                for x in x0..x1 {
+                    check_column((z1 - 1) * nx + x, &mut out);
+                    if z0 > 0 {
+                        check_column((z0 - 1) * nx + x, &mut out);
+                    }
+                }
+                out
+            })
+            .collect()
     }
 
     /// Is this cell in a tile that runs this frame?
