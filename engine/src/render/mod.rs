@@ -11,6 +11,7 @@ mod particles_gpu;
 mod pipeline;
 mod portal;
 mod postprocess;
+mod reflect;
 mod ribbons_gpu;
 mod shadow;
 mod skinned;
@@ -269,6 +270,8 @@ enum SceneUniformTarget {
     Main,
     /// Views through portals, where the occlusion texture does not apply.
     Portal,
+    /// Reflection probe faces: no occlusion texture, but the GI probes hold.
+    Probe,
 }
 
 pub struct Renderer {
@@ -303,6 +306,9 @@ pub struct Renderer {
     main_uniform_slot: usize,
     /// Ambient occlusion from the depth prepass.
     ssao: ssao::Ssao,
+    reflect: reflect::Reflect,
+    /// Aspect for views other than the window's (reflection probe faces).
+    view_aspect: Option<f32>,
     /// This frame ran the depth prepass and SSAO.
     ao_active: bool,
     /// Voxel scene and light probes for global illumination.
@@ -496,6 +502,13 @@ impl Renderer {
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
         let ssao = ssao::Ssao::new(&device, &depth_texture, config.width, config.height);
         shadow.set_ao_view(&device, ssao.view().clone());
+        let reflect =
+            reflect::Reflect::new(&device, &queue, &depth_texture, config.width, config.height);
+        shadow.set_reflection_views(
+            &device,
+            reflect.ssr_view().clone(),
+            reflect.probe_view().clone(),
+        );
         let gi = gi::GiVolume::new(&device, &shadow.resource_layout);
         let voxel = voxel_terrain::VoxelTerrainGpu::new(&device);
         shadow.set_gi_views(&device, gi.probe_views().clone());
@@ -557,6 +570,8 @@ impl Renderer {
             water_gpu,
             main_uniform_slot: 0,
             ssao,
+            reflect,
+            view_aspect: None,
             ao_active: false,
             gi,
             voxel,
@@ -667,6 +682,13 @@ impl Renderer {
         );
         self.shadow
             .set_ao_view(&self.device, self.ssao.view().clone());
+        self.reflect
+            .resize(&self.device, self.config.width, self.config.height);
+        self.shadow.set_reflection_views(
+            &self.device,
+            self.reflect.ssr_view().clone(),
+            self.reflect.probe_view().clone(),
+        );
         self.pipelines
             .rebuild_scene_bind_groups(&self.device, &self.shadow);
         // The terrain bundle holds the old scene bind group.
@@ -1197,6 +1219,24 @@ impl Renderer {
             );
         }
         self.mark_gpu(&mut encoder, Mark::WaterDone);
+        {
+            let camera = Self::main_scene_camera(world);
+            let aspect = width as f32 / height as f32;
+            let projection = taa::jittered(camera.projection_matrix(aspect), self.taa_jitter);
+            let view_proj = taa::jittered(camera.view_projection(aspect), self.taa_jitter);
+            let (scene_view, _) = self.postprocess.scene_target();
+            let scene_view = scene_view.clone();
+            self.reflect.capture(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &scene_view,
+                &self.depth_texture,
+                projection,
+                view_proj,
+                world.render_origin(),
+            );
+        }
         if taa_on {
             let aspect = width as f32 / height as f32;
             let vp = Self::main_scene_camera(world).view_projection(aspect);
@@ -1424,7 +1464,11 @@ impl Renderer {
             _ => 0.0,
         };
         let gi_strength = match target {
-            SceneUniformTarget::Main if world.global_illumination().is_some() => 1.0,
+            SceneUniformTarget::Main | SceneUniformTarget::Probe
+                if world.global_illumination().is_some() =>
+            {
+                1.0
+            }
             _ => 0.0,
         };
         let slot = self.next_scene_uniform_slot;
@@ -1432,7 +1476,9 @@ impl Renderer {
             .next_scene_uniform_slot
             .checked_add(1)
             .expect("scene uniform slot counter overflow");
-        let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+        let aspect = self
+            .view_aspect
+            .unwrap_or(self.config.width as f32 / self.config.height.max(1) as f32);
         let vp = match clip_plane {
             Some((point, normal)) => oblique_view_projection(camera, aspect, point, normal),
             None => camera.view_projection(aspect),
@@ -1565,6 +1611,21 @@ impl Renderer {
             self.encode_gi(encoder, world, placement, &scene_camera);
         }
         self.mark_gpu(encoder, Mark::GiDone);
+        self.capture_probes(encoder, world);
+        let probes: Vec<_> = world
+            .reflection_probe_slots()
+            .map(|(i, p, _)| (i, *p))
+            .collect();
+        let reflect_u = self.reflect.uniforms(
+            world.screen_space_reflections(),
+            world.render_origin(),
+            &probes,
+        );
+        self.queue.write_buffer(
+            &self.shadow.reflect.uniform,
+            0,
+            bytemuck::bytes_of(&reflect_u),
+        );
         self.particles
             .encode_compute(encoder, self.pipelines.scene_bind_group(main_uniform_slot));
 
@@ -1655,6 +1716,96 @@ impl Renderer {
             &main_cull,
             Some(main_uniform_slot),
         );
+    }
+
+    /// Draw this frame's reflection probe faces (see `reflect.rs`).
+    fn capture_probes(&mut self, encoder: &mut wgpu::CommandEncoder, world: &World) {
+        let probes: Vec<_> = world
+            .reflection_probe_slots()
+            .map(|(i, p, v)| (i, *p, v))
+            .collect();
+        let jobs = self.reflect.plan(&probes);
+        if jobs.is_empty() {
+            return;
+        }
+        let saved_frustum = self.frustum;
+        let saved_jitter = std::mem::replace(&mut self.taa_jitter, glam::Vec2::ZERO);
+        self.view_aspect = Some(1.0);
+        // A probe sees every room, not just the ones the camera does.
+        world.set_room_bypass(true);
+        let live = world.living_in();
+        let no_cull = MainCullSelection {
+            ids: Vec::new(),
+            compacted: HashSet::new(),
+        };
+        let clear = world.clear_color().to_vec3();
+        let far = world.camera().far().max(100.0);
+        let (color, resolve, depth) = {
+            let (c, r, d) = self.reflect.face_targets();
+            (c.clone(), r.cloned(), d.clone())
+        };
+        for job in jobs {
+            let (forward, up) = reflect::face_view(job.face);
+            let camera = Camera::from_parts(job.center, job.center + forward, up, 90.0, 0.05, far);
+            let slot = self.write_scene_uniforms(world, &camera, None, SceneUniformTarget::Probe);
+            self.collect_draws(world, live, true);
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("probe-face"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color,
+                        resolve_target: resolve.as_ref(),
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: clear.x as f64,
+                                g: clear.y as f64,
+                                b: clear.z as f64,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(DEPTH_CLEAR),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                    }),
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                if world.sky().is_some() {
+                    pass.set_pipeline(&self.sky.pipeline);
+                    pass.set_bind_group(0, self.sky.bind_group(slot), &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                self.draw_space_scene(
+                    &mut pass,
+                    world,
+                    live,
+                    &no_cull,
+                    PortalLevelView {
+                        clip_plane: None,
+                        draw_environment: false,
+                        use_cull: false,
+                    },
+                    ScenePass {
+                        portal_mask: false,
+                        uniform_slot: slot,
+                    },
+                );
+            }
+            self.reflect.store_face(&self.device, encoder, job);
+        }
+        world.set_room_bypass(false);
+        self.view_aspect = None;
+        self.taa_jitter = saved_jitter;
+        self.frustum = saved_frustum;
     }
 
     fn render_portal_level<'a>(

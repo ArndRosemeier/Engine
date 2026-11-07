@@ -219,6 +219,19 @@ windows are open, and a wall or door that breaks becomes a new opening.
 `room_count()` and `set_room_culling(false)` to compare. See
 `examples/interiors`.
 
+**Reflections:** glossy surfaces (chrome, glass, wet streets, polished
+floors) reflect what is around them. Screen-space reflections are on by
+default (`set_screen_space_reflections(None)` or `Quality::Low` turns them
+off): each glossy pixel traces its reflected ray through the last frame's
+image, so the street mirrors towers and lamps. For what is off screen, add
+reflection probes: `world.add_reflection_probe(ReflectionProbe::new(center,
+half_extents))?` captures a cube map once and projects it onto that box
+(a hall, a street), so a mirror inside shows the walls in the right place;
+rough surfaces read blurrier mips. `.dynamic()` re-captures continuously,
+`refresh_reflection_probe(id)` once (after a wall broke or the lights
+changed); up to 8 probes, smaller boxes win where they overlap. Outside
+every probe, surfaces reflect the sky. See `examples/reflections`.
+
 **Lamps:** `world.add_lamp(Lamp::fire(pos))?`, `Lamp::street_lamp(pos)`, or
 `Lamp::point(pos, color, intensity, range)` and
 `Lamp::spot(pos, direction, angle_deg, color, intensity, range)` for your own;
@@ -341,6 +354,7 @@ cargo run --release -p <name>
 | `buildings` | A block of breakable towers: punch panels (click), blast (F), topple (T), pancake (P), rebuild (R) |
 | `ragdolls` | People strolling about: click knocks one flying, F a blast; they tumble, settle and get up (K keeps them down, G gets everyone up) |
 | `interiors` | A city block of office towers, every floor furnished (about a million triangles); from the street only the rooms you can see through windows are drawn (C toggles culling, I interiors, click punches a wall open) |
+| `reflections` | A rain-wet street between glass towers at dusk mirrors lamps, windows and chrome spheres; a polished hall's chrome ball shows the hall from a reflection probe (R toggles SSR, P the probe) |
 | `fixed_tick` | A 30 Hz simulation drawn smoothly at any frame rate, next to the raw steps; I toggles interpolation, 1/2/3 change the rate |
 | `physics` | Crates, a brick wall, dominoes, rolling boulders and a sweeper; throw balls (click), blow things up (F), shatter (X) |
 | `model_viewer` | Any glTF/GLB or `.fmpk` file: `-- path/to/model.glb` |

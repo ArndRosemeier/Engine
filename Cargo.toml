@@ -30,6 +30,7 @@ members = [
     "examples/fixed_tick",
     "examples/ragdolls",
     "examples/interiors",
+    "examples/reflections",
     "examples/buildings",
     "examples/navigation",
 ]

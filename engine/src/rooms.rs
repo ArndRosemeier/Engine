@@ -219,6 +219,9 @@ pub(crate) struct Rooms {
     pub visible: Vec<bool>,
     pub enabled: bool,
     pub computed: bool,
+    /// Set by the renderer while it draws views other than the camera's
+    /// (reflection probes), which must see every room.
+    pub bypass: std::sync::atomic::AtomicBool,
 }
 
 impl Rooms {
