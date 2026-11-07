@@ -126,8 +126,10 @@ fn main() -> EngineResult<()> {
                 rgb(98, 120, 72),
             )?;
             ground.add_box(
-                Vec3::new(4.0, 0.005, 0.0),
-                Vec3::new(24.0, 0.01, 1.2),
+                // Sunk half into the ground so its underside never meets
+                // the undersides of things standing on it.
+                Vec3::new(4.0, 0.0, 0.0),
+                Vec3::new(24.0, 0.02, 1.2),
                 rgb(150, 128, 98),
             )?;
             world.spawn(ground);

@@ -11,7 +11,7 @@
 //!
 //! `ENGINE_INTERIORS_CULL=0` starts with culling off, `ENGINE_INTERIORS_FURNISH=0`
 //! without interiors, `ENGINE_INTERIORS_VIEW=inside` inside an office.
-use engine::building::{BuildingPlan, TowerSpec};
+use engine::building::{BuildingPlan, ElementKind, TowerSpec};
 use engine::prelude::*;
 use glam::Vec3;
 use std::sync::Arc;
@@ -53,8 +53,9 @@ fn block() -> EngineResult<Vec<(Vec3, Arc<BuildingPlan>)>> {
 }
 
 /// Desks, chairs, desk lamps and shelves filling a room (half size `half`,
-/// floor at y = 0), one mesh.
-fn furniture(half: Vec3, seed: u64) -> EngineResult<Mesh> {
+/// floor at y = 0), one mesh. Desks keep clear of `columns` (room-local
+/// x/z), so no leg stands inside a column.
+fn furniture(half: Vec3, seed: u64, columns: &[glam::Vec2]) -> EngineResult<Mesh> {
     let mut m = Mesh::new();
     let wood = rgb(140, 100, 64);
     let metal = rgb(90, 92, 98);
@@ -68,6 +69,11 @@ fn furniture(half: Vec3, seed: u64) -> EngineResult<Mesh> {
             k = k
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
+            let clear = |c: &glam::Vec2| (c.x - x).abs() > 1.05 || (c.y - z - 0.3).abs() > 0.95;
+            if !columns.iter().all(clear) {
+                z += 2.4;
+                continue;
+            }
             // Desk: top and four legs.
             m.add_box(Vec3::new(x, 0.74, z), Vec3::new(1.4, 0.04, 0.7), wood)?;
             for (dx, dz) in [(-0.65, -0.3), (0.65, -0.3), (-0.65, 0.3), (0.65, 0.3)] {
@@ -107,9 +113,11 @@ fn furniture(half: Vec3, seed: u64) -> EngineResult<Mesh> {
         }
         x += 2.6;
     }
-    // A shelf of books along the back wall.
-    let mut x = -hx;
-    while x <= hx {
+    // A shelf of books along the back wall, clear of the side walls (a
+    // shelf poking into a wall would z-fight with the wall's underside).
+    let shelf_hx = half.x - 1.2;
+    let mut x = -shelf_hx;
+    while x <= shelf_hx {
         m.add_box(
             Vec3::new(x, 1.0, half.z - 0.35),
             Vec3::new(1.8, 2.0, 0.04),
@@ -152,7 +160,14 @@ fn furnish(world: &mut World, towers: &[Tower]) -> EngineResult<Vec<EntityId>> {
     for t in towers {
         for (i, (c, h)) in t.plan.rooms().iter().enumerate() {
             let floor_y = c.y - h.y;
-            let mesh = furniture(*h, t.plan.seed() * 131 + i as u64)?;
+            let columns: Vec<glam::Vec2> = t
+                .plan
+                .elements()
+                .iter()
+                .filter(|e| e.kind == ElementKind::Column && (e.center.y - c.y).abs() < h.y)
+                .map(|e| glam::Vec2::new(e.center.x - c.x, e.center.z - c.z))
+                .collect();
+            let mesh = furniture(*h, t.plan.seed() * 131 + i as u64, &columns)?;
             let p = t.at + Vec3::new(c.x, floor_y, c.z);
             let id = world.place(mesh, Place::new(p.x, p.y, p.z))?;
             world.set_room_by_position(id)?;

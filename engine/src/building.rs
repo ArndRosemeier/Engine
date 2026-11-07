@@ -376,6 +376,14 @@ impl BuildingPlan {
                 (Vec3::new(-hw, 0.0, hd), -Vec3::Z, spec.depth, -Vec3::X),
             ];
             for (start, along, len, out) in sides {
+                // The x-running sides stop at the inner faces of the
+                // z-running ones, so corner panels meet instead of
+                // overlapping (overlapping corners flicker).
+                let (start, len) = if along.x.abs() > 0.5 {
+                    (start + along * wall_t, len - 2.0 * wall_t)
+                } else {
+                    (start, len)
+                };
                 let bays = (len / spec.bay).round().max(1.0) as usize;
                 let bw = len / bays as f32;
                 for b in 0..bays {
@@ -437,9 +445,10 @@ impl BuildingPlan {
                     plan.add(e, None, dim(spec.slab_color, 0.9))?;
                 }
             }
-            // Rooms: the front and back halves (or one room when shallow).
-            let y1 = y0 + fh;
-            let (ry, rh) = ((y0 + y1) * 0.5, fh * 0.5);
+            // Rooms: the front and back halves (or one room when shallow),
+            // the air between this storey's slab and the next one, so a
+            // room's floor is where furniture stands.
+            let (ry, rh) = (wall_y + wall_h * 0.5, wall_h * 0.5);
             if spec.depth >= 6.0 {
                 let front =
                     plan.add_room(Vec3::new(0.0, ry, -hd * 0.5), Vec3::new(hw, rh, hd * 0.5))?;
@@ -542,7 +551,9 @@ impl BuildingPlan {
         Ok(())
     }
 
-    /// Rooms as (centre, half size) in the building's space.
+    /// Rooms as (centre, half size) in the building's space. For a
+    /// [`BuildingPlan::tower`] a room is the air of one storey: its bottom
+    /// (`centre.y - half.y`) is the top of the floor slab.
     pub fn rooms(&self) -> &[(Vec3, Vec3)] {
         &self.rooms
     }
@@ -1591,5 +1602,37 @@ mod tests {
         }
         let low = p.position(id).unwrap().y;
         assert!(low < 1.0, "fell through: {low}");
+    }
+
+    #[test]
+    fn generated_towers_do_not_z_fight() {
+        use crate::zfight::{Options, ZFightCheck};
+        let specs = [
+            TowerSpec::default(),
+            TowerSpec {
+                width: 12.0,
+                depth: 12.0,
+                floors: 3,
+                glazing: 0.6,
+                seed: 2,
+                ..Default::default()
+            },
+            TowerSpec {
+                width: 9.0,
+                depth: 5.0,
+                floors: 2,
+                glazing: 0.85,
+                seed: 4,
+                ..Default::default()
+            },
+        ];
+        for spec in specs {
+            let plan = BuildingPlan::tower(&spec).unwrap();
+            let mut check = ZFightCheck::new().options(Options::ground_at(0.0));
+            check.add_built("tower", plan.mesh(), glam::Mat4::IDENTITY);
+            let report = check.run();
+            report.assert_clean();
+            assert_eq!(report.doubled().count(), 0, "{report}");
+        }
     }
 }

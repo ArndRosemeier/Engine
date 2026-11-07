@@ -134,9 +134,10 @@ fn main() -> EngineResult<()> {
                 (160.0, 0.1, 160.0),
                 rgb(92, 96, 88),
             )?);
+            // The road lies on the ground and stops short of its edges.
             world.spawn(Shape::box_at(
-                (0.0, 0.0, -6.0),
-                (160.0, 0.02, 10.0),
+                (0.0, 0.01, -6.0),
+                (158.0, 0.02, 10.0),
                 rgb(60, 60, 64),
             )?);
             block = Some(build(world, &plans)?);
