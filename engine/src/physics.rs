@@ -44,6 +44,10 @@ const TILE_KEEP_S: f32 = 3.0;
 /// Rubble sinks into the ground for this long before it vanishes.
 const SINK_SECONDS: f32 = 2.0;
 
+#[path = "physics_ragdoll.rs"]
+mod physics_ragdoll;
+pub(crate) use physics_ragdoll::{JointDesc, LinkDesc, PartDesc, PartShape};
+
 /// How a body moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BodyKind {
@@ -378,7 +382,6 @@ pub(crate) struct Temporary {
 #[derive(Clone, Debug)]
 struct Tracked {
     handle: RigidBodyHandle,
-    collider: ColliderHandle,
     kind: BodyKind,
     scale: Vec3,
     /// Pose at the previous and current step, for drawing in between.
@@ -424,6 +427,10 @@ pub(crate) struct Physics {
     impacts: Vec<Impact>,
     /// Fixed boxes owned by something else (building elements), by owner and part.
     statics: HashMap<(u64, u32), ColliderHandle>,
+    /// Ragdoll bodies by the character that owns them.
+    ragdolls: HashMap<EntityId, physics_ragdoll::RagBodies>,
+    /// How far between the last two steps things are drawn.
+    alpha: f32,
 }
 
 impl std::fmt::Debug for Physics {
@@ -516,6 +523,8 @@ impl Physics {
             accumulator: 0.0,
             impacts: Vec::new(),
             statics: HashMap::new(),
+            ragdolls: HashMap::new(),
+            alpha: 1.0,
         }
     }
 
@@ -676,7 +685,6 @@ impl Physics {
             id,
             Tracked {
                 handle,
-                collider,
                 kind: body.kind,
                 scale,
                 prev: (translation, rotation),
@@ -752,11 +760,16 @@ impl Physics {
     /// centre and fading to nothing at `radius`. `strength` is the speed in
     /// m/s given to a body right at the centre.
     pub fn blast(&mut self, center: Vec3, radius: f32, strength: f32) {
-        for t in self.bodies.values() {
-            if t.kind != BodyKind::Dynamic {
-                continue;
-            }
-            let Some(b) = self.world.bodies.get_mut(t.handle) else {
+        let ragdoll_parts = self.ragdoll_handles();
+        let handles: Vec<RigidBodyHandle> = self
+            .bodies
+            .values()
+            .filter(|t| t.kind == BodyKind::Dynamic)
+            .map(|t| t.handle)
+            .chain(ragdoll_parts)
+            .collect();
+        for handle in handles {
+            let Some(b) = self.world.bodies.get_mut(handle) else {
                 continue;
             };
             let to = b.translation() - center;
@@ -789,8 +802,8 @@ impl Physics {
             .world
             .cast_ray_and_get_normal(&ray, max, true, filter)?;
         let c = self.world.colliders.get(handle)?;
-        let entity =
-            Some(EntityId::from_raw(c.user_data as u64)).filter(|id| self.bodies.contains_key(id));
+        let entity = Some(EntityId::from_raw(c.user_data as u64))
+            .filter(|id| self.bodies.contains_key(id) || self.ragdolls.contains_key(id));
         Some(RayHit {
             entity,
             point: origin + dir * hit.time_of_impact,
@@ -913,7 +926,7 @@ impl Physics {
             out.sink.push((s.id, dt * 0.6));
             true
         });
-        if self.bodies.is_empty() {
+        if self.bodies.is_empty() && self.ragdolls.is_empty() {
             self.accumulator = 0.0;
             return out;
         }
@@ -930,6 +943,9 @@ impl Physics {
             for t in self.bodies.values_mut() {
                 t.prev = t.cur;
             }
+            for r in self.ragdolls_mut() {
+                r.prev_cur();
+            }
             let before: HashMap<RigidBodyHandle, Vec3> = self
                 .world
                 .active_bodies()
@@ -943,6 +959,7 @@ impl Physics {
                     t.cur = (b.translation(), *b.rotation());
                 }
             }
+            self.read_ragdolls();
         }
         if steps == self.settings.max_steps_per_frame {
             // Fell behind: drop the backlog rather than spiral.
@@ -970,6 +987,7 @@ impl Physics {
 
         // Draw between the last two steps.
         let alpha = (self.accumulator / h).clamp(0.0, 1.0);
+        self.alpha = alpha;
         for (id, t) in self.bodies.iter_mut() {
             if t.kind == BodyKind::Fixed {
                 continue;
@@ -1228,14 +1246,22 @@ impl Physics {
     fn needed_tiles(&self, tile_m: f32, three_d: bool) -> HashSet<IVec3> {
         let h = 1.0 / self.settings.steps_per_second;
         let mut out = HashSet::new();
-        for t in self.bodies.values() {
-            if t.kind != BodyKind::Dynamic {
+        let ragdoll_parts = self.ragdoll_handles();
+        let handles = self
+            .bodies
+            .values()
+            .filter(|t| t.kind == BodyKind::Dynamic)
+            .map(|t| t.handle)
+            .chain(ragdoll_parts);
+        for handle in handles {
+            let Some(b) = self.world.bodies.get(handle) else {
                 continue;
-            }
-            let (Some(b), Some(c)) = (
-                self.world.bodies.get(t.handle),
-                self.world.colliders.get(t.collider),
-            ) else {
+            };
+            let Some(c) = b
+                .colliders()
+                .first()
+                .and_then(|c| self.world.colliders.get(*c))
+            else {
                 continue;
             };
             let aabb = c.compute_aabb();

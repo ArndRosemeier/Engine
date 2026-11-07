@@ -193,6 +193,18 @@ a window for the server: send `building.broken()` (`to_bytes()`), and
 building and the same mounds. `PhysicsWorld::add_building` gives a server the
 element colliders. See `examples/buildings`.
 
+**Ragdolls:** `world.knock_down(id, Knock::new(impulse).at(point))?` on any
+skinned character with a humanlike skeleton (Unreal, Mixamo, MakeHuman and
+Rigify bone names). It goes limp from the pose it is drawn in (no pop) as 14
+jointed bodies sized from its skeleton, tumbles, comes to rest (bodies
+removed, pose kept), then gets up from the back or face down and blends back
+into its animation. `.stay_down(true)` keeps it down until `world.get_up(id)`.
+`world.ragdoll_state(id)`, `take_ragdoll_events()` (settled, got up),
+`knock_down_in(center, radius, speed)` for blasts, `pick_character(..)` for
+clicks, and `RagdollSettings { max_active, get_up_after, .. }`: beyond
+`max_active` tumbling at once, the calmest one is settled. See
+`examples/ragdolls`.
+
 **Lamps:** `world.add_lamp(Lamp::fire(pos))?`, `Lamp::street_lamp(pos)`, or
 `Lamp::point(pos, color, intensity, range)` and
 `Lamp::spot(pos, direction, angle_deg, color, intensity, range)` for your own;
@@ -313,6 +325,7 @@ cargo run --release -p <name>
 | `navigation` | Villagers find their own way around houses, walls, a fountain and crates and up stairs to a terrace; click sends everyone there, N shows the walkable area |
 | `prefabs` | Carts built from parts driving with spinning wheels, a windmill turning its sails, a lantern carried in a hand; C drops carts that tumble whole, X removes them |
 | `buildings` | A block of breakable towers: punch panels (click), blast (F), topple (T), pancake (P), rebuild (R) |
+| `ragdolls` | People strolling about: click knocks one flying, F a blast; they tumble, settle and get up (K keeps them down, G gets everyone up) |
 | `fixed_tick` | A 30 Hz simulation drawn smoothly at any frame rate, next to the raw steps; I toggles interpolation, 1/2/3 change the rate |
 | `physics` | Crates, a brick wall, dominoes, rolling boulders and a sweeper; throw balls (click), blow things up (F), shatter (X) |
 | `model_viewer` | Any glTF/GLB or `.fmpk` file: `-- path/to/model.glb` |

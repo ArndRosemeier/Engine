@@ -81,6 +81,7 @@ VARIANTS: list[Launch] = [
     Launch("physics: demo (a throw, dominoes, a blast)", "physics", {"ENGINE_PHYSICS_DEMO": "1"}),
     Launch("buildings: demo (a topple and a pancake)", "buildings", {"ENGINE_BUILDINGS_DEMO": "1"}),
     Launch("fixed_tick: 10 Hz simulation", "fixed_tick", {"ENGINE_SIM_HZ": "10"}),
+    Launch("ragdolls: demo (knocks people over by itself)", "ragdolls", {"ENGINE_RAGDOLLS_DEMO": "1"}),
     Launch("starter with ACES tone mapping (compare)", "starter", {"ENGINE_TONEMAP": "aces"}),
 ]
 

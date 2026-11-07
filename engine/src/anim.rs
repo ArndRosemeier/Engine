@@ -238,6 +238,16 @@ pub struct Animator {
     fade: Option<Fade>,
     /// Feet on uneven ground; see [`FootIk`].
     pub(crate) ik: Option<IkState>,
+    /// A pose laid over the clips (a ragdoll, getting up), see [`PoseOverride`].
+    pub(crate) pose_override: Option<PoseOverride>,
+}
+
+/// Joint locals that replace the clips' by `weight` (0 = clips only,
+/// 1 = this pose only). Foot IK is off while one is set.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PoseOverride {
+    pub locals: Vec<(Vec3, Quat, Vec3)>,
+    pub weight: f32,
 }
 
 /// A clip fading out under the one now playing.
@@ -347,6 +357,7 @@ impl Animator {
             blend_time: 0.2,
             fade: None,
             ik: None,
+            pose_override: None,
         })
     }
 
@@ -644,17 +655,38 @@ impl Animator {
 
     fn blend_locals(&self, s: &mut PoseScratch) {
         sample_locals(&self.model, self.clip_index, self.time, &mut s.locals);
-        let Some(f) = self.fade else {
-            return;
-        };
-        sample_locals(&self.model, f.clip_index, f.time, &mut s.other);
-        let w = (f.elapsed / f.duration.max(1e-6)).clamp(0.0, 1.0);
-        let w = w * w * (3.0 - 2.0 * w);
-        for (cur, old) in s.locals.iter_mut().zip(&s.other) {
-            cur.0 = old.0.lerp(cur.0, w);
-            cur.1 = old.1.slerp(cur.1, w);
-            cur.2 = old.2.lerp(cur.2, w);
+        if let Some(f) = self.fade {
+            sample_locals(&self.model, f.clip_index, f.time, &mut s.other);
+            let w = (f.elapsed / f.duration.max(1e-6)).clamp(0.0, 1.0);
+            let w = w * w * (3.0 - 2.0 * w);
+            for (cur, old) in s.locals.iter_mut().zip(&s.other) {
+                cur.0 = old.0.lerp(cur.0, w);
+                cur.1 = old.1.slerp(cur.1, w);
+                cur.2 = old.2.lerp(cur.2, w);
+            }
         }
+        if let Some(o) = self.pose_override.as_ref() {
+            let w = o.weight.clamp(0.0, 1.0);
+            if w > 0.0 && o.locals.len() == s.locals.len() {
+                for (cur, over) in s.locals.iter_mut().zip(&o.locals) {
+                    if w >= 1.0 {
+                        *cur = *over;
+                    } else {
+                        cur.0 = cur.0.lerp(over.0, w);
+                        cur.1 = cur.1.slerp(over.1, w);
+                        cur.2 = cur.2.lerp(over.2, w);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The pose as drawn: every joint's local TRS and model-space global.
+    pub(crate) fn pose_now(&self) -> (Vec<(Vec3, Quat, Vec3)>, Vec<Mat4>) {
+        let mut scratch = PoseScratch::default();
+        let mut out = Vec::new();
+        self.write_pose(&mut scratch, &mut out);
+        (scratch.locals, scratch.global)
     }
 
     /// The final pose: clips cross-faded, then feet put on the ground.
@@ -663,7 +695,7 @@ impl Animator {
         self.blend_locals(scratch);
         let skeleton = &self.model.skeleton;
         globals_from_locals(skeleton, &scratch.locals, &mut scratch.global);
-        if let Some(ik) = self.ik.as_ref() {
+        if let Some(ik) = self.ik.as_ref().filter(|_| self.pose_override.is_none()) {
             apply_foot_ik(skeleton, ik, &mut scratch.locals, &mut scratch.global);
         }
         out.clear();
@@ -730,7 +762,11 @@ fn sample_locals(
     }
 }
 
-fn globals_from_locals(skeleton: &Skeleton, locals: &[(Vec3, Quat, Vec3)], global: &mut Vec<Mat4>) {
+pub(crate) fn globals_from_locals(
+    skeleton: &Skeleton,
+    locals: &[(Vec3, Quat, Vec3)],
+    global: &mut Vec<Mat4>,
+) {
     let n = skeleton.joint_names.len();
     global.clear();
     global.resize(n, Mat4::IDENTITY);

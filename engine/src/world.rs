@@ -38,6 +38,8 @@ mod nav;
 
 #[path = "world_buildings.rs"]
 mod world_buildings;
+#[path = "world_ragdolls.rs"]
+mod world_ragdolls;
 pub use nav::{NavAgent, NavSettings, NavStats, NavStatus};
 
 /// Opaque handle to a spawned entity. Saves can hold it; after loading,
@@ -742,6 +744,8 @@ pub struct World {
     element_states: world_buildings::ElementStates,
     falling: Vec<world_buildings::FallingPart>,
     rubble: world_buildings::RubbleSet,
+    /// Characters knocked down, lying or getting up.
+    ragdolls: world_ragdolls::Ragdolls,
     /// Surface presentation sync. Engine default stays on so demos never tear;
     /// the renderer applies it at every present.
     vsync: bool,
@@ -851,6 +855,7 @@ impl Default for World {
             element_states: Default::default(),
             falling: Vec::new(),
             rubble: Default::default(),
+            ragdolls: Default::default(),
             vsync: true,
             shadow_contact: ContactSnapshot::default(),
             shadow_contact_epoch: 0,
@@ -1904,6 +1909,7 @@ impl World {
     /// them. [`Self::detach`] a child first to keep it.
     pub fn despawn(&mut self, id: EntityId) {
         self.sim_poses.remove(&id);
+        self.forget_ragdoll(id);
         if self.buildings.contains_key(&id) || self.falling.iter().any(|p| p.building == id) {
             self.forget_building(id);
         }
@@ -2353,6 +2359,7 @@ impl World {
         self.tick_nav(dt);
         self.tick_animations(dt);
         self.tick_physics(dt);
+        self.tick_ragdolls(dt);
         self.tick_buildings(dt);
         self.tick_interpolation();
         self.tick_hierarchy();
