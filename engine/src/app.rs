@@ -271,6 +271,7 @@ impl App {
         let anim_t = Instant::now();
         if self.fatal_error.is_none() {
             self.world.set_time(time);
+            self.world.tick_nav(dt);
             self.world.tick_animations(dt);
             self.world.tick_physics(dt);
             self.world.tick_hierarchy();

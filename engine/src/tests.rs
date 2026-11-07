@@ -2464,3 +2464,267 @@ mod animation_blending {
         world.set_foot_ik(id, None).unwrap();
     }
 }
+
+mod navigation {
+    use crate::color::rgb;
+    use crate::mesh::Mesh;
+    use crate::physics::{Body, PhysicsGround, PhysicsSettings};
+    use crate::place::Place;
+    use crate::world::{NavAgent, NavSettings, NavStatus, World};
+    use glam::Vec3;
+
+    fn flat() -> World {
+        let mut world = World::default();
+        world
+            .set_physics_settings(PhysicsSettings {
+                ground: PhysicsGround::Plane(0.0),
+                ..Default::default()
+            })
+            .unwrap();
+        world
+    }
+
+    fn block(world: &mut World, center: Vec3, size: Vec3) {
+        let id = world.spawn(Mesh::box_at(center, size, rgb(120, 120, 120)).unwrap());
+        world.add_body(id, Body::fixed()).unwrap();
+    }
+
+    fn build(world: &mut World) {
+        world
+            .build_nav(
+                Vec3::new(-10.0, -1.0, -10.0),
+                Vec3::new(10.0, 6.0, 10.0),
+                NavSettings::default(),
+            )
+            .unwrap();
+    }
+
+    fn length(path: &[Vec3]) -> f32 {
+        path.windows(2).map(|w| (w[1] - w[0]).length()).sum()
+    }
+
+    #[test]
+    fn paths_go_around_walls_and_keep_their_distance() {
+        let mut world = flat();
+        // A wall across x = 0 from z = -6 to z = 4: the way round is at z > 4.
+        block(
+            &mut world,
+            Vec3::new(0.0, 1.0, -1.0),
+            Vec3::new(0.4, 2.0, 10.0),
+        );
+        build(&mut world);
+        let stats = world.nav_stats();
+        assert!(stats.walkable > 3000, "{stats:?}");
+
+        assert!(world.is_walkable(Vec3::new(-3.0, 0.0, 0.0)));
+        assert!(
+            !world.is_walkable(Vec3::new(0.0, 0.0, 0.0)),
+            "inside the wall"
+        );
+        assert!(
+            !world.is_walkable(Vec3::new(0.3, 0.0, 0.0)),
+            "too close to the wall"
+        );
+
+        let from = Vec3::new(-3.0, 0.0, 0.0);
+        let to = Vec3::new(3.0, 0.0, 0.0);
+        let path = world.find_path(from, to).expect("a way round");
+        assert!((path[0] - from).length() < 0.01);
+        assert!((*path.last().unwrap() - to).length() < 0.01);
+        assert!(
+            path.iter().any(|p| p.z > 4.0),
+            "goes round the end: {path:?}"
+        );
+        // Straightened: a few corners, not a staircase of cells.
+        assert!(path.len() <= 6, "{path:?}");
+        assert!(length(&path) < 6.0 + 2.0 * 4.6 + 1.5, "{}", length(&path));
+        // Every point along it is walkable.
+        for w in path.windows(2) {
+            for k in 0..=20 {
+                let p = w[0].lerp(w[1], k as f32 / 20.0);
+                assert!(world.is_walkable(p), "{p} off the walkable area");
+            }
+        }
+    }
+
+    #[test]
+    fn steps_are_climbed_but_high_ledges_are_not() {
+        let mut world = flat();
+        // Four 0.2 m steps up to a platform at 0.8 m.
+        for i in 0..4 {
+            let h = 0.2 * (i + 1) as f32;
+            block(
+                &mut world,
+                Vec3::new(1.0 + 0.4 * i as f32, h * 0.5, 0.0),
+                Vec3::new(0.4, h, 3.0),
+            );
+        }
+        block(
+            &mut world,
+            Vec3::new(3.6, 0.4, 0.0),
+            Vec3::new(2.4, 0.8, 3.0),
+        );
+        // A 0.8 m block with no steps.
+        block(
+            &mut world,
+            Vec3::new(-5.0, 0.4, -6.0),
+            Vec3::new(2.0, 0.8, 2.0),
+        );
+        build(&mut world);
+
+        let path = world
+            .find_path(Vec3::new(-2.0, 0.0, 0.0), Vec3::new(4.5, 0.8, 0.0))
+            .expect("up the steps");
+        assert!((path.last().unwrap().y - 0.8).abs() < 0.01, "{path:?}");
+        assert!(
+            world.is_walkable(Vec3::new(-5.0, 0.8, -6.0)),
+            "its top is walkable"
+        );
+        assert!(
+            world
+                .find_path(Vec3::new(-2.0, 0.0, 0.0), Vec3::new(-5.0, 0.8, -6.0))
+                .is_none(),
+            "but nobody can get up there"
+        );
+    }
+
+    #[test]
+    fn floors_above_each_other_both_work() {
+        let mut world = flat();
+        // A 4 x 4 m slab at 3 m: walk on it and under it.
+        block(
+            &mut world,
+            Vec3::new(0.0, 3.0, 0.0),
+            Vec3::new(4.0, 0.2, 4.0),
+        );
+        // A low table: nobody fits under it.
+        block(
+            &mut world,
+            Vec3::new(6.0, 0.9, 6.0),
+            Vec3::new(2.0, 0.1, 2.0),
+        );
+        build(&mut world);
+        let column = world.nav_column(Vec3::new(0.0, 0.0, 0.0));
+        assert_eq!(column.len(), 2, "slab top and ground: {column:?}");
+        assert!(
+            world.is_walkable(Vec3::new(0.0, 0.0, 0.0)),
+            "under the slab"
+        );
+        assert!(world.is_walkable(Vec3::new(0.0, 3.1, 0.0)), "on the slab");
+        assert!(
+            !world.is_walkable(Vec3::new(6.0, 0.0, 6.0)),
+            "under the table"
+        );
+        let up = world.nearest_walkable(Vec3::new(0.0, 3.5, 0.0)).unwrap();
+        assert!((up.y - 3.1).abs() < 0.01, "{up}");
+    }
+
+    #[test]
+    fn agents_walk_to_their_goal_around_walls_and_each_other() {
+        let mut world = flat();
+        block(
+            &mut world,
+            Vec3::new(0.0, 1.0, -1.0),
+            Vec3::new(0.4, 2.0, 10.0),
+        );
+        build(&mut world);
+        let a = world.spawn(Mesh::box_at(Vec3::ZERO, Vec3::splat(0.4), rgb(200, 50, 50)).unwrap());
+        let b = world.spawn(Mesh::box_at(Vec3::ZERO, Vec3::splat(0.4), rgb(50, 50, 200)).unwrap());
+        world.set_place(a, Place::new(-3.0, 0.0, 0.0)).unwrap();
+        world.set_place(b, Place::new(-3.0, 0.0, 1.0)).unwrap();
+        world.add_nav_agent(a, NavAgent::new(2.0)).unwrap();
+        world.add_nav_agent(b, NavAgent::new(2.0)).unwrap();
+        let goal = Vec3::new(3.0, 0.0, 0.5);
+        world.set_nav_goal(a, Some(goal)).unwrap();
+        world.set_nav_goal(b, Some(goal)).unwrap();
+        assert_eq!(world.nav_status(a), Some(NavStatus::Moving));
+
+        let pos = |w: &World, id| w.world_transform(id).unwrap().w_axis.truncate();
+        let mut closest = f32::INFINITY;
+        for _ in 0..(60 * 20) {
+            world.tick_nav(1.0 / 60.0);
+            let (pa, pb) = (pos(&world, a), pos(&world, b));
+            for p in [pa, pb] {
+                assert!(
+                    !(p.x.abs() < 0.2 && p.z < 4.0 && p.z > -6.0),
+                    "walked through the wall at {p}"
+                );
+            }
+            if world.nav_status(a) == Some(NavStatus::Moving)
+                && world.nav_status(b) == Some(NavStatus::Moving)
+            {
+                closest = closest.min(Vec3::new(pa.x - pb.x, 0.0, pa.z - pb.z).length());
+            }
+        }
+        assert_eq!(world.nav_status(a), Some(NavStatus::Arrived));
+        assert!((pos(&world, a) - goal).length() < 0.8, "{}", pos(&world, a));
+        assert!((pos(&world, b) - goal).length() < 1.2, "{}", pos(&world, b));
+        assert!(closest > 0.4, "agents overlapped: {closest}");
+        // Facing where it went (+X on the last leg).
+        let fwd = world.world_transform(a).unwrap().z_axis.truncate();
+        assert!(fwd.x > 0.0, "{fwd}");
+
+        // Unreachable goals say so.
+        block(
+            &mut world,
+            Vec3::new(-8.0, 2.0, 8.0),
+            Vec3::new(2.0, 4.0, 2.0),
+        );
+        world.rebuild_nav_area(Vec3::new(-10.0, -1.0, 6.0), Vec3::new(-6.0, 6.0, 10.0));
+        world
+            .set_nav_goal(a, Some(Vec3::new(-8.0, 4.0, 8.0)))
+            .unwrap();
+        assert_eq!(world.nav_status(a), Some(NavStatus::Unreachable));
+        world.despawn(b);
+        world.tick_nav(1.0 / 60.0);
+        assert_eq!(world.nav_agents(), vec![a]);
+    }
+
+    #[test]
+    fn digging_into_voxel_ground_updates_the_walkable_area() {
+        let mut world = World::default();
+        let mut volume = crate::volume::Volume::new(0.5);
+        volume.ensure_bounds(Vec3::new(-8.0, -4.0, -8.0), Vec3::new(8.0, 8.0, 8.0));
+        let keys: Vec<_> = volume.chunk_keys().collect();
+        volume.generate_chunks(&keys, |p| 2.0 - p.y);
+        world.set_voxel_terrain(Some(crate::voxel_terrain::VoxelTerrain::new(volume)));
+        world
+            .build_nav(
+                Vec3::new(-6.0, -3.0, -6.0),
+                Vec3::new(6.0, 6.0, 6.0),
+                NavSettings::default(),
+            )
+            .unwrap();
+        assert!(world.is_walkable(Vec3::new(0.0, 2.0, 0.0)));
+        // A deep, steep pit: the surface there is gone.
+        world
+            .voxel_terrain_mut()
+            .unwrap()
+            .dig_sphere(Vec3::new(0.0, 2.0, 0.0), 2.0);
+        world.tick_nav(1.0 / 60.0);
+        assert!(!world.is_walkable(Vec3::new(0.0, 2.0, 0.0)));
+        assert!(
+            world.is_walkable(Vec3::new(4.5, 2.0, 0.0)),
+            "far away still fine"
+        );
+    }
+
+    #[test]
+    fn bad_settings_are_refused() {
+        let mut world = flat();
+        let bad = NavSettings {
+            cell_m: 0.0,
+            ..Default::default()
+        };
+        assert!(world
+            .build_nav(Vec3::splat(-1.0), Vec3::splat(1.0), bad)
+            .is_err());
+        assert!(world
+            .build_nav(Vec3::splat(1.0), Vec3::splat(-1.0), NavSettings::default())
+            .is_err());
+        assert!(
+            world.find_path(Vec3::ZERO, Vec3::X).is_none(),
+            "nothing built"
+        );
+    }
+}

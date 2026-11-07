@@ -33,6 +33,10 @@ use std::sync::Arc;
 mod save;
 pub use save::Loaded;
 
+#[path = "nav.rs"]
+mod nav;
+pub use nav::{NavAgent, NavSettings, NavStats, NavStatus};
+
 /// Opaque handle to a spawned entity. Saves can hold it; after loading,
 /// map it to the new one with [`Loaded::entity`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -703,6 +707,8 @@ pub struct World {
     prefabs: HashMap<String, Arc<crate::prefab::Prefab>>,
     /// Placed prefabs by root: which prefab and every entity and lamp made.
     prefab_instances: HashMap<EntityId, PrefabInstance>,
+    /// Walkable areas, paths and agents.
+    nav: nav::NavState,
     /// Nearby mesh CSM + height raymarch. `None` disables shadows.
     shadows: Option<ShadowSettings>,
     /// Instanced mesh submit path. Default stays CPU so Engine demos match today.
@@ -810,6 +816,7 @@ impl Default for World {
             hierarchy: Default::default(),
             prefabs: HashMap::new(),
             prefab_instances: HashMap::new(),
+            nav: Default::default(),
             shadows: Some(ShadowSettings::default()),
             instance_submit: InstanceSubmit::from_env(),
             bloom: BloomSettings::default(),
