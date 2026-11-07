@@ -57,7 +57,7 @@ pub use crate::water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon
 pub use crate::world::AnimatedEntity;
 pub use crate::world::{
     AmbientOcclusion, BloomSettings, EntityId, Frame, GlobalIllumination, Haze, InstanceSubmit,
-    Light, ShadowSettings, Sky, TorchLight, World,
+    Light, ShadowSettings, Sky, ToneMap, TorchLight, World,
 };
 pub use crate::Engine;
 pub use glam::Vec3;

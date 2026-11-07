@@ -1,9 +1,21 @@
-//! HDR scene post-processing: bloom extraction, blur, and filmic tone mapping.
+//! HDR scene post-processing: wide bloom from a mip chain, then filmic tone
+//! mapping (AgX by default, ACES on request).
+//!
+//! Bloom follows the "next generation post processing" recipe from Call of
+//! Duty: Advanced Warfare: the bright part of the scene is filtered down a
+//! chain of half-size images (13-tap filter, Karis-weighted on the first step
+//! so single hot pixels do not flicker), then added back up with a tent
+//! filter. Each level spreads the light twice as far, so the sum is a soft,
+//! wide glow instead of one tight halo.
 
-use crate::world::BloomSettings;
+use crate::world::{BloomSettings, ToneMap};
 use wgpu::util::DeviceExt;
 
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// Most bloom levels below the half-size first level. Six levels reach about
+/// a sixtieth of the screen, a wide enough glow without washing the image.
+const MAX_BLOOM_LEVELS: u32 = 6;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -12,8 +24,11 @@ struct PostprocessUniform {
     knee: f32,
     intensity: f32,
     exposure: f32,
+    /// One texel of the image this pass reads.
     texel_size: [f32; 2],
-    direction: [f32; 2],
+    /// 0 = ACES, 1 = AgX.
+    tone_map: f32,
+    _pad: f32,
 }
 
 struct Target {
@@ -22,10 +37,6 @@ struct Target {
 }
 
 impl Target {
-    fn new(device: &wgpu::Device, label: &str, width: u32, height: u32) -> Self {
-        Self::with_samples(device, label, width, height, 1)
-    }
-
     fn with_samples(
         device: &wgpu::Device,
         label: &str,
@@ -63,21 +74,88 @@ impl Target {
     }
 }
 
+/// The bloom mip chain: level 0 is half the window, each next level half again.
+struct BloomChain {
+    _texture: wgpu::Texture,
+    views: Vec<wgpu::TextureView>,
+    sizes: Vec<(u32, u32)>,
+}
+
+impl BloomChain {
+    fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let sizes = bloom_sizes(width, height);
+        let (w0, h0) = sizes[0];
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("bloom-chain"),
+            size: wgpu::Extent3d {
+                width: w0,
+                height: h0,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: sizes.len() as u32,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let views = (0..sizes.len() as u32)
+            .map(|level| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("bloom-level"),
+                    base_mip_level: level,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        Self {
+            _texture: texture,
+            views,
+            sizes,
+        }
+    }
+
+    fn levels(&self) -> usize {
+        self.views.len()
+    }
+}
+
+/// Sizes of the bloom levels: half the window, then halving while both sides
+/// keep at least 4 pixels (always at least one level).
+fn bloom_sizes(width: u32, height: u32) -> Vec<(u32, u32)> {
+    let mut w = (width / 2).max(1);
+    let mut h = (height / 2).max(1);
+    let mut sizes = vec![(w, h)];
+    while sizes.len() < MAX_BLOOM_LEVELS as usize && w >= 8 && h >= 8 {
+        w /= 2;
+        h /= 2;
+        sizes.push((w, h));
+    }
+    sizes
+}
+
 pub struct Postprocess {
     scene: Target,
     /// Multisampled world-pass colour, resolved into `scene`. None without MSAA.
     scene_msaa: Option<Target>,
-    bloom_a: Target,
-    bloom_b: Target,
+    bloom: BloomChain,
     sampler: wgpu::Sampler,
-    uniforms: [wgpu::Buffer; 4],
     layout: wgpu::BindGroupLayout,
-    binds: [wgpu::BindGroup; 4],
-    extract: wgpu::RenderPipeline,
-    blur: wgpu::RenderPipeline,
+    /// Passes in order: one per downsample step, one per upsample step, then
+    /// the composite. Each has its own uniform and bind group.
+    passes: Vec<Pass>,
+    prefilter: wgpu::RenderPipeline,
+    down: wgpu::RenderPipeline,
+    up: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
     width: u32,
     height: u32,
+}
+
+struct Pass {
+    uniform: wgpu::Buffer,
+    bind: wgpu::BindGroup,
 }
 
 impl Postprocess {
@@ -120,25 +198,14 @@ impl Postprocess {
                 },
             ],
         });
-        let uniforms = std::array::from_fn(|index| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("postprocess-uniform-{index}")),
-                contents: bytemuck::bytes_of(&PostprocessUniform {
-                    threshold: 1.0,
-                    knee: 0.5,
-                    intensity: 0.35,
-                    exposure: 1.0,
-                    texel_size: [1.0, 1.0],
-                    direction: [1.0, 0.0],
-                }),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            })
-        });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("postprocess-shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
-        let make = |label: &str, entry: &str, format: wgpu::TextureFormat| {
+        let make = |label: &str,
+                    entry: &str,
+                    format: wgpu::TextureFormat,
+                    blend: Option<wgpu::BlendState>| {
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(label),
                 bind_group_layouts: &[&layout],
@@ -158,7 +225,7 @@ impl Postprocess {
                     entry_point: Some(entry),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
-                        blend: None,
+                        blend,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: Default::default(),
@@ -170,24 +237,31 @@ impl Postprocess {
                 cache: None,
             })
         };
-        let extract = make("bloom-extract", "fs_extract", HDR_FORMAT);
-        let blur = make("bloom-blur", "fs_blur", HDR_FORMAT);
-        let composite = make("tone-map-composite", "fs_composite", surface_format);
-        let (scene, bloom_a, bloom_b) = create_targets(device, width, height);
-        let binds = create_binds(
-            device, &layout, &sampler, &uniforms, &scene, &bloom_a, &bloom_b,
-        );
+        let additive = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent::REPLACE,
+        };
+        let prefilter = make("bloom-prefilter", "fs_prefilter", HDR_FORMAT, None);
+        let down = make("bloom-down", "fs_down", HDR_FORMAT, None);
+        let up = make("bloom-up", "fs_up", HDR_FORMAT, Some(additive));
+        let composite = make("tone-map-composite", "fs_composite", surface_format, None);
+        let scene = Target::with_samples(device, "hdr-scene-color", width, height, 1);
+        let bloom = BloomChain::new(device, width, height);
+        let passes = create_passes(device, &layout, &sampler, &scene, &bloom);
         Self {
             scene,
             scene_msaa: create_msaa_target(device, width, height),
-            bloom_a,
-            bloom_b,
+            bloom,
             sampler,
-            uniforms,
             layout,
-            binds,
-            extract,
-            blur,
+            passes,
+            prefilter,
+            down,
+            up,
             composite,
             width: width.max(1),
             height: height.max(1),
@@ -200,16 +274,15 @@ impl Postprocess {
         if self.width == width && self.height == height {
             return;
         }
-        (self.scene, self.bloom_a, self.bloom_b) = create_targets(device, width, height);
+        self.scene = Target::with_samples(device, "hdr-scene-color", width, height, 1);
+        self.bloom = BloomChain::new(device, width, height);
         self.scene_msaa = create_msaa_target(device, width, height);
-        self.binds = create_binds(
+        self.passes = create_passes(
             device,
             &self.layout,
             &self.sampler,
-            &self.uniforms,
             &self.scene,
-            &self.bloom_a,
-            &self.bloom_b,
+            &self.bloom,
         );
         self.width = width;
         self.height = height;
@@ -234,63 +307,81 @@ impl Postprocess {
         encoder: &mut wgpu::CommandEncoder,
         output: &wgpu::TextureView,
         settings: BloomSettings,
+        tone_map: ToneMap,
     ) {
-        let bloom_width = (self.width / 2).max(1);
-        let bloom_height = (self.height / 2).max(1);
+        let levels = self.bloom.levels();
+        let bloom_on = settings.enabled() && settings.intensity() > 0.0;
+        let texel = |(w, h): (u32, u32)| [1.0 / w as f32, 1.0 / h as f32];
         let base = PostprocessUniform {
             threshold: settings.threshold(),
             knee: settings.soft_knee(),
-            intensity: if settings.enabled() {
-                settings.intensity()
+            // The upsampled chain is the sum of every level; dividing keeps
+            // the overall strength independent of the level count.
+            intensity: if bloom_on {
+                settings.intensity() / levels as f32
             } else {
                 0.0
             },
             exposure: settings.exposure(),
-            texel_size: [1.0 / bloom_width as f32, 1.0 / bloom_height as f32],
-            direction: [0.0, 0.0],
+            texel_size: [0.0, 0.0],
+            tone_map: match tone_map {
+                ToneMap::Aces => 0.0,
+                ToneMap::Agx => 1.0,
+            },
+            _pad: 0.0,
         };
-        let params = [
-            base,
-            PostprocessUniform {
-                direction: [1.0, 0.0],
-                ..base
-            },
-            PostprocessUniform {
-                direction: [0.0, 1.0],
-                ..base
-            },
-            base,
-        ];
-        for (buffer, params) in self.uniforms.iter().zip(params) {
-            queue.write_buffer(buffer, 0, bytemuck::bytes_of(&params));
+        let write = |pass: &Pass, texel_size: [f32; 2]| {
+            let uniform = PostprocessUniform { texel_size, ..base };
+            queue.write_buffer(&pass.uniform, 0, bytemuck::bytes_of(&uniform));
+        };
+        if bloom_on {
+            // Down: scene -> level 0 -> level 1 -> ...
+            for level in 0..levels {
+                let pass = &self.passes[level];
+                let source = if level == 0 {
+                    (self.width, self.height)
+                } else {
+                    self.bloom.sizes[level - 1]
+                };
+                write(pass, texel(source));
+                let pipeline = if level == 0 {
+                    &self.prefilter
+                } else {
+                    &self.down
+                };
+                draw_fullscreen(
+                    encoder,
+                    "bloom-down-pass",
+                    &self.bloom.views[level],
+                    pipeline,
+                    &pass.bind,
+                    true,
+                );
+            }
+            // Up: add each smaller level onto the next larger one.
+            for step in 0..levels - 1 {
+                let target = levels - 2 - step;
+                let pass = &self.passes[levels + step];
+                write(pass, texel(self.bloom.sizes[target + 1]));
+                draw_fullscreen(
+                    encoder,
+                    "bloom-up-pass",
+                    &self.bloom.views[target],
+                    &self.up,
+                    &pass.bind,
+                    false,
+                );
+            }
         }
-        draw_fullscreen(
-            encoder,
-            "bloom-extract-pass",
-            &self.bloom_a.view,
-            &self.extract,
-            &self.binds[0],
-        );
-        draw_fullscreen(
-            encoder,
-            "bloom-horizontal-pass",
-            &self.bloom_b.view,
-            &self.blur,
-            &self.binds[1],
-        );
-        draw_fullscreen(
-            encoder,
-            "bloom-vertical-pass",
-            &self.bloom_a.view,
-            &self.blur,
-            &self.binds[2],
-        );
+        let composite = self.passes.last().expect("composite pass");
+        write(composite, texel((self.width, self.height)));
         draw_fullscreen(
             encoder,
             "tone-map-composite-pass",
             output,
             &self.composite,
-            &self.binds[3],
+            &composite.bind,
+            true,
         );
     }
 }
@@ -314,30 +405,29 @@ fn create_msaa_target(device: &wgpu::Device, width: u32, height: u32) -> Option<
         .then(|| Target::with_samples(device, "hdr-scene-color-msaa", width, height, samples))
 }
 
-fn create_targets(device: &wgpu::Device, width: u32, height: u32) -> (Target, Target, Target) {
-    let half_w = (width / 2).max(1);
-    let half_h = (height / 2).max(1);
-    (
-        Target::new(device, "hdr-scene-color", width, height),
-        Target::new(device, "bloom-half-a", half_w, half_h),
-        Target::new(device, "bloom-half-b", half_w, half_h),
-    )
-}
-
-fn create_binds(
+/// Uniforms and bind groups for every pass, in `encode`'s order.
+fn create_passes(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
-    uniforms: &[wgpu::Buffer; 4],
     scene: &Target,
-    bloom_a: &Target,
-    bloom_b: &Target,
-) -> [wgpu::BindGroup; 4] {
-    let make = |label: &str,
-                first: &wgpu::TextureView,
-                second: &wgpu::TextureView,
-                uniform: &wgpu::Buffer| {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
+    bloom: &BloomChain,
+) -> Vec<Pass> {
+    let make = |label: &str, first: &wgpu::TextureView, second: &wgpu::TextureView| {
+        let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::bytes_of(&PostprocessUniform {
+                threshold: 1.0,
+                knee: 0.5,
+                intensity: 0.0,
+                exposure: 1.0,
+                texel_size: [1.0, 1.0],
+                tone_map: 1.0,
+                _pad: 0.0,
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(label),
             layout,
             entries: &[
@@ -358,29 +448,25 @@ fn create_binds(
                     resource: uniform.as_entire_binding(),
                 },
             ],
-        })
+        });
+        Pass { uniform, bind }
     };
-    [
-        make("bloom-extract-bind", &scene.view, &scene.view, &uniforms[0]),
-        make(
-            "bloom-horizontal-bind",
-            &bloom_a.view,
-            &bloom_a.view,
-            &uniforms[1],
-        ),
-        make(
-            "bloom-vertical-bind",
-            &bloom_b.view,
-            &bloom_b.view,
-            &uniforms[2],
-        ),
-        make(
-            "tone-map-composite-bind",
-            &scene.view,
-            &bloom_a.view,
-            &uniforms[3],
-        ),
-    ]
+    let levels = bloom.levels();
+    let mut passes = Vec::with_capacity(levels * 2);
+    for level in 0..levels {
+        let source = if level == 0 {
+            &scene.view
+        } else {
+            &bloom.views[level - 1]
+        };
+        passes.push(make("bloom-down", source, source));
+    }
+    for step in 0..levels - 1 {
+        let source = &bloom.views[levels - 1 - step];
+        passes.push(make("bloom-up", source, source));
+    }
+    passes.push(make("tone-map-composite", &scene.view, &bloom.views[0]));
+    passes
 }
 
 fn draw_fullscreen(
@@ -389,6 +475,7 @@ fn draw_fullscreen(
     output: &wgpu::TextureView,
     pipeline: &wgpu::RenderPipeline,
     bind: &wgpu::BindGroup,
+    clear: bool,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some(label),
@@ -396,7 +483,11 @@ fn draw_fullscreen(
             view: output,
             resolve_target: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                load: if clear {
+                    wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                } else {
+                    wgpu::LoadOp::Load
+                },
                 store: wgpu::StoreOp::Store,
             },
         })],
@@ -410,6 +501,7 @@ fn draw_fullscreen(
 }
 
 #[cfg(test)]
+/// CPU copy of the shader's ACES curve (Narkowicz fit), for tests and tools.
 pub(crate) fn aces_tone_map(color: glam::Vec3, exposure: f32) -> glam::Vec3 {
     let x = color * exposure;
     ((x * (2.51 * x + glam::Vec3::splat(0.03)))
@@ -417,32 +509,212 @@ pub(crate) fn aces_tone_map(color: glam::Vec3, exposure: f32) -> glam::Vec3 {
     .clamp(glam::Vec3::ZERO, glam::Vec3::ONE)
 }
 
+#[cfg(test)]
+/// AgX keeps bright colours from turning into flat cyan, yellow or magenta
+/// blobs: they fade towards white the way film does. Without a correction it
+/// is a little darker and greyer than ACES in mid tones, so the engine adds
+/// this much exposure and a gentle "punchy" look on top.
+const AGX_EXPOSURE: f32 = 1.25;
+
+#[cfg(test)]
+/// CPU copy of the shader's AgX curve, for tests and tools. Returns linear
+/// display colour.
+pub(crate) fn agx_tone_map(color: glam::Vec3, exposure: f32) -> glam::Vec3 {
+    use glam::{Mat3, Vec3};
+    // Inset into the AgX working space (columns, as in the shader).
+    let inset = Mat3::from_cols(
+        Vec3::new(0.842_479_06, 0.042_328_24, 0.042_375_655),
+        Vec3::new(0.078_433_6, 0.878_468_64, 0.078_433_6),
+        Vec3::new(0.079_223_745, 0.079_166_13, 0.879_143),
+    );
+    let outset = Mat3::from_cols(
+        Vec3::new(1.196_879, -0.052_896_85, -0.052_971_635),
+        Vec3::new(-0.098_020_88, 1.151_903_1, -0.098_043_45),
+        Vec3::new(-0.099_029_74, -0.098_961_18, 1.151_073_7),
+    );
+    let (min_ev, max_ev) = (-12.473_93_f32, 4.026_069_f32);
+    let v = inset * (color * exposure * AGX_EXPOSURE);
+    let curve = |x: f32| {
+        let x = ((x.max(1e-10).log2().clamp(min_ev, max_ev)) - min_ev) / (max_ev - min_ev);
+        let x2 = x * x;
+        let x4 = x2 * x2;
+        15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x
+            - 0.00232
+    };
+    let v = Vec3::new(curve(v.x), curve(v.y), curve(v.z));
+    let v = agx_look(v);
+    let v = outset * v;
+    Vec3::new(
+        v.x.max(0.0).powf(2.2),
+        v.y.max(0.0).powf(2.2),
+        v.z.max(0.0).powf(2.2),
+    )
+    .clamp(Vec3::ZERO, Vec3::ONE)
+}
+
+#[cfg(test)]
+/// The look applied in AgX's display space: a touch more contrast and
+/// saturation than the neutral base (between Blender's "Base" and "Punchy").
+fn agx_look(v: glam::Vec3) -> glam::Vec3 {
+    let luma = v.dot(glam::Vec3::new(0.2126, 0.7152, 0.0722));
+    let v = glam::Vec3::new(
+        v.x.max(0.0).powf(1.12),
+        v.y.max(0.0).powf(1.12),
+        v.z.max(0.0).powf(1.12),
+    );
+    let luma_c = luma.max(0.0).powf(1.12);
+    glam::Vec3::splat(luma_c) + (v - glam::Vec3::splat(luma_c)) * 1.15
+}
+
 const SHADER: &str = r#"
-struct Params { threshold:f32, knee:f32, intensity:f32, exposure:f32, texel_size:vec2<f32>, direction:vec2<f32> };
+const AGX_EXPOSURE:f32=1.25;
+struct Params { threshold:f32, knee:f32, intensity:f32, exposure:f32, texel_size:vec2<f32>, tone_map:f32, pad:f32 };
 @group(0) @binding(0) var primary_tex:texture_2d<f32>;
 @group(0) @binding(1) var secondary_tex:texture_2d<f32>;
 @group(0) @binding(2) var linear_sampler:sampler;
 @group(0) @binding(3) var<uniform> p:Params;
 struct VOut { @builtin(position) clip:vec4<f32>, @location(0) uv:vec2<f32> };
-@vertex fn vs_main(@builtin(vertex_index) i:u32)->VOut { let pos=array<vec2<f32>,3>(vec2(-1.0,-1.0),vec2(3.0,-1.0),vec2(-1.0,3.0)); var o:VOut; o.clip=vec4(pos[i],0.0,1.0); o.uv=pos[i]*vec2(0.5,-0.5)+vec2(0.5); return o; }
-@fragment fn fs_extract(i:VOut)->@location(0) vec4<f32> { let c=textureSample(primary_tex,linear_sampler,i.uv).rgb; let brightness=max(c.r,max(c.g,c.b)); let knee=max(p.knee,0.0001); let soft=clamp((brightness-p.threshold+knee)/(2.0*knee),0.0,1.0); let contribution=max(brightness-p.threshold,0.0)+soft*soft*knee; return vec4(c*(contribution/max(brightness,0.0001)),1.0); }
-@fragment fn fs_blur(i:VOut)->@location(0) vec4<f32> { let d=p.direction*p.texel_size; var c=textureSample(primary_tex,linear_sampler,i.uv).rgb*0.227027; c+=(textureSample(primary_tex,linear_sampler,i.uv+d*1.384615).rgb+textureSample(primary_tex,linear_sampler,i.uv-d*1.384615).rgb)*0.316216; c+=(textureSample(primary_tex,linear_sampler,i.uv+d*3.230769).rgb+textureSample(primary_tex,linear_sampler,i.uv-d*3.230769).rgb)*0.070270; return vec4(c,1.0); }
+@vertex fn vs_main(@builtin(vertex_index) i:u32)->VOut {
+    let pos=array<vec2<f32>,3>(vec2(-1.0,-1.0),vec2(3.0,-1.0),vec2(-1.0,3.0));
+    var o:VOut; o.clip=vec4(pos[i],0.0,1.0); o.uv=pos[i]*vec2(0.5,-0.5)+vec2(0.5); return o;
+}
+
+fn tap(uv:vec2<f32>, x:f32, y:f32)->vec3<f32> {
+    return textureSampleLevel(primary_tex, linear_sampler, uv + vec2(x, y) * p.texel_size, 0.0).rgb;
+}
+fn luma(c:vec3<f32>)->f32 { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+// Karis average weight: hot pixels count less, so they cannot flicker.
+fn karis(c:vec3<f32>)->f32 { return 1.0 / (1.0 + luma(c)); }
+
+// 13 taps in five overlapping 2x2 boxes (Jimenez 2014).
+struct Taps { a:vec3<f32>, b:vec3<f32>, c:vec3<f32>, d:vec3<f32>, e:vec3<f32>, f:vec3<f32>, g:vec3<f32>,
+              h:vec3<f32>, i:vec3<f32>, j:vec3<f32>, k:vec3<f32>, l:vec3<f32>, m:vec3<f32> };
+fn taps13(uv:vec2<f32>)->Taps {
+    var t:Taps;
+    t.a=tap(uv,-2.0,-2.0); t.b=tap(uv,0.0,-2.0); t.c=tap(uv,2.0,-2.0);
+    t.d=tap(uv,-2.0,0.0);  t.e=tap(uv,0.0,0.0);  t.f=tap(uv,2.0,0.0);
+    t.g=tap(uv,-2.0,2.0);  t.h=tap(uv,0.0,2.0);  t.i=tap(uv,2.0,2.0);
+    t.j=tap(uv,-1.0,-1.0); t.k=tap(uv,1.0,-1.0); t.l=tap(uv,-1.0,1.0); t.m=tap(uv,1.0,1.0);
+    return t;
+}
+
+// First step: threshold the scene with a soft knee, Karis-weighted.
+@fragment fn fs_prefilter(v:VOut)->@location(0) vec4<f32> {
+    let t=taps13(v.uv);
+    let g0=(t.j+t.k+t.l+t.m)*0.25;
+    let g1=(t.a+t.b+t.d+t.e)*0.25;
+    let g2=(t.b+t.c+t.e+t.f)*0.25;
+    let g3=(t.d+t.e+t.g+t.h)*0.25;
+    let g4=(t.e+t.f+t.h+t.i)*0.25;
+    let w0=karis(g0)*0.5; let w1=karis(g1)*0.125; let w2=karis(g2)*0.125; let w3=karis(g3)*0.125; let w4=karis(g4)*0.125;
+    var c=(g0*w0+g1*w1+g2*w2+g3*w3+g4*w4)/max(w0+w1+w2+w3+w4, 1e-5);
+    c=min(c, vec3(64.0));
+    let brightness=max(c.r,max(c.g,c.b));
+    let knee=max(p.knee*p.threshold,1e-4);
+    let soft=clamp(brightness-p.threshold+knee,0.0,2.0*knee);
+    let contribution=max(brightness-p.threshold, soft*soft/(4.0*knee));
+    return vec4(c*(contribution/max(brightness,1e-4)),1.0);
+}
+
+@fragment fn fs_down(v:VOut)->@location(0) vec4<f32> {
+    let t=taps13(v.uv);
+    let c=t.e*0.125+(t.a+t.c+t.g+t.i)*0.03125+(t.b+t.d+t.f+t.h)*0.0625+(t.j+t.k+t.l+t.m)*0.125;
+    return vec4(c,1.0);
+}
+
+// 3x3 tent from the smaller level, added onto the larger one by blending.
+@fragment fn fs_up(v:VOut)->@location(0) vec4<f32> {
+    var c=tap(v.uv,0.0,0.0)*4.0;
+    c+=(tap(v.uv,-1.0,0.0)+tap(v.uv,1.0,0.0)+tap(v.uv,0.0,-1.0)+tap(v.uv,0.0,1.0))*2.0;
+    c+=tap(v.uv,-1.0,-1.0)+tap(v.uv,1.0,-1.0)+tap(v.uv,-1.0,1.0)+tap(v.uv,1.0,1.0);
+    return vec4(c/16.0,1.0);
+}
+
 fn aces(x:vec3<f32>)->vec3<f32>{return clamp((x*(2.51*x+vec3(0.03)))/(x*(2.43*x+vec3(0.59))+vec3(0.14)),vec3(0.0),vec3(1.0));}
-@fragment fn fs_composite(i:VOut)->@location(0) vec4<f32> { let hdr=textureSample(primary_tex,linear_sampler,i.uv).rgb+textureSample(secondary_tex,linear_sampler,i.uv).rgb*p.intensity; return vec4(aces(hdr*p.exposure),1.0); }
+
+// AgX (Troy Sobotka), with the polynomial fit by Benjamin Wrensch.
+fn agx_curve(x:vec3<f32>)->vec3<f32> {
+    let x2=x*x; let x4=x2*x2;
+    return 15.5*x4*x2-40.14*x4*x+31.96*x4-6.868*x2*x+0.4298*x2+0.1191*x-0.00232;
+}
+fn agx(color:vec3<f32>)->vec3<f32> {
+    let inset=mat3x3<f32>(
+        vec3(0.842479062253094,0.0423282422610123,0.0423756549057051),
+        vec3(0.0784335999999992,0.878468636469772,0.0784336),
+        vec3(0.0792237451477643,0.0791661274605434,0.879142973793104));
+    let outset=mat3x3<f32>(
+        vec3(1.19687900512017,-0.0528968517574562,-0.0529716355144438),
+        vec3(-0.0980208811401368,1.15190312990417,-0.0980434501171241),
+        vec3(-0.0990297440797205,-0.0989611768448433,1.15107367264116));
+    let min_ev=-12.47393; let max_ev=4.026069;
+    var v=inset*color;
+    v=(clamp(log2(max(v,vec3(1e-10))),vec3(min_ev),vec3(max_ev))-min_ev)/(max_ev-min_ev);
+    v=agx_curve(v);
+    // Look: a touch more contrast and saturation than the neutral base.
+    let l=pow(max(luma(v),0.0),1.12);
+    v=vec3(l)+(pow(max(v,vec3(0.0)),vec3(1.12))-vec3(l))*1.15;
+    v=outset*v;
+    // AgX ends in display encoding; the surface wants linear.
+    return clamp(pow(max(v,vec3(0.0)),vec3(2.2)),vec3(0.0),vec3(1.0));
+}
+
+@fragment fn fs_composite(v:VOut)->@location(0) vec4<f32> {
+    let scene=textureSampleLevel(primary_tex,linear_sampler,v.uv,0.0).rgb;
+    let bloom=textureSampleLevel(secondary_tex,linear_sampler,v.uv,0.0).rgb;
+    let hdr=(scene+bloom*p.intensity)*p.exposure;
+    if p.tone_map>0.5 { return vec4(agx(hdr*AGX_EXPOSURE),1.0); }
+    return vec4(aces(hdr),1.0);
+}
 "#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn aces_is_bounded_and_monotonic() {
-        let black = aces_tone_map(glam::Vec3::ZERO, 1.0);
-        let middle = aces_tone_map(glam::Vec3::splat(1.0), 1.0);
-        let hot = aces_tone_map(glam::Vec3::splat(16.0), 1.0);
-        assert_eq!(black, glam::Vec3::ZERO);
-        assert!(middle.cmpgt(black).all());
+    fn bounded_and_monotonic(curve: fn(glam::Vec3, f32) -> glam::Vec3) {
+        let black = curve(glam::Vec3::ZERO, 1.0);
+        let grey = curve(glam::Vec3::splat(0.18), 1.0);
+        let middle = curve(glam::Vec3::splat(1.0), 1.0);
+        let hot = curve(glam::Vec3::splat(16.0), 1.0);
+        assert!(black.cmple(glam::Vec3::splat(1e-3)).all(), "{black}");
+        assert!(grey.cmpgt(black).all());
+        assert!(middle.cmpgt(grey).all());
         assert!(hot.cmpgt(middle).all());
         assert!(hot.cmple(glam::Vec3::ONE).all());
+    }
+
+    #[test]
+    fn aces_is_bounded_and_monotonic() {
+        bounded_and_monotonic(aces_tone_map);
+        assert_eq!(aces_tone_map(glam::Vec3::ZERO, 1.0), glam::Vec3::ZERO);
+    }
+
+    #[test]
+    fn shader_and_cpu_agx_share_the_exposure() {
+        assert!(SHADER.contains(&format!("const AGX_EXPOSURE:f32={AGX_EXPOSURE};")));
+    }
+
+    #[test]
+    fn agx_is_bounded_and_monotonic() {
+        bounded_and_monotonic(agx_tone_map);
+    }
+
+    #[test]
+    fn agx_fades_saturated_highlights_towards_white() {
+        // A very bright pure red ends up less saturated than a dim one.
+        let sat = |c: glam::Vec3| (c.max_element() - c.min_element()) / c.max_element().max(1e-5);
+        let dim = agx_tone_map(glam::Vec3::new(0.3, 0.0, 0.0), 1.0);
+        let hot = agx_tone_map(glam::Vec3::new(40.0, 0.0, 0.0), 1.0);
+        assert!(sat(hot) < sat(dim) * 0.8, "dim {dim} hot {hot}");
+    }
+
+    #[test]
+    fn bloom_levels_halve_down_to_a_few_pixels() {
+        let sizes = bloom_sizes(1920, 1080);
+        assert_eq!(sizes[0], (960, 540));
+        assert_eq!(sizes.len(), MAX_BLOOM_LEVELS as usize);
+        assert_eq!(sizes[1], (480, 270));
+        assert_eq!(bloom_sizes(3, 3), vec![(1, 1)]);
+        assert_eq!(bloom_sizes(20, 20).len(), 2);
     }
 }

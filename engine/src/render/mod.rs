@@ -1135,8 +1135,13 @@ impl Renderer {
             self.taa.reset();
         }
         self.mark_gpu(&mut encoder, Mark::WorldDone);
-        self.postprocess
-            .encode(&self.queue, &mut encoder, &view, world.bloom());
+        self.postprocess.encode(
+            &self.queue,
+            &mut encoder,
+            &view,
+            world.bloom(),
+            tone_map_env().unwrap_or(world.tone_map()),
+        );
         self.mark_gpu(&mut encoder, Mark::PostDone);
         after(&self.device, &self.queue, &mut encoder, &view);
         if std::mem::take(&mut self.capture_next_frame) {
@@ -3228,6 +3233,16 @@ fn mesh_submit(compacted: &HashSet<EntityId>, id: EntityId) -> MeshSubmit {
 }
 
 /// `ENGINE_TAA=0` switches temporal anti-aliasing off for comparisons.
+/// `ENGINE_TONEMAP=agx|aces` overrides the world's choice (for comparisons).
+fn tone_map_env() -> Option<crate::world::ToneMap> {
+    static MODE: std::sync::OnceLock<Option<crate::world::ToneMap>> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        std::env::var("ENGINE_TONEMAP")
+            .ok()
+            .and_then(|v| crate::world::ToneMap::from_name(&v))
+    })
+}
+
 fn taa_env_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("ENGINE_TAA").map_or(true, |v| v.trim() != "0"))

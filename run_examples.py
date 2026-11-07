@@ -48,6 +48,7 @@ VARIANTS: list[Launch] = [
     Launch("model_viewer: prop pack", "model_viewer", {},
            ["examples/model_viewer/assets/props.fmpk"]),
     Launch("anything without TAA (starter)", "starter", {"ENGINE_TAA": "0"}),
+    Launch("starter with ACES tone mapping (compare)", "starter", {"ENGINE_TONEMAP": "aces"}),
 ]
 
 
