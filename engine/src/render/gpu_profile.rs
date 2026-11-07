@@ -54,7 +54,15 @@ pub enum SceneMark {
 const SCENE_COUNT: u32 = 11;
 const SCENE_BYTES: u64 = SCENE_COUNT as u64 * wgpu::QUERY_SIZE as u64;
 const SCENE_PARTS: [&str; 10] = [
-    "sky", "land", "grass", "voxel", "meshes", "batches", "terrain", "skinned", "transparent",
+    "sky",
+    "land",
+    "grass",
+    "voxel",
+    "meshes",
+    "batches",
+    "terrain",
+    "skinned",
+    "transparent",
     "effects",
 ];
 

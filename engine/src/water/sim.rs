@@ -27,9 +27,9 @@ use rayon::prelude::*;
 pub(crate) const G: f32 = 9.81;
 /// Depth below which a cell counts as dry (metres).
 pub(crate) const DRY: f32 = 1e-4;
-const NONE: u32 = u32::MAX;
+pub(crate) const NONE: u32 = u32::MAX;
 /// Bit set in a cell's link list when the cell is the link's `b` side.
-const B_SIDE: u32 = 1 << 31;
+pub(crate) const B_SIDE: u32 = 1 << 31;
 
 /// Area and grid of the simulation.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -209,8 +209,8 @@ pub struct Water {
     /// Links of column c along axis k are link_group[2c + k]..link_group[2c + k + 1].
     pub(crate) link_group: Vec<u32>,
     /// Upstream and downstream link along the same axis (θ smoothing).
-    link_prev: Vec<u32>,
-    link_next: Vec<u32>,
+    pub(crate) link_prev: Vec<u32>,
+    pub(crate) link_next: Vec<u32>,
     pub(crate) cell_link_start: Vec<u32>,
     pub(crate) cell_links: Vec<u32>,
     // Scratch.
@@ -235,6 +235,13 @@ pub struct Water {
     pub(crate) activity: super::active::Activity,
     /// Per cell: foam, when the foam was set, when the cell was last wet.
     pub(crate) marks: Vec<[f32; 4]>,
+    pub(crate) backend: super::WaterBackend,
+    pub(crate) gpu: super::backend::GpuLinkCell,
+    /// Bumped whenever the CPU replaces the water state wholesale (the GPU
+    /// must upload it again).
+    pub(crate) state_rev: u64,
+    /// Bumped when the sea edge cells change.
+    pub(crate) boundary_rev: u64,
 }
 
 impl std::fmt::Debug for Water {
@@ -293,6 +300,10 @@ impl Water {
             sea_out: Vec::new(),
             activity: Default::default(),
             marks: Vec::new(),
+            backend: Default::default(),
+            gpu: Default::default(),
+            state_rev: 0,
+            boundary_rev: 0,
             next_dt: 1.0 / 120.0,
             time: 0.0,
             stats: WaterStats::default(),
@@ -425,6 +436,7 @@ impl Water {
         }
         self.time_step_reset();
         self.wake_all();
+        self.state_rev += 1;
         self.total_volume() - before
     }
 
@@ -453,6 +465,10 @@ impl Water {
         let moved = (new - self.depth[i]) * area;
         self.depth[i] = new;
         self.wake_near(Vec2::new(at.x, at.z), 0.0);
+        self.gpu_edit(super::backend::GpuEdit::Depth {
+            cell,
+            add: moved / area,
+        });
         moved
     }
 
@@ -466,6 +482,9 @@ impl Water {
             }
         }
         self.wake_all();
+        if self.on_gpu() {
+            self.gpu.0.get_mut().unwrap_or_else(|e| e.into_inner()).rain += metres;
+        }
     }
 
     /// Push water outward from `at`, as something falling in or a blast
@@ -518,7 +537,12 @@ impl Water {
                         let w = (1.0 - dist / radius).powi(2);
                         let along = d[link.axis as usize];
                         let h = (head.min(link.hi) - link.lo).max(0.0);
-                        self.q[id] += along.signum() * strength * w * h;
+                        let add = along.signum() * strength * w * h;
+                        self.q[id] += add;
+                        self.gpu_edit(super::backend::GpuEdit::Flow {
+                            link: id as u32,
+                            add,
+                        });
                     }
                 }
             }
@@ -533,6 +557,7 @@ impl Water {
         self.depth.iter_mut().for_each(|d| *d = 0.0);
         self.q.iter_mut().for_each(|q| *q = 0.0);
         self.wake_all();
+        self.state_rev += 1;
     }
 
     pub fn add_source(&mut self, source: WaterSource) -> SourceId {
@@ -724,6 +749,10 @@ impl Water {
 
     /// Advance the simulation by `dt` seconds (clamped to 0.1 s).
     pub fn update(&mut self, dt: f32) {
+        if self.on_gpu() {
+            self.update_gpu(dt);
+            return;
+        }
         let mut remaining = dt.clamp(0.0, 0.1);
         let mut steps = 0;
         let mut simulated = 0.0;
@@ -1016,6 +1045,7 @@ impl Water {
             }
         }
         self.topology_rev += 1;
+        self.state_rev += 1;
     }
 
     /// Rebuild links. With `old` (the previous topology), discharge is kept

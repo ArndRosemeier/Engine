@@ -511,17 +511,16 @@ impl Renderer {
         let sky = create_sky_pipelines(&device, HDR_FORMAT);
         let portal = PortalGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
         let instance_cull = InstanceCull::new(&device);
-        let gpu_profiler = gpu_profile_interval
-            .map(|every| {
-                GpuProfiler::new(
-                    &device,
-                    queue.get_timestamp_period(),
-                    every,
-                    device
-                        .features()
-                        .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
-                )
-            });
+        let gpu_profiler = gpu_profile_interval.map(|every| {
+            GpuProfiler::new(
+                &device,
+                queue.get_timestamp_period(),
+                every,
+                device
+                    .features()
+                    .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
+            )
+        });
 
         let particles = ParticleGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
         let ribbons = RibbonGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);

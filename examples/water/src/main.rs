@@ -14,7 +14,7 @@
 //! `ENGINE_WATER_CRATE=x,y,z` drops a crate there on the third frame.
 use engine::advanced::Volume;
 use engine::prelude::*;
-use engine::water::{SwimState, Swimmer, WaterLook};
+use engine::water::{SwimState, Swimmer, WaterBackend, WaterLook};
 use glam::{Vec2, Vec3};
 
 const SIZE: f32 = 256.0;
@@ -147,6 +147,8 @@ fn main() -> EngineResult<()> {
             for _ in 0..60 * 40 {
                 water.update(1.0 / 60.0);
             }
+            // Warmed up on the CPU; from here on where it runs best.
+            water.set_backend(WaterBackend::preferred());
             eprintln!(
                 "water: {} cells, {:.0} m3, warmed up in {:.1} s",
                 water.cell_count(),

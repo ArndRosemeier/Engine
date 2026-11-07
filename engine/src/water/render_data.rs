@@ -67,6 +67,34 @@ impl Water {
             .collect()
     }
 
+    /// Per column along the region's edge (walking +x at the low z edge, +z
+    /// at the high x edge, -x at the high z edge, -z at the low x edge), the
+    /// cell holding the sea surface, which the far sea continues from; or
+    /// `NO_CELL`.
+    pub(crate) fn render_edge_cells(&self) -> Vec<u32> {
+        let r = self.region;
+        let (nx, nz) = (r.cells_x, r.cells_z);
+        let mut walk = Vec::with_capacity(2 * (nx + nz) as usize);
+        walk.extend((0..nx).map(|x| (x, 0)));
+        walk.extend((0..nz).map(|z| (nx - 1, z)));
+        walk.extend((0..nx).rev().map(|x| (x, nz - 1)));
+        walk.extend((0..nz).rev().map(|z| (0, z)));
+        let level = self.sea.as_ref().map(|s| s.level);
+        walk.into_iter()
+            .map(|(x, z)| {
+                let Some(level) = level else { return NO_CELL };
+                let c = (z * nx + x) as usize;
+                (self.col_start[c]..self.col_start[c + 1])
+                    .rev()
+                    .find(|&i| {
+                        let i = i as usize;
+                        self.floor[i] < level + 2.0 && self.ceil[i] > level
+                    })
+                    .unwrap_or(NO_CELL)
+            })
+            .collect()
+    }
+
     /// Column index of every cell.
     pub(crate) fn render_cell_columns(&self) -> &[u32] {
         &self.cell_col
@@ -89,9 +117,16 @@ impl Water {
             }
         };
         let t = self.time as f32;
+        let dry = |i: usize| (0.0..=DRAW_DEPTH).contains(&state[i][1]);
+        let recent = |i: usize| t - self.marks[i][2] < super::marks::DRYING_SECONDS * 4.0;
+        // Wet ground and its dry neighbours, so the darkening fades out
+        // across a cell instead of ending at a cell edge.
         let wet_ground = |i: usize| {
-            (0.0..=DRAW_DEPTH).contains(&state[i][1])
-                && t - self.marks[i][2] < super::marks::DRYING_SECONDS * 4.0
+            dry(i)
+                && (recent(i)
+                    || corners[i]
+                        .iter()
+                        .any(|&n| n != NO_CELL && dry(n as usize) && recent(n as usize)))
         };
         *out = (0..state.len() as u32)
             .into_par_iter()

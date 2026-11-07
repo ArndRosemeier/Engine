@@ -97,6 +97,10 @@ impl Water {
                     let m = &mut self.marks[cell];
                     let now = m[0] * (-(t - m[1]) / FOAM_SECONDS).exp();
                     *m = [now.max(w), t, m[2], m[3]];
+                    self.gpu_edit(super::backend::GpuEdit::Foam {
+                        cell: cell as u32,
+                        amount: w,
+                    });
                 }
             }
         }

@@ -778,3 +778,29 @@ fn breaking_swell_leaves_foam_and_wet_sand() {
     let dune = water.wetness(Vec3::new(155.5, beach_ground(155.5) + 0.01, 1.0));
     assert!(dune < 0.01, "dune should be dry, {dune}");
 }
+
+#[test]
+fn sleeping_tiles_leave_no_step_in_the_sea_surface() {
+    // Open sea with a slow swell over a shelf; most tiles barely move, so
+    // they fall asleep while the level around them keeps changing.
+    let shelf = HeightMapTerrain(|x: f32, z: f32| -6.0 + (x * 0.05).max(0.0) * 0.1 + z * 0.002);
+    let region = WaterRegion::new(Vec2::ZERO, Vec2::new(128.0, 96.0), 1.0, -8.0, 20.0);
+    let mut water = Water::new(region, &shelf);
+    water.flood_sea(0.0);
+    water.set_sea(Some(Sea::calm(0.0).with_swell(Swell {
+        height: 0.3,
+        period: 14.0,
+        direction_deg: 60.0,
+    })));
+    run(&mut water, 60.0);
+    assert_sane(&water);
+    // Largest level step between neighbouring wet cells.
+    let mut worst: f32 = 0.0;
+    for l in &water.links {
+        let (a, b) = (l.a as usize, l.b as usize);
+        if water.depth[a] > 0.5 && water.depth[b] > 0.5 {
+            worst = worst.max((water.cell_head(a) - water.cell_head(b)).abs());
+        }
+    }
+    assert!(worst < 0.02, "step of {worst} m in the surface");
+}
