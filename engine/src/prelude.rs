@@ -36,7 +36,10 @@ pub use crate::space::{
 pub use crate::surface::{SurfaceSample, SurfaceSource, WaterSurface, WATER_CLEARANCE};
 pub use crate::surface_terrain::{SurfaceMeshStyle, SurfaceStream, SurfaceTerrain};
 pub use crate::terrain::{HeightTerrain, TerrainRules, TerrainSample, TerrainStream};
-pub use crate::texgen::{natural_layer, NaturalLayer, TextureLayer};
+pub use crate::texgen::{
+    layer as texture_layer, natural_layer, FacadeLayer, GroundLayer, Layer, MedievalLayer,
+    NaturalLayer, RoofLayer, TextureLayer,
+};
 pub use crate::texture::{
     generate_cave_albedo, generate_terrain_albedo, load_rgba8_png, MaterialId, TerrainAlbedo,
     TerrainMaterialDesc, TextureId,
