@@ -4,7 +4,7 @@
 //! Right mouse + move to look, WASD to move, Shift faster. G switches between
 //! flying (Space/E up, Ctrl/Q down) and a body that walks, swims and dives
 //! (Space jumps or rises, Ctrl dives; look down to dive while swimming).
-//! Left click digs where the crosshair points (dig from the lake toward the
+//! Left click digs under the mouse cursor (dig from the lake toward the
 //! cave and watch it flood), F builds rock, R pours a big bucket of water,
 //! B drops a wooden crate that breaks into floating planks, T toggles rain.
 //!
@@ -172,16 +172,14 @@ fn main() -> EngineResult<()> {
                 }
             };
         }
-        let (eye, aim) = match body.as_mut() {
+        match body.as_mut() {
             Some(b) => {
                 b.update(world, frame);
-                (b.eye(), Camera::direction(b.yaw_deg, b.pitch_deg))
             }
-            None => {
-                camera.update(world, frame);
-                (camera.position, camera.forward())
-            }
-        };
+            None => camera.update(world, frame),
+        }
+        // Dig, build and pour under the mouse cursor.
+        let (eye, aim) = world.cursor_ray(frame);
         let input = &frame.input;
         let hit = world
             .voxel_terrain()
