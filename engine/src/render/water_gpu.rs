@@ -1175,25 +1175,56 @@ fn sea_point(s: u32, r: u32) -> vec2<f32> {
     }
 }
 
-// Surface of the simulated water where perimeter step `s` meets the edge,
-// exactly as the edge of the surface mesh has it (x = height, y = 1 if
-// there is water there).
-fn edge_surface(s: u32) -> vec2<f32> {
+// The simulated water where perimeter step `s` meets the edge, exactly as
+// the edge of the surface mesh has it: surface height, depth, current, and
+// how many of the two edge cells there are wet.
+struct Edge {
+    height: f32,
+    depth: f32,
+    flow: vec2<f32>,
+    wet: f32,
+};
+
+fn edge_at(s: u32) -> Edge {
     let n = perimeter();
-    var sum = 0.0;
-    var count = 0.0;
+    var e: Edge;
+    e.height = 0.0;
+    e.depth = 0.0;
+    e.flow = vec2<f32>(0.0);
+    e.wet = 0.0;
     for (var j = 0u; j < 2u; j++) {
         let c = edge_cells[(s + n - 1u + j) % n];
         if is_wet(c) {
-            sum += cells[c].x;
-            count += 1.0;
+            e.height += cells[c].x;
+            e.depth += cells[c].y;
+            e.flow += cells[c].zw;
+            e.wet += 1.0;
         }
     }
-    return vec2<f32>(sum / max(count, 1.0), select(0.0, 1.0, count > 0.0));
+    let k = 1.0 / max(e.wet, 1.0);
+    e.height *= k;
+    e.depth *= k;
+    e.flow *= k;
+    return e;
 }
 
-// The open sea beyond the simulated region, with the incoming swell. The
-// first ring starts from the simulated surface, so there is no step.
+// Along the side and outwards, for perimeter step `s`.
+fn sea_axes(s: u32) -> array<vec2<f32>, 2> {
+    switch sea_side(s).x {
+        case 0u: { return array<vec2<f32>, 2>(vec2<f32>(1.0, 0.0), vec2<f32>(0.0, -1.0)); }
+        case 1u: { return array<vec2<f32>, 2>(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0)); }
+        case 2u: { return array<vec2<f32>, 2>(vec2<f32>(-1.0, 0.0), vec2<f32>(0.0, 1.0)); }
+        default: { return array<vec2<f32>, 2>(vec2<f32>(0.0, -1.0), vec2<f32>(-1.0, 0.0)); }
+    }
+}
+
+// Width (m) of the band outside the region over which the simulated edge
+// (its waves, currents and depth) turns into the open sea.
+const SEA_BLEND: f32 = 60.0;
+
+// The open sea beyond the simulated region, with the incoming swell. It
+// starts as the simulated edge and turns into the open-sea swell over
+// SEA_BLEND metres, so neither the level nor the slope steps at the edge.
 @vertex
 fn vs_sea(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VsOut {
     var order = array<u32, 6>(0u, 1u, 3u, 0u, 3u, 2u);
@@ -1205,19 +1236,35 @@ fn vs_sea(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> V
     // Spacing of the mesh here: waves much shorter only alias.
     let spacing = max(sea_ring(f32(r) + 1.0) - sea_ring(f32(r)), distance(sea_point(s + 1u, r), xz));
     let w = swell_at(xz, spacing);
-    var y = wp.sea.x + w.x;
-    if r == 0u {
-        let e = edge_surface(s);
-        if e.y > 0.0 {
-            y = e.x;
+    let open_y = wp.sea.x + w.x;
+    var y = open_y;
+    var grad = w.yz;
+    var flow = vec2<f32>(0.0);
+    var depth = max(wp.sea.z, 2.0);
+    let e = edge_at(s);
+    let x = sea_ring(f32(r)) / SEA_BLEND;
+    if e.wet > 0.0 && x < 1.0 {
+        let f = x * x * (3.0 - 2.0 * x);
+        let df = 6.0 * x * (1.0 - x) / SEA_BLEND;
+        let axes = sea_axes(s);
+        // Slope of the simulated edge along the side.
+        let e0 = edge_at(s + per_ring - 1u);
+        let e1 = edge_at(s + 1u);
+        var along = 0.0;
+        if e0.wet > 0.0 && e1.wet > 0.0 {
+            along = (e1.height - e0.height) * 0.5 / wp.region.z;
         }
+        y = mix(e.height, open_y, f);
+        grad = mix(axes[0] * along, w.yz, f) + axes[1] * (open_y - e.height) * df;
+        flow = e.flow * (1.0 - f);
+        depth = mix(max(e.depth, 0.05), depth, f);
     }
     var out: VsOut;
     out.world_p = vec3<f32>(xz.x, y, xz.y);
     out.clip = u.view_proj * vec4<f32>(out.world_p, 1.0);
-    out.grad = w.yz;
-    out.flow = vec2<f32>(0.0);
-    out.depth = max(wp.sea.z, 2.0);
+    out.grad = grad;
+    out.flow = flow;
+    out.depth = depth;
     out.foam = 0.0;
     return out;
 }
