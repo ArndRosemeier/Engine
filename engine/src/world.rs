@@ -113,6 +113,14 @@ pub enum InstanceSubmit {
 }
 
 impl InstanceSubmit {
+    /// `ENGINE_INSTANCE_SUBMIT=gpu|cpu` picks the starting mode.
+    fn from_env() -> Self {
+        match std::env::var("ENGINE_INSTANCE_SUBMIT").as_deref() {
+            Ok("gpu") => Self::GpuIndirect,
+            _ => Self::CpuIndexed,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::CpuIndexed => "cpu_indexed",
@@ -758,7 +766,7 @@ impl Default for World {
             texture_by_content: HashMap::new(),
             torch: None,
             shadows: Some(ShadowSettings::default()),
-            instance_submit: InstanceSubmit::CpuIndexed,
+            instance_submit: InstanceSubmit::from_env(),
             bloom: BloomSettings::default(),
             ambient_occlusion: Some(AmbientOcclusion::default()),
             global_illumination: Some(GlobalIllumination::default()),
