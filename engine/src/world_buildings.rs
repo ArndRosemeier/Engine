@@ -106,6 +106,9 @@ pub(crate) struct BuildingVisual {
     pub mounds: Vec<EntityId>,
     /// Physics owner key of the element colliders.
     pub owner: u64,
+    /// The plan's rooms in the world, and the openings elements leave.
+    pub rooms: Vec<crate::rooms::RoomId>,
+    pub openings: Vec<(u32, crate::rooms::OpeningId)>,
 }
 
 /// The upper part of a building on its way down.
@@ -207,6 +210,7 @@ impl World {
             self.physics
                 .add_static_box(owner, i as u32, pos + rot * e.center, rot, e.half);
         }
+        let (rooms, openings) = self.add_building_rooms(&plan, transform, owner)?;
         self.buildings.insert(
             id,
             BuildingVisual {
@@ -214,9 +218,67 @@ impl World {
                 base,
                 mounds: Vec::new(),
                 owner,
+                rooms,
+                openings,
             },
         );
+        self.sync_building_openings(id);
         Ok(id)
+    }
+
+    /// The plan's rooms and openings, placed in the world.
+    #[allow(clippy::type_complexity)]
+    fn add_building_rooms(
+        &mut self,
+        plan: &BuildingPlan,
+        transform: Mat4,
+        owner: u64,
+    ) -> EngineResult<(
+        Vec<crate::rooms::RoomId>,
+        Vec<(u32, crate::rooms::OpeningId)>,
+    )> {
+        use crate::rooms::{Opening, Room};
+        let (scale, rot, _) = transform.to_scale_rotation_translation();
+        let rooms: Vec<_> = plan
+            .rooms()
+            .iter()
+            .map(|(c, h)| {
+                let room = Room::new(transform.transform_point3(*c), *h * scale).rotated(rot);
+                self.rooms.add_room(room, Some(owner))
+            })
+            .collect();
+        let corners = |q: [Vec3; 4]| q.map(|c| transform.transform_point3(c));
+        for gap in plan.gaps() {
+            let o = Opening::door(
+                rooms[gap.a as usize],
+                gap.b.map(|b| rooms[b as usize]),
+                corners(gap.corners),
+            );
+            self.rooms.add_opening(o, true, Some(owner))?;
+        }
+        let mut openings = Vec::new();
+        for i in 0..plan.len() {
+            if let Some((a, b, q)) = plan.element_opening(i) {
+                let o = Opening::door(rooms[a as usize], b.map(|b| rooms[b as usize]), corners(q));
+                openings.push((i as u32, self.rooms.add_opening(o, false, Some(owner))?));
+            }
+        }
+        Ok((rooms, openings))
+    }
+
+    /// Windows, broken elements and anything after a collapse are open.
+    fn sync_building_openings(&mut self, id: EntityId) {
+        let Some(b) = self.buildings.get(&id) else {
+            return;
+        };
+        let gone = b.state.gone();
+        let collapsed = b.state.collapse().is_some();
+        let plan = b.state.plan();
+        for (i, o) in &b.openings {
+            let window = plan.elements()[*i as usize].kind == crate::building::ElementKind::Window;
+            let open = window || collapsed || gone.get(*i as usize);
+            let _ = self.rooms.set_open(*o, open);
+        }
     }
 
     /// A building's state (what is broken, what fell, the rubble).
@@ -329,6 +391,7 @@ impl World {
             }
         }
         self.show_building_change(id, &change, None, animate);
+        self.sync_building_openings(id);
         if !animate || change.collapse.is_none() {
             self.place_mounds(id);
         }
@@ -407,6 +470,7 @@ impl World {
             self.element_states.set(base + el.0, true);
             self.physics.remove_static(owner, el.0);
         }
+        self.sync_building_openings(id);
         if !animate {
             let _ = collapse;
             return;
@@ -720,6 +784,10 @@ impl World {
     /// Forget a building's extra state when its entity goes.
     pub(crate) fn forget_building(&mut self, id: EntityId) {
         if let Some(b) = self.buildings.remove(&id) {
+            for r in &b.rooms {
+                self.rooms.remove_room(*r);
+            }
+            self.entity_rooms.retain(|_, r| !b.rooms.contains(r));
             self.element_states
                 .release(b.base, b.state.plan().len() as u32);
             self.physics.remove_statics_of(b.owner);

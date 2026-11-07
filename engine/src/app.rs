@@ -298,6 +298,9 @@ impl App {
                 .as_mut()
                 .expect("renderer must exist before redraw");
             let sync_t = Instant::now();
+            let size = renderer.size();
+            self.world
+                .update_room_visibility(size.width as f32 / size.height.max(1) as f32);
             renderer.sync_world(&mut self.world);
             let sync_ms = elapsed_ms(sync_t);
             let ui_backend = self.ui_backend.as_mut().expect("ui backend");

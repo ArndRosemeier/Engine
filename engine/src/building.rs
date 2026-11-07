@@ -210,6 +210,19 @@ pub struct BuildingPlan {
     /// Slab tiles of each storey.
     slabs: Vec<Vec<u32>>,
     tile: f32,
+    /// Rooms inside (boxes in the building's space), see [`crate::rooms`].
+    rooms: Vec<(Vec3, Vec3)>,
+    /// Gaps that are always open (doorways): rooms on each side (`None`
+    /// outside) and the outline.
+    gaps: Vec<PlanGap>,
+}
+
+/// A doorway in a plan: always open.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlanGap {
+    pub a: u16,
+    pub b: Option<u16>,
+    pub corners: [Vec3; 4],
 }
 
 impl BuildingPlan {
@@ -240,6 +253,8 @@ impl BuildingPlan {
             footprint_max: Vec2::splat(f32::MIN),
             slabs: Vec::new(),
             tile: 3.0,
+            rooms: Vec::new(),
+            gaps: Vec::new(),
         })
     }
 
@@ -422,6 +437,31 @@ impl BuildingPlan {
                     plan.add(e, None, dim(spec.slab_color, 0.9))?;
                 }
             }
+            // Rooms: the front and back halves (or one room when shallow).
+            let y1 = y0 + fh;
+            let (ry, rh) = ((y0 + y1) * 0.5, fh * 0.5);
+            if spec.depth >= 6.0 {
+                let front =
+                    plan.add_room(Vec3::new(0.0, ry, -hd * 0.5), Vec3::new(hw, rh, hd * 0.5))?;
+                let back =
+                    plan.add_room(Vec3::new(0.0, ry, hd * 0.5), Vec3::new(hw, rh, hd * 0.5))?;
+                let segs = nx.max(2);
+                let w = spec.width / segs as f32;
+                let x = -hw + w * (segs / 2) as f32;
+                let (yb, yt) = (wall_y, wall_y + wall_h);
+                plan.add_gap(PlanGap {
+                    a: front,
+                    b: Some(back),
+                    corners: [
+                        Vec3::new(x, yb, 0.0),
+                        Vec3::new(x + w, yb, 0.0),
+                        Vec3::new(x + w, yt, 0.0),
+                        Vec3::new(x, yt, 0.0),
+                    ],
+                })?;
+            } else {
+                plan.add_room(Vec3::new(0.0, ry, 0.0), Vec3::new(hw, rh, hd))?;
+            }
             // An inner wall across the middle, with a door gap.
             if spec.depth >= 6.0 {
                 let segs = nx.max(2);
@@ -467,6 +507,91 @@ impl BuildingPlan {
 
     pub fn elements(&self) -> &[Element] {
         &self.elements
+    }
+
+    /// Add a room (a box in the building's space). Elements between two
+    /// rooms, or a room and the outside, become openings when they break
+    /// (windows are open from the start), so what is inside is drawn only
+    /// when it can be seen. Returns the room's index in the plan.
+    pub fn add_room(&mut self, center: Vec3, half: Vec3) -> EngineResult<u16> {
+        if !(center.is_finite() && half.is_finite() && half.min_element() > 0.0) {
+            return Err(EngineError::InvalidValue(
+                "room needs a box with positive size".into(),
+            ));
+        }
+        if self.rooms.len() >= u16::MAX as usize {
+            return Err(EngineError::InvalidValue("too many rooms".into()));
+        }
+        self.rooms.push((center, half));
+        Ok((self.rooms.len() - 1) as u16)
+    }
+
+    /// A doorway that is always open between room `a` and room `b` (`None`: outside).
+    pub fn add_gap(&mut self, gap: PlanGap) -> EngineResult<()> {
+        let ok = (gap.a as usize) < self.rooms.len()
+            && gap
+                .b
+                .is_none_or(|b| (b as usize) < self.rooms.len() && b != gap.a)
+            && gap.corners.iter().all(|c| c.is_finite());
+        if !ok {
+            return Err(EngineError::InvalidValue(
+                "gap between rooms that are not in the plan".into(),
+            ));
+        }
+        self.gaps.push(gap);
+        Ok(())
+    }
+
+    /// Rooms as (centre, half size) in the building's space.
+    pub fn rooms(&self) -> &[(Vec3, Vec3)] {
+        &self.rooms
+    }
+
+    pub fn gaps(&self) -> &[PlanGap] {
+        &self.gaps
+    }
+
+    fn room_at(&self, p: Vec3) -> Option<u16> {
+        self.rooms
+            .iter()
+            .enumerate()
+            .filter(|(_, (c, h))| (p - *c).abs().cmple(*h).all())
+            .min_by(|a, b| {
+                let v = |h: Vec3| h.x * h.y * h.z;
+                v(a.1 .1).total_cmp(&v(b.1 .1))
+            })
+            .map(|(i, _)| i as u16)
+    }
+
+    /// The rooms on either side of element `i` (across its thinnest side)
+    /// and its outline there, when the sides differ: what opens up when it
+    /// breaks.
+    pub fn element_opening(&self, i: usize) -> Option<(u16, Option<u16>, [Vec3; 4])> {
+        let e = self.elements.get(i)?;
+        if self.rooms.is_empty() || e.kind == ElementKind::Column {
+            return None;
+        }
+        let h = e.half;
+        let axis = if h.x <= h.y && h.x <= h.z {
+            0
+        } else if h.y <= h.z {
+            1
+        } else {
+            2
+        };
+        let n = Vec3::AXES[axis];
+        let reach = h[axis] + 0.3;
+        let a = self.room_at(e.center + n * reach);
+        let b = self.room_at(e.center - n * reach);
+        let (a, b) = match (a, b) {
+            (Some(a), b) if Some(a) != b => (a, b),
+            (None, Some(b)) => (b, None),
+            _ => return None,
+        };
+        let (u, v) = (Vec3::AXES[(axis + 1) % 3], Vec3::AXES[(axis + 2) % 3]);
+        let (du, dv) = (u * h[(axis + 1) % 3], v * h[(axis + 2) % 3]);
+        let c = e.center;
+        Some((a, b, [c - du - dv, c + du - dv, c + du + dv, c - du + dv]))
     }
 
     pub fn element(&self, id: ElementId) -> Option<&Element> {

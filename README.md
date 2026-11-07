@@ -205,6 +205,20 @@ clicks, and `RagdollSettings { max_active, get_up_after, .. }`: beyond
 `max_active` tumbling at once, the calmest one is settled. See
 `examples/ragdolls`.
 
+**Rooms (indoor culling):** describe interiors as rooms (boxes, optionally
+rotated) joined by openings (doors, windows, holes):
+`let r = world.add_room(Room::new(center, half), owner)?`,
+`world.add_opening(Opening::rect(r, None, bottom_center, normal, w, h), open)?`
+(`None` is the outside), then `world.set_room(entity, Some(r))` or
+`set_room_by_position(entity)`. Each frame only rooms the camera can see
+through open openings are drawn; buildings in front hide the rooms behind
+them. `set_opening_open` changes an opening at runtime. Buildings made with
+`spawn_building` get rooms and openings from their plan automatically
+(`BuildingPlan::add_room`, `add_gap`; the tower preset has offices per floor):
+windows are open, and a wall or door that breaks becomes a new opening.
+`room_count()` and `set_room_culling(false)` to compare. See
+`examples/interiors`.
+
 **Lamps:** `world.add_lamp(Lamp::fire(pos))?`, `Lamp::street_lamp(pos)`, or
 `Lamp::point(pos, color, intensity, range)` and
 `Lamp::spot(pos, direction, angle_deg, color, intensity, range)` for your own;
@@ -326,6 +340,7 @@ cargo run --release -p <name>
 | `prefabs` | Carts built from parts driving with spinning wheels, a windmill turning its sails, a lantern carried in a hand; C drops carts that tumble whole, X removes them |
 | `buildings` | A block of breakable towers: punch panels (click), blast (F), topple (T), pancake (P), rebuild (R) |
 | `ragdolls` | People strolling about: click knocks one flying, F a blast; they tumble, settle and get up (K keeps them down, G gets everyone up) |
+| `interiors` | A city block of office towers, every floor furnished (about a million triangles); from the street only the rooms you can see through windows are drawn (C toggles culling, I interiors, click punches a wall open) |
 | `fixed_tick` | A 30 Hz simulation drawn smoothly at any frame rate, next to the raw steps; I toggles interpolation, 1/2/3 change the rate |
 | `physics` | Crates, a brick wall, dominoes, rolling boulders and a sweeper; throw balls (click), blow things up (F), shatter (X) |
 | `model_viewer` | Any glTF/GLB or `.fmpk` file: `-- path/to/model.glb` |
