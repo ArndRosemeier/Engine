@@ -153,3 +153,113 @@ mod tests {
         assert_eq!(clock.tick(f32::NAN), 0.0);
     }
 }
+
+/// Paces frames to the display's refresh rate when vsync was asked for but
+/// presentation does not wait for it (seen with a window on a monitor driven
+/// by another GPU). Rendering far faster than the display shows frames makes
+/// each shown frame sample the motion at an uneven moment: judder.
+pub(crate) struct FramePacer {
+    next: Option<std::time::Instant>,
+    active: bool,
+}
+
+impl FramePacer {
+    pub(crate) fn new() -> Self {
+        Self {
+            next: None,
+            active: false,
+        }
+    }
+
+    /// Turn pacing on once frames clearly outrun the display (`fps` well
+    /// above `refresh_hz`); off when vsync is not wanted.
+    pub(crate) fn observe(&mut self, vsync: bool, fps: f32, refresh_hz: Option<f32>) {
+        match refresh_hz {
+            Some(hz) if vsync && hz > 20.0 => {
+                if fps > hz * 1.15 {
+                    self.active = true;
+                }
+            }
+            _ => {
+                self.active = false;
+                self.next = None;
+            }
+        }
+    }
+
+    /// When the next frame may start (`None`: now). Keeps a fixed schedule
+    /// so the frames line up with the display, and starts over after a
+    /// stall instead of rushing to catch up.
+    pub(crate) fn schedule(
+        &mut self,
+        now: std::time::Instant,
+        refresh_hz: f32,
+    ) -> Option<std::time::Instant> {
+        if !self.active || refresh_hz <= 0.0 {
+            return None;
+        }
+        let interval = std::time::Duration::from_secs_f64(1.0 / refresh_hz as f64);
+        let due = match self.next {
+            Some(due) if now <= due + interval => due,
+            _ => now,
+        };
+        self.next = Some(due + interval);
+        (due > now).then_some(due)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active(&self) -> bool {
+        self.active
+    }
+}
+
+/// Wait until `until`: sleep most of the way, then spin the last stretch
+/// (sleep alone can overshoot by a millisecond or more).
+pub(crate) fn wait_until(until: std::time::Instant) {
+    let spin = std::time::Duration::from_micros(1500);
+    loop {
+        let now = std::time::Instant::now();
+        if now >= until {
+            return;
+        }
+        let left = until - now;
+        if left > spin {
+            std::thread::sleep(left - spin);
+        } else {
+            std::hint::spin_loop();
+        }
+    }
+}
+
+#[cfg(test)]
+mod pacer_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn paces_only_when_frames_outrun_the_display() {
+        let mut p = FramePacer::new();
+        p.observe(true, 62.0, Some(60.0));
+        assert!(!p.active());
+        p.observe(true, 200.0, Some(60.0));
+        assert!(p.active());
+        p.observe(false, 200.0, Some(60.0));
+        assert!(!p.active());
+    }
+
+    #[test]
+    fn keeps_a_fixed_schedule_and_resyncs_after_a_stall() {
+        let mut p = FramePacer::new();
+        p.observe(true, 200.0, Some(50.0));
+        let t0 = Instant::now();
+        assert_eq!(p.schedule(t0, 50.0), None);
+        // A fast frame waits for the next slot, 20 ms after the first.
+        let due = p.schedule(t0 + Duration::from_millis(5), 50.0).unwrap();
+        assert_eq!(due - t0, Duration::from_millis(20));
+        // Long stall: start over from now.
+        let late = t0 + Duration::from_millis(500);
+        assert_eq!(p.schedule(late, 50.0), None);
+        let due = p.schedule(late + Duration::from_millis(1), 50.0).unwrap();
+        assert_eq!(due - late, Duration::from_millis(20));
+    }
+}
