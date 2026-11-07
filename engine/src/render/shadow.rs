@@ -633,7 +633,7 @@ fn lamp_storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 15] {
+fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 19] {
     [
         wgpu::BindGroupLayoutEntry {
             binding: base,
@@ -715,6 +715,44 @@ fn resource_layout_entries(base: u32) -> [wgpu::BindGroupLayoutEntry; 15] {
             count: None,
         },
         element_state_entry(base + 14),
+        // Reflections (see `reflect.rs`): last frame's image with depth,
+        // its sampler, the probe cube maps and their uniforms.
+        wgpu::BindGroupLayoutEntry {
+            binding: base + 15,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: base + 16,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: base + 17,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::CubeArray,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: base + 18,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        },
     ]
 }
 
@@ -836,6 +874,38 @@ struct ResourceViews<'a> {
     ao_sampler: &'a wgpu::Sampler,
     lamps: &'a super::lights::LampResources,
     elements: &'a wgpu::Buffer,
+    reflect: &'a ReflectResources,
+}
+
+/// What the lit shaders read for reflections; see `reflect.rs`.
+pub struct ReflectResources {
+    pub ssr_view: wgpu::TextureView,
+    pub sampler: wgpu::Sampler,
+    pub probe_view: wgpu::TextureView,
+    pub uniform: wgpu::Buffer,
+}
+
+impl ReflectResources {
+    fn entries(&self, base: u32) -> [wgpu::BindGroupEntry<'_>; 4] {
+        [
+            wgpu::BindGroupEntry {
+                binding: base,
+                resource: wgpu::BindingResource::TextureView(&self.ssr_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: base + 1,
+                resource: wgpu::BindingResource::Sampler(&self.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: base + 2,
+                resource: wgpu::BindingResource::TextureView(&self.probe_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: base + 3,
+                resource: self.uniform.as_entire_binding(),
+            },
+        ]
+    }
 }
 
 fn create_resource_bind(
@@ -907,7 +977,10 @@ fn create_resource_bind(
                 binding: 14,
                 resource: v.elements.as_entire_binding(),
             },
-        ],
+        ]
+        .into_iter()
+        .chain(v.reflect.entries(15))
+        .collect::<Vec<_>>(),
     })
 }
 
@@ -940,6 +1013,7 @@ pub struct ShadowGpu {
     ao_view: wgpu::TextureView,
     ao_sampler: wgpu::Sampler,
     gi_views: [wgpu::TextureView; 3],
+    pub reflect: ReflectResources,
     pub lamps: super::lights::LampResources,
     /// Probe box for this frame, from the renderer; None switches GI off.
     gi: Option<super::gi::GiPlacement>,
@@ -1121,10 +1195,12 @@ impl ShadowGpu {
             label: Some("shadow-resource-layout"),
             entries: &resource_layout_entries(0),
         });
+        let reflect = ReflectResources::placeholder(device, queue);
         let resource_bind = create_resource_bind(
             device,
             &resource_layout,
             ResourceViews {
+                reflect: &reflect,
                 uniform: &uniform_buf,
                 map: &map_array_view,
                 comparison: &comparison_sampler,
@@ -1308,6 +1384,7 @@ impl ShadowGpu {
             ao_view,
             ao_sampler,
             gi_views,
+            reflect,
             lamps,
             gi: None,
             map_size,
@@ -1383,6 +1460,7 @@ impl ShadowGpu {
                 gi: &self.gi_views,
                 lamps: &self.lamps,
                 elements: &self.element_states,
+                reflect: &self.reflect,
             },
         );
     }
@@ -1390,8 +1468,8 @@ impl ShadowGpu {
     pub fn scene_bind_entries<'a>(
         &'a self,
         scene_uniforms: wgpu::BindingResource<'a>,
-    ) -> [wgpu::BindGroupEntry<'a>; 16] {
-        [
+    ) -> Vec<wgpu::BindGroupEntry<'a>> {
+        let mut out = vec![
             wgpu::BindGroupEntry {
                 binding: 0,
                 resource: scene_uniforms,
@@ -1456,7 +1534,22 @@ impl ShadowGpu {
                 binding: 15,
                 resource: self.element_states.as_entire_binding(),
             },
-        ]
+        ];
+        out.extend(self.reflect.entries(16));
+        out
+    }
+
+    /// Point the lit shaders at the reflection images. Bind groups made
+    /// from [`Self::scene_bind_entries`] must be rebuilt afterwards.
+    pub fn set_reflection_views(
+        &mut self,
+        device: &wgpu::Device,
+        ssr_view: wgpu::TextureView,
+        probe_view: wgpu::TextureView,
+    ) {
+        self.reflect.ssr_view = ssr_view;
+        self.reflect.probe_view = probe_view;
+        self.rebuild_resource_bind(device);
     }
 
     /// Build the alpha-tested caster pipeline over the mesh material layout.

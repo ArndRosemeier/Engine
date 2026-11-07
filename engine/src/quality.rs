@@ -69,6 +69,7 @@ impl Quality {
                 Quality::Medium => 0.7,
                 Quality::High | Quality::Ultra => 1.0,
             },
+            screen_space_reflections: (self >= Quality::Medium).then(Default::default),
         }
     }
 }
@@ -82,6 +83,8 @@ pub struct QualitySettings {
     pub lod_bias: f32,
     /// Grass distance factor (0: no grass). The LOD bias scales it further.
     pub grass: f32,
+    /// Screen-space reflections (off on `Low`).
+    pub screen_space_reflections: Option<crate::reflections::ScreenSpaceReflections>,
 }
 
 /// Lowest LOD bias the tuner goes to before it drops features.

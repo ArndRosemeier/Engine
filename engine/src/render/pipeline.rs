@@ -154,6 +154,9 @@ fn shade_surface_occluded(
     light.gi = gi_irradiance(world_p, n);
     light.gi.a *= u.gi_strength;
     let v = normalize(u.eye - world_p);
+    let clip = u.view_proj * vec4<f32>(world_p, 1.0);
+    let frag = clip.xy / max(clip.w, 1e-4) * vec2<f32>(960.0, 540.0);
+    light.reflection = scene_reflection(world_p, n, v, roughness, base, metallic, frag);
     return pbr_shade(base, n, v, light, roughness, metallic, vis, sun_diffuse)
         + lamp_light(base, n, v, world_p, roughness, metallic);
 }
@@ -226,6 +229,9 @@ struct SceneLight {
     // Probe light (rgb, same units as sky_irradiance * ambient) and how much
     // of it to use (a); see gi_irradiance.
     gi: vec4<f32>,
+    // Reflected light from screen-space reflections and reflection probes
+    // (rgb) and how much it replaces the sky's (a); see scene_reflection.
+    reflection: vec4<f32>,
 };
 
 // Cosine-weighted sky light arriving at a surface facing `n`.
@@ -302,7 +308,11 @@ fn pbr_shade(
         let seen = clamp(dot(sky_e, lum) / max(dot(open_sky, lum), 1e-4), 0.0, 1.0);
         reflect_scale = light.ambient * seen;
     }
-    let env_spec = fr * sky_radiance(r, roughness, light) * light.env_strength * reflect_scale;
+    var env_rad = sky_radiance(r, roughness, light) * reflect_scale;
+    if light.reflection.a > 0.0 {
+        env_rad = mix(env_rad, light.reflection.rgb, light.reflection.a);
+    }
+    let env_spec = fr * env_rad * light.env_strength;
     let env_diffuse = diffuse_color * sky_e * (vec3<f32>(1.0) - fr);
     return direct + (env_diffuse + env_spec) * light.ao;
 }
@@ -337,7 +347,7 @@ fn veg_wind(p: vec3<f32>, n: vec3<f32>, w: f32, flutter: f32, seed: f32,
 
 pub fn scene_shader_prefix() -> String {
     format!(
-        "{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}",
         super::shadow::element_dead_wgsl(0, 15),
         VEG_WIND_WGSL,
         crate::lod::LOD_DITHER_WGSL,
@@ -346,7 +356,8 @@ pub fn scene_shader_prefix() -> String {
         super::shadow::SHADOW_UNIFORMS_WGSL,
         super::shadow::SCENE_SHADOW_WGSL,
         super::shadow::SHADOW_EVAL_WGSL,
-        super::lights::LAMP_EVAL_WGSL
+        super::lights::LAMP_EVAL_WGSL,
+        super::reflect::reflect_wgsl(),
     )
 }
 

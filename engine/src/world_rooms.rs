@@ -116,8 +116,19 @@ impl World {
     }
 
     /// Is this entity in a room the camera cannot see?
+    /// Draw every room regardless of what the camera sees (for views other
+    /// than the camera's).
+    pub(crate) fn set_room_bypass(&self, on: bool) {
+        self.rooms
+            .bypass
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) fn room_hidden(&self, id: EntityId) -> bool {
-        if !self.rooms.enabled || !self.rooms.computed {
+        if !self.rooms.enabled
+            || !self.rooms.computed
+            || self.rooms.bypass.load(std::sync::atomic::Ordering::Relaxed)
+        {
             return false;
         }
         self.entity_rooms

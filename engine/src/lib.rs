@@ -69,6 +69,7 @@ pub mod proc_terrain;
 pub mod props;
 pub mod quality;
 pub mod ragdoll;
+pub mod reflections;
 pub mod ribbons;
 pub mod rocks;
 pub mod rooms;

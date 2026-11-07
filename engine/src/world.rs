@@ -750,6 +750,8 @@ pub struct World {
     ragdolls: world_ragdolls::Ragdolls,
     /// Indoor culling: rooms, openings, and what is in which room.
     rooms: crate::rooms::Rooms,
+    reflection_probes: crate::reflections::ReflectionProbes,
+    ssr: Option<crate::reflections::ScreenSpaceReflections>,
     entity_rooms: HashMap<EntityId, crate::rooms::RoomId>,
     /// Surface presentation sync. Engine default stays on so demos never tear;
     /// the renderer applies it at every present.
@@ -862,6 +864,8 @@ impl Default for World {
             rubble: Default::default(),
             ragdolls: Default::default(),
             rooms: crate::rooms::Rooms::new(),
+            reflection_probes: Default::default(),
+            ssr: Some(Default::default()),
             entity_rooms: HashMap::new(),
             vsync: true,
             shadow_contact: ContactSnapshot::default(),
@@ -1080,6 +1084,7 @@ impl World {
         self.global_illumination = s.global_illumination;
         self.lod_bias = s.lod_bias;
         self.grass = s.grass;
+        self.ssr = s.screen_space_reflections;
         if let Some(t) = &mut self.auto_tune {
             t.max_bias = s.lod_bias;
         }
@@ -3131,6 +3136,73 @@ impl World {
 
     pub fn set_ambient_occlusion(&mut self, ao: Option<AmbientOcclusion>) {
         self.ambient_occlusion = ao;
+    }
+
+    /// Screen-space reflections (on by default; see [`crate::reflections`]).
+    pub fn screen_space_reflections(&self) -> Option<crate::reflections::ScreenSpaceReflections> {
+        self.ssr
+    }
+
+    pub fn set_screen_space_reflections(
+        &mut self,
+        ssr: Option<crate::reflections::ScreenSpaceReflections>,
+    ) -> EngineResult<()> {
+        if let Some(s) = &ssr {
+            s.validate()?;
+        }
+        self.ssr = ssr;
+        Ok(())
+    }
+
+    /// Add a reflection probe (at most
+    /// [`crate::reflections::MAX_REFLECTION_PROBES`]); it is captured over
+    /// the next frame.
+    pub fn add_reflection_probe(
+        &mut self,
+        probe: crate::reflections::ReflectionProbe,
+    ) -> EngineResult<crate::reflections::ReflectionProbeId> {
+        self.reflection_probes.add(probe)
+    }
+
+    /// Move or reshape a probe (it is captured again).
+    pub fn set_reflection_probe(
+        &mut self,
+        id: crate::reflections::ReflectionProbeId,
+        probe: crate::reflections::ReflectionProbe,
+    ) -> EngineResult<()> {
+        self.reflection_probes.set(id, probe)
+    }
+
+    /// Capture a probe again, after what it sees changed.
+    pub fn refresh_reflection_probe(&mut self, id: crate::reflections::ReflectionProbeId) {
+        self.reflection_probes.refresh(id);
+    }
+
+    /// Capture every probe again (say after the time of day jumped).
+    pub fn refresh_reflection_probes(&mut self) {
+        self.reflection_probes.refresh_all();
+    }
+
+    pub fn remove_reflection_probe(
+        &mut self,
+        id: crate::reflections::ReflectionProbeId,
+    ) -> Option<crate::reflections::ReflectionProbe> {
+        self.reflection_probes.remove(id)
+    }
+
+    pub fn reflection_probe(
+        &self,
+        id: crate::reflections::ReflectionProbeId,
+    ) -> Option<&crate::reflections::ReflectionProbe> {
+        self.reflection_probes.get(id)
+    }
+
+    /// Live probes as (slot, probe, version); the version changes whenever
+    /// the probe should be captured again.
+    pub(crate) fn reflection_probe_slots(
+        &self,
+    ) -> impl Iterator<Item = (usize, &crate::reflections::ReflectionProbe, u64)> {
+        self.reflection_probes.iter()
     }
 
     pub fn global_illumination(&self) -> Option<GlobalIllumination> {
