@@ -501,9 +501,35 @@ Every program built on the engine understands these:
 | `ENGINE_GPU_PROFILE_EVERY=N` | Print GPU timings every N frames: shadow, AO, scene, water, TAA, post; plus a split of the scene pass (sky, land, grass, voxel, meshes, ...) where the GPU supports it |
 | `ENGINE_HITCH_MS` | Log frames slower than this (default 33) |
 | `ENGINE_CPU_TRACE=1` | Print every 2 s where the CPU time of a frame went: game update, each world tick, renderer sync and drawing (average and worst ms) |
+| `ENGINE_WHATS_NEW=1` | Keep the "What's new" button in screenshot runs (`open` also opens the list) |
 | `ENGINE_ZFIGHT=1` | Find z-fighting around the camera (250 m; a number sets the radius, `all` scans everything), mark it with magenta posts and print where it is |
 
 The examples add their own (listed at the top of each `main.rs`).
+
+## Versioning
+
+The engine version starts at 0.001 and goes up by 0.001 with **every merge
+into `main`**. The only place it lives is [`CHANGELOG.md`](CHANGELOG.md):
+the newest `## <version> (<date>)` entry is the current version. The engine
+reads that file at build time, so `engine::version()`, every window title
+("starter - Engine 0.004 - 144 FPS") and the "What's new" button in the
+bottom right corner always match it. A game hides the button with
+`world.set_whats_new_button(false)` or places it itself with
+`engine::whats_new_ui(ctx)`.
+
+Before merging a pull request:
+
+```bash
+git fetch origin && git rebase origin/main
+python tools/bump_version.py "What this merge brings, in plain words"
+```
+
+One entry per pull request, in words a game developer understands. If
+another merge took your number while you were rebasing (a conflict at the
+top of `CHANGELOG.md`), keep both entries and run
+`python tools/bump_version.py --renumber` to move yours on top again. The
+`version` check on every pull request and `cargo test -p engine` fail when
+the version was not raised by exactly 0.001.
 
 ## Testing
 

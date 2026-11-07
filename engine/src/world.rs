@@ -780,6 +780,7 @@ pub struct World {
     /// Surface presentation sync. Engine default stays on so demos never tear;
     /// the renderer applies it at every present.
     vsync: bool,
+    whats_new_button: bool,
     /// Resident contact grids, pushed by the chunk streamer when they change.
     shadow_contact: ContactSnapshot,
     shadow_contact_epoch: u64,
@@ -902,6 +903,7 @@ impl Default for World {
             zfight: Default::default(),
             entity_names: HashMap::new(),
             vsync: true,
+            whats_new_button: true,
             shadow_contact: ContactSnapshot::default(),
             shadow_contact_epoch: 0,
             hitch_spans: Vec::new(),
@@ -3845,6 +3847,17 @@ impl World {
 
     pub fn vsync(&self) -> bool {
         self.vsync
+    }
+
+    /// Show the engine's "Engine 0.001 · What's new" button in the bottom
+    /// right corner (default on; hidden in screenshot runs). Turn it off for
+    /// a shipped game, or call [`crate::whats_new_ui`] where you want it.
+    pub fn set_whats_new_button(&mut self, show: bool) {
+        self.whats_new_button = show;
+    }
+
+    pub fn whats_new_button(&self) -> bool {
+        self.whats_new_button
     }
     pub(crate) fn note_shadow_contact(&mut self, snap: ContactSnapshot, epoch: u64) {
         if self.shadow_contact_epoch != epoch {
