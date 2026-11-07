@@ -95,7 +95,8 @@ fn windmill() -> EngineResult<Prefab> {
         rgb(110, 60, 44),
     )?;
     tower.add_box(
-        Vec3::new(0.0, 1.0, 1.62),
+        // The door sits just outside the wall, not half inside it.
+        Vec3::new(0.0, 1.0, 1.63),
         Vec3::new(1.0, 2.0, 0.05),
         rgb(80, 56, 40),
     )?;

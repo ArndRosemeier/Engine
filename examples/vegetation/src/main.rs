@@ -69,15 +69,29 @@ fn main() -> EngineResult<()> {
                     )?;
                 }
             }
+            // Strewn rocks keep apart, so no two grow into each other (their
+            // flattened feet would fight under the ground).
+            let mut taken: Vec<(f32, f32, f32)> = Vec::new();
             for k in 0..8u32 {
-                let rocks = (0..60)
-                    .map(|i| {
-                        let h = |j: u32| (i * 7919 + k * 104_729 + j * 15_485_863) % 1000;
-                        Place::at(h(1) as f32 - 500.0, 0.0, 25.0 + h(2) as f32 * 0.55)?
+                let mut rocks = Vec::new();
+                for i in 0..60 {
+                    let h = |j: u32| (i * 7919 + k * 104_729 + j * 15_485_863) % 1000;
+                    let (x, z) = (h(1) as f32 - 500.0, 25.0 + h(2) as f32 * 0.55);
+                    let scale = 0.5 + h(4) as f32 / 1000.0 * 1.6;
+                    let r = scale * 1.3 * 1.2;
+                    if taken
+                        .iter()
+                        .any(|&(tx, tz, tr)| (tx - x).hypot(tz - z) < tr + r)
+                    {
+                        continue;
+                    }
+                    taken.push((x, z, r));
+                    rocks.push(
+                        Place::at(x, 0.0, z)?
                             .yaw_deg(h(3) as f32 * 0.36)?
-                            .scale(0.5 + h(4) as f32 / 1000.0 * 1.6)
-                    })
-                    .collect::<EngineResult<Vec<Place>>>()?;
+                            .scale(scale)?,
+                    );
+                }
                 let rock = rock_model(RockShape::ALL[k as usize % 4], 10 + k)?;
                 let id = world.spawn_lod(rock.lod_levels_scaled(1.3))?;
                 world.set_lod_places(id, &rocks)?;

@@ -114,10 +114,19 @@ fn main() -> EngineResult<()> {
                 (60.0, 0.1, 60.0),
                 rgb(96, 110, 90),
             )?);
-            things = Some(Things {
+            let made = Things {
                 smooth: spawn(world, 1.0)?,
                 raw: spawn(world, 0.55)?,
-            });
+            };
+            // Start everything where the first step will put it, not
+            // stacked at the origin.
+            for (k, id) in made.smooth.iter().enumerate() {
+                world.set_place(*id, pose(&sim, k, Vec3::ZERO))?;
+            }
+            for (k, id) in made.raw.iter().enumerate() {
+                world.set_place(*id, pose(&sim, k, BACK))?;
+            }
+            things = Some(made);
         }
         camera.update(world, frame);
         let t = things.as_ref().expect("spawned");

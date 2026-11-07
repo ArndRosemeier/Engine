@@ -105,8 +105,9 @@ fn build_village(world: &mut World) -> EngineResult<()> {
     // A fountain in the middle of the square.
     let mut fountain = Mesh::cylinder(Vec3::new(0.0, 0.3, 1.0), Vec3::Y, 1.6, 0.6, 32, stone)?;
     fountain.append_translated(
-        &Mesh::cylinder(Vec3::ZERO, Vec3::Y, 0.25, 1.6, 12, rgb(170, 165, 155))?,
-        Vec3::new(0.0, 0.8, 1.0),
+        // The column stands on the basin, not beside it on the ground.
+        &Mesh::cylinder(Vec3::ZERO, Vec3::Y, 0.25, 1.0, 12, rgb(170, 165, 155))?,
+        Vec3::new(0.0, 1.1, 1.0),
     )?;
     solid(world, fountain)?;
     // Crates.
@@ -166,8 +167,10 @@ fn main() -> EngineResult<()> {
                 rgb(98, 120, 72),
             )?;
             ground.add_box(
-                Vec3::new(0.0, 0.005, 1.0),
-                Vec3::new(20.0, 0.01, 18.0),
+                // Sunk half into the ground so its underside never meets
+                // the undersides of things standing on it.
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(20.0, 0.02, 17.8),
                 rgb(168, 150, 120),
             )?;
             world.spawn(ground);

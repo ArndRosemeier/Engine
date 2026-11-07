@@ -24,6 +24,9 @@ pub struct WorldScan {
     pub max_triangles: usize,
     /// Instanced meshes and LOD sets (forests, scattered props) too.
     pub instanced: bool,
+    /// Leave out clashes buried under the terrain height field (the bottoms
+    /// of rocks and trees sunk into the ground), which nobody can see.
+    pub skip_under_terrain: bool,
 }
 
 impl Default for WorldScan {
@@ -34,6 +37,7 @@ impl Default for WorldScan {
             centre: None,
             max_triangles: 4_000_000,
             instanced: true,
+            skip_under_terrain: true,
         }
     }
 }
@@ -47,6 +51,13 @@ impl WorldScan {
         }
     }
 }
+
+/// Most posts [`World::show_z_fighting`] puts up (the worst spots first).
+pub const MAX_Z_FIGHTING_MARKS: usize = 500;
+
+/// How long the watcher waits before its first scan, so an app can put
+/// things where they belong first (s).
+const FIRST_SCAN_DELAY: f32 = 0.5;
 
 /// Z-fighting markers and the `ENGINE_ZFIGHT` watcher.
 #[derive(Debug, Default)]
@@ -229,9 +240,26 @@ impl World {
                     zfight::triangles_tinted(j.mesh, j.transform, j.tint, j.look, j.source)
                 })
                 .collect();
+            let mut clashes = zfight::find(&tris, &scan.options);
+            if scan.skip_under_terrain && space == SpaceId::DEFAULT.raw() {
+                if let Some(field) = &self.height_field {
+                    let before = clashes.len();
+                    // Under the surface by more than a centimetre: hidden.
+                    clashes.retain(|c| {
+                        let p = c.at.as_vec3();
+                        p.y > field.height_at(p.x, p.z) - 0.01
+                    });
+                    let buried = before - clashes.len();
+                    if buried > 0 {
+                        notes.push(format!(
+                            "{buried} clashes under the terrain left out (nobody sees them)"
+                        ));
+                    }
+                }
+            }
             report.merge(ZFightReport {
                 triangles: tris.len(),
-                clashes: zfight::find(&tris, &scan.options),
+                clashes,
                 sources,
                 notes: Vec::new(),
                 elapsed: Default::default(),
@@ -243,8 +271,9 @@ impl World {
     }
 
     /// Marks every flickering spot of `report` with a glowing magenta post
-    /// (replacing earlier marks) and returns how many there are. The posts
-    /// are left out of later scans.
+    /// (replacing earlier marks) and returns how many spots there are. Only
+    /// the worst [`MAX_Z_FIGHTING_MARKS`] get a post, so a badly broken
+    /// scene stays drawable. The posts are left out of later scans.
     pub fn show_z_fighting(&mut self, report: &ZFightReport) -> usize {
         self.clear_z_fighting_marks();
         let spots = report.spots(2.0);
@@ -253,7 +282,7 @@ impl World {
         }
         let mut mesh = Mesh::new();
         let magenta = rgb(255, 0, 255);
-        for s in &spots {
+        for s in spots.iter().take(MAX_Z_FIGHTING_MARKS) {
             let p = s.at.as_vec3();
             let n = s.normal.as_vec3();
             // A post standing up from the spot, and a knob sitting on the
@@ -303,7 +332,7 @@ impl World {
             },
             seen_epoch: None,
             seen_eye: Vec3::ZERO,
-            cooldown: 0.0,
+            cooldown: FIRST_SCAN_DELAY,
             last: None,
         });
         if self.zfight.watch.is_none() {
@@ -509,5 +538,85 @@ mod tests {
         world.tick_zfight_watch(2.0);
         assert!(world.zfight.marks.is_none());
         world.watch_z_fighting(None);
+    }
+
+    #[test]
+    fn a_badly_broken_scene_gets_a_limited_number_of_posts() {
+        let mut world = World::new();
+        world.spawn(
+            Shape::box_at((0.0, -0.05, 0.0), (400.0, 0.1, 400.0), rgb(90, 120, 70)).unwrap(),
+        );
+        for i in 0..30 {
+            for j in 0..30 {
+                world
+                    .place(
+                        rug(0.0),
+                        Place::new(i as f32 * 6.0 - 90.0, 0.0, j as f32 * 6.0 - 90.0),
+                    )
+                    .unwrap();
+            }
+        }
+        let report = world.find_z_fighting();
+        let spots = world.show_z_fighting(&report);
+        assert!(spots > MAX_Z_FIGHTING_MARKS, "{spots}");
+        let marks = world.zfight.marks.expect("posts");
+        let all = world.entities[&marks].mesh.positions.len();
+        // One spot's post, for scale.
+        let mut one = report.clone();
+        one.clashes.truncate(1);
+        world.show_z_fighting(&one);
+        let marks = world.zfight.marks.expect("post");
+        let per_spot = world.entities[&marks].mesh.positions.len();
+        assert_eq!(all, per_spot * MAX_Z_FIGHTING_MARKS);
+    }
+
+    #[test]
+    fn clashes_buried_under_the_terrain_are_left_out() {
+        let rules = crate::proc_terrain::demo_terrain_rules();
+        let mut world = World::new();
+        world.set_proc_terrain(crate::proc_terrain::ProcTerrain::gpu_clipmap(
+            rules,
+            Default::default(),
+        ));
+        let h = world.proc_height_at(5.0, 5.0);
+        // Two rocks sunk into the ground with only their bottoms in one
+        // plane, and two rugs of different colours on top of each other well
+        // above it.
+        world
+            .place(
+                Shape::box_at((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), rgb(120, 120, 120)).unwrap(),
+                Place::new(5.0, h - 0.4, 5.0),
+            )
+            .unwrap();
+        world
+            .place(
+                Shape::box_at((0.0, 0.1, 0.0), (1.0, 1.2, 1.0), rgb(140, 130, 120)).unwrap(),
+                Place::new(5.4, h - 0.4, 5.3),
+            )
+            .unwrap();
+        world
+            .place(rug(0.0), Place::new(5.0, h + 3.0, 5.0))
+            .unwrap();
+        world
+            .place(
+                Shape::box_at((0.5, 0.0, 0.0), (2.0, 0.0001, 1.0), rgb(30, 30, 160)).unwrap(),
+                Place::new(5.0, h + 3.0, 5.0),
+            )
+            .unwrap();
+        let report = world.find_z_fighting();
+        assert!(
+            report.fighting().all(|c| c.at.y > h as f64 + 2.0),
+            "{report}"
+        );
+        assert!(!report.is_clean(), "{report}");
+        assert!(
+            report.notes.iter().any(|n| n.contains("under the terrain")),
+            "{report}"
+        );
+        let all = world.find_z_fighting_with(&WorldScan {
+            skip_under_terrain: false,
+            ..WorldScan::default()
+        });
+        assert!(all.fighting().count() > report.fighting().count(), "{all}");
     }
 }
