@@ -136,6 +136,37 @@ impl Volume {
         self.chunks.contains_key(&key)
     }
 
+    /// A chunk's raw samples and materials (for saving).
+    pub(crate) fn chunk_raw(&self, key: IVec3) -> Option<(&[f32], Option<&[u8]>)> {
+        self.chunks
+            .get(&key)
+            .map(|c| (&c.samples[..], c.materials.as_deref()))
+    }
+
+    /// Replace a chunk with saved samples. Returns false if the sizes are wrong.
+    pub(crate) fn put_chunk_raw(
+        &mut self,
+        key: IVec3,
+        samples: Vec<f32>,
+        materials: Option<Vec<u8>>,
+    ) -> bool {
+        let n = ((CHUNK_SIZE + 1) as usize).pow(3);
+        if samples.len() != n || materials.as_ref().is_some_and(|m| m.len() != n) {
+            return false;
+        }
+        self.rev += 1;
+        self.chunks.insert(
+            key,
+            Chunk {
+                samples,
+                materials,
+                dirty: true,
+                rev: self.rev,
+            },
+        );
+        true
+    }
+
     pub fn remove_chunk_data(&mut self, key: IVec3) {
         if self.chunks.remove(&key).is_some() {
             self.rev += 1;
@@ -469,20 +500,14 @@ impl Volume {
 
     /// Ensure chunks covering the AABB exist (filled empty by default).
     pub fn ensure_bounds(&mut self, min: Vec3, max: Vec3) {
-        let step = self.voxel_size * CHUNK_SIZE as f32;
-        let mut y = min.y;
-        while y <= max.y {
-            let mut z = min.z;
-            while z <= max.z {
-                let mut x = min.x;
-                while x <= max.x {
-                    let (key, _) = self.world_to_grid(Vec3::new(x, y, z));
-                    self.ensure_chunk(key);
-                    x += step;
+        let (lo, _) = self.world_to_grid(min.min(max));
+        let (hi, _) = self.world_to_grid(min.max(max));
+        for y in lo.y..=hi.y {
+            for z in lo.z..=hi.z {
+                for x in lo.x..=hi.x {
+                    self.ensure_chunk(IVec3::new(x, y, z));
                 }
-                z += step;
             }
-            y += step;
         }
     }
 

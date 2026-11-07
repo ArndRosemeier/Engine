@@ -21,7 +21,10 @@ use glam::Vec3;
 pub const MAX_SHADOW_LAMPS: usize = 8;
 
 /// Handle to a lamp from [`crate::world::World::add_lamp`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub struct LampId(pub(crate) u32);
 
 /// Which way a lamp shines.

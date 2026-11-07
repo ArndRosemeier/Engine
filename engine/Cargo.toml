@@ -23,5 +23,8 @@ rapier3d = { workspace = true }
 rodio = { workspace = true }
 tiny-skia = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+flate2 = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }

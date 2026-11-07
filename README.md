@@ -179,6 +179,19 @@ place)` place it by name. A hull body wraps the parts hanging on it, so a
 dropped cart tumbles on its wheels. `Place` now has a roll too
 (`with_roll_deg`). See `examples/prefabs`.
 
+**Save and load:** `world.save("slot1.save", &my_game)?` writes what changed
+during play: every placed prefab (parts, bodies with their speed and spin,
+animation clip and time), free-standing lamps and lamps riding on prefab
+things, dug and built voxel terrain, the time of day, plus your own game data
+(anything serde can write; `EntityId` included). To load, build the world as
+at startup (terrain, scenery, `register_prefab` for every prefab), then
+`let loaded = world.load("slot1.save")?; let game: MyGame = loaded.game()?;`
+and map saved ids with `loaded.entity(old)`. `save_to_bytes` /
+`load_from_bytes` work in memory. Derive with
+`#[derive(engine::serde::Serialize, engine::serde::Deserialize)]` and
+`#[serde(crate = "engine::serde")]`, or add serde to your crate. See K and L in
+`examples/voxel_destruction`.
+
 **Particles:** `world.particles_mut().start(ParticleEmitter::new(pos).with_..())`
 runs by itself; call `particles_mut().advance(dt)` only for slow motion or
 fixed steps.
@@ -215,6 +228,7 @@ Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_glo
 | `physics` | `Body`, `BodyShape`, `PhysicsSettings`: rigid bodies on top of Rapier |
 | `lamps` | `Lamp`: point and spot lights with shadows and flicker |
 | `hierarchy` / `prefab` | Parent/child entities, bones, pivots; `Prefab` blueprints spawned whole |
+| `save` | `World::save` / `load`: prefab things, bodies, lamps, dug terrain, your game data |
 | `proc` | `Noise`, carving helpers |
 | `props` | AssetGenerator `.fmpk` prop packs |
 
@@ -233,7 +247,7 @@ cargo run --release -p <name>
 | `lod_forest` | 12 000 trees with per-instance LOD |
 | `sky_day` | A day passing under the physical sky |
 | `texgen` | The texture layers (`ENGINE_TEXGEN_FAMILY=natural/ground/facade/roof/medieval`) |
-| `voxel_destruction` | Digging terrain and shattering towers |
+| `voxel_destruction` | Digging terrain and shattering towers; K saves, L loads |
 | `lamps` | A hamlet at night: street lamps, a camp fire, lit windows, a lantern walker and a sweeping searchlight, all casting shadows (L your own lantern, T shadows, N/M the hour) |
 | `prefabs` | Carts built from parts driving with spinning wheels, a windmill turning its sails, a lantern carried in a hand; C drops carts that tumble whole, X removes them |
 | `physics` | Crates, a brick wall, dominoes, rolling boulders and a sweeper; throw balls (click), blow things up (F), shatter (X) |

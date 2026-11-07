@@ -133,6 +133,9 @@ pub use proc_terrain::{
 };
 pub use props::{PropModel, PropPack};
 pub use ribbons::{RibbonId, RibbonProfile, RibbonStyle, RibbonWorld};
+/// For your save data: `#[derive(engine::serde::Serialize, engine::serde::Deserialize)]`
+/// with `#[serde(crate = "engine::serde")]`, or add serde to your own crate.
+pub use serde;
 pub use space::{
     ChunkCoord, ChunkId, ChunkLayer, ChunkLevel, ChunkSpan, GlobalPosition, GlobalXZ, RenderOrigin,
     RenderPosition,
