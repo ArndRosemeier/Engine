@@ -3,26 +3,36 @@
 //! edges, sources), run as compute passes, many sub-steps per frame without
 //! waiting for the CPU.
 //!
-//! Per frame: apply queued CPU edits, then for each sub-step pick dt from
-//! the CFL limit of the previous one (on the GPU), compute heads, link
-//! discharge, sea exchange, the outflow limit and the new depths; then foam
-//! and wetness. The state is copied to a read-back buffer that reaches the
-//! CPU copy a couple of frames later.
+//! Like the CPU version it only works where water moves: the region is cut
+//! into tiles of 16 × 16 columns, and each frame the GPU itself picks the
+//! tiles that run (awake ones and their neighbours) and dispatches work for
+//! those only. A still lake costs next to nothing.
+//!
+//! Per frame: apply queued CPU edits, pick the running tiles, then for each
+//! sub-step choose dt from the CFL limit of the previous one (on the GPU),
+//! compute heads, link discharge, sea exchange, the outflow limit and the
+//! new depths; then which tiles stay awake, foam and wetness. The depths and
+//! currents of the tiles that ran are packed and copied back, plus a slice
+//! of the whole state each frame, so the CPU copy trails by a couple of
+//! frames and fully refreshes every second.
 
-use super::backend::{GpuEdit, Snapshot};
+use super::active::TILE;
+use super::backend::{GpuEdit, Snapshot, MAX_INBOX};
 use super::sim::{Water, B_SIDE, NONE};
 use bytemuck::{Pod, Zeroable};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const WORKGROUP: u32 = 64;
+/// Rows of a tile handled by one workgroup (a tile is 4 workgroups).
+const ROWS: u32 = 4;
 /// CPU edits applied per frame (more wait for the next frame).
 const MAX_EDITS: usize = 256;
 const MAX_SOURCES: usize = 64;
 /// Read-back buffers in flight.
-const READBACKS: usize = 3;
-/// Foam and wetness are read back every this many frames.
-const MARKS_EVERY: u64 = 8;
+const READBACKS: usize = 4;
+/// The whole state is read back in this many slices, one per frame.
+const REFRESH_FRAMES: usize = 60;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -37,6 +47,13 @@ struct Params {
     sea: [f32; 4],
     /// height, period, direction degrees, 0.
     swell: [[f32; 4]; 4],
+    /// columns x, columns z, adjacency offsets of the column starts and of
+    /// the link groups.
+    grid: [u32; 4],
+    /// tiles x, tiles z, adjacency offset of the cell tiles, 1 = never sleep.
+    tiles: [u32; 4],
+    /// read-back slot: cells, links; tile count, 0.
+    slots: [u32; 4],
 }
 
 #[repr(C)]
@@ -74,13 +91,82 @@ struct GpuBoundary {
     q: f32,
 }
 
-/// Per frame: remaining, dt, max speed (bits), next dt, steps, simulated.
+/// Sim buffer header: remaining, dt, max speed (bits), next dt, steps,
+/// simulated, 0, 0. Then per tile its flags, then the running tiles, then
+/// one read-back slot per running tile.
 const SIM_WORDS: usize = 8;
+/// Indirect dispatch: groups x, y (running tiles), z, 0.
+const ARGS_WORDS: usize = 4;
+const HEADER_BYTES: u64 = ((SIM_WORDS + ARGS_WORDS) * 4) as u64;
+
+/// How the region splits into tiles, and the read-back slot per tile.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TileLayout {
+    nx: usize,
+    nz: usize,
+    tiles_x: usize,
+    tiles_z: usize,
+    /// Most cells and links in one tile.
+    slot_cells: usize,
+    slot_links: usize,
+}
+
+impl TileLayout {
+    fn new(water: &Water) -> Self {
+        let nx = water.region.cells_x as usize;
+        let nz = water.region.cells_z as usize;
+        let tiles_x = nx.div_ceil(TILE);
+        let tiles_z = nz.div_ceil(TILE);
+        let mut layout = Self {
+            nx,
+            nz,
+            tiles_x,
+            tiles_z,
+            slot_cells: 1,
+            slot_links: 1,
+        };
+        for t in 0..layout.tiles() {
+            let (mut cells, mut links) = (0, 0);
+            layout.rows(t, |c0, c1| {
+                cells += (water.col_start[c1] - water.col_start[c0]) as usize;
+                links += (water.link_group[2 * c1] - water.link_group[2 * c0]) as usize;
+            });
+            layout.slot_cells = layout.slot_cells.max(cells);
+            layout.slot_links = layout.slot_links.max(links);
+        }
+        layout
+    }
+
+    fn tiles(&self) -> usize {
+        self.tiles_x * self.tiles_z
+    }
+
+    fn slot(&self) -> usize {
+        self.slot_cells + self.slot_links
+    }
+
+    /// The column range `[c0, c1)` of each row of tile `t`.
+    fn rows(&self, t: usize, mut f: impl FnMut(usize, usize)) {
+        let (x0, z0) = ((t % self.tiles_x) * TILE, (t / self.tiles_x) * TILE);
+        let x1 = (x0 + TILE).min(self.nx);
+        for z in z0..(z0 + TILE).min(self.nz) {
+            f(z * self.nx + x0, z * self.nx + x1);
+        }
+    }
+
+    /// Words of the sim buffer: header, flags, list, slots.
+    fn sim_words(&self) -> usize {
+        SIM_WORDS + 2 * self.tiles() + self.tiles() * self.slot()
+    }
+}
 
 struct Buffers {
     cells: usize,
     links: usize,
     boundary: usize,
+    layout: TileLayout,
+    /// Adjacency offsets: column starts, link groups, cell tiles.
+    offsets: [u32; 3],
     statics: wgpu::Buffer,
     dynamic: wgpu::Buffer,
     adjacency: wgpu::Buffer,
@@ -88,19 +174,27 @@ struct Buffers {
     q: [wgpu::Buffer; 2],
     boundary_buf: wgpu::Buffer,
     sim: wgpu::Buffer,
+    args: wgpu::Buffer,
     marks: wgpu::Buffer,
     /// [q_old = A, q_new = B] and the swapped one.
     sim_bind: [wgpu::BindGroup; 2],
+    schedule_bind: wgpu::BindGroup,
     marks_bind: wgpu::BindGroup,
 }
 
 struct Readback {
     buffer: wgpu::Buffer,
-    /// Bytes: depth, then q, then marks (if `with_marks`).
-    depth_bytes: u64,
-    q_bytes: u64,
-    with_marks: bool,
+    /// Running tiles copied (the rest wait for the slow refresh).
+    tiles: usize,
+    /// Refreshed slices: cells `[c0, c1)`, links `[l0, l1)`.
+    cells: (usize, usize),
+    links: (usize, usize),
+    /// Bytes copied.
+    used: u64,
+    /// The frame it was copied in.
+    frame: u64,
     generation: u64,
+    topology: u64,
     state: ReadbackState,
     ready: Arc<AtomicBool>,
 }
@@ -115,8 +209,11 @@ enum ReadbackState {
 
 pub(crate) struct GpuWaterSim {
     sim_layout: wgpu::BindGroupLayout,
+    schedule_layout: wgpu::BindGroupLayout,
     marks_layout: wgpu::BindGroupLayout,
     frame_begin: wgpu::ComputePipeline,
+    args_reset: wgpu::ComputePipeline,
+    schedule: wgpu::ComputePipeline,
     rain: wgpu::ComputePipeline,
     step_begin: wgpu::ComputePipeline,
     heads: wgpu::ComputePipeline,
@@ -126,6 +223,9 @@ pub(crate) struct GpuWaterSim {
     limit: wgpu::ComputePipeline,
     depth: wgpu::ComputePipeline,
     step_end: wgpu::ComputePipeline,
+    settle: wgpu::ComputePipeline,
+    sea_wake: wgpu::ComputePipeline,
+    tiles_end: wgpu::ComputePipeline,
     marks: wgpu::ComputePipeline,
     state_layout: wgpu::BindGroupLayout,
     list_layout: wgpu::BindGroupLayout,
@@ -145,13 +245,17 @@ pub(crate) struct GpuWaterSim {
     frame_no: u64,
     /// Last CFL step size read back, to choose how many sub-steps to encode.
     last_dt: f32,
+    /// Running tiles copied back per frame; follows how many run.
+    budget: usize,
 }
 
 impl GpuWaterSim {
     pub fn new(device: &wgpu::Device) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("water-sim"),
-            source: wgpu::ShaderSource::Wgsl(format!("{COMMON_WGSL}{SIM_WGSL_BODY}").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{COMMON_WGSL}{TILES_WGSL}{SIM_WGSL_BODY}{SIM_TILED_WGSL}").into(),
+            ),
         });
         let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
             binding,
@@ -181,6 +285,20 @@ impl GpuWaterSim {
                 entry(9, rw),
             ],
         });
+        // The dispatch arguments cannot be bound while used for a dispatch,
+        // so only the scheduling kernels see them.
+        let schedule_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("water-schedule-layout"),
+            entries: &[
+                entry(0, uniform),
+                entry(1, uniform),
+                entry(4, read),
+                entry(6, rw),
+                entry(7, rw),
+                entry(9, rw),
+                entry(17, rw),
+            ],
+        });
         let marks_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("water-marks-layout"),
             entries: &[
@@ -191,23 +309,9 @@ impl GpuWaterSim {
                 entry(4, read),
                 entry(5, read),
                 entry(6, read),
+                entry(9, rw),
                 entry(10, rw),
             ],
-        });
-        let sim_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("water-sim-pipeline-layout"),
-            bind_group_layouts: &[&sim_layout],
-            push_constant_ranges: &[],
-        });
-        let marks_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("water-marks-pipeline-layout"),
-                bind_group_layouts: &[&marks_layout],
-                push_constant_ranges: &[],
-            });
-        let marks_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("water-marks"),
-            source: wgpu::ShaderSource::Wgsl(format!("{COMMON_WGSL}{MARKS_WGSL_BODY}").into()),
         });
         let make = |layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule, entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -219,6 +323,23 @@ impl GpuWaterSim {
                 cache: None,
             })
         };
+        let pipeline_layout = |layout: &wgpu::BindGroupLayout, label: &str| {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(label),
+                bind_group_layouts: &[layout],
+                push_constant_ranges: &[],
+            })
+        };
+        let sim_pipeline_layout = pipeline_layout(&sim_layout, "water-sim-pipeline-layout");
+        let schedule_pipeline_layout =
+            pipeline_layout(&schedule_layout, "water-schedule-pipeline-layout");
+        let marks_pipeline_layout = pipeline_layout(&marks_layout, "water-marks-pipeline-layout");
+        let marks_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("water-marks"),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{COMMON_WGSL}{TILES_WGSL}{MARKS_WGSL_BODY}").into(),
+            ),
+        });
         let sim = |e: &str| make(&sim_pipeline_layout, &shader, e);
         let state_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("water-render-state-layout"),
@@ -255,12 +376,7 @@ impl GpuWaterSim {
             source: wgpu::ShaderSource::Wgsl(format!("{COMMON_WGSL}{LIST_WGSL_BODY}").into()),
         });
         let with_layout = |layout: &wgpu::BindGroupLayout, module: &wgpu::ShaderModule, e: &str| {
-            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some(e),
-                bind_group_layouts: &[layout],
-                push_constant_ranges: &[],
-            });
-            make(&pl, module, e)
+            make(&pipeline_layout(layout, e), module, e)
         };
         let render_state = with_layout(&state_layout, &draw_shader, "k_render_state");
         let draw_lists = with_layout(&list_layout, &list_shader, "k_draw_lists");
@@ -274,6 +390,8 @@ impl GpuWaterSim {
         };
         Self {
             frame_begin: sim("k_frame_begin"),
+            args_reset: make(&schedule_pipeline_layout, &shader, "k_args_reset"),
+            schedule: make(&schedule_pipeline_layout, &shader, "k_schedule"),
             rain: sim("k_rain"),
             step_begin: sim("k_step_begin"),
             heads: sim("k_heads"),
@@ -283,8 +401,12 @@ impl GpuWaterSim {
             limit: sim("k_limit"),
             depth: sim("k_depth"),
             step_end: sim("k_step_end"),
+            settle: sim("k_settle"),
+            sea_wake: sim("k_sea_wake"),
+            tiles_end: sim("k_tiles_end"),
             marks: make(&marks_pipeline_layout, &marks_shader, "k_marks"),
             sim_layout,
+            schedule_layout,
             marks_layout,
             state_layout,
             list_layout,
@@ -301,6 +423,7 @@ impl GpuWaterSim {
             readbacks: Vec::new(),
             frame_no: 0,
             last_dt: 1.0 / 240.0,
+            budget: 0,
         }
     }
 
@@ -331,6 +454,7 @@ impl GpuWaterSim {
             self.upload_boundary(queue, water);
         }
         let buffers = self.buffers.as_ref().expect("buffers");
+        let layout = buffers.layout;
         if fresh || self.synced_state != water.state_rev {
             let dynamic: Vec<[f32; 4]> = water.depth.iter().map(|&d| [d, 0.0, 1.0, 0.0]).collect();
             queue.write_buffer(&buffers.dynamic, 0, bytemuck::cast_slice(&dynamic));
@@ -338,6 +462,13 @@ impl GpuWaterSim {
                 queue.write_buffer(&buffers.q[0], 0, bytemuck::cast_slice(&water.q));
             }
             queue.write_buffer(&buffers.marks, 0, bytemuck::cast_slice(&water.marks));
+            // Every tile awake (and none running, so nothing gets zeroed).
+            let awake = vec![1u32; layout.tiles()];
+            queue.write_buffer(
+                &buffers.sim,
+                (SIM_WORDS * 4) as u64,
+                bytemuck::cast_slice(&awake),
+            );
             self.synced_state = water.state_rev;
             // Everything queued so far is already in the uploaded state.
             let mut link = water.gpu.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -388,6 +519,24 @@ impl GpuWaterSim {
                 1.0 / 30.0,
             ],
             swell,
+            grid: [
+                layout.nx as u32,
+                layout.nz as u32,
+                buffers.offsets[0],
+                buffers.offsets[1],
+            ],
+            tiles: [
+                layout.tiles_x as u32,
+                layout.tiles_z as u32,
+                buffers.offsets[2],
+                water.activity.never_sleep as u32,
+            ],
+            slots: [
+                layout.slot_cells as u32,
+                layout.slot_links as u32,
+                layout.tiles() as u32,
+                0,
+            ],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         let mut frame = Frame::zeroed();
@@ -429,34 +578,42 @@ impl GpuWaterSim {
         .clamp(if dt > 0.0 { 1 } else { 0 }, max_steps);
 
         let cells_groups = groups(buffers.cells);
-        let link_groups = groups(buffers.links);
+        let tile_groups = groups(layout.tiles());
         let boundary_groups = groups(params.counts[2] as usize);
+        let dispatch =
+            |pass: &mut wgpu::ComputePass<'_>, p: &wgpu::ComputePipeline, n: (u32, u32)| {
+                if n.0 > 0 {
+                    pass.set_pipeline(p);
+                    pass.dispatch_workgroups(n.0, n.1, 1);
+                }
+            };
+        // Four workgroups per running tile; the GPU wrote how many run.
+        let tiled = |pass: &mut wgpu::ComputePass<'_>, p: &wgpu::ComputePipeline| {
+            pass.set_pipeline(p);
+            pass.dispatch_workgroups_indirect(&buffers.args, 0);
+        };
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("water-sim"),
                 timestamp_writes: None,
             });
-            let dispatch =
-                |pass: &mut wgpu::ComputePass<'_>, p: &wgpu::ComputePipeline, n: (u32, u32)| {
-                    if n.0 > 0 {
-                        pass.set_pipeline(p);
-                        pass.dispatch_workgroups(n.0, n.1, 1);
-                    }
-                };
             pass.set_bind_group(0, &buffers.sim_bind[0], &[]);
             dispatch(&mut pass, &self.frame_begin, (1, 1));
             if rain != 0.0 {
                 dispatch(&mut pass, &self.rain, cells_groups);
             }
+            pass.set_bind_group(0, &buffers.schedule_bind, &[]);
+            dispatch(&mut pass, &self.args_reset, (1, 1));
+            dispatch(&mut pass, &self.schedule, tile_groups);
             for k in 0..steps as usize {
                 pass.set_bind_group(0, &buffers.sim_bind[k % 2], &[]);
                 dispatch(&mut pass, &self.step_begin, (1, 1));
-                dispatch(&mut pass, &self.heads, cells_groups);
-                dispatch(&mut pass, &self.links, link_groups);
+                tiled(&mut pass, &self.heads);
+                tiled(&mut pass, &self.links);
                 dispatch(&mut pass, &self.sea, boundary_groups);
-                dispatch(&mut pass, &self.scale, cells_groups);
-                dispatch(&mut pass, &self.limit, link_groups);
-                dispatch(&mut pass, &self.depth, cells_groups);
+                tiled(&mut pass, &self.scale);
+                tiled(&mut pass, &self.limit);
+                tiled(&mut pass, &self.depth);
                 dispatch(&mut pass, &self.step_end, (1, 1));
             }
         }
@@ -472,12 +629,15 @@ impl GpuWaterSim {
         }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("water-marks"),
+                label: Some("water-settle"),
                 timestamp_writes: None,
             });
+            pass.set_bind_group(0, &buffers.sim_bind[0], &[]);
+            tiled(&mut pass, &self.settle);
+            dispatch(&mut pass, &self.sea_wake, boundary_groups);
+            dispatch(&mut pass, &self.tiles_end, tile_groups);
             pass.set_bind_group(0, &buffers.marks_bind, &[]);
-            pass.set_pipeline(&self.marks);
-            pass.dispatch_workgroups(cells_groups.0, cells_groups.1, 1);
+            tiled(&mut pass, &self.marks);
         }
         self.queue_readback(device, encoder, water);
         self.frame_no += 1;
@@ -555,6 +715,7 @@ impl GpuWaterSim {
         let cells = water.floor.len().max(1);
         let links = water.links.len().max(1);
         let boundary = water.boundary.len().max(1).next_power_of_two();
+        let layout = TileLayout::new(water);
         let storage = |label: &str, size: usize, extra: wgpu::BufferUsages| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -567,7 +728,10 @@ impl GpuWaterSim {
             })
         };
         let none = wgpu::BufferUsages::empty();
-        let adjacency_len = water.cell_link_start.len() + water.cell_links.len();
+        let off_col = water.cell_link_start.len() + water.cell_links.len();
+        let off_group = off_col + water.col_start.len();
+        let off_tile = off_group + water.link_group.len();
+        let adjacency_len = off_tile + water.floor.len();
         let statics = storage("water-sim-static", cells * 16, none);
         let dynamic = storage("water-sim-dynamic", cells * 16, none);
         let adjacency = storage("water-sim-adjacency", adjacency_len * 4, none);
@@ -577,7 +741,12 @@ impl GpuWaterSim {
             storage("water-sim-q1", links * 4, none),
         ];
         let boundary_buf = storage("water-sim-boundary", boundary * 16, none);
-        let sim = storage("water-sim-state", SIM_WORDS * 4, none);
+        let sim = storage("water-sim-state", layout.sim_words() * 4, none);
+        let args = storage(
+            "water-sim-args",
+            ARGS_WORDS * 4,
+            wgpu::BufferUsages::INDIRECT,
+        );
         let marks = storage("water-sim-marks", cells * 16, none);
         let bind = |q_old: &wgpu::Buffer, q_new: &wgpu::Buffer| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -598,6 +767,19 @@ impl GpuWaterSim {
             })
         };
         let sim_bind = [bind(&q[0], &q[1]), bind(&q[1], &q[0])];
+        let schedule_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("water-schedule-bind"),
+            layout: &self.schedule_layout,
+            entries: &[
+                bg(0, &self.params),
+                bg(1, &self.frame),
+                bg(4, &adjacency),
+                bg(6, &q[0]),
+                bg(7, &q[1]),
+                bg(9, &sim),
+                bg(17, &args),
+            ],
+        });
         let marks_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("water-marks-bind"),
             layout: &self.marks_layout,
@@ -609,6 +791,7 @@ impl GpuWaterSim {
                 bg(4, &adjacency),
                 bg(5, &links_buf),
                 bg(6, &q[0]),
+                bg(9, &sim),
                 bg(10, &marks),
             ],
         });
@@ -616,6 +799,8 @@ impl GpuWaterSim {
             cells,
             links,
             boundary,
+            layout,
+            offsets: [off_col as u32, off_group as u32, off_tile as u32],
             statics,
             dynamic,
             adjacency,
@@ -623,14 +808,17 @@ impl GpuWaterSim {
             q,
             boundary_buf,
             sim,
+            args,
             marks,
             sim_bind,
+            schedule_bind,
             marks_bind,
         });
         self.synced_topology = water.topology_rev;
         self.buffers_gen += 1;
         // Read-backs of the old layout are useless now.
         self.readbacks.clear();
+        self.budget = layout.tiles();
         true
     }
 
@@ -683,10 +871,16 @@ impl GpuWaterSim {
 
     fn upload_topology(&mut self, queue: &wgpu::Queue, water: &Water) {
         let b = self.buffers.as_ref().expect("buffers");
-        let mut adjacency =
-            Vec::with_capacity(water.cell_link_start.len() + water.cell_links.len());
+        let layout = b.layout;
+        let mut adjacency = Vec::with_capacity(b.offsets[2] as usize + water.floor.len());
         adjacency.extend_from_slice(&water.cell_link_start);
         adjacency.extend_from_slice(&water.cell_links);
+        adjacency.extend_from_slice(&water.col_start);
+        adjacency.extend_from_slice(&water.link_group);
+        adjacency.extend(water.cell_col.iter().map(|&c| {
+            let (x, z) = (c as usize % layout.nx, c as usize / layout.nx);
+            ((z / TILE) * layout.tiles_x + x / TILE) as u32
+        }));
         queue.write_buffer(&b.adjacency, 0, bytemuck::cast_slice(&adjacency));
         let links: Vec<GpuLinkData> = water
             .links
@@ -706,7 +900,8 @@ impl GpuWaterSim {
         if !links.is_empty() {
             queue.write_buffer(&b.links_buf, 0, bytemuck::cast_slice(&links));
         }
-        let sim = [0.0f32, 0.0, 0.0, self.last_dt, 0.0, 0.0, 0.0, 0.0];
+        let mut sim = vec![0.0f32; SIM_WORDS + layout.tiles()];
+        sim[3] = self.last_dt;
         queue.write_buffer(&b.sim, 0, bytemuck::cast_slice(&sim));
     }
 
@@ -717,27 +912,38 @@ impl GpuWaterSim {
         water: &Water,
     ) {
         let b = self.buffers.as_ref().expect("buffers");
-        let with_marks = self.frame_no.is_multiple_of(MARKS_EVERY);
+        let layout = b.layout;
+        let tiles = layout.tiles();
+        let slice = |n: usize| {
+            let k = self.frame_no as usize % REFRESH_FRAMES;
+            (n * k / REFRESH_FRAMES, n * (k + 1) / REFRESH_FRAMES)
+        };
+        let (cells, links) = (slice(b.cells), slice(b.links));
         let Some(slot) = self
             .readbacks
             .iter()
             .position(|r| r.state == ReadbackState::Free)
             .or_else(|| {
                 (self.readbacks.len() < READBACKS).then(|| {
-                    let depth_bytes = (b.cells * 16) as u64;
-                    let q_bytes = (b.links * 4) as u64;
-                    let marks_bytes = (b.cells * 16) as u64;
+                    // Room for every tile plus the largest slices.
+                    let size = HEADER_BYTES
+                        + (tiles * (1 + layout.slot()) * 4) as u64
+                        + ((b.cells / REFRESH_FRAMES + 1) * 32) as u64
+                        + ((b.links / REFRESH_FRAMES + 1) * 4) as u64;
                     self.readbacks.push(Readback {
                         buffer: device.create_buffer(&wgpu::BufferDescriptor {
                             label: Some("water-readback"),
-                            size: depth_bytes + q_bytes + marks_bytes + 32,
+                            size,
                             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                             mapped_at_creation: false,
                         }),
-                        depth_bytes,
-                        q_bytes,
-                        with_marks: false,
+                        tiles: 0,
+                        cells: (0, 0),
+                        links: (0, 0),
+                        used: 0,
+                        frame: 0,
                         generation: 0,
+                        topology: 0,
                         state: ReadbackState::Free,
                         ready: Arc::new(AtomicBool::new(false)),
                     });
@@ -745,39 +951,68 @@ impl GpuWaterSim {
                 })
             })
         else {
-            return; // all in flight: skip this frame's read-back
+            return; // all in flight: the slow refresh catches up
         };
+        let budget = self.budget.clamp(1, tiles);
         let r = &mut self.readbacks[slot];
-        encoder.copy_buffer_to_buffer(&b.dynamic, 0, &r.buffer, 0, r.depth_bytes);
-        encoder.copy_buffer_to_buffer(&b.q[0], 0, &r.buffer, r.depth_bytes, r.q_bytes);
-        if with_marks {
-            encoder.copy_buffer_to_buffer(
-                &b.marks,
-                0,
-                &r.buffer,
-                r.depth_bytes + r.q_bytes,
-                (b.cells * 16) as u64,
-            );
-        }
-        let sim_at = r.depth_bytes + r.q_bytes + (b.cells * 16) as u64;
-        encoder.copy_buffer_to_buffer(&b.sim, 0, &r.buffer, sim_at, (SIM_WORDS * 4) as u64);
-        r.with_marks = with_marks;
+        let mut at = 0u64;
+        let mut copy = |src: &wgpu::Buffer, from: u64, bytes: u64| {
+            if bytes > 0 {
+                encoder.copy_buffer_to_buffer(src, from, &r.buffer, at, bytes);
+            }
+            at += bytes;
+        };
+        copy(&b.sim, 0, (SIM_WORDS * 4) as u64);
+        copy(&b.args, 0, (ARGS_WORDS * 4) as u64);
+        copy(
+            &b.sim,
+            ((SIM_WORDS + tiles) * 4) as u64,
+            (budget * 4) as u64,
+        );
+        copy(
+            &b.sim,
+            ((SIM_WORDS + 2 * tiles) * 4) as u64,
+            (budget * layout.slot() * 4) as u64,
+        );
+        copy(
+            &b.dynamic,
+            (cells.0 * 16) as u64,
+            ((cells.1 - cells.0) * 16) as u64,
+        );
+        copy(
+            &b.q[0],
+            (links.0 * 4) as u64,
+            ((links.1 - links.0) * 4) as u64,
+        );
+        copy(
+            &b.marks,
+            (cells.0 * 16) as u64,
+            ((cells.1 - cells.0) * 16) as u64,
+        );
+        r.tiles = budget;
+        r.cells = cells;
+        r.links = links;
+        r.used = at;
+        r.frame = self.frame_no;
         r.generation = water.state_rev;
+        r.topology = water.topology_rev;
         r.state = ReadbackState::Copied;
     }
 
     /// Start mapping last frame's copies; hand finished ones to the CPU.
     fn collect_readbacks(&mut self, device: &wgpu::Device, water: &Water) {
         let _ = device.poll(wgpu::PollType::Poll);
-        let cells = self.buffers.as_ref().map_or(0, |b| b.cells);
-        let mut newest: Option<Snapshot> = None;
-        for r in &mut self.readbacks {
+        let Some(layout) = self.buffers.as_ref().map(|b| b.layout) else {
+            return;
+        };
+        let mut arrived = Vec::new();
+        for (n, r) in self.readbacks.iter_mut().enumerate() {
             match r.state {
                 ReadbackState::Copied => {
                     let ready = r.ready.clone();
                     ready.store(false, Ordering::Release);
                     r.buffer
-                        .slice(..)
+                        .slice(..r.used)
                         .map_async(wgpu::MapMode::Read, move |res| {
                             if res.is_ok() {
                                 ready.store(true, Ordering::Release);
@@ -785,57 +1020,84 @@ impl GpuWaterSim {
                         });
                     r.state = ReadbackState::Mapping;
                 }
-                ReadbackState::Mapping if r.ready.load(Ordering::Acquire) => {
-                    {
-                        let data = r.buffer.slice(..).get_mapped_range();
-                        let dynamic: &[[f32; 4]] =
-                            bytemuck::cast_slice(&data[..r.depth_bytes as usize]);
-                        let q: &[f32] = bytemuck::cast_slice(
-                            &data[r.depth_bytes as usize..(r.depth_bytes + r.q_bytes) as usize],
-                        );
-                        let marks_at = (r.depth_bytes + r.q_bytes) as usize;
-                        let sim_at = marks_at + cells * 16;
-                        let sim: &[f32] =
-                            bytemuck::cast_slice(&data[sim_at..sim_at + SIM_WORDS * 4]);
-                        self.last_dt = sim[3].clamp(1e-4, 1.0 / 30.0);
-                        let snapshot = Snapshot {
-                            generation: r.generation,
-                            depth: dynamic.iter().map(|d| d[0]).collect(),
-                            q: q[..water.links.len().min(q.len())].to_vec(),
-                            marks: r.with_marks.then(|| {
-                                bytemuck::cast_slice::<u8, [f32; 4]>(
-                                    &data[marks_at..marks_at + cells * 16],
-                                )
-                                .to_vec()
-                            }),
-                        };
-                        // Keep marks from an older snapshot if the newest has none.
-                        let marks = snapshot
-                            .marks
-                            .is_none()
-                            .then(|| newest.as_mut().and_then(|n| n.marks.take()))
-                            .flatten();
-                        let mut snapshot = snapshot;
-                        if snapshot.marks.is_none() {
-                            snapshot.marks = marks;
-                        }
-                        newest = Some(snapshot);
-                    }
-                    r.buffer.unmap();
-                    r.state = ReadbackState::Free;
-                }
+                ReadbackState::Mapping if r.ready.load(Ordering::Acquire) => arrived.push(n),
                 _ => {}
             }
         }
-        if let Some(mut s) = newest {
-            s.depth.truncate(water.floor.len());
-            let mut link = water.gpu.0.lock().unwrap_or_else(|e| e.into_inner());
-            if s.marks.is_none() {
-                s.marks = link.inbox.take().and_then(|old| old.marks);
+        // Oldest first: patches must land in the order they were made.
+        arrived.sort_by_key(|&n| self.readbacks[n].frame);
+        let mut snapshots = Vec::new();
+        let mut running = None;
+        for n in arrived {
+            let r = &mut self.readbacks[n];
+            if r.topology == water.topology_rev {
+                let data = r.buffer.slice(..r.used).get_mapped_range();
+                let words: &[u32] = bytemuck::cast_slice(&data);
+                let (snapshot, n_run) = unpack(words, r, &layout, water);
+                self.last_dt = f32::from_bits(words[3]).clamp(1e-4, 1.0 / 30.0);
+                // Copy back about as many tiles as run, growing quickly.
+                self.budget = (n_run * 3 / 2 + 16).max(self.budget * 15 / 16);
+                running = Some(n_run);
+                snapshots.push(snapshot);
             }
-            link.inbox = Some(s);
+            r.buffer.unmap();
+            r.state = ReadbackState::Free;
+        }
+        if !snapshots.is_empty() {
+            let mut link = water.gpu.0.lock().unwrap_or_else(|e| e.into_inner());
+            link.running_tiles = running;
+            link.inbox.extend(snapshots);
+            let excess = link.inbox.len().saturating_sub(MAX_INBOX);
+            link.inbox.drain(..excess);
         }
     }
+}
+
+/// The patches in one read-back, and how many tiles ran.
+fn unpack(words: &[u32], r: &Readback, layout: &TileLayout, water: &Water) -> (Snapshot, usize) {
+    let n_run = words[SIM_WORDS + 1] as usize;
+    let list_at = SIM_WORDS + ARGS_WORDS;
+    let slots_at = list_at + r.tiles;
+    let floats: &[f32] = bytemuck::cast_slice(words);
+    let mut s = Snapshot {
+        generation: r.generation,
+        topology: r.topology,
+        ..Default::default()
+    };
+    let slot_len = layout.slot();
+    for k in 0..n_run.min(r.tiles) {
+        let t = words[list_at + k] as usize;
+        if t >= layout.tiles() {
+            continue;
+        }
+        let slot = &floats[slots_at + k * slot_len..][..slot_len];
+        let (mut jc, mut jl) = (0, layout.slot_cells);
+        layout.rows(t, |c0, c1| {
+            let (s0, s1) = (water.col_start[c0] as usize, water.col_start[c1] as usize);
+            s.depth.push(s0 as u32, &slot[jc..jc + s1 - s0]);
+            jc += s1 - s0;
+            let (l0, l1) = (
+                water.link_group[2 * c0] as usize,
+                water.link_group[2 * c1] as usize,
+            );
+            s.q.push(l0 as u32, &slot[jl..jl + l1 - l0]);
+            jl += l1 - l0;
+        });
+    }
+    // The slice of everything.
+    let mut at = slots_at + r.tiles * slot_len;
+    let nc = r.cells.1 - r.cells.0;
+    let nl = r.links.1 - r.links.0;
+    let depth: Vec<f32> = floats[at..at + nc * 4].iter().step_by(4).copied().collect();
+    s.depth.push(r.cells.0 as u32, &depth);
+    at += nc * 4;
+    s.q.push(r.links.0 as u32, &floats[at..at + nl]);
+    at += nl;
+    s.marks.push(
+        r.cells.0 as u32,
+        bytemuck::cast_slice(&floats[at..at + nc * 4]),
+    );
+    (s, n_run)
 }
 
 /// Where [`GpuWaterSim::encode_draw`] writes. The indirect buffer holds two
@@ -870,8 +1132,153 @@ fn bg(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
 
 const _: () = assert!(B_SIDE == 1 << 31);
 const _: () = assert!(NONE == u32::MAX);
+const _: () = assert!(TILE == 16 && ROWS == 4);
 
-/// Shared declarations of the simulation and marks shaders.
+/// Tiles, read-back slots and tiled dispatch (simulation and marks).
+const TILES_WGSL: &str = r#"
+const TILE: u32 = 16u;
+const ROWS: u32 = 4u;
+// Tile flags: awake (input to scheduling), running this frame, stays awake.
+const AWAKE: u32 = 1u;
+const RUN: u32 = 2u;
+const WAKE: u32 = 4u;
+const STILL: f32 = 2e-5;
+const LEVEL_STEP: f32 = 5e-4;
+
+fn col_start(c: u32) -> u32 {
+    return adjacency[P.grid.z + c];
+}
+
+fn group_start(c: u32) -> u32 {
+    return adjacency[P.grid.w + 2u * c];
+}
+
+fn cell_tile(i: u32) -> u32 {
+    return adjacency[P.tiles.z + i];
+}
+
+fn never_sleep() -> bool {
+    return P.tiles.w != 0u;
+}
+
+// Rows [z0, z1) of tile t handled by workgroup `part`; columns [x0, x1).
+struct Rows {
+    x0: u32,
+    x1: u32,
+    zt: u32,
+    z0: u32,
+    z1: u32,
+};
+
+fn rows_of(t: u32, part: u32) -> Rows {
+    var r: Rows;
+    r.x0 = (t % P.tiles.x) * TILE;
+    r.x1 = min(r.x0 + TILE, P.grid.x);
+    r.zt = (t / P.tiles.x) * TILE;
+    let end = min(r.zt + TILE, P.grid.y);
+    r.z0 = min(r.zt + part * ROWS, end);
+    r.z1 = min(r.z0 + ROWS, end);
+    return r;
+}
+
+// Cells (links) in the tile's rows before this workgroup's.
+fn cells_before(r: Rows) -> u32 {
+    var n = 0u;
+    for (var z = r.zt; z < r.z0; z++) {
+        n += col_start(z * P.grid.x + r.x1) - col_start(z * P.grid.x + r.x0);
+    }
+    return n;
+}
+
+fn links_before(r: Rows) -> u32 {
+    var n = 0u;
+    for (var z = r.zt; z < r.z0; z++) {
+        n += group_start(z * P.grid.x + r.x1) - group_start(z * P.grid.x + r.x0);
+    }
+    return n;
+}
+
+// Read-back slot of running tile k (after the flags and the list).
+fn slot_at(k: u32) -> u32 {
+    return 2u * P.slots.z + k * (P.slots.x + P.slots.y);
+}
+"#;
+
+/// The tiled entry points: four workgroups per running tile.
+const SIM_TILED_WGSL: &str = r#"
+@compute @workgroup_size(64)
+fn k_heads(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    if sim.dt <= 0.0 {
+        return;
+    }
+    let r = rows_of(listed(wg.y), wg.x);
+    for (var z = r.z0; z < r.z1; z++) {
+        let row = z * P.grid.x;
+        let e = col_start(row + r.x1);
+        for (var i = col_start(row + r.x0) + lid; i < e; i += 64u) {
+            heads_cell(i);
+        }
+    }
+}
+
+@compute @workgroup_size(64)
+fn k_links(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    let r = rows_of(listed(wg.y), wg.x);
+    for (var z = r.z0; z < r.z1; z++) {
+        let row = z * P.grid.x;
+        let e = group_start(row + r.x1);
+        for (var i = group_start(row + r.x0) + lid; i < e; i += 64u) {
+            link_flow(i);
+        }
+    }
+}
+
+@compute @workgroup_size(64)
+fn k_scale(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    if sim.dt <= 0.0 {
+        return;
+    }
+    let r = rows_of(listed(wg.y), wg.x);
+    for (var z = r.z0; z < r.z1; z++) {
+        let row = z * P.grid.x;
+        let e = col_start(row + r.x1);
+        for (var i = col_start(row + r.x0) + lid; i < e; i += 64u) {
+            scale_cell(i);
+        }
+    }
+}
+
+@compute @workgroup_size(64)
+fn k_limit(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    if sim.dt <= 0.0 {
+        return;
+    }
+    let r = rows_of(listed(wg.y), wg.x);
+    for (var z = r.z0; z < r.z1; z++) {
+        let row = z * P.grid.x;
+        let e = group_start(row + r.x1);
+        for (var i = group_start(row + r.x0) + lid; i < e; i += 64u) {
+            limit_link(i);
+        }
+    }
+}
+
+@compute @workgroup_size(64)
+fn k_depth(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    if sim.dt <= 0.0 {
+        return;
+    }
+    let r = rows_of(listed(wg.y), wg.x);
+    for (var z = r.z0; z < r.z1; z++) {
+        let row = z * P.grid.x;
+        let e = col_start(row + r.x1);
+        for (var i = col_start(row + r.x0) + lid; i < e; i += 64u) {
+            depth_cell(i);
+        }
+    }
+}
+"#;
+
 const COMMON_WGSL: &str = r#"
 struct Params {
     counts: vec4<u32>,
@@ -879,6 +1286,9 @@ struct Params {
     b: vec4<f32>,
     sea: vec4<f32>,
     swell: array<vec4<f32>, 4>,
+    grid: vec4<u32>,
+    tiles: vec4<u32>,
+    slots: vec4<u32>,
 };
 
 struct Frame {
@@ -946,8 +1356,29 @@ struct Sim {
     simulated: f32,
     pad0: f32,
     pad1: f32,
+    // Tile flags, running tiles, read-back slots.
+    w: array<atomic<u32>>,
 };
 @group(0) @binding(9) var<storage, read_write> sim: Sim;
+struct Args {
+    x: u32,
+    y: atomic<u32>,
+    z: u32,
+    pad: u32,
+};
+@group(0) @binding(17) var<storage, read_write> args: Args;
+
+fn listed(k: u32) -> u32 {
+    return atomicLoad(&sim.w[P.slots.z + k]);
+}
+
+fn runs(t: u32) -> bool {
+    return (atomicLoad(&sim.w[t]) & RUN) != 0u;
+}
+
+fn wake_cell(c: u32) {
+    atomicOr(&sim.w[cell_tile(c)], AWAKE);
+}
 
 @compute @workgroup_size(1)
 fn k_frame_begin() {
@@ -963,8 +1394,65 @@ fn k_frame_begin() {
         let at = bitcast<u32>(e.y);
         if e.x == 0.0 {
             dyn_state[at].x = max(dyn_state[at].x + e.z, 0.0);
+            wake_cell(at);
         } else if e.x == 1.0 {
             q_old[at] += e.z;
+            wake_cell(links[at].a);
+            wake_cell(links[at].b);
+        } else {
+            wake_cell(at);
+        }
+    }
+    // Sources keep their tiles going.
+    for (var i = 0u; i < F.counts.y; i++) {
+        wake_cell(bitcast<u32>(F.sources[i].x));
+    }
+}
+
+@compute @workgroup_size(1)
+fn k_args_reset() {
+    args.x = ROWS;
+    atomicStore(&args.y, 0u);
+    args.z = 1u;
+}
+
+// Same as Water::schedule: awake tiles and their neighbours run; a tile
+// that stops running keeps no flow on its links.
+@compute @workgroup_size(64)
+fn k_schedule(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let t = idx(gid);
+    let n = P.slots.z;
+    if t >= n {
+        return;
+    }
+    let tx = t % P.tiles.x;
+    let tz = t / P.tiles.x;
+    var run = never_sleep() || F.a.y != 0.0;
+    for (var z = max(tz, 1u) - 1u; z < min(tz + 2u, P.tiles.y); z++) {
+        for (var x = max(tx, 1u) - 1u; x < min(tx + 2u, P.tiles.x); x++) {
+            if (atomicLoad(&sim.w[z * P.tiles.x + x]) & AWAKE) != 0u {
+                run = true;
+            }
+        }
+    }
+    let was = runs(t);
+    if run {
+        atomicOr(&sim.w[t], RUN);
+        let k = atomicAdd(&args.y, 1u);
+        atomicStore(&sim.w[n + k], t);
+    } else {
+        atomicAnd(&sim.w[t], ~RUN);
+        if was {
+            for (var part = 0u; part < TILE / ROWS; part++) {
+                let r = rows_of(t, part);
+                for (var z = r.z0; z < r.z1; z++) {
+                    let e = group_start(z * P.grid.x + r.x1);
+                    for (var i = group_start(z * P.grid.x + r.x0); i < e; i++) {
+                        q_old[i] = 0.0;
+                        q_new[i] = 0.0;
+                    }
+                }
+            }
         }
     }
 }
@@ -997,22 +1485,12 @@ fn k_step_begin() {
     }
 }
 
-@compute @workgroup_size(64)
-fn k_heads(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = idx(gid);
-    if i >= P.counts.x || sim.dt <= 0.0 {
-        return;
-    }
+fn heads_cell(i: u32) {
     let s = statics[i];
     dyn_state[i].y = head_of(s.x, s.y, dyn_state[i].x);
 }
 
-@compute @workgroup_size(64)
-fn k_links(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = idx(gid);
-    if i >= P.counts.y {
-        return;
-    }
+fn link_flow(i: u32) {
     let dt = sim.dt;
     let q0 = q_old[i];
     if dt <= 0.0 {
@@ -1020,6 +1498,11 @@ fn k_links(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let l = links[i];
+    // Into a resting tile: closed for this frame.
+    if !runs(cell_tile(l.b)) {
+        q_new[i] = 0.0;
+        return;
+    }
     let dx = P.a.x;
     let ha = dyn_state[l.a].y;
     let hb = dyn_state[l.b].y;
@@ -1109,6 +1592,10 @@ fn k_sea(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let b = boundary[k];
+    if !runs(cell_tile(b.cell)) {
+        boundary[k].q = 0.0;
+        return;
+    }
     let s = statics[b.cell];
     let floor = s.x;
     let level = P.sea.x;
@@ -1135,12 +1622,7 @@ fn sea_entries(i: u32) -> vec2<u32> {
     return vec2<u32>(packed >> 2u, packed & 3u);
 }
 
-@compute @workgroup_size(64)
-fn k_scale(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = idx(gid);
-    if i >= P.counts.x || sim.dt <= 0.0 {
-        return;
-    }
+fn scale_cell(i: u32) {
     var outflow = 0.0;
     let e0 = adjacency[i];
     let e1 = adjacency[i + 1u];
@@ -1166,12 +1648,7 @@ fn k_scale(@builtin(global_invocation_id) gid: vec3<u32>) {
     dyn_state[i].z = sc;
 }
 
-@compute @workgroup_size(64)
-fn k_limit(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = idx(gid);
-    if i >= P.counts.y || sim.dt <= 0.0 {
-        return;
-    }
+fn limit_link(i: u32) {
     let q = q_new[i];
     let l = links[i];
     var donor = l.b;
@@ -1181,12 +1658,7 @@ fn k_limit(@builtin(global_invocation_id) gid: vec3<u32>) {
     q_new[i] = q * dyn_state[donor].z;
 }
 
-@compute @workgroup_size(64)
-fn k_depth(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = idx(gid);
-    if i >= P.counts.x || sim.dt <= 0.0 {
-        return;
-    }
+fn depth_cell(i: u32) {
     var net = 0.0;
     let e0 = adjacency[i];
     let e1 = adjacency[i + 1u];
@@ -1218,6 +1690,97 @@ fn k_step_end() {
     let speed = max(bitcast<f32>(atomicLoad(&sim.max_speed)), 1e-3);
     sim.next_dt = clamp(P.b.w * P.a.x / speed, 1e-4, P.sea.w);
     sim.steps += 1u;
+}
+
+fn level_differs(l: Link) -> bool {
+    let sa = statics[l.a];
+    let sb = statics[l.b];
+    let ha = head_of(sa.x, sa.y, dyn_state[l.a].x);
+    let hb = head_of(sb.x, sb.y, dyn_state[l.b].x);
+    return max(ha, hb) > l.lo + DRY && abs(max(ha, l.lo) - max(hb, l.lo)) > LEVEL_STEP;
+}
+
+// Same as Water::settle_activity: tiles with flow stay awake, and a resting
+// tile whose level no longer matches the running water next to it wakes.
+// Also packs the tile's discharge for the read-back.
+@compute @workgroup_size(64)
+fn k_settle(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    let t = listed(wg.y);
+    let r = rows_of(t, wg.x);
+    let base = slot_at(wg.y) + P.slots.x;
+    var j = links_before(r);
+    var flowing = false;
+    for (var z = r.z0; z < r.z1; z++) {
+        let row = z * P.grid.x;
+        let s = group_start(row + r.x0);
+        let e = group_start(row + r.x1);
+        for (var i = s + lid; i < e; i += 64u) {
+            let qv = q_old[i];
+            atomicStore(&sim.w[base + j + i - s], bitcast<u32>(qv));
+            flowing = flowing || abs(qv) > STILL;
+            let l = links[i];
+            let tb = cell_tile(l.b);
+            if tb != t && !runs(tb) && level_differs(l) {
+                atomicOr(&sim.w[tb], WAKE);
+            }
+        }
+        j += e - s;
+    }
+    if flowing {
+        atomicOr(&sim.w[t], WAKE);
+    }
+    // Links from the columns just before the tile (towards -x and -z).
+    if wg.x == 0u && lid < 2u * TILE {
+        let k = lid % TILE;
+        var c = NONE;
+        if lid < TILE {
+            if r.x0 > 0u && r.zt + k < P.grid.y {
+                c = (r.zt + k) * P.grid.x + r.x0 - 1u;
+            }
+        } else if r.zt > 0u && r.x0 + k < r.x1 {
+            c = (r.zt - 1u) * P.grid.x + r.x0 + k;
+        }
+        if c != NONE {
+            let e = group_start(c + 1u);
+            for (var i = group_start(c); i < e; i++) {
+                let l = links[i];
+                let ta = cell_tile(l.a);
+                if ta != t && cell_tile(l.b) == t && !runs(ta) && level_differs(l) {
+                    atomicOr(&sim.w[ta], WAKE);
+                }
+            }
+        }
+    }
+}
+
+// Sea edges with swell or flow keep their tiles going.
+@compute @workgroup_size(64)
+fn k_sea_wake(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let k = idx(gid);
+    if k >= P.counts.z || P.sea.y == 0.0 {
+        return;
+    }
+    var swell = false;
+    for (var n = 0; n < 4; n++) {
+        swell = swell || P.swell[n].x != 0.0;
+    }
+    if swell || abs(boundary[k].q) > STILL {
+        atomicOr(&sim.w[cell_tile(boundary[k].cell)], WAKE);
+    }
+}
+
+@compute @workgroup_size(64)
+fn k_tiles_end(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let t = idx(gid);
+    if t >= P.slots.z {
+        return;
+    }
+    let f = atomicLoad(&sim.w[t]);
+    var awake = 0u;
+    if (f & WAKE) != 0u || never_sleep() {
+        awake = AWAKE;
+    }
+    atomicStore(&sim.w[t], (f & RUN) | awake);
 }
 "#;
 
@@ -1331,17 +1894,39 @@ fn k_draw_lists(@builtin(global_invocation_id) gid: vec3<u32>) {
 const MARKS_WGSL_BODY: &str = r#"
 @group(0) @binding(6) var<storage, read> q: array<f32>;
 @group(0) @binding(10) var<storage, read_write> marks: array<vec4<f32>>;
+struct SimWords {
+    head: array<u32, 8>,
+    w: array<u32>,
+};
+@group(0) @binding(9) var<storage, read_write> sim: SimWords;
+
+fn listed(k: u32) -> u32 {
+    return sim.w[P.slots.z + k];
+}
 
 const FOAM_SECONDS: f32 = 5.0;
 const DRAW_DEPTH: f32 = 0.004;
 
-// Same as Water::update_marks.
+// The running tiles: marks, and the depths packed for the read-back.
 @compute @workgroup_size(64)
-fn k_marks(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = idx(gid);
-    if i >= P.counts.x {
-        return;
+fn k_marks(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    let r = rows_of(listed(wg.y), wg.x);
+    let base = slot_at(wg.y);
+    var j = cells_before(r);
+    for (var z = r.z0; z < r.z1; z++) {
+        let row = z * P.grid.x;
+        let s = col_start(row + r.x0);
+        let e = col_start(row + r.x1);
+        for (var i = s + lid; i < e; i += 64u) {
+            mark_cell(i);
+            sim.w[base + j + i - s] = bitcast<u32>(dyn_state[i].x);
+        }
+        j += e - s;
     }
+}
+
+// Same as Water::update_marks.
+fn mark_cell(i: u32) {
     // A CPU splash, queued as an edit.
     var m = marks[i];
     let t = F.a.w;
@@ -1432,14 +2017,14 @@ mod tests {
         for _ in 0..frames {
             frame(water, dt);
         }
-        // Read-backs trail by a couple of frames (one more for the marks).
-        for _ in 0..MARKS_EVERY as usize + 3 {
+        // Read-backs trail by a couple of frames; marks come with the slow refresh.
+        for _ in 0..REFRESH_FRAMES + 4 {
             frame(water, 0.0);
         }
         water.update(0.0);
     }
 
-    fn dam(backend: WaterBackend) -> Water {
+    fn dam(backend: WaterBackend, never_sleep: bool) -> Water {
         let flat = HeightMapTerrain(|_, _| 0.0);
         let region = WaterRegion::new(Vec2::ZERO, Vec2::new(40.0, 8.0), 1.0, -1.0, 20.0);
         let mut water = Water::new(region, &flat).with_backend(backend);
@@ -1448,7 +2033,7 @@ mod tests {
                 water.pour(Vec3::new(x as f32 + 0.5, 0.5, z as f32 + 0.5), 2.0);
             }
         }
-        water.activity.never_sleep = true;
+        water.activity.never_sleep = never_sleep;
         water
     }
 
@@ -1458,29 +2043,100 @@ mod tests {
             return;
         }
         let (device, queue) = device();
+        // With every tile running, and with still tiles asleep.
+        for never_sleep in [true, false] {
+            let mut sim = GpuWaterSim::new(&device);
+            let mut cpu = dam(WaterBackend::Cpu, never_sleep);
+            let mut gpu = dam(WaterBackend::Gpu, never_sleep);
+            let v0 = cpu.total_volume();
+            let frames = 90;
+            for _ in 0..frames {
+                cpu.update(1.0 / 60.0);
+            }
+            run_gpu(&mut sim, &device, &queue, &mut gpu, frames, 1.0 / 60.0);
+            let vg = gpu.total_volume();
+            assert!((vg - v0).abs() / v0 < 1e-4, "volume {vg} vs {v0}");
+            // The front has moved and both agree on where the water is.
+            let worst = cpu
+                .depth
+                .iter()
+                .zip(&gpu.depth)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            let at = cpu.cell_at(Vec3::new(26.5, 0.1, 4.5)).unwrap() as usize;
+            let moved = gpu.depth[at];
+            eprintln!("never sleep {never_sleep}: worst depth difference {worst} m, depth at x=26: {moved}");
+            assert!(moved > 0.05, "the front should reach x = 26, depth {moved}");
+            assert!(worst < 0.1, "GPU and CPU differ by {worst} m");
+        }
+    }
+
+    /// A still lake sleeps on the GPU; a pour wakes only the tiles around
+    /// it, and the result matches the CPU.
+    #[test]
+    fn a_still_gpu_lake_sleeps_and_wakes_where_poured() {
+        if !gpu_tests_enabled() {
+            return;
+        }
+        let (device, queue) = device();
+        let flat = HeightMapTerrain(|_, _| 0.0);
+        let make = |backend| {
+            let region = WaterRegion::new(Vec2::ZERO, Vec2::splat(128.0), 1.0, -1.0, 20.0);
+            let mut water = Water::new(region, &flat).with_backend(backend);
+            for z in 0..128 {
+                for x in 0..128 {
+                    water.pour(Vec3::new(x as f32 + 0.5, 0.5, z as f32 + 0.5), 0.5);
+                }
+            }
+            water
+        };
         let mut sim = GpuWaterSim::new(&device);
-        let mut cpu = dam(WaterBackend::Cpu);
-        let mut gpu = dam(WaterBackend::Gpu);
-        let v0 = cpu.total_volume();
-        let frames = 90;
+        let mut cpu = make(WaterBackend::Cpu);
+        let mut gpu = make(WaterBackend::Gpu);
+        for _ in 0..30 {
+            cpu.update(1.0 / 60.0);
+        }
+        run_gpu(&mut sim, &device, &queue, &mut gpu, 30, 1.0 / 60.0);
+        let (running, tiles) = gpu.active_tiles();
+        eprintln!("still lake: {running} of {tiles} tiles run");
+        assert_eq!(tiles, 64);
+        assert_eq!(running, 0, "a still lake should sleep");
+
+        let at = Vec3::new(20.5, 1.0, 20.5);
+        cpu.pour(at, 4.0);
+        gpu.pour(at, 4.0);
+        let frames = 40;
         for _ in 0..frames {
             cpu.update(1.0 / 60.0);
         }
-        run_gpu(&mut sim, &device, &queue, &mut gpu, frames, 1.0 / 60.0);
-        let vg = gpu.total_volume();
-        assert!((vg - v0).abs() / v0 < 1e-4, "volume {vg} vs {v0}");
-        // The front has moved and both agree on where the water is.
+        let mut frame = |water: &mut Water, dt: f32| {
+            water.update(dt);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            sim.encode_frame(&device, &queue, &mut encoder, water);
+            queue.submit([encoder.finish()]);
+            device.poll(wgpu::PollType::Wait).expect("poll");
+        };
+        for _ in 0..frames {
+            frame(&mut gpu, 1.0 / 60.0);
+        }
+        for _ in 0..REFRESH_FRAMES + 4 {
+            frame(&mut gpu, 0.0);
+        }
+        gpu.update(0.0);
+        let (running, _) = gpu.active_tiles();
+        let (cpu_running, _) = cpu.active_tiles();
+        eprintln!("after the pour: GPU runs {running} tiles, CPU {cpu_running}");
+        assert!(running > 0 && running < 30, "{running} tiles run");
         let worst = cpu
             .depth
             .iter()
             .zip(&gpu.depth)
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
-        let at = cpu.cell_at(Vec3::new(26.5, 0.1, 4.5)).unwrap() as usize;
-        let moved = gpu.depth[at];
-        eprintln!("worst depth difference {worst} m, depth at x=26: {moved}");
-        assert!(moved > 0.05, "the front should reach x = 26, depth {moved}");
-        assert!(worst < 0.1, "GPU and CPU differ by {worst} m");
+        let (vc, vg) = (cpu.total_volume(), gpu.total_volume());
+        eprintln!("worst {worst} m, volume cpu {vc} gpu {vg}");
+        assert!(worst < 0.02, "GPU and CPU differ by {worst} m");
+        assert!((vc - vg).abs() / vc < 1e-4);
     }
 
     #[test]
@@ -1572,12 +2228,14 @@ mod tests {
             let mut cpu = setup(WaterBackend::Cpu);
             let mut gpu = setup(WaterBackend::Gpu);
             let mut sim = GpuWaterSim::new(&device);
-            let gpu_frame = |sim: &mut GpuWaterSim, w: &mut Water| {
+            let gpu_frame = |sim: &mut GpuWaterSim, w: &mut Water, wait: bool| {
                 w.update(1.0 / 60.0);
                 let mut encoder = device.create_command_encoder(&Default::default());
                 sim.encode_frame(&device, &queue, &mut encoder, w);
                 queue.submit([encoder.finish()]);
-                device.poll(wgpu::PollType::Wait).expect("poll");
+                if wait {
+                    device.poll(wgpu::PollType::Wait).expect("poll");
+                }
             };
             for phase in ["mostly still", "everything flowing"] {
                 if phase == "everything flowing" {
@@ -1586,7 +2244,7 @@ mod tests {
                 }
                 for _ in 0..30 {
                     cpu.update(1.0 / 60.0);
-                    gpu_frame(&mut sim, &mut gpu);
+                    gpu_frame(&mut sim, &mut gpu, true);
                 }
                 let frames = 120;
                 let t = std::time::Instant::now();
@@ -1594,17 +2252,28 @@ mod tests {
                     cpu.update(1.0 / 60.0);
                 }
                 let cpu_ms = t.elapsed().as_secs_f64() * 1e3 / frames as f64;
+                // Waiting for each frame: GPU time plus the round trip.
                 let t = std::time::Instant::now();
                 for _ in 0..frames {
-                    gpu_frame(&mut sim, &mut gpu);
+                    gpu_frame(&mut sim, &mut gpu, true);
                 }
                 let gpu_ms = t.elapsed().as_secs_f64() * 1e3 / frames as f64;
+                // As in a game: the CPU only queues work and takes read-backs.
+                let t = std::time::Instant::now();
+                for _ in 0..frames {
+                    gpu_frame(&mut sim, &mut gpu, false);
+                }
+                let queue_ms = t.elapsed().as_secs_f64() * 1e3 / frames as f64;
+                device.poll(wgpu::PollType::Wait).expect("poll");
                 eprintln!(
-                    "{size} m, {} cells, {phase}: CPU {cpu_ms:.2} ms/frame ({} substeps), \
-                     GPU {gpu_ms:.2} ms/frame incl. read-back (x{:.1})",
+                    "{size} m, {} cells, {phase}: CPU {cpu_ms:.2} ms/frame ({} substeps, \
+                     {} tiles), GPU {gpu_ms:.2} ms/frame waited (x{:.1}, {} tiles), \
+                     CPU side of the GPU path {queue_ms:.2} ms",
                     cpu.cell_count(),
                     cpu.stats().substeps,
-                    cpu_ms / gpu_ms
+                    cpu.active_tiles().0,
+                    cpu_ms / gpu_ms,
+                    gpu.active_tiles().0,
                 );
             }
         }

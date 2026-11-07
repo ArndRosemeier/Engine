@@ -39,15 +39,48 @@ pub(crate) enum GpuEdit {
     Foam { cell: u32, amount: f32 },
 }
 
-/// The GPU state read back after a frame.
+/// Parts of an array: `(first index, count)` ranges and their values, in
+/// order.
+#[derive(Debug, Default)]
+pub(crate) struct Patch<T> {
+    pub ranges: Vec<(u32, u32)>,
+    pub values: Vec<T>,
+}
+
+impl<T: Copy> Patch<T> {
+    pub fn push(&mut self, start: u32, values: &[T]) {
+        if !values.is_empty() {
+            self.ranges.push((start, values.len() as u32));
+            self.values.extend_from_slice(values);
+        }
+    }
+
+    fn apply(&self, to: &mut [T]) {
+        let mut at = 0;
+        for &(start, n) in &self.ranges {
+            let (s, n) = (start as usize, n as usize);
+            if s + n <= to.len() && at + n <= self.values.len() {
+                to[s..s + n].copy_from_slice(&self.values[at..at + n]);
+            }
+            at += n;
+        }
+    }
+}
+
+/// What changed on the GPU in one frame, read back: the areas that ran,
+/// plus a slice of everything (so the whole copy refreshes every second).
 #[derive(Debug, Default)]
 pub(crate) struct Snapshot {
     /// The CPU state revision the GPU state descends from.
     pub generation: u64,
-    pub depth: Vec<f32>,
-    pub q: Vec<f32>,
-    pub marks: Option<Vec<[f32; 4]>>,
+    pub topology: u64,
+    pub depth: Patch<f32>,
+    pub q: Patch<f32>,
+    pub marks: Patch<[f32; 4]>,
 }
+
+/// Read-backs waiting for the CPU copy (older ones are dropped).
+pub(crate) const MAX_INBOX: usize = 120;
 
 #[derive(Debug, Default)]
 pub(crate) struct GpuLink {
@@ -55,7 +88,10 @@ pub(crate) struct GpuLink {
     pub pending_dt: f32,
     pub edits: Vec<GpuEdit>,
     pub rain: f32,
-    pub inbox: Option<Snapshot>,
+    /// Oldest first.
+    pub inbox: Vec<Snapshot>,
+    /// Tiles that ran on the GPU in the newest frame read back.
+    pub running_tiles: Option<usize>,
 }
 
 /// Shared between `Water` (CPU side) and the renderer, which only sees the
@@ -104,20 +140,18 @@ impl Water {
         }
     }
 
-    /// GPU backend: take the newest read-back and queue `dt` for the GPU.
+    /// GPU backend: apply the read-backs and queue `dt` for the GPU.
     pub(crate) fn update_gpu(&mut self, dt: f32) {
         let dt = dt.clamp(0.0, 0.1);
         let link = self.gpu.0.get_mut().unwrap_or_else(|e| e.into_inner());
-        if let Some(s) = link.inbox.take() {
-            if s.generation == self.state_rev
-                && s.depth.len() == self.depth.len()
-                && s.q.len() == self.q.len()
-            {
-                self.depth = s.depth;
-                self.q = s.q;
-                if let Some(m) = s.marks.filter(|m| m.len() == self.marks.len()) {
-                    self.marks = m;
-                }
+        if let Some(n) = link.running_tiles.take() {
+            self.gpu_running = n;
+        }
+        for s in link.inbox.drain(..) {
+            if s.generation == self.state_rev && s.topology == self.topology_rev {
+                s.depth.apply(&mut self.depth);
+                s.q.apply(&mut self.q);
+                s.marks.apply(&mut self.marks);
             }
         }
         link.pending_dt = (link.pending_dt + dt).min(0.1);
