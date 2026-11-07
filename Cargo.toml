@@ -20,6 +20,7 @@ members = [
     "examples/texgen",
     "examples/vegetation",
     "examples/starter",
+    "examples/water",
 ]
 default-members = ["engine"]
 

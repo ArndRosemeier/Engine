@@ -34,12 +34,15 @@
 //! assert!(water.is_submerged(Vec3::new(32.0, 1.0, 32.0)));
 //! ```
 
+mod look;
+mod render_data;
 mod sim;
 mod terrain;
 
 #[cfg(test)]
 mod tests;
 
+pub use look::WaterLook;
 pub(crate) use sim::mark_columns;
 pub use sim::{SourceId, Water, WaterRegion, WaterSample, WaterSettings, WaterSource, WaterStats};
 pub use terrain::{scan_column, HeightMapTerrain, Span, WaterTerrain};

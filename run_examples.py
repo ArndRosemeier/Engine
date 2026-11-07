@@ -48,6 +48,11 @@ VARIANTS: list[Launch] = [
     Launch("model_viewer: prop pack", "model_viewer", {},
            ["examples/model_viewer/assets/props.fmpk"]),
     Launch("anything without TAA (starter)", "starter", {"ENGINE_TAA": "0"}),
+    Launch("water: shore close up", "water", {"ENGINE_WATER_VIEW": "shore"}),
+    Launch("water: under the lake", "water", {"ENGINE_WATER_VIEW": "bed"}),
+    Launch("water: the stream", "water", {"ENGINE_WATER_VIEW": "river"}),
+    Launch("water: tropical colour", "water",
+           {"ENGINE_WATER_VIEW": "shore", "ENGINE_WATER_LOOK": "tropical"}),
     Launch("starter with ACES tone mapping (compare)", "starter", {"ENGINE_TONEMAP": "aces"}),
 ]
 
