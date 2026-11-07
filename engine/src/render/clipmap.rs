@@ -1,9 +1,19 @@
 //! GPU clipmap: static grids displaced by a WGSL height formula.
 
+use super::grass::{GrassUniform, BLADE_VERTICES};
 use crate::proc_terrain::{ClipmapConfig, ProcTerrain, TerrainLayers, TerrainParamsUniform};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use wgpu::util::DeviceExt;
+
+/// Per-frame grass inputs: distance scale (quality times LOD bias, 0 = off),
+/// animation time and wind strength.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GrassFrame {
+    pub scale: f32,
+    pub time: f32,
+    pub wind: f32,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -384,9 +394,15 @@ fn sample_layer(i: i32, in: VsOut, geo: vec3<f32>, far: f32, d: Grads) -> LayerS
 
 // Blend the ground layers by water level, slope, height and large patches,
 // sharpened by each layer's relief so stones poke through sand and grass.
-fn ground_surface(in: VsOut, geo: vec3<f32>, d: Grads) -> LayerSample {
-    let xz = in.world_p.xz;
-    let g = in.ground;
+struct GroundMix {
+    // Weights of grass, meadow, shore, rock and lake bed.
+    w: array<f32, 5>,
+    patches: f32,
+};
+
+// Which ground layer covers a spot: by water level, slope, height and large
+// patches. Shared by the ground and the grass blades.
+fn ground_mix(xz: vec2<f32>, g: f32, up: f32) -> GroundMix {
     let wl = terrain.water_level;
     let patches = fbm2(xz * 0.012, terrain.seed ^ 0x5151u, 3u, 2.0, 0.5);
     let fine = value_noise(xz * 0.13, terrain.seed ^ 0x7777u);
@@ -403,7 +419,7 @@ fn ground_surface(in: VsOut, geo: vec3<f32>, d: Grads) -> LayerSample {
     let near_lake = smoothstep(terrain.lake_threshold - 0.07, terrain.lake_threshold + 0.01, lake + fine * 0.02);
     let shore = near_lake * (1.0 - smoothstep(wl + 0.6, wl + 1.8, g + fine * 0.35));
     let bed = 1.0 - smoothstep(wl - 0.5, wl - 0.05, g);
-    let slope = 1.0 - geo.y;
+    let slope = 1.0 - up;
     let high = smoothstep(
         terrain.base_height + terrain.hill_height * 0.5,
         terrain.base_height + terrain.hill_height * 0.68,
@@ -412,13 +428,22 @@ fn ground_surface(in: VsOut, geo: vec3<f32>, d: Grads) -> LayerSample {
     let rock = max(smoothstep(0.2, 0.34, slope + fine * 0.05), high);
     let rest = (1.0 - bed) * (1.0 - shore);
     let grassy = rest * (1.0 - rock);
-    var w = array<f32, 5>(
+    var out: GroundMix;
+    out.w = array<f32, 5>(
         grassy * (1.0 - meadow),
         grassy * meadow,
         shore * (1.0 - bed),
         rest * rock,
         bed,
     );
+    out.patches = patches;
+    return out;
+}
+
+fn ground_surface(in: VsOut, geo: vec3<f32>, d: Grads) -> LayerSample {
+    let mix5 = ground_mix(in.world_p.xz, in.ground, geo.y);
+    var w = mix5.w;
+    let patches = mix5.patches;
     let far = smoothstep(25.0, 90.0, distance(frame.eye, in.world_p));
     var s: array<LayerSample, 5>;
     var best = 0.0;
@@ -541,6 +566,11 @@ pub struct ClipmapRenderer {
     land_depth_prepass: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
     water_pipeline_portal: wgpu::RenderPipeline,
+    grass_pipeline: wgpu::RenderPipeline,
+    grass_buf: wgpu::Buffer,
+    /// Blades to draw this frame (0: no grass).
+    grass_blades: u32,
+    last_grass: Option<GrassUniform>,
     frame_buf: wgpu::Buffer,
     terrain_buf: wgpu::Buffer,
     vertex_buf: wgpu::Buffer,
@@ -569,7 +599,7 @@ struct LayerParamsUniform {
 fn layer_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     let tex = |binding| wgpu::BindGroupLayoutEntry {
         binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
+        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
             view_dimension: wgpu::TextureViewDimension::D2Array,
@@ -585,13 +615,13 @@ fn layer_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             tex(2),
             wgpu::BindGroupLayoutEntry {
                 binding: 3,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
             wgpu::BindGroupLayoutEntry {
                 binding: 4,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -772,11 +802,12 @@ impl ClipmapRenderer {
             label: Some("clipmap-shader"),
             source: wgpu::ShaderSource::Wgsl(
                 format!(
-                    "{}{SHADER}{}{}{}",
+                    "{}{SHADER}{}{}{}{}",
                     super::pipeline::LIGHTING_WGSL,
                     super::shadow::SHADOW_UNIFORMS_WGSL,
                     super::shadow::CLIPMAP_SHADOW_WGSL,
-                    super::shadow::SHADOW_EVAL_WGSL
+                    super::shadow::SHADOW_EVAL_WGSL,
+                    super::grass::GRASS_WGSL
                 )
                 .into(),
             ),
@@ -808,6 +839,16 @@ impl ClipmapRenderer {
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -931,6 +972,42 @@ impl ClipmapRenderer {
             super::stencil::scene_depth_stencil_masked_write(false),
         );
 
+        let grass_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("clipmap-grass"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_grass"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_grass"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(super::stencil::scene_depth_stencil_unmasked()),
+            multisample: super::stencil::scene_multisample(false),
+            multiview: None,
+            cache: None,
+        });
+        let grass_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("clipmap-grass"),
+            size: std::mem::size_of::<GrassUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let frame_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("clipmap-frame"),
             size: std::mem::size_of::<FrameUniform>() as u64,
@@ -952,6 +1029,7 @@ impl ClipmapRenderer {
             &bind_layout,
             &frame_buf,
             &terrain_buf,
+            &grass_buf,
             &config,
             full_range,
             annulus_range,
@@ -963,6 +1041,10 @@ impl ClipmapRenderer {
             land_depth_prepass,
             water_pipeline,
             water_pipeline_portal,
+            grass_pipeline,
+            grass_buf,
+            grass_blades: 0,
+            last_grass: None,
             frame_buf,
             terrain_buf,
             vertex_buf,
@@ -1030,7 +1112,17 @@ impl ClipmapRenderer {
         sky: super::SkyLight,
         ao_strength: f32,
         proc: &ProcTerrain,
+        grass: GrassFrame,
     ) {
+        let (grass_u, blades) = match (&proc.grass, grass.scale > 0.0) {
+            (Some(g), true) => GrassUniform::around(eye, g, grass.scale, grass.time, grass.wind),
+            _ => (GrassUniform::default(), 0),
+        };
+        self.grass_blades = blades;
+        if blades > 0 && self.last_grass != Some(grass_u) {
+            queue.write_buffer(&self.grass_buf, 0, bytemuck::bytes_of(&grass_u));
+            self.last_grass = Some(grass_u);
+        }
         let pad = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
         let frame = FrameUniform {
             view_proj: view_proj.to_cols_array_2d(),
@@ -1119,6 +1211,21 @@ impl ClipmapRenderer {
         }
     }
 
+    /// Grass blades on the land (main pass only, after the land).
+    pub fn draw_grass(&self, pass: &mut wgpu::RenderPass<'_>, shadow_bind: &wgpu::BindGroup) {
+        let Some(ring) = self.rings.first() else {
+            return;
+        };
+        if self.grass_blades == 0 {
+            return;
+        }
+        pass.set_pipeline(&self.grass_pipeline);
+        pass.set_bind_group(0, &ring.bind_group, &[]);
+        pass.set_bind_group(1, shadow_bind, &[]);
+        pass.set_bind_group(2, &self.layer_bind, &[]);
+        pass.draw(0..BLADE_VERTICES, 0..self.grass_blades);
+    }
+
     pub fn draw_water(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -1203,11 +1310,13 @@ fn build_grid(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_rings(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     frame_buf: &wgpu::Buffer,
     terrain_buf: &wgpu::Buffer,
+    grass_buf: &wgpu::Buffer,
     config: &ClipmapConfig,
     full_range: IndexRange,
     annulus_range: IndexRange,
@@ -1239,6 +1348,10 @@ fn build_rings(
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: grass_buf.as_entire_binding(),
                 },
             ],
         });

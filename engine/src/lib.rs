@@ -122,7 +122,7 @@ pub use particles::{
 pub use place::{GlobalPlace, MeshInstance, Place};
 pub use portal::{Portal, PortalId, PortalSettings, SpaceId};
 pub use proc_terrain::{
-    demo_terrain_rules, ClipmapConfig, HeightField, ProcTerrain, TerrainLayers,
+    demo_terrain_rules, ClipmapConfig, Grass, HeightField, ProcTerrain, TerrainLayers,
 };
 pub use props::{PropModel, PropPack};
 pub use ribbons::{RibbonId, RibbonProfile, RibbonStyle, RibbonWorld};

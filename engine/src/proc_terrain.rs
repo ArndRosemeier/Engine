@@ -40,6 +40,32 @@ pub struct ProcTerrain {
     /// Texture layers painted on the ground; `None` keeps the flat colours
     /// of [`TerrainRules`].
     pub layers: Option<TerrainLayers>,
+    /// Grass blades on grass and meadow ground; `None` for bare ground.
+    pub grass: Option<Grass>,
+}
+
+/// Grass blades grown on the terrain's grass and meadow ground.
+///
+/// The blades are made on the GPU around the camera each frame, so they cost
+/// no memory. Quality presets and the frame-rate tuner shorten `distance`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grass {
+    /// Typical blade height in metres (meadow grows about half as tall).
+    pub height: f32,
+    /// Blades per area, 1 = about 25 per square metre close by.
+    pub density: f32,
+    /// Where the grass ends, in metres from the camera.
+    pub distance: f32,
+}
+
+impl Default for Grass {
+    fn default() -> Self {
+        Self {
+            height: 0.42,
+            density: 2.0,
+            distance: 60.0,
+        }
+    }
 }
 
 /// The [`NaturalLayer`]s a [`ProcTerrain`] is painted with. Grass and meadow
@@ -80,7 +106,14 @@ impl ProcTerrain {
             config,
             focus: Vec3::ZERO,
             layers: Some(TerrainLayers::default()),
+            grass: Some(Grass::default()),
         }
+    }
+
+    /// Grow grass blades (`None`: bare ground).
+    pub fn with_grass(mut self, grass: Option<Grass>) -> Self {
+        self.grass = grass;
+        self
     }
 
     /// Paint the ground with these texture layers (`None`: flat colours).
