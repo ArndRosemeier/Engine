@@ -121,6 +121,31 @@ impl InstanceSubmit {
     }
 }
 
+/// Fast 64-bit hash of texture bytes (several GB/s), to find identical maps.
+/// Four independent lanes keep the CPU busy; not for security.
+fn content_hash(bytes: &[u8]) -> u64 {
+    const K: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut lanes = [K, K ^ 1, K ^ 2, K ^ 3];
+    let mut blocks = bytes.chunks_exact(32);
+    for block in &mut blocks {
+        for (i, lane) in lanes.iter_mut().enumerate() {
+            let v = u64::from_le_bytes(block[i * 8..i * 8 + 8].try_into().expect("8 bytes"));
+            *lane = (*lane ^ v).wrapping_mul(K).rotate_left(31);
+        }
+    }
+    let mut h = bytes.len() as u64;
+    for (i, &b) in blocks.remainder().iter().enumerate() {
+        h ^= (b as u64) << ((i % 8) * 8);
+        if i % 8 == 7 {
+            h = h.wrapping_mul(K).rotate_left(27);
+        }
+    }
+    for lane in lanes {
+        h = (h ^ lane).wrapping_mul(K).rotate_left(27);
+    }
+    h ^ (h >> 32)
+}
+
 /// The curve that turns the HDR scene into screen colours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToneMap {
@@ -847,10 +872,23 @@ impl World {
     /// a dithered cross-fade between levels. See [`crate::lod`].
     pub fn spawn_lod(&mut self, levels: Vec<LodLevel>) -> EngineResult<LodId> {
         LodSet::validate_levels(&levels)?;
-        let mut ids = Vec::with_capacity(levels.len());
-        for level in levels {
-            let id = self.spawn_instanced(level.mesh);
-            ids.push((id, level.max_distance));
+        // Building GPU-ready vertices is the slow part: do the levels at once.
+        use rayon::prelude::*;
+        let built: Vec<_> = levels
+            .into_par_iter()
+            .map(|level| {
+                let albedo = (
+                    level.mesh.albedo().cloned(),
+                    level.mesh.material_maps().cloned(),
+                );
+                (level.mesh.build(), albedo, level.max_distance)
+            })
+            .collect();
+        let mut ids = Vec::with_capacity(built.len());
+        for (mesh, albedo, max_distance) in built {
+            let id = self.spawn_built_instanced(mesh, Vec::new());
+            self.attach_albedo(id, albedo)?;
+            ids.push((id, max_distance));
         }
         let id = LodId(self.next_lod);
         self.next_lod += 1;
@@ -1710,19 +1748,18 @@ impl World {
         // Large maps are looked up by content first: generated assets (every
         // tree) carry the same atlas and should share one GPU texture.
         let key = (map.rgba.len() >= 1 << 20).then(|| {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            (map.width, map.height, &map.rgba).hash(&mut h);
+            let mut h = content_hash(&map.rgba) ^ ((map.width as u64) << 32 | map.height as u64);
+            let mut mix = |v: u64| h = (h ^ v).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
             if let Some(m) = &maps {
-                m.normal.as_ref().map(|n| &n.rgba).hash(&mut h);
-                m.orm.as_ref().map(|n| &n.rgba).hash(&mut h);
-                m.emissive.as_ref().map(|n| &n.rgba).hash(&mut h);
-                m.normal_scale.to_bits().hash(&mut h);
-                m.roughness.to_bits().hash(&mut h);
-                m.metallic.to_bits().hash(&mut h);
-                m.triplanar.to_bits().hash(&mut h);
+                for map in [&m.normal, &m.orm, &m.emissive] {
+                    mix(map.as_ref().map_or(1, |n| content_hash(&n.rgba)));
+                }
+                mix(m.normal_scale.to_bits() as u64);
+                mix(m.roughness.to_bits() as u64);
+                mix(m.metallic.to_bits() as u64);
+                mix(m.triplanar.to_bits() as u64);
             }
-            h.finish()
+            h
         });
         let shared = key
             .and_then(|k| self.texture_by_content.get(&k).copied())
@@ -2876,7 +2913,14 @@ impl World {
     }
 
     /// Enable GPU procedural terrain (clipmap). Replaces any previous proc terrain.
+    /// Its texture layers start generating in the background right away, so
+    /// they are ready by the first frame.
     pub fn set_proc_terrain(&mut self, terrain: ProcTerrain) {
+        if let Some(layers) = &terrain.layers {
+            let list: Vec<crate::texgen::Layer> =
+                layers.as_array().iter().map(|&l| l.into()).collect();
+            crate::texgen::prepare_in_background(&list);
+        }
         self.height_field = Some(HeightField::new(terrain.rules.clone()));
         self.proc_terrain = Some(terrain);
     }
@@ -2960,6 +3004,16 @@ mod bloom_tests {
         assert!(BloomSettings::default().with_soft_knee(1.1).is_err());
         assert!(BloomSettings::default().with_intensity(-0.01).is_err());
         assert!(BloomSettings::default().with_exposure(0.0).is_err());
+    }
+
+    #[test]
+    fn content_hash_tells_maps_apart() {
+        let a = vec![7u8; 1 << 20];
+        let mut b = a.clone();
+        assert_eq!(content_hash(&a), content_hash(&b));
+        b[123_457] = 8;
+        assert_ne!(content_hash(&a), content_hash(&b));
+        assert_ne!(content_hash(&a[..1000]), content_hash(&a[..1001]));
     }
 
     #[test]

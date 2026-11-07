@@ -53,6 +53,7 @@ pub mod limits;
 pub mod lod;
 pub mod mesh;
 pub mod model;
+pub mod parallel;
 pub mod particles;
 pub mod place;
 pub mod portal;

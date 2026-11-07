@@ -112,9 +112,10 @@ let places = Scatter::new(1)
     .on_ground(|x, z| ground.height_at(x, z))
     .only_where(|x, z| !ground.sample(x, z).water)
     .places()?;
-for (i, mine) in Scatter::split(&places, 4, 1).iter().enumerate() {
-    let tree = tree_model(TreeSpecies::Oak, i as u32)?;
-    world.spawn_lod_at(tree.lod_levels(), mine)?;
+// Generating models is the slow part: build_all makes them on all cores.
+let oaks = build_all(&[0, 1, 2, 3], |&v| tree_model(TreeSpecies::Oak, v))?;
+for (tree, mine) in oaks.iter().zip(Scatter::split(&places, 4, 1)) {
+    world.spawn_lod_at(tree.lod_levels(), &mine)?;
 }
 ```
 

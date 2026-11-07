@@ -351,20 +351,31 @@ impl Layer {
 }
 
 /// The layer at [`TEX_SIZE`], generated on first use and shared after.
+/// Threads asking for a layer that is still being made wait for it instead
+/// of making it again.
 pub fn layer(layer: impl Into<Layer>) -> Arc<TextureLayer> {
-    static CACHE: OnceLock<Mutex<HashMap<Layer, Arc<TextureLayer>>>> = OnceLock::new();
+    type Slot = Arc<OnceLock<Arc<TextureLayer>>>;
+    static CACHE: OnceLock<Mutex<HashMap<Layer, Slot>>> = OnceLock::new();
     let key = layer.into();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(l) = cache.lock().expect("texgen cache").get(&key) {
-        return l.clone();
-    }
-    let made = Arc::new(key.generate(TEX_SIZE));
-    cache
+    let slot = CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .expect("texgen cache")
         .entry(key)
-        .or_insert(made)
+        .or_default()
+        .clone();
+    slot.get_or_init(|| Arc::new(key.generate(TEX_SIZE)))
         .clone()
+}
+
+/// Start generating `layers` on a background thread and return at once;
+/// later [`layer`] calls pick up the results (or wait for the ones still
+/// running).
+pub fn prepare_in_background(layers: &[Layer]) {
+    let todo = layers.to_vec();
+    let _ = std::thread::Builder::new()
+        .name("texgen-prepare".into())
+        .spawn(move || prepare(&todo));
 }
 
 /// Generate `layers` on all cores now, so later [`layer`] calls return at
