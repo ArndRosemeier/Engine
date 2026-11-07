@@ -1,6 +1,6 @@
 //! GPU clipmap: static grids displaced by a WGSL height formula.
 
-use crate::proc_terrain::{ClipmapConfig, ProcTerrain, TerrainParamsUniform};
+use crate::proc_terrain::{ClipmapConfig, ProcTerrain, TerrainLayers, TerrainParamsUniform};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use wgpu::util::DeviceExt;
@@ -103,6 +103,21 @@ struct RingUniform {
 @group(0) @binding(1) var<uniform> terrain: TerrainParams;
 @group(0) @binding(2) var<uniform> ring: RingUniform;
 
+// Ground texture layers, in order: grass, meadow, shore, rock, lake bed.
+struct LayerParams {
+    // x..w: 1 / tile metres of grass, meadow, shore, rock.
+    inv_tile_a: vec4<f32>,
+    // x: lake bed 1 / tile metres; y: 1 when textured, 0 for flat colours.
+    inv_tile_b: vec4<f32>,
+    normal_scale_a: vec4<f32>,
+    normal_scale_b: vec4<f32>,
+};
+@group(2) @binding(0) var layer_albedo: texture_2d_array<f32>;
+@group(2) @binding(1) var layer_normal: texture_2d_array<f32>;
+@group(2) @binding(2) var layer_orm: texture_2d_array<f32>;
+@group(2) @binding(3) var layer_sampler: sampler;
+@group(2) @binding(4) var<uniform> layers: LayerParams;
+
 // Light from the viewer's own lantern — same shape as the scene pipelines.
 fn torch_light(world_p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     if frame.torch_radius_m <= 0.0 {
@@ -127,6 +142,7 @@ struct VsOut {
     @location(1) world_n: vec3<f32>,
     @location(2) color: vec4<f32>,
     @location(3) wet: f32,
+    @location(4) ground: f32,
 };
 
 fn hash21(ix: i32, iy: i32, seed: u32) -> f32 {
@@ -254,11 +270,193 @@ fn vs_main(v: VsIn) -> VsOut {
     out.world_n = n;
     out.color = terrain_color(h.ground, h.water);
     out.wet = h.water;
+    out.ground = h.ground;
+    return out;
+}
+
+struct Grads {
+    x: vec3<f32>,
+    y: vec3<f32>,
+};
+
+struct LayerSample {
+    albedo: vec3<f32>,
+    n: vec3<f32>,
+    // x: occlusion, y: roughness, z: relief height (0 deepest).
+    orh: vec3<f32>,
+};
+
+// Seen from above: u along +x, v along -z (image rows run top-down), so the
+// map's +y points along +z. `far` fades in a second, larger and turned
+// sample that hides the tiling in the distance.
+fn sample_flat(i: i32, xz: vec2<f32>, inv_tile: f32, k: f32, geo: vec3<f32>, far: f32, d: Grads) -> LayerSample {
+    let uv = vec2<f32>(xz.x, -xz.y) * inv_tile;
+    let gx = vec2<f32>(d.x.x, -d.x.z) * inv_tile;
+    let gy = vec2<f32>(d.y.x, -d.y.z) * inv_tile;
+    var out: LayerSample;
+    var albedo = textureSampleGrad(layer_albedo, layer_sampler, uv, i, gx, gy).rgb;
+    let r = mat2x2<f32>(0.8 * 0.27, 0.6 * 0.27, -0.6 * 0.27, 0.8 * 0.27);
+    let uv2 = r * uv + vec2<f32>(0.37, 0.71);
+    albedo = mix(albedo, textureSampleGrad(layer_albedo, layer_sampler, uv2, i, r * gx, r * gy).rgb, far * 0.5);
+    out.albedo = albedo;
+    let nm = textureSampleGrad(layer_normal, layer_sampler, uv, i, gx, gy);
+    var t = nm.xyz * 2.0 - 1.0;
+    t = vec3<f32>(t.xy * k, t.z);
+    // Whiteout blend onto the ground normal.
+    out.n = normalize(vec3<f32>(t.x + geo.x, abs(t.z) * geo.y, t.y + geo.z));
+    let orm = textureSampleGrad(layer_orm, layer_sampler, uv, i, gx, gy);
+    out.orh = vec3<f32>(orm.r, orm.g, nm.a);
+    return out;
+}
+
+// World-space triplanar for cliffs (the same projection as mesh triplanar).
+fn sample_tri(i: i32, wp: vec3<f32>, inv_tile: f32, k: f32, geo: vec3<f32>, d: Grads) -> LayerSample {
+    var w = pow(abs(geo), vec3<f32>(4.0));
+    w = w / max(w.x + w.y + w.z, 1e-5);
+    let sg = select(vec3<f32>(-1.0), vec3<f32>(1.0), geo >= vec3<f32>(0.0));
+    let p = wp * inv_tile;
+    let uvx = vec2<f32>(p.z * sg.x, -p.y);
+    let uvy = vec2<f32>(p.x * sg.y, -p.z);
+    let uvz = vec2<f32>(-p.x * sg.z, -p.y);
+    let ax = d.x * inv_tile;
+    let ay = d.y * inv_tile;
+    let xx = vec2<f32>(ax.z * sg.x, -ax.y);
+    let xy = vec2<f32>(ay.z * sg.x, -ay.y);
+    let yx = vec2<f32>(ax.x * sg.y, -ax.z);
+    let yy = vec2<f32>(ay.x * sg.y, -ay.z);
+    let zx = vec2<f32>(-ax.x * sg.z, -ax.y);
+    let zy = vec2<f32>(-ay.x * sg.z, -ay.y);
+    var out: LayerSample;
+    out.albedo = textureSampleGrad(layer_albedo, layer_sampler, uvx, i, xx, xy).rgb * w.x
+        + textureSampleGrad(layer_albedo, layer_sampler, uvy, i, yx, yy).rgb * w.y
+        + textureSampleGrad(layer_albedo, layer_sampler, uvz, i, zx, zy).rgb * w.z;
+    let ox = textureSampleGrad(layer_orm, layer_sampler, uvx, i, xx, xy);
+    let oy = textureSampleGrad(layer_orm, layer_sampler, uvy, i, yx, yy);
+    let oz = textureSampleGrad(layer_orm, layer_sampler, uvz, i, zx, zy);
+    let nx = textureSampleGrad(layer_normal, layer_sampler, uvx, i, xx, xy);
+    let ny = textureSampleGrad(layer_normal, layer_sampler, uvy, i, yx, yy);
+    let nz = textureSampleGrad(layer_normal, layer_sampler, uvz, i, zx, zy);
+    var tx = nx.xyz * 2.0 - 1.0;
+    var ty = ny.xyz * 2.0 - 1.0;
+    var tz = nz.xyz * 2.0 - 1.0;
+    tx = vec3<f32>(tx.xy * k, tx.z);
+    ty = vec3<f32>(ty.xy * k, ty.z);
+    tz = vec3<f32>(tz.xy * k, tz.z);
+    tx.x *= sg.x;
+    ty.x *= sg.y;
+    tz.x *= -sg.z;
+    tx = vec3<f32>(tx.xy + geo.zy, abs(tx.z) * geo.x);
+    ty = vec3<f32>(ty.xy + geo.xz, abs(ty.z) * geo.y);
+    tz = vec3<f32>(tz.xy + geo.xy, abs(tz.z) * geo.z);
+    out.n = normalize(tx.zyx * w.x + ty.xzy * w.y + tz.xyz * w.z);
+    let o = ox * w.x + oy * w.y + oz * w.z;
+    let h = nx.a * w.x + ny.a * w.y + nz.a * w.z;
+    out.orh = vec3<f32>(o.r, o.g, h);
+    return out;
+}
+
+fn layer_tile(i: i32) -> f32 {
+    switch i {
+        case 0: { return layers.inv_tile_a.x; }
+        case 1: { return layers.inv_tile_a.y; }
+        case 2: { return layers.inv_tile_a.z; }
+        case 3: { return layers.inv_tile_a.w; }
+        default: { return layers.inv_tile_b.x; }
+    }
+}
+
+fn layer_normal_scale(i: i32) -> f32 {
+    switch i {
+        case 0: { return layers.normal_scale_a.x; }
+        case 1: { return layers.normal_scale_a.y; }
+        case 2: { return layers.normal_scale_a.z; }
+        case 3: { return layers.normal_scale_a.w; }
+        default: { return layers.normal_scale_b.x; }
+    }
+}
+
+fn sample_layer(i: i32, in: VsOut, geo: vec3<f32>, far: f32, d: Grads) -> LayerSample {
+    if i == 3 {
+        return sample_tri(i, in.world_p, layer_tile(i), layer_normal_scale(i), geo, d);
+    }
+    return sample_flat(i, in.world_p.xz, layer_tile(i), layer_normal_scale(i), geo, far, d);
+}
+
+// Blend the ground layers by water level, slope, height and large patches,
+// sharpened by each layer's relief so stones poke through sand and grass.
+fn ground_surface(in: VsOut, geo: vec3<f32>, d: Grads) -> LayerSample {
+    let xz = in.world_p.xz;
+    let g = in.ground;
+    let wl = terrain.water_level;
+    let patches = fbm2(xz * 0.012, terrain.seed ^ 0x5151u, 3u, 2.0, 0.5);
+    let fine = value_noise(xz * 0.13, terrain.seed ^ 0x7777u);
+    let meadow = smoothstep(0.32, 0.6, patches);
+    // Beaches only round the lakes (the same lake noise as the height field),
+    // not on every low flat.
+    let lake = fbm2(
+        xz * terrain.lake_scale + vec2(17.0, 9.0),
+        terrain.seed ^ 0xC0FFEEu,
+        3u,
+        2.0,
+        0.55,
+    ) * 0.5 + 0.5;
+    let near_lake = smoothstep(terrain.lake_threshold - 0.07, terrain.lake_threshold + 0.01, lake + fine * 0.02);
+    let shore = near_lake * (1.0 - smoothstep(wl + 0.6, wl + 1.8, g + fine * 0.35));
+    let bed = 1.0 - smoothstep(wl - 0.5, wl - 0.05, g);
+    let slope = 1.0 - geo.y;
+    let high = smoothstep(
+        terrain.base_height + terrain.hill_height * 0.5,
+        terrain.base_height + terrain.hill_height * 0.68,
+        g + fine * 1.2 + patches * 1.5,
+    );
+    let rock = max(smoothstep(0.2, 0.34, slope + fine * 0.05), high);
+    let rest = (1.0 - bed) * (1.0 - shore);
+    let grassy = rest * (1.0 - rock);
+    var w = array<f32, 5>(
+        grassy * (1.0 - meadow),
+        grassy * meadow,
+        shore * (1.0 - bed),
+        rest * rock,
+        bed,
+    );
+    let far = smoothstep(25.0, 90.0, distance(frame.eye, in.world_p));
+    var s: array<LayerSample, 5>;
+    var best = 0.0;
+    for (var i = 0; i < 5; i++) {
+        if w[i] > 0.002 {
+            s[i] = sample_layer(i, in, geo, far, d);
+            best = max(best, w[i] + s[i].orh.z * 0.5);
+        }
+    }
+    var out: LayerSample;
+    out.albedo = vec3<f32>(0.0);
+    out.n = vec3<f32>(0.0);
+    out.orh = vec3<f32>(0.0);
+    var total = 0.0;
+    for (var i = 0; i < 5; i++) {
+        if w[i] > 0.002 {
+            let b = max(w[i] + s[i].orh.z * 0.5 - best + 0.18, 0.0);
+            out.albedo += s[i].albedo * b;
+            out.n += s[i].n * b;
+            out.orh += s[i].orh * b;
+            total += b;
+        }
+    }
+    let inv = 1.0 / max(total, 1e-5);
+    out.albedo *= inv;
+    out.n = normalize(out.n + geo * 1e-4);
+    out.orh *= inv;
+    // Broad brightness drift so repeats do not line up in the distance.
+    out.albedo *= 0.88 + 0.24 * (patches * 0.5 + 0.5);
     return out;
 }
 
 @fragment
 fn fs_land(in: VsOut) -> @location(0) vec4<f32> {
+    // Texture gradients, taken while control flow is still uniform.
+    var grads: Grads;
+    grads.x = dpdx(in.world_p);
+    grads.y = dpdy(in.world_p);
     let n = normalize(in.world_n);
     let l = normalize(frame.light_dir);
     let ndl = max(dot(n, l), 0.0);
@@ -271,6 +469,13 @@ fn fs_land(in: VsOut) -> @location(0) vec4<f32> {
     // sky_up.w carries this view's AO strength.
     light.ao = screen_ao(frame.view_proj * vec4(in.world_p, 1.0), frame.sky_up.w);
     light.gi = gi_irradiance(in.world_p, n);
+    if layers.inv_tile_b.y > 0.5 && in.wet < 0.5 {
+        let surf = ground_surface(in, n, grads);
+        light.ao *= surf.orh.x;
+        let lit = pbr_shade(surf.albedo, surf.n, v, light, surf.orh.y, 0.0, vis, sun_diffuse)
+            + surf.albedo * torch_light(in.world_p, surf.n);
+        return vec4(lit, 1.0);
+    }
     let lit = pbr_shade(in.color.rgb, n, v, light, 0.92, 0.0, vis, sun_diffuse)
         + in.color.rgb * torch_light(in.world_p, n);
     return vec4(lit, 1.0);
@@ -346,11 +551,218 @@ pub struct ClipmapRenderer {
     last_params: Option<TerrainParamsUniform>,
     last_ring_center: Option<[f32; 2]>,
     shadow_layout: wgpu::BindGroupLayout,
+    layer_layout: wgpu::BindGroupLayout,
+    layer_bind: wgpu::BindGroup,
+    /// Which layers `layer_bind` holds (`None` until the first `ensure_layers`).
+    layers_for: Option<Option<TerrainLayers>>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct LayerParamsUniform {
+    inv_tile_a: [f32; 4],
+    inv_tile_b: [f32; 4],
+    normal_scale_a: [f32; 4],
+    normal_scale_b: [f32; 4],
+}
+
+fn layer_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let tex = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2Array,
+            multisampled: false,
+        },
+        count: None,
+    };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("clipmap-layer-layout"),
+        entries: &[
+            tex(0),
+            tex(1),
+            tex(2),
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+/// One texture array per map kind (albedo, normal + height, ORM), a layer
+/// per ground layer, with full mip chains. `None` binds 1x1 placeholders and
+/// switches texturing off in the shader.
+fn build_layer_bind(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    layers: Option<TerrainLayers>,
+) -> wgpu::BindGroup {
+    use super::material::{mip_chain, MapKind};
+    use crate::mesh::AlbedoMap;
+    let sets: Vec<std::sync::Arc<crate::texgen::TextureLayer>> = match layers {
+        Some(l) => {
+            let all = l.as_array();
+            let list: Vec<crate::texgen::Layer> = all.iter().map(|&n| n.into()).collect();
+            crate::texgen::prepare(&list);
+            all.iter().map(|&n| crate::texgen::layer(n)).collect()
+        }
+        None => Vec::new(),
+    };
+    let size = sets.first().map_or(1, |t| t.size);
+    let count = sets.len().max(1) as u32;
+    let make = |kind: MapKind, pick: &dyn Fn(&crate::texgen::TextureLayer) -> Vec<u8>, flat: [u8; 4]| {
+        let maps: Vec<AlbedoMap> = if sets.is_empty() {
+            vec![AlbedoMap {
+                width: 1,
+                height: 1,
+                rgba: flat.to_vec(),
+            }]
+        } else {
+            sets.iter()
+                .map(|t| AlbedoMap {
+                    width: size,
+                    height: size,
+                    rgba: pick(t),
+                })
+                .collect()
+        };
+        let chains: Vec<_> = maps.iter().map(|m| mip_chain(m, kind)).collect();
+        let format = if kind == MapKind::Color {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("clipmap-ground-layers"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: count,
+            },
+            mip_level_count: chains[0].len() as u32,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for (layer, chain) in chains.iter().enumerate() {
+            for (level, (w, h, data)) in chain.iter().enumerate() {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: level as u32,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer as u32,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(w * 4),
+                        rows_per_image: Some(*h),
+                    },
+                    wgpu::Extent3d {
+                        width: *w,
+                        height: *h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+        texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        })
+    };
+    let albedo = make(MapKind::Color, &|t| t.albedo.clone(), [255, 255, 255, 255]);
+    let normal = make(MapKind::Normal, &|t| t.normal.clone(), [128, 128, 255, 255]);
+    let orm = make(MapKind::Data, &|t| t.orm.clone(), [255, 235, 0, 255]);
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("clipmap-layer-sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Linear,
+        anisotropy_clamp: 8,
+        ..Default::default()
+    });
+    let mut p = LayerParamsUniform {
+        inv_tile_a: [1.0; 4],
+        inv_tile_b: [1.0, 0.0, 0.0, 0.0],
+        normal_scale_a: [1.0; 4],
+        normal_scale_b: [1.0, 0.0, 0.0, 0.0],
+    };
+    if !sets.is_empty() {
+        for (i, t) in sets.iter().enumerate() {
+            let inv = 1.0 / t.tile_metres.max(0.01);
+            if i < 4 {
+                p.inv_tile_a[i] = inv;
+                p.normal_scale_a[i] = t.normal_scale;
+            } else {
+                p.inv_tile_b[0] = inv;
+                p.normal_scale_b[0] = t.normal_scale;
+            }
+        }
+        p.inv_tile_b[1] = 1.0;
+    }
+    let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("clipmap-layer-params"),
+        contents: bytemuck::bytes_of(&p),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("clipmap-layer-bind"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&albedo),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&normal),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&orm),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: params.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 impl ClipmapRenderer {
     pub fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
         config: ClipmapConfig,
         shadow_layout: &wgpu::BindGroupLayout,
@@ -405,9 +817,10 @@ impl ClipmapRenderer {
             ],
         });
 
+        let layer_layout = layer_bind_layout(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("clipmap-pipeline-layout"),
-            bind_group_layouts: &[&bind_layout, shadow_layout],
+            bind_group_layouts: &[&bind_layout, shadow_layout, &layer_layout],
             push_constant_ranges: &[],
         });
 
@@ -559,12 +972,30 @@ impl ClipmapRenderer {
             last_params: None,
             last_ring_center: None,
             shadow_layout: shadow_layout.clone(),
+            layer_bind: build_layer_bind(device, queue, &layer_layout, None),
+            layer_layout,
+            layers_for: None,
         }
+    }
+
+    /// Upload the ground texture layers when they change.
+    pub fn ensure_layers(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layers: Option<TerrainLayers>,
+    ) {
+        if self.layers_for == Some(layers) {
+            return;
+        }
+        self.layer_bind = build_layer_bind(device, queue, &self.layer_layout, layers);
+        self.layers_for = Some(layers);
     }
 
     pub fn ensure_config(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
         config: &ClipmapConfig,
     ) {
@@ -574,7 +1005,7 @@ impl ClipmapRenderer {
         {
             return;
         }
-        *self = Self::new(device, format, config.clone(), &self.shadow_layout.clone());
+        *self = Self::new(device, queue, format, config.clone(), &self.shadow_layout.clone());
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -670,6 +1101,7 @@ impl ClipmapRenderer {
     ) {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(1, shadow_bind, &[]);
+        pass.set_bind_group(2, &self.layer_bind, &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
         // Coarse → fine so finer wins depth.
@@ -692,6 +1124,7 @@ impl ClipmapRenderer {
             &self.water_pipeline
         });
         pass.set_bind_group(1, shadow_bind, &[]);
+        pass.set_bind_group(2, &self.layer_bind, &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
         for ring in self.rings.iter().rev() {

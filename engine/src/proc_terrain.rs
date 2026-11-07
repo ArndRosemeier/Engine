@@ -6,6 +6,7 @@
 use crate::color::{rgb, rgba, Color};
 use crate::surface::{SurfaceSample, WATER_CLEARANCE};
 use crate::terrain::TerrainRules;
+use crate::texgen::NaturalLayer;
 use glam::Vec3;
 
 /// Clipmap layout for GPU heightfield rendering.
@@ -36,6 +37,40 @@ pub struct ProcTerrain {
     pub config: ClipmapConfig,
     /// Walker’s XZ focus; rings snap around this each frame.
     pub focus: Vec3,
+    /// Texture layers painted on the ground; `None` keeps the flat colours
+    /// of [`TerrainRules`].
+    pub layers: Option<TerrainLayers>,
+}
+
+/// The [`NaturalLayer`]s a [`ProcTerrain`] is painted with. Grass and meadow
+/// alternate in large patches, the shore and the lake bed follow the water,
+/// rock takes steep slopes and high ground. Water keeps its rule colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TerrainLayers {
+    pub grass: NaturalLayer,
+    pub meadow: NaturalLayer,
+    pub shore: NaturalLayer,
+    pub rock: NaturalLayer,
+    pub lakebed: NaturalLayer,
+}
+
+impl Default for TerrainLayers {
+    fn default() -> Self {
+        Self {
+            grass: NaturalLayer::WildGrass,
+            meadow: NaturalLayer::Heather,
+            shore: NaturalLayer::Sand,
+            rock: NaturalLayer::RockFace,
+            lakebed: NaturalLayer::Mud,
+        }
+    }
+}
+
+impl TerrainLayers {
+    /// In shader order: grass, meadow, shore, rock, lake bed.
+    pub fn as_array(&self) -> [NaturalLayer; 5] {
+        [self.grass, self.meadow, self.shore, self.rock, self.lakebed]
+    }
 }
 
 impl ProcTerrain {
@@ -44,7 +79,14 @@ impl ProcTerrain {
             rules,
             config,
             focus: Vec3::ZERO,
+            layers: Some(TerrainLayers::default()),
         }
+    }
+
+    /// Paint the ground with these texture layers (`None`: flat colours).
+    pub fn with_layers(mut self, layers: Option<TerrainLayers>) -> Self {
+        self.layers = layers;
+        self
     }
 
     pub fn with_focus(mut self, focus: impl Into<Vec3>) -> Self {

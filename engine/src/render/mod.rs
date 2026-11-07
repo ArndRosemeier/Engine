@@ -655,10 +655,11 @@ impl Renderer {
         if let Some(proc) = world.proc_terrain() {
             let format = HDR_FORMAT;
             match self.clipmap.as_mut() {
-                Some(clip) => clip.ensure_config(&self.device, format, &proc.config),
+                Some(clip) => clip.ensure_config(&self.device, &self.queue, format, &proc.config),
                 None => {
                     self.clipmap = Some(ClipmapRenderer::new(
                         &self.device,
+                        &self.queue,
                         format,
                         proc.config.clone(),
                         &self.shadow.resource_layout,
@@ -666,6 +667,7 @@ impl Renderer {
                 }
             }
             if let Some(clip) = self.clipmap.as_mut() {
+                clip.ensure_layers(&self.device, &self.queue, proc.layers);
                 let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
                 let vp = world.camera().view_projection(aspect);
                 let light_dir = world.light().direction.normalize_or_zero();

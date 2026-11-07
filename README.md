@@ -161,7 +161,7 @@ Finer knobs: `set_shadows`, `set_ambient_occlusion`, `set_global_illumination`,
 | `rocks` | `rock_model(shape, seed)`: boulders, blocks, slabs, spires with LOD |
 | `texgen` | `texture_layer(layer)`: 61 tileable albedo/normal/roughness layers |
 | `scatter` | `Scatter`: deterministic places with clumping, ground snapping, filters |
-| `proc_terrain` | `ProcTerrain::gpu_clipmap`: endless terrain with lakes, `HeightField` to query it |
+| `proc_terrain` | `ProcTerrain::gpu_clipmap`: endless terrain with lakes, painted with texgen layers (`with_layers(Some(TerrainLayers { .. }))`), `HeightField` to query it |
 | `landscape` | `Landscape::new(seed)`: hills and caves as a mesh |
 | `voxel_terrain` | Smooth, diggable voxel ground meshed on the GPU |
 | `fracture` / `debris` | Shatter meshes into solid chunks |
