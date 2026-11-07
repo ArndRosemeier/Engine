@@ -422,6 +422,8 @@ pub(crate) struct Physics {
     clock: f32,
     accumulator: f32,
     impacts: Vec<Impact>,
+    /// Fixed boxes owned by something else (building elements), by owner and part.
+    statics: HashMap<(u64, u32), ColliderHandle>,
 }
 
 impl std::fmt::Debug for Physics {
@@ -513,6 +515,7 @@ impl Physics {
             clock: 0.0,
             accumulator: 0.0,
             impacts: Vec::new(),
+            statics: HashMap::new(),
         }
     }
 
@@ -1257,6 +1260,59 @@ impl Physics {
         out
     }
 
+    /// A fixed box collider (a building element): `center`, `rotation` and
+    /// `half` extents in world space. Bodies collide with it like ground.
+    pub fn add_static_box(
+        &mut self,
+        owner: u64,
+        part: u32,
+        center: Vec3,
+        rotation: Quat,
+        half: Vec3,
+    ) {
+        self.remove_static(owner, part);
+        let c = ColliderBuilder::cuboid(half.x.max(0.01), half.y.max(0.01), half.z.max(0.01))
+            .position(pose(center, rotation))
+            .friction(0.7)
+            .user_data(GROUND_TAG);
+        let h = self.world.insert_collider(c, None);
+        self.statics.insert((owner, part), h);
+    }
+
+    /// Take a fixed box away and wake whatever rested on it.
+    pub fn remove_static(&mut self, owner: u64, part: u32) {
+        if let Some(h) = self.statics.remove(&(owner, part)) {
+            if let Some(c) = self.world.colliders.get(h) {
+                let aabb = c.compute_aabb();
+                let (lo, hi) = (aabb.mins - Vec3::splat(0.5), aabb.maxs + Vec3::splat(0.5));
+                self.world.remove_collider(h);
+                self.wake_in(lo, hi);
+            }
+        }
+    }
+
+    /// Take every fixed box of `owner` away.
+    pub fn remove_statics_of(&mut self, owner: u64) {
+        let mut parts: Vec<u32> = self
+            .statics
+            .keys()
+            .filter(|k| k.0 == owner)
+            .map(|k| k.1)
+            .collect();
+        parts.sort_unstable();
+        for p in parts {
+            self.remove_static(owner, p);
+        }
+    }
+
+    /// Is this dynamic body resting (asleep)?
+    pub fn is_sleeping(&self, id: EntityId) -> bool {
+        self.bodies
+            .get(&id)
+            .and_then(|t| self.world.bodies.get(t.handle))
+            .is_some_and(|b| b.is_sleeping())
+    }
+
     fn wake_in(&mut self, lo: Vec3, hi: Vec3) {
         for t in self.bodies.values() {
             if let Some(b) = self.world.bodies.get_mut(t.handle) {
@@ -1401,6 +1457,10 @@ impl BodyId {
         EntityId::from_raw(self.0)
     }
 }
+
+/// The colliders of a building in a [`PhysicsWorld`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BuildingColliders(u64);
 
 /// What a ray hit in a [`PhysicsWorld`]: a body, or the ground (`body` is `None`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1812,6 +1872,43 @@ impl PhysicsWorld {
             self.expired.push(BodyId(id.raw()));
         }
         ((self.inner.clock - before) * self.inner.settings.steps_per_second).round() as u32
+    }
+
+    /// A building's standing elements as fixed box colliders, placed by
+    /// `transform`. Keep the key and call [`Self::update_building`] after
+    /// the building changes.
+    pub fn add_building(
+        &mut self,
+        building: &crate::building::Building,
+        transform: Mat4,
+    ) -> BuildingColliders {
+        let key = BuildingColliders(self.next | (1 << 62));
+        self.next += 1;
+        let (_, rot, pos) = transform.to_scale_rotation_translation();
+        for (i, e) in building.plan().elements().iter().enumerate() {
+            if building.is_standing(crate::building::ElementId(i as u32)) {
+                self.inner
+                    .add_static_box(key.0, i as u32, pos + rot * e.center, rot, e.half);
+            }
+        }
+        key
+    }
+
+    /// Drop the colliders of elements that broke or fell (and wake what
+    /// rested on them).
+    pub fn update_building(
+        &mut self,
+        key: BuildingColliders,
+        building: &crate::building::Building,
+    ) {
+        let gone = building.gone();
+        for i in gone.iter_set() {
+            self.inner.remove_static(key.0, i as u32);
+        }
+    }
+
+    pub fn remove_building(&mut self, key: BuildingColliders) {
+        self.inner.remove_statics_of(key.0);
     }
 
     /// Exactly one fixed step, whatever the clock says. For servers that

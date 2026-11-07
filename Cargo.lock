@@ -226,6 +226,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "buildings"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "glam 0.33.12",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

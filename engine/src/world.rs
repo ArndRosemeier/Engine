@@ -35,6 +35,9 @@ pub use save::Loaded;
 
 #[path = "nav.rs"]
 mod nav;
+
+#[path = "world_buildings.rs"]
+mod world_buildings;
 pub use nav::{NavAgent, NavSettings, NavStats, NavStatus};
 
 /// Opaque handle to a spawned entity. Saves can hold it; after loading,
@@ -733,6 +736,12 @@ pub struct World {
     /// Where drawing is between the last two steps.
     sim_alpha: f32,
     sim_poses: HashMap<EntityId, crate::sim::SimPose>,
+    /// Breakable buildings by their mesh entity.
+    buildings: HashMap<EntityId, world_buildings::BuildingVisual>,
+    /// Element bits the GPU reads to hide broken parts.
+    element_states: world_buildings::ElementStates,
+    falling: Vec<world_buildings::FallingPart>,
+    rubble: world_buildings::RubbleSet,
     /// Surface presentation sync. Engine default stays on so demos never tear;
     /// the renderer applies it at every present.
     vsync: bool,
@@ -838,6 +847,10 @@ impl Default for World {
             sim_tick: 0,
             sim_alpha: 1.0,
             sim_poses: HashMap::new(),
+            buildings: HashMap::new(),
+            element_states: Default::default(),
+            falling: Vec::new(),
+            rubble: Default::default(),
             vsync: true,
             shadow_contact: ContactSnapshot::default(),
             shadow_contact_epoch: 0,
@@ -1891,6 +1904,9 @@ impl World {
     /// them. [`Self::detach`] a child first to keep it.
     pub fn despawn(&mut self, id: EntityId) {
         self.sim_poses.remove(&id);
+        if self.buildings.contains_key(&id) || self.falling.iter().any(|p| p.building == id) {
+            self.forget_building(id);
+        }
         if let Some(made) = self.prefab_instances.remove(&id) {
             for lamp in made.lamps {
                 self.remove_lamp(lamp);
@@ -2337,8 +2353,15 @@ impl World {
         self.tick_nav(dt);
         self.tick_animations(dt);
         self.tick_physics(dt);
+        self.tick_buildings(dt);
         self.tick_interpolation();
         self.tick_hierarchy();
+    }
+
+    /// Element words changed since the last call (start word, words), for the renderer.
+    pub(crate) fn take_element_upload(&mut self) -> Option<(usize, &[u32])> {
+        let (a, b) = self.element_states.dirty.take()?;
+        Some((a, &self.element_states.bits[a..b]))
     }
 
     /// Spawn a skinned model with clip playback.

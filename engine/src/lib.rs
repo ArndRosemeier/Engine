@@ -37,6 +37,7 @@
 pub mod advanced;
 pub mod anim;
 pub mod audio;
+pub mod building;
 pub mod camera;
 pub mod chunk_stream;
 pub mod collision;
@@ -130,8 +131,8 @@ pub use particles::{
     ParticleSilhouette, ParticleWorld, SizeOverLife,
 };
 pub use physics::{
-    Body, BodyHit, BodyId, BodyImpact, BodyKind, BodyShape, Impact, PhysicsGround, PhysicsSettings,
-    PhysicsWorld, RayHit,
+    Body, BodyHit, BodyId, BodyImpact, BodyKind, BodyShape, BuildingColliders, Impact,
+    PhysicsGround, PhysicsSettings, PhysicsWorld, RayHit,
 };
 pub use place::{GlobalPlace, MeshInstance, Place};
 pub use portal::{Portal, PortalId, PortalSettings, SpaceId};
