@@ -38,10 +38,10 @@ mod nav;
 
 #[path = "world_buildings.rs"]
 mod world_buildings;
-#[path = "world_decals.rs"]
-mod world_decals;
 #[path = "world_crowds.rs"]
 mod world_crowds;
+#[path = "world_decals.rs"]
+mod world_decals;
 #[path = "world_grading.rs"]
 mod world_grading;
 #[path = "world_ragdolls.rs"]
@@ -51,7 +51,7 @@ mod world_rooms;
 #[path = "world_zfight.rs"]
 mod world_zfight;
 pub use nav::{NavAgent, NavSettings, NavStats, NavStatus};
-pub use world_zfight::WorldScan;
+pub use world_zfight::{WorldScan, MAX_Z_FIGHTING_MARKS};
 
 /// Opaque handle to a spawned entity. Saves can hold it; after loading,
 /// map it to the new one with [`Loaded::entity`].

@@ -61,8 +61,9 @@ fn build(world: &mut World) -> EngineResult<ReflectionProbeId> {
     for side in [-1.0f32, 1.0] {
         world.place(
             slab(
-                Vec3::new(side * 10.0, 0.05, 20.0),
-                Vec3::new(6.0, 0.3, 160.0),
+                // The pavements end where the hall begins.
+                Vec3::new(side * 10.0, 0.05, 1.0),
+                Vec3::new(6.0, 0.3, 122.0),
                 rgb(120, 118, 112),
                 finish(0.8, 0.0),
             )?,
@@ -170,8 +171,10 @@ fn build(world: &mut World) -> EngineResult<ReflectionProbeId> {
     let floor = finish(0.05, 0.0);
     world.place(
         slab(
-            c + Vec3::new(0.0, 0.05, 0.0),
-            Vec3::new(hh.x * 2.0, 0.1, hh.z * 2.0),
+            // A little deeper than it shows, so its underside sits below the
+            // walls' and never fights with them.
+            c + Vec3::new(0.0, 0.04, 0.0),
+            Vec3::new(hh.x * 2.0, 0.12, hh.z * 2.0),
             rgb(200, 196, 188),
             floor,
         )?,
@@ -181,24 +184,25 @@ fn build(world: &mut World) -> EngineResult<ReflectionProbeId> {
         |center: Vec3, size: Vec3, color: Color| slab(center, size, color, finish(0.85, 0.0));
     world.place(
         wall(
+            // The back wall stops at the side walls instead of overlapping them.
             c + Vec3::new(0.0, hh.y, hh.z),
-            Vec3::new(hh.x * 2.0, hh.y * 2.0, 0.3),
+            Vec3::new(hh.x * 2.0 - 0.3, hh.y * 2.0, 0.3),
             rgb(170, 40, 36),
         )?,
         Place::new(0.0, 0.0, 0.0),
     )?;
     world.place(
         wall(
-            c + Vec3::new(-hh.x, hh.y, 0.0),
-            Vec3::new(0.3, hh.y * 2.0, hh.z * 2.0),
+            c + Vec3::new(-hh.x, hh.y, 0.05),
+            Vec3::new(0.3, hh.y * 2.0, hh.z * 2.0 + 0.2),
             rgb(40, 110, 170),
         )?,
         Place::new(0.0, 0.0, 0.0),
     )?;
     world.place(
         wall(
-            c + Vec3::new(hh.x, hh.y, 0.0),
-            Vec3::new(0.3, hh.y * 2.0, hh.z * 2.0),
+            c + Vec3::new(hh.x, hh.y, 0.05),
+            Vec3::new(0.3, hh.y * 2.0, hh.z * 2.0 + 0.2),
             rgb(220, 180, 60),
         )?,
         Place::new(0.0, 0.0, 0.0),

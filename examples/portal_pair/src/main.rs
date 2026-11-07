@@ -17,7 +17,8 @@ fn portal_frame(center: Vec3, color: Color, world: &mut World) {
     let t = 0.12;
     world.spawn(box_at((center.x - 0.62, 1.18, center.z), (t, h, t), color));
     world.spawn(box_at((center.x + 0.62, 1.18, center.z), (t, h, t), color));
-    world.spawn(box_at((center.x, 2.30, center.z), (w, t, t), color));
+    // 1 cm below the lintel so their undersides do not fight.
+    world.spawn(box_at((center.x, 2.29, center.z), (w, t, t), color));
     world.spawn(box_at((center.x, 0.06, center.z), (w, t, t), color));
 }
 
@@ -42,13 +43,14 @@ fn main() -> EngineResult<()> {
 
             world.spawn(box_at((0.0, 0.0, 0.0), (16.0, 0.1, 20.0), floor));
             world.spawn(box_at((0.0, 3.2, 0.0), (16.0, 0.1, 20.0), concrete));
-            world.spawn(box_at((-8.0, 1.6, 0.0), (0.2, 3.2, 20.0), concrete));
-            world.spawn(box_at((8.0, 1.6, 0.0), (0.2, 3.2, 20.0), concrete));
-            world.spawn(box_at((-4.4, 1.6, -10.0), (7.2, 3.2, 0.2), concrete));
-            world.spawn(box_at((4.4, 1.6, -10.0), (7.2, 3.2, 0.2), concrete));
+            // Side walls run through the corners; end walls stop at them.
+            world.spawn(box_at((-8.0, 1.6, 0.0), (0.2, 3.2, 20.2), concrete));
+            world.spawn(box_at((8.0, 1.6, 0.0), (0.2, 3.2, 20.2), concrete));
+            world.spawn(box_at((-4.35, 1.6, -10.0), (7.1, 3.2, 0.2), concrete));
+            world.spawn(box_at((4.35, 1.6, -10.0), (7.1, 3.2, 0.2), concrete));
             world.spawn(box_at((0.0, 2.72, -10.0), (1.6, 0.96, 0.2), concrete));
-            world.spawn(box_at((-4.4, 1.6, 10.0), (7.2, 3.2, 0.2), concrete));
-            world.spawn(box_at((4.4, 1.6, 10.0), (7.2, 3.2, 0.2), concrete));
+            world.spawn(box_at((-4.35, 1.6, 10.0), (7.1, 3.2, 0.2), concrete));
+            world.spawn(box_at((4.35, 1.6, 10.0), (7.1, 3.2, 0.2), concrete));
             world.spawn(box_at((0.0, 2.72, 10.0), (1.6, 0.96, 0.2), concrete));
 
             // Landmarks visible through recursive portal views.

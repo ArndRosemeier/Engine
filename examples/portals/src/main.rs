@@ -61,14 +61,16 @@ fn main() -> EngineResult<()> {
             let stone = rgb(140, 128, 107);
 
             world.spawn(wall((0.0, -0.05, 0.0), (28.0, 0.1, 28.0), grass));
-            world.spawn(wall((0.0, 1.5, 3.0), (6.0, 3.0, 0.2), plaster));
-            world.spawn(wall((-3.0, 1.5, 0.0), (0.2, 3.0, 6.0), plaster));
-            world.spawn(wall((3.0, 1.5, 0.0), (0.2, 3.0, 6.0), plaster));
-            world.spawn(wall((-1.8, 1.5, -3.0), (2.4, 3.0, 0.2), plaster));
-            world.spawn(wall((1.8, 1.5, -3.0), (2.4, 3.0, 0.2), plaster));
+            // Side walls run through the corners; the others stop at them.
+            world.spawn(wall((0.0, 1.5, 3.0), (5.8, 3.0, 0.2), plaster));
+            world.spawn(wall((-3.0, 1.5, 0.0), (0.2, 3.0, 6.2), plaster));
+            world.spawn(wall((3.0, 1.5, 0.0), (0.2, 3.0, 6.2), plaster));
+            world.spawn(wall((-1.75, 1.5, -3.0), (2.3, 3.0, 0.2), plaster));
+            world.spawn(wall((1.75, 1.5, -3.0), (2.3, 3.0, 0.2), plaster));
             world.spawn(wall((0.0, 2.6, -3.0), (DOOR_W, 0.8, 0.2), plaster));
             world.spawn(wall((0.0, 3.15, 0.0), (6.4, 0.2, 6.4), rgb(184, 46, 41)));
-            world.spawn(wall((0.0, 0.02, -4.2), (1.4, 0.04, 2.4), stone));
+            // The step is sunk a little so its underside never meets the walls'.
+            world.spawn(wall((0.0, 0.01, -4.2), (1.4, 0.06, 2.4), stone));
 
             let door_out = world
                 .place(
@@ -84,11 +86,11 @@ fn main() -> EngineResult<()> {
             let cream = rgb(232, 214, 186);
             world.spawn(wall((0.0, 0.0, 0.0), (8.0, 0.1, 8.0), floor));
             world.spawn(wall((0.0, 3.0, 0.0), (8.0, 0.1, 8.0), cream));
-            world.spawn(wall((0.0, 1.5, 4.0), (8.0, 3.0, 0.2), cream));
-            world.spawn(wall((-4.0, 1.5, 0.0), (0.2, 3.0, 8.0), cream));
-            world.spawn(wall((4.0, 1.5, 0.0), (0.2, 3.0, 8.0), cream));
-            world.spawn(wall((-2.3, 1.5, -4.0), (3.4, 3.0, 0.2), cream));
-            world.spawn(wall((2.3, 1.5, -4.0), (3.4, 3.0, 0.2), cream));
+            world.spawn(wall((0.0, 1.5, 4.0), (7.8, 3.0, 0.2), cream));
+            world.spawn(wall((-4.0, 1.5, 0.0), (0.2, 3.0, 8.2), cream));
+            world.spawn(wall((4.0, 1.5, 0.0), (0.2, 3.0, 8.2), cream));
+            world.spawn(wall((-2.25, 1.5, -4.0), (3.3, 3.0, 0.2), cream));
+            world.spawn(wall((2.25, 1.5, -4.0), (3.3, 3.0, 0.2), cream));
             world.spawn(wall((0.0, 2.6, -4.0), (DOOR_W, 0.8, 0.2), cream));
             world.spawn(wall((0.0, 0.45, 1.2), (1.4, 0.7, 0.8), wood));
             world.spawn(wall((-1.6, 0.7, 2.4), (0.5, 1.4, 0.5), rgb(70, 90, 140)));
