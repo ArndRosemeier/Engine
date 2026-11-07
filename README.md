@@ -434,9 +434,11 @@ world.audio_mut().set_bus_volume(Bus::Music, 0.5);
 world.set_room_reverb(hall, Some(Reverb::HALL));           // instead of the guess from its size
 ```
 
-No audio files needed to start: `Sound::explosion`, `crumble`, `dig`,
-`knock`, `splash`, `fire_loop`, `stream_loop`, `surf_loop`, `wind_loop` and
-`MusicTrack::procedural(seed, bpm)` are made in code. The engine also makes
+No audio files needed to start: recorded explosions, crumbling, digging,
+knocks, splashes and loops for fire, streams, rivers, surf and wind are built
+in (`Sound::stock(Stock::Explosion, variant)`), and `Sound::explosion(seed)`,
+`knock`, `fire_loop` and friends plus `MusicTrack::procedural(seed, bpm)` are
+made in code. The engine also makes
 its own sounds for explosions, digging, crumbling and shattering, fires,
 splashes, hard impacts between bodies, and flowing water and surf near the
 camera; `world.set_auto_sounds(false)` turns them off. See `examples/audio`.

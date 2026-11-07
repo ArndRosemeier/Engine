@@ -128,7 +128,7 @@ impl World {
         self.auto_play(
             |b| bank::pick(&b.dig, at.x - at.z),
             PlaySound::at(at)
-                .volume((radius / 1.5).sqrt().clamp(0.3, 2.0))
+                .volume(1.5 * (radius / 1.5).sqrt().clamp(0.3, 2.0))
                 .pitch((1.2 - 0.1 * radius).clamp(0.7, 1.3))
                 .range(3.0, 80.0 + 10.0 * radius),
         );
@@ -155,7 +155,7 @@ impl World {
                 &b.fire,
                 PlaySound::at(at)
                     .looped()
-                    .volume((0.5 * size.sqrt()).clamp(0.2, 2.0))
+                    .volume((0.9 * size.sqrt()).clamp(0.3, 3.0))
                     .range(1.0 + size, 30.0 + 10.0 * size)
                     .bus(crate::audio::Bus::Ambience)
                     .fade_in(0.8),
@@ -199,7 +199,7 @@ impl World {
             self.auto_play(
                 |b| bank::pick(if hard { &b.knock_hard } else { &b.knock_soft }, key),
                 PlaySound::at(i.point)
-                    .volume((i.speed / 8.0).clamp(0.1, 1.5))
+                    .volume((i.speed / 4.0).clamp(0.2, 3.0))
                     .pitch(0.9 + (key.fract().abs()) * 0.25)
                     .range(1.5, 60.0),
             );

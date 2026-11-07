@@ -116,7 +116,7 @@ pub use anim::{
 };
 pub use audio::{
     Acoustics, Audio, AudioScene, Bus, ClipId, MusicLayer, MusicTrack, Play, PlaySound, Reverb,
-    Sound, SoundId, VoiceId,
+    Sound, SoundId, Stock, VoiceId,
 };
 pub use camera::Camera;
 pub use chunk_stream::{ChunkBuilder, ChunkPayload, ChunkStream};

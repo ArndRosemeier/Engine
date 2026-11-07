@@ -1,6 +1,6 @@
 //! Sound: 3D placed sounds, reverb that follows the space you are in, and
-//! music in layers that follow the action. No audio files: every sound here
-//! is made in code.
+//! music in layers that follow the action. No audio files needed: every sound here
+//! is built into the engine or made in code.
 //!
 //! A meadow with a hill. Walk into the cave in the hill and the sound turns
 //! long and ringing; step into the stone hall and it echoes like a hall;
@@ -31,7 +31,9 @@ fn density(noise: &Noise, p: Vec3, hill: Vec3, hall: Vec3) -> f32 {
     let r = (p.with_y(0.0) - hill.with_y(0.0)).length();
     let mut height = 20.0 + hills * 5.0 + 34.0 * (-(r / 38.0).powi(2)).exp();
     // Level ground for the hall.
-    let out = ((p.x - hall.x).abs() - 12.0).max((p.z - hall.z).abs() - 15.0).max(0.0);
+    let out = ((p.x - hall.x).abs() - 12.0)
+        .max((p.z - hall.z).abs() - 15.0)
+        .max(0.0);
     let w = (out / 8.0).min(1.0);
     height = 21.0 + (height - 21.0) * w * w * (3.0 - 2.0 * w);
     let mut d = (height - p.y).clamp(-6.0, 6.0);
@@ -93,6 +95,7 @@ fn main() -> EngineResult<()> {
     let mut last_space = String::new();
     let mut ground_y = 0.0;
     let bell = Sound::knock(3, 1.0);
+    let mut frame_no = 0usize;
 
     Engine::run("audio", move |world, frame| {
         world.set_vsync(false);
@@ -133,7 +136,7 @@ fn main() -> EngineResult<()> {
             world.set_view_distance(900.0)?;
             // A breeze everywhere, and music.
             world.play_sound(
-                &Sound::wind_loop(4),
+                &Sound::stock(Stock::WindLoop, 0),
                 PlaySound::ambient().looped().volume(0.25),
             );
             world.play_music(MusicTrack::procedural(7, 92.0), 3.0);
@@ -164,7 +167,11 @@ fn main() -> EngineResult<()> {
         }
         if input.pressed(Key::K) {
             if let Some(hit) = hit {
-                world.play_sound(&Sound::knock(frame.time as u64, 0.6), PlaySound::at(hit));
+                world.play_sound(
+                    &Sound::stock(Stock::KnockHard, frame_no),
+                    PlaySound::at(hit).volume(2.0),
+                );
+                frame_no += 1;
             }
         }
         if input.pressed(Key::F) {

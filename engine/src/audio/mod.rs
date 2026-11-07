@@ -28,6 +28,7 @@ pub(crate) mod scene;
 mod sound;
 mod synth;
 
+pub use bank::Stock;
 pub use mixer::Bus;
 pub use player::{Audio, ClipId, Play, VoiceId};
 pub use reverb::Reverb;
