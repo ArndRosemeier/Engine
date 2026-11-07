@@ -678,15 +678,15 @@ fn an_instance_slot_can_reserve_gpu_capacity_without_drawing() {
 }
 
 #[test]
-fn instance_submit_defaults_to_cpu_and_switches_explicitly() {
+fn instance_submit_defaults_to_gpu_and_switches_explicitly() {
     use crate::world::{InstanceSubmit, World};
 
     let mut world = World::new();
-    assert_eq!(world.instance_submit(), InstanceSubmit::CpuIndexed);
-    world.set_instance_submit(InstanceSubmit::GpuIndirect);
     assert_eq!(world.instance_submit(), InstanceSubmit::GpuIndirect);
     world.set_instance_submit(InstanceSubmit::CpuIndexed);
     assert_eq!(world.instance_submit(), InstanceSubmit::CpuIndexed);
+    world.set_instance_submit(InstanceSubmit::GpuIndirect);
+    assert_eq!(world.instance_submit(), InstanceSubmit::GpuIndirect);
 }
 
 #[test]
@@ -700,7 +700,7 @@ fn static_render_epoch_changes_only_for_effective_render_mutations() {
 
     let unchanged = world.render_epoch();
     world.set_casts_shadow(id, true).expect("same shadow state");
-    world.set_instance_submit(InstanceSubmit::CpuIndexed);
+    world.set_instance_submit(InstanceSubmit::GpuIndirect);
     assert_eq!(world.render_epoch(), unchanged);
 
     world
