@@ -9,7 +9,8 @@
 //!
 //! `ENGINE_QUALITY=low|medium|high|ultra` picks a preset,
 //! `ENGINE_TARGET_FPS=60` lets the engine trade detail for frame rate,
-//! `ENGINE_SKY_HOUR=8.5` sets the time of day.
+//! `ENGINE_SKY_HOUR=8.5` sets the time of day, `ENGINE_GRASS=0` hides the
+//! grass (`0.5` halves its reach).
 use engine::prelude::*;
 
 /// Trees of the wood, in the order they are dealt places.
@@ -103,6 +104,7 @@ fn main() -> EngineResult<()> {
     let hour = setting("ENGINE_SKY_HOUR")
         .and_then(|h| h.parse::<f32>().ok())
         .unwrap_or(16.0);
+    let grass = setting("ENGINE_GRASS").and_then(|g| g.parse::<f32>().ok());
 
     let start = Vec3::new(-30.0, 0.0, -60.0);
     let mut camera = FlyCamera::new(
@@ -115,6 +117,9 @@ fn main() -> EngineResult<()> {
     Engine::run("starter", move |world, frame| {
         if frame.first {
             world.set_quality(quality);
+            if let Some(grass) = grass {
+                world.set_grass_scale(grass)?;
+            }
             world.set_target_fps(target_fps)?;
             world.set_view_distance(1500.0)?;
             world.set_physical_sky(Some(PhysicalSky::at_hour(hour)));
