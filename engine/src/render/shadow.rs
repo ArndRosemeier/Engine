@@ -1048,7 +1048,7 @@ pub struct ShadowGpu {
     /// once the mesh material layout exists.
     pub cutout_pipeline: Option<wgpu::RenderPipeline>,
     mesh_shader: wgpu::ShaderModule,
-    depth_state: wgpu::DepthStencilState,
+    pub(crate) depth_state: wgpu::DepthStencilState,
     pub voxel_pipeline: wgpu::RenderPipeline,
     pub skinned_pipeline: wgpu::RenderPipeline,
     pub layer_views: [wgpu::TextureView; CASCADE_COUNT],

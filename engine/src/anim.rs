@@ -526,6 +526,13 @@ impl Animator {
         }
     }
 
+    /// Drop any cross-fade and continue the current clip from `time`, so a
+    /// character can pick up exactly where a stand-in left off.
+    pub(crate) fn snap_to(&mut self, time: f32) {
+        self.fade = None;
+        self.seek(time);
+    }
+
     pub fn time(&self) -> f32 {
         self.time
     }

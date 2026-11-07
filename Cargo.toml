@@ -29,6 +29,7 @@ members = [
     "examples/characters",
     "examples/fixed_tick",
     "examples/ragdolls",
+    "examples/crowds",
     "examples/decals",
     "examples/fog_volumes",
     "examples/interiors",
@@ -67,6 +68,7 @@ serde_json = "1"
 flate2 = "1"
 wgpu = "25"
 winit = "0.30"
+meshopt = "0.7"
 
 # Generators and the renderer crawl without optimisation, so debug builds
 # optimise dependencies (and the engine) while your own code stays quick to build.
