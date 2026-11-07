@@ -529,6 +529,9 @@ struct ResidentTile {
 
 /// Streams a [`WorldGenerator`] around the camera. Hand it to
 /// [`World::set_stream`]; the engine updates it every frame.
+/// Generated chunks of one voxel block: key and density samples.
+type BlockChunks = Vec<(IVec3, Vec<f32>)>;
+
 pub struct WorldStream {
     gen: Arc<dyn WorldGenerator>,
     settings: StreamSettings,
@@ -542,7 +545,7 @@ pub struct WorldStream {
     // Voxel blocks.
     blocks: HashSet<IVec2>,
     block_chunks: HashMap<IVec2, usize>,
-    ready_blocks: Vec<(IVec2, Vec<(IVec3, Vec<f32>)>)>,
+    ready_blocks: Vec<(IVec2, BlockChunks)>,
     edits: HashMap<IVec3, EditedChunk>,
     seen_layout: u64,
     // Far terrain.
@@ -736,14 +739,29 @@ impl WorldStream {
         let far = self.far_tree(focus, &wanted_blocks);
         let wanted_tiles = self.wanted_tiles(focus);
 
+        let t0 = Instant::now();
         self.schedule(focus, &wanted_blocks, &far, &wanted_tiles);
         self.stats.installed = 0;
+        let t1 = Instant::now();
         self.install_blocks(world, focus, &wanted_blocks);
+        let t2 = Instant::now();
         self.update_far(world, &far);
+        let t3 = Instant::now();
         self.install_tiles(world, focus, started);
+        let t4 = Instant::now();
         self.unload(world, focus);
+        let t5 = Instant::now();
         self.update_water(world, focus);
         self.store_stray_edits(world);
+        let t6 = Instant::now();
+        if std::env::var_os("ENGINE_STREAM_TRACE").is_some() && (t6 - started).as_secs_f32() > 0.003
+        {
+            let ms = |a: Instant, b: Instant| (b - a).as_secs_f32() * 1000.0;
+            eprintln!(
+                "stream slow frame: wanted {:.2} schedule {:.2} blocks {:.2} far {:.2} tiles {:.2} unload {:.2} water {:.2}",
+                ms(started, t0), ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4), ms(t4, t5), ms(t5, t6)
+            );
+        }
 
         self.stats.voxel_blocks = self.blocks.len();
         self.stats.voxel_chunks = self.block_chunks.values().sum();
@@ -1311,7 +1329,7 @@ impl WorldStream {
         let gen = self.gen.clone();
         let tx = self.tx.clone();
         let settings = self.settings.clone();
-        let look = world.water().map(|w| w.look().clone());
+        let look = world.water().map(|w| *w.look());
         self.pool.spawn(move || {
             let mid = wanted.as_vec2() * step;
             let half = Vec2::splat(window * 0.5);
@@ -1577,6 +1595,45 @@ mod tests {
     }
 
     #[test]
+    fn saved_games_keep_edits_of_unloaded_ground() {
+        let gen = || TestWorld {
+            model: None,
+            water: false,
+        };
+        let mut world = World::new();
+        look(&mut world, 0.0, 0.0);
+        world
+            .set_stream(Some(WorldStream::new(gen(), small())))
+            .unwrap();
+        pump(&mut world);
+        let ground = world.stream().unwrap().height_at(5.0, 5.0);
+        let probe = Vec3::new(5.0, ground - 1.0, 5.0);
+        world
+            .voxel_terrain_mut()
+            .unwrap()
+            .dig_sphere(Vec3::new(5.0, ground, 5.0), 3.0);
+        // Walk away so the dug chunks sit in the stream's store, then save.
+        look(&mut world, 3000.0, 0.0);
+        pump(&mut world);
+        assert!(world.stream().unwrap().stats().stored_edits > 0);
+        let bytes = world.save_to_bytes(&()).unwrap();
+
+        let mut fresh = World::new();
+        look(&mut fresh, 3000.0, 0.0);
+        fresh
+            .set_stream(Some(WorldStream::new(gen(), small())))
+            .unwrap();
+        pump(&mut fresh);
+        fresh.load_from_bytes(&bytes).unwrap();
+        look(&mut fresh, 0.0, 0.0);
+        pump(&mut fresh);
+        assert!(
+            !fresh.voxel_terrain().unwrap().is_solid(probe),
+            "the hole came back from the save"
+        );
+    }
+
+    #[test]
     fn tiles_place_models_and_take_them_away() {
         let mut world = World::new();
         let cube = Shape::box_at((0.0, 0.5, 0.0), (1.0, 1.0, 1.0), rgb(200, 100, 50)).unwrap();
@@ -1698,5 +1755,103 @@ mod tests {
         );
         v.restore_edited(edit);
         assert!(!v.is_solid(Vec3::new(10.0, -1.0, 10.0)), "the edit is back");
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use crate::color::rgb;
+    use crate::mesh::Shape;
+
+    struct Rolling {
+        models: Vec<LodId>,
+    }
+
+    impl WorldGenerator for Rolling {
+        fn height(&self, x: f32, z: f32) -> f32 {
+            (x * 0.004).sin() * 30.0 + (z * 0.003).cos() * 25.0 + (x * 0.03 + z * 0.02).sin() * 3.0
+        }
+
+        fn populate(&self, tile: &mut Tile) -> EngineResult<()> {
+            let (min, max) = (tile.min(), tile.max());
+            let places = crate::scatter::Scatter::new(tile.seed())
+                .rect(min.x, min.y, max.x, max.y)
+                .spacing(9.0)
+                .on_ground(|x, z| self.height(x, z))
+                .places()?;
+            for (i, p) in places.into_iter().enumerate() {
+                tile.place(self.models[i % self.models.len()], p);
+            }
+            Ok(())
+        }
+    }
+
+    /// World-side cost of flying over a streamed world (no renderer):
+    /// `cargo test --release -p engine --lib stream::bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn flight_costs() {
+        let mut world = World::new();
+        let mut models = Vec::new();
+        for k in 0..12 {
+            let cube = Shape::box_at(
+                (0.0, 0.5, 0.0),
+                (1.0, 1.0 + k as f32 * 0.1, 1.0),
+                rgb(90, 140, 60),
+            )
+            .unwrap();
+            models.push(
+                world
+                    .spawn_lod(vec![
+                        crate::lod::LodLevel::new(cube.clone(), 60.0),
+                        crate::lod::LodLevel::new(cube.clone(), 200.0),
+                        crate::lod::LodLevel::new(cube, 1100.0),
+                    ])
+                    .unwrap(),
+            );
+        }
+        world.look_first_person((0.0, 40.0, 0.0), 90.0, 0.0);
+        world
+            .set_stream(Some(WorldStream::new(
+                Rolling { models },
+                StreamSettings::default(),
+            )))
+            .unwrap();
+        let t = Instant::now();
+        assert!(world.prepare_stream(60.0));
+        println!(
+            "prepare {:.0} ms {:?}",
+            t.elapsed().as_secs_f32() * 1000.0,
+            world.stream().unwrap().stats()
+        );
+        for speed in [15.0f32, 120.0, 400.0] {
+            let mut x = world.camera().eye().x;
+            let mut stream_ms = Vec::new();
+            let mut lod_ms = Vec::new();
+            for _ in 0..600 {
+                x += speed / 60.0;
+                world.look_first_person((x, 40.0, 0.0), 90.0, 0.0);
+                let a = Instant::now();
+                world.tick_stream();
+                let b = Instant::now();
+                world.tick_lods();
+                let c = Instant::now();
+                stream_ms.push((b - a).as_secs_f32() * 1000.0);
+                lod_ms.push((c - b).as_secs_f32() * 1000.0);
+                std::thread::sleep(std::time::Duration::from_millis(16));
+            }
+            let stat = |v: &mut Vec<f32>| {
+                v.sort_by(f32::total_cmp);
+                (v[v.len() / 2], v[v.len() * 99 / 100], v[v.len() - 1])
+            };
+            println!(
+                "{speed} m/s: stream p50/p99/max {:?} ms, lod {:?} ms, entities {}, {:?}",
+                stat(&mut stream_ms),
+                stat(&mut lod_ms),
+                world.entity_count(),
+                world.stream().unwrap().stats()
+            );
+        }
     }
 }

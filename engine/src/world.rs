@@ -657,6 +657,9 @@ pub struct World {
     next_id: u64,
     entities: HashMap<EntityId, Entity>,
     order: Vec<EntityId>,
+    /// Despawned ids still listed in `order` (dropped in bulk, so despawning
+    /// many entities stays cheap).
+    order_stale: usize,
     /// Changes whenever static render state could require a GPU resync.
     render_epoch: u64,
     animated: HashMap<EntityId, AnimatedEntity>,
@@ -822,6 +825,7 @@ impl Default for World {
             next_id: 1,
             entities: HashMap::new(),
             order: Vec::new(),
+            order_stale: 0,
             render_epoch: 1,
             animated: HashMap::new(),
             animated_order: Vec::new(),
@@ -1275,11 +1279,17 @@ impl World {
         }
         let eye = self.camera.eye();
         let (bias, fade) = (self.lod_bias, self.lod_fade);
-        let mut updates = Vec::new();
+        let mut stale_sets: Vec<&mut LodSet> = Vec::new();
         for set in self.lods.values_mut() {
+            // Far sets need a proportionally longer move to change visibly
+            // (a metre at a kilometre moves a fade by a fraction of a percent).
+            let near = set
+                .bounds
+                .map_or(0.0, |(c, r)| (c.distance(eye) - r).max(0.0));
+            let threshold = set.move_threshold(bias, fade).max(near * 0.01);
             let stale = match set.assigned_for {
                 None => true,
-                Some((at, b)) => b != bias || at.distance(eye) >= set.move_threshold(bias, fade),
+                Some((at, b)) => b != bias || at.distance(eye) >= threshold,
             };
             if !stale {
                 continue;
@@ -1295,12 +1305,22 @@ impl World {
             }
             set.assigned_zone = zone;
             set.assigned_for = Some((eye, bias));
-            let ends: Vec<f32> = set.levels.iter().map(|(_, d)| *d).collect();
-            let lists = crate::lod::assign(&set.places, &ends, eye, bias, fade);
-            for ((entity, _), list) in set.levels.iter().zip(lists) {
-                updates.push((*entity, list));
-            }
+            stale_sets.push(set);
         }
+        // Sets are independent: assign them on all cores.
+        use rayon::prelude::*;
+        let updates: Vec<(EntityId, Vec<MeshInstance>)> = stale_sets
+            .par_iter()
+            .flat_map_iter(|set| {
+                let ends: Vec<f32> = set.levels.iter().map(|(_, d)| *d).collect();
+                let lists = crate::lod::assign(&set.places, &ends, eye, bias, fade);
+                set.levels
+                    .iter()
+                    .map(|(e, _)| *e)
+                    .zip(lists)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         for (entity, list) in updates {
             self.replace_instances(entity, list);
         }
@@ -2032,7 +2052,15 @@ impl World {
         }
         self.physics.remove(id);
         let removed_static = self.entities.remove(&id).is_some();
-        self.order.retain(|x| *x != id);
+        if removed_static {
+            // `entities()` skips ids that are gone; compact now and then.
+            self.order_stale += 1;
+            if self.order_stale > 256 && self.order_stale * 2 > self.order.len() {
+                let entities = &self.entities;
+                self.order.retain(|x| entities.contains_key(x));
+                self.order_stale = 0;
+            }
+        }
         self.animated.remove(&id);
         self.animated_order.retain(|x| *x != id);
         self.chunk_entities.retain(|_, eid| *eid != id);
