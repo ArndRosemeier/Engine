@@ -76,6 +76,8 @@ VARIANTS: list[Launch] = [
     Launch("characters: from the side", "characters", {"ENGINE_CHARACTERS_VIEW": "side"}),
     Launch("characters: without foot IK (compare)", "characters",
            {"ENGINE_CHARACTERS_VIEW": "side", "ENGINE_CHARACTERS_IK": "0"}),
+    Launch("navigation: walkable area shown", "navigation", {"ENGINE_NAV_OVERLAY": "1"}),
+    Launch("navigation: stairs to the terrace", "navigation", {"ENGINE_NAV_VIEW": "terrace"}),
     Launch("physics: demo (a throw, dominoes, a blast)", "physics", {"ENGINE_PHYSICS_DEMO": "1"}),
     Launch("starter with ACES tone mapping (compare)", "starter", {"ENGINE_TONEMAP": "aces"}),
 ]

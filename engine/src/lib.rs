@@ -163,7 +163,8 @@ pub use voxel_terrain::{VoxelTerrain, VOXEL_MAX_LOD};
 pub use water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use world::{
     AmbientOcclusion, AnimatedEntity, BloomSettings, EntityId, Frame, GlobalIllumination, Haze,
-    HitchSpan, InstanceSubmit, Light, ShadowSettings, Sky, ToneMap, TorchLight, World,
+    HitchSpan, InstanceSubmit, Light, NavAgent, NavSettings, NavStats, NavStatus, ShadowSettings,
+    Sky, ToneMap, TorchLight, World,
 };
 
 /// Entry point matching the planned `Engine::run` shape.
