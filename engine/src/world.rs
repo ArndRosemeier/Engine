@@ -620,6 +620,9 @@ pub struct World {
     global_illumination: Option<GlobalIllumination>,
     /// Smooth destructible terrain, meshed by the renderer on the GPU.
     voxel_terrain: Option<crate::voxel_terrain::VoxelTerrain>,
+    water: Option<crate::water::Water>,
+    /// Voxel terrain revision the water last read its columns from.
+    water_terrain_rev: u64,
     /// Pieces of shattered meshes still flying or lying around.
     debris: Vec<crate::debris::Piece>,
     /// Surface presentation sync. Engine default stays on so demos never tear;
@@ -710,6 +713,8 @@ impl Default for World {
             ambient_occlusion: Some(AmbientOcclusion::default()),
             global_illumination: Some(GlobalIllumination::default()),
             voxel_terrain: None,
+            water: None,
+            water_terrain_rev: 0,
             debris: Vec::new(),
             vsync: true,
             shadow_contact: ContactSnapshot::default(),
@@ -2176,6 +2181,59 @@ impl World {
 
     pub fn set_voxel_terrain(&mut self, terrain: Option<crate::voxel_terrain::VoxelTerrain>) {
         self.voxel_terrain = terrain;
+    }
+
+    /// The water simulation, if one is set.
+    pub fn water(&self) -> Option<&crate::water::Water> {
+        self.water.as_ref()
+    }
+
+    /// Pour, add sources, change settings. Terrain edits made through
+    /// [`World::voxel_terrain_mut`] reach the water by themselves.
+    pub fn water_mut(&mut self) -> Option<&mut crate::water::Water> {
+        self.water.as_mut()
+    }
+
+    /// Set (or remove) the water. The engine steps it every frame and, when
+    /// the voxel terrain is dug or built on, re-reads the changed columns so
+    /// water flows into new cavities and out of filled ones.
+    pub fn set_water(&mut self, water: Option<crate::water::Water>) {
+        self.water = water;
+        self.water_terrain_rev = self.voxel_terrain.as_ref().map_or(0, |t| t.volume().rev());
+    }
+
+    /// Step the water. The engine calls this every frame.
+    pub fn tick_water(&mut self, dt: f32) {
+        let Some(water) = self.water.as_mut() else {
+            return;
+        };
+        if let Some(terrain) = self.voxel_terrain.as_ref() {
+            let volume = terrain.volume();
+            if volume.rev() != self.water_terrain_rev {
+                let (keys, _) = volume.changed_since(self.water_terrain_rev);
+                self.water_terrain_rev = volume.rev();
+                let size = volume.chunk_world_size();
+                let mut xz: Vec<glam::IVec2> =
+                    keys.iter().map(|k| glam::IVec2::new(k.x, k.z)).collect();
+                xz.sort_by_key(|k| (k.x, k.y));
+                xz.dedup();
+                let region = *water.region();
+                let mut changed = vec![false; region.column_count()];
+                for k in xz {
+                    let min = k.as_vec2() * size;
+                    crate::water::mark_columns(
+                        &region,
+                        min,
+                        min + glam::Vec2::splat(size),
+                        &mut changed,
+                    );
+                }
+                water.resync_columns(terrain, &changed);
+            }
+        }
+        if dt.is_finite() && dt > 0.0 {
+            water.update(dt);
+        }
     }
 
     /// Break a mesh entity into solid pieces that fly away from `impact`

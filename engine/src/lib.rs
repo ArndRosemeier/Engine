@@ -77,6 +77,7 @@ pub mod ui;
 pub mod vegetation;
 pub mod vfx;
 pub mod voxel_terrain;
+pub mod water;
 pub mod water_mesh;
 pub mod world;
 
