@@ -422,6 +422,70 @@ fn fbm3(p: vec3<f32>, gain: f32) -> f32 {
     return total / 0.5;
 }
 
+// Three independent value noises at once (one hash per corner, not three).
+fn hash33(p: vec3<f32>) -> vec3<f32> {
+    var q = fract(p * vec3<f32>(0.1031, 0.1030, 0.0973));
+    q += dot(q, q.yxz + 33.33);
+    return fract((q.xxy + q.yxx) * q.zyx);
+}
+
+fn value3v(p: vec3<f32>) -> vec3<f32> {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let n000 = hash33(i);
+    let n100 = hash33(i + vec3<f32>(1.0, 0.0, 0.0));
+    let n010 = hash33(i + vec3<f32>(0.0, 1.0, 0.0));
+    let n110 = hash33(i + vec3<f32>(1.0, 1.0, 0.0));
+    let n001 = hash33(i + vec3<f32>(0.0, 0.0, 1.0));
+    let n101 = hash33(i + vec3<f32>(1.0, 0.0, 1.0));
+    let n011 = hash33(i + vec3<f32>(0.0, 1.0, 1.0));
+    let n111 = hash33(i + vec3<f32>(1.0, 1.0, 1.0));
+    return mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y),
+        mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z);
+}
+
+// fbm3-like noise that stops at octaves finer than the pixel (`foot`: pixel
+// size in noise units). Skipped octaves add their mean, so the brightness
+// matches; distant surfaces then cost one or two octaves instead of four.
+fn fbm3_lod(p: vec3<f32>, gain: f32, foot: f32) -> f32 {
+    var q = p;
+    var amplitude = 0.5;
+    var total = 0.0;
+    var freq = 1.0;
+    for (var octave = 0; octave < 4; octave++) {
+        let keep = 1.0 - smoothstep(0.25, 0.5, freq * foot);
+        if keep <= 0.0 {
+            total += 0.5 * amplitude * (1.0 - pow(gain, f32(4 - octave))) / (1.0 - gain);
+            break;
+        }
+        total += mix(0.5, value3(q), keep) * amplitude;
+        q = q * 2.03 + vec3<f32>(17.1, 9.4, 3.7);
+        amplitude *= gain;
+        freq *= 2.03;
+    }
+    return total / 0.5;
+}
+
+fn fbm3v_lod(p: vec3<f32>, gain: f32, foot: f32) -> vec3<f32> {
+    var q = p;
+    var amplitude = 0.5;
+    var total = vec3<f32>(0.0);
+    var freq = 1.0;
+    for (var octave = 0; octave < 4; octave++) {
+        let keep = 1.0 - smoothstep(0.25, 0.5, freq * foot);
+        if keep <= 0.0 {
+            total += vec3<f32>(0.5 * amplitude * (1.0 - pow(gain, f32(4 - octave))) / (1.0 - gain));
+            break;
+        }
+        total += mix(vec3<f32>(0.5), value3v(q), keep) * amplitude;
+        q = q * 2.03 + vec3<f32>(17.1, 9.4, 3.7);
+        amplitude *= gain;
+        freq *= 2.03;
+    }
+    return total / 0.5;
+}
+
 fn ridged3(p: vec3<f32>, gain: f32) -> f32 {
     let ridge = 1.0 - abs(fbm3(p, gain) * 2.0 - 1.0);
     return ridge * ridge;
@@ -1016,10 +1080,14 @@ fn fs_voxel(in: VsOut) -> @location(0) vec4<f32> {
     let n0 = normalize(in.world_n);
     let p = in.world_p;
     let seed = in.surface2.y;
-    let broad = fbm3(p * 0.11 + vec3<f32>(seed, 5.0, 9.0), 0.5);
-    let fine = fbm3(p * 1.7 + vec3<f32>(3.0, seed, 1.0), 0.5);
-    let strata = fbm3(vec3<f32>(p.x * 0.04, p.y * 0.85, p.z * 0.04) + vec3<f32>(seed * 0.3), 0.55);
-    let n = normalize(n0 + (vec3<f32>(fine, fbm3(p * 1.7 + 11.0, 0.5), fbm3(p * 1.7 + 23.0, 0.5)) - 0.5) * 0.18);
+    // Pixel size in metres: noise octaves finer than that are skipped.
+    let foot = max(length(dpdx(p)), length(dpdy(p)));
+    let broad = fbm3_lod(p * 0.11 + vec3<f32>(seed, 5.0, 9.0), 0.5, foot * 0.11);
+    // Colour grain and the bumped normal from one three-channel noise.
+    let grain = fbm3v_lod(p * 1.7 + vec3<f32>(3.0, seed, 1.0), 0.5, foot * 1.7);
+    let fine = grain.x;
+    let strata = fbm3_lod(vec3<f32>(p.x * 0.04, p.y * 0.85, p.z * 0.04) + vec3<f32>(seed * 0.3), 0.55, foot * 0.85);
+    let n = normalize(n0 + (grain - 0.5) * 0.18);
 
     var rock = in.color.rgb * (0.62 + 0.5 * strata) * (0.86 + 0.28 * fine);
     var earth = vec3<f32>(0.33, 0.25, 0.17) * (0.8 + 0.35 * broad) * (0.9 + 0.2 * fine);
@@ -1032,6 +1100,15 @@ fn fs_voxel(in: VsOut) -> @location(0) vec4<f32> {
         grass = sand;
         earth = sand * 0.88;
         rock = vec3<f32>(0.40, 0.37, 0.33) * (0.62 + 0.5 * strata) * (0.86 + 0.28 * fine);
+    }
+    if in.surface5.y > 0.5 {
+        // Beach: sand on the low ground, its upper edge wandering with the
+        // noise; steep faces keep their rock.
+        let top = in.surface5.x + (broad - 0.5) * 2.4;
+        let s = 1.0 - smoothstep(top - 0.5, top + 0.5, p.y);
+        let sand = vec3<f32>(0.66, 0.55, 0.36) * (0.9 + 0.2 * broad) * (0.9 + 0.2 * fine);
+        grass = mix(grass, sand, s);
+        earth = mix(earth, sand * 0.88, s);
     }
     let up = n0.y + (broad - 0.5) * 0.3;
     let grass_w = smoothstep(0.72, 0.84, up);
@@ -1078,6 +1155,9 @@ pub struct Pipelines {
     pub opaque: wgpu::RenderPipeline,
     /// Voxel terrain through the same lit shader (compact vertex layout).
     pub voxel_opaque: wgpu::RenderPipeline,
+    /// After a depth prepass: same shading, depth test only.
+    pub opaque_nowrite: wgpu::RenderPipeline,
+    pub voxel_nowrite: wgpu::RenderPipeline,
     pub voxel_depth_prepass: wgpu::RenderPipeline,
     pub transparent: wgpu::RenderPipeline,
     pub opaque_portal: wgpu::RenderPipeline,
@@ -1208,13 +1288,14 @@ pub fn create_pipelines(
 
     let make = |label: &str,
                 blend: wgpu::BlendState,
-                depth_write: bool,
+                _depth_write: bool,
                 cull: Option<wgpu::Face>,
                 depth_stencil: wgpu::DepthStencilState,
                 buffers: &[wgpu::VertexBufferLayout<'static>],
                 fs_entry: &str| {
-        // Opaque draws (the only ones writing depth) turn foliage alpha into coverage.
-        let alpha_to_coverage = depth_write;
+        // Opaque draws turn foliage alpha into coverage.
+        // Voxel ground is always solid: no coverage from alpha.
+        let alpha_to_coverage = blend == wgpu::BlendState::REPLACE && fs_entry != "fs_voxel";
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&pipeline_layout),
@@ -1234,7 +1315,7 @@ pub fn create_pipelines(
                 })],
                 // See-through surfaces are not in the depth the AO came from.
                 compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: if depth_write {
+                    constants: if blend == wgpu::BlendState::REPLACE {
                         &[]
                     } else {
                         &[("SCENE_AO", 0.0)]
@@ -1301,6 +1382,24 @@ pub fn create_pipelines(
         &super::voxel_terrain::VOXEL_BUFFERS,
         "fs_voxel",
     );
+    let opaque_nowrite = make(
+        "opaque-nowrite-pipeline",
+        wgpu::BlendState::REPLACE,
+        false,
+        Some(wgpu::Face::Back),
+        super::stencil::scene_depth_stencil_unmasked_write(false),
+        &MESH_BUFFERS,
+        "fs_main",
+    );
+    let voxel_nowrite = make(
+        "voxel-nowrite-pipeline",
+        wgpu::BlendState::REPLACE,
+        false,
+        Some(wgpu::Face::Back),
+        super::stencil::scene_depth_stencil_unmasked_write(false),
+        &super::voxel_terrain::VOXEL_BUFFERS,
+        "fs_voxel",
+    );
     let depth_prepass_for = |label: &str, buffers: &[wgpu::VertexBufferLayout<'static>]| {
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
@@ -1336,6 +1435,8 @@ pub fn create_pipelines(
     Pipelines {
         opaque,
         voxel_opaque,
+        opaque_nowrite,
+        voxel_nowrite,
         voxel_depth_prepass,
         transparent,
         opaque_portal,
@@ -1350,3 +1451,4 @@ pub fn create_pipelines(
         white_albedo,
     }
 }
+

@@ -62,6 +62,9 @@ VARIANTS: list[Launch] = [
     Launch("coast: rough sea", "coast", {"ENGINE_COAST_SEA": "rough"}),
     Launch("coast: swim in the surf (G toggles flying)", "coast",
            {"ENGINE_COAST_VIEW": "beach", "ENGINE_WATER_BODY": "1"}),
+    Launch("island: from the hill", "island", {"ENGINE_ISLAND_VIEW": "hill"}),
+    Launch("island: seen from the sea", "island", {"ENGINE_ISLAND_VIEW": "sea"}),
+    Launch("island: evening", "island", {"ENGINE_SKY_HOUR": "19.2"}),
     Launch("starter with ACES tone mapping (compare)", "starter", {"ENGINE_TONEMAP": "aces"}),
 ]
 

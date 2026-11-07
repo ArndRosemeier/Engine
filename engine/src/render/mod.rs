@@ -34,7 +34,7 @@ use crate::world::{Entity, EntityId, InstanceSubmit, ShadowSettings, SurfaceMate
 use clipmap::ClipmapRenderer;
 use frustum::{Bounds, Frustum, Visibility};
 use gpu_mesh::GpuMesh;
-use gpu_profile::{GpuProfiler, Mark};
+use gpu_profile::{GpuProfiler, Mark, SceneMark};
 use instance_cull::{
     ActiveInstanceRange, CullDraws, CullJob, InstanceCull, OPAQUE_INDIRECT_OFFSET,
     TRANSLUCENT_INDIRECT_OFFSET, WORKGROUP,
@@ -407,6 +407,13 @@ impl Renderer {
                 panic!("ENGINE_GPU_PROFILE_EVERY requested unsupported GPU timestamp queries");
             }
             required_features |= timestamp_features;
+            // Splitting the scene pass needs stamps inside it; optional.
+            if adapter
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES)
+            {
+                required_features |= wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
+            }
         }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -505,7 +512,16 @@ impl Renderer {
         let portal = PortalGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
         let instance_cull = InstanceCull::new(&device);
         let gpu_profiler = gpu_profile_interval
-            .map(|every| GpuProfiler::new(&device, queue.get_timestamp_period(), every));
+            .map(|every| {
+                GpuProfiler::new(
+                    &device,
+                    queue.get_timestamp_period(),
+                    every,
+                    device
+                        .features()
+                        .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
+                )
+            });
 
         let particles = ParticleGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
         let ribbons = RibbonGpu::new(&device, HDR_FORMAT, &pipelines.bind_layout);
@@ -1151,6 +1167,7 @@ impl Renderer {
         };
         let (scene_view, scene_resolve) = self.postprocess.scene_attachment();
         self.encode_world(&mut encoder, &scene_view, scene_resolve.as_ref(), world);
+        self.mark_gpu(&mut encoder, Mark::SceneDone);
         if let Some(water) = world.water() {
             let camera = Self::main_scene_camera(world);
             let aspect = width as f32 / height as f32;
@@ -1173,6 +1190,7 @@ impl Renderer {
                 },
             );
         }
+        self.mark_gpu(&mut encoder, Mark::WaterDone);
         if taa_on {
             let aspect = width as f32 / height as f32;
             let vp = Self::main_scene_camera(world).view_projection(aspect);
@@ -1212,6 +1230,13 @@ impl Renderer {
         }
         frame.present();
         Ok(())
+    }
+
+    /// Stamp a part of the main scene pass (only the top level, not portals).
+    fn mark_scene(&self, pass: &mut wgpu::RenderPass<'_>, on: bool, mark: SceneMark) {
+        if let (true, Some(profiler)) = (on, self.gpu_profiler.as_ref()) {
+            profiler.scene_mark(pass, mark);
+        }
     }
 
     fn mark_gpu(&self, encoder: &mut wgpu::CommandEncoder, mark: Mark) {
@@ -2100,6 +2125,15 @@ impl Renderer {
             draw_environment,
             use_cull,
         } = view;
+        // Profile only the top-level view (portal views reuse this code).
+        let stamp = !portal_mask && use_cull;
+        // After a depth prepass the opaque draws only test depth: with depth
+        // writes on, shaders that can discard (LOD dither, leaves) lose early
+        // depth testing and shade every hidden fragment (2.4 -> 1.2 ms for
+        // lod_forest on an RTX 5070). Leaf edges the prepass left out still
+        // draw, they just don't occlude each other.
+        let nowrite = stamp && self.ao_active;
+        self.mark_scene(pass, stamp, SceneMark::Begin);
         pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
 
         if draw_environment && world.sky().is_some() {
@@ -2113,9 +2147,16 @@ impl Renderer {
             pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
         }
 
+        self.mark_scene(pass, stamp, SceneMark::Sky);
         if draw_environment {
             if let Some(clip) = self.clipmap.as_ref() {
                 clip.draw_land(pass, &self.shadow.resource_bind, portal_mask);
+            }
+        }
+        // Every stamp is written each frame: the readback waits for all.
+        self.mark_scene(pass, stamp, SceneMark::Land);
+        if draw_environment {
+            if let Some(clip) = self.clipmap.as_ref() {
                 if !portal_mask {
                     clip.draw_grass(pass, &self.shadow.resource_bind);
                 }
@@ -2124,15 +2165,23 @@ impl Renderer {
             }
         }
 
+        self.mark_scene(pass, stamp, SceneMark::Grass);
         if !portal_mask && space == SpaceId::DEFAULT && self.voxel.is_drawing() {
             let draws = self.voxel.visible_in(&self.frustum);
-            pass.set_pipeline(&self.pipelines.voxel_opaque);
+            pass.set_pipeline(if nowrite {
+                &self.pipelines.voxel_nowrite
+            } else {
+                &self.pipelines.voxel_opaque
+            });
             pass.set_bind_group(1, &self.pipelines.white_albedo, &[]);
             self.voxel.draw(pass, &draws);
         }
 
+        self.mark_scene(pass, stamp, SceneMark::Voxel);
         pass.set_pipeline(if portal_mask {
             &self.pipelines.opaque_portal
+        } else if nowrite {
+            &self.pipelines.opaque_nowrite
         } else {
             &self.pipelines.opaque
         });
@@ -2160,6 +2209,7 @@ impl Renderer {
                 &mut self.gpu_stats.indirect_draws,
             );
         }
+        self.mark_scene(pass, stamp, SceneMark::Meshes);
         for &prototype in &self.batch_opaque {
             if !entity_in_space(world, prototype, space) {
                 continue;
@@ -2187,6 +2237,7 @@ impl Renderer {
             );
         }
 
+        self.mark_scene(pass, stamp, SceneMark::Batches);
         if use_cull {
             if let Some(bundle) = self.terrain_bundle.as_ref() {
                 pass.execute_bundles(std::iter::once(bundle));
@@ -2253,6 +2304,7 @@ impl Renderer {
             );
         }
 
+        self.mark_scene(pass, stamp, SceneMark::Terrain);
         pass.set_pipeline(if portal_mask {
             &self.skinned.opaque_portal
         } else {
@@ -2276,6 +2328,7 @@ impl Renderer {
         }
         pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
 
+        self.mark_scene(pass, stamp, SceneMark::Skinned);
         pass.set_pipeline(if portal_mask {
             &self.pipelines.transparent_portal
         } else {
@@ -2393,6 +2446,7 @@ impl Renderer {
             );
         }
 
+        self.mark_scene(pass, stamp, SceneMark::Transparent);
         self.ribbons
             .draw(pass, self.pipelines.scene_bind_group(uniform_slot));
         self.particles
@@ -2403,6 +2457,7 @@ impl Renderer {
                 clip.draw_water(pass, &self.shadow.resource_bind, portal_mask);
             }
         }
+        self.mark_scene(pass, stamp, SceneMark::End);
     }
 
     fn prepare_shadow_bundle(&mut self, cascade: usize, selection: &ShadowCullSelection) {

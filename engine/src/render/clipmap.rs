@@ -305,9 +305,11 @@ fn sample_flat(i: i32, xz: vec2<f32>, inv_tile: f32, k: f32, geo: vec3<f32>, far
     let gy = vec2<f32>(d.y.x, -d.y.z) * inv_tile;
     var out: LayerSample;
     var albedo = textureSampleGrad(layer_albedo, layer_sampler, uv, i, gx, gy).rgb;
-    let r = mat2x2<f32>(0.8 * 0.27, 0.6 * 0.27, -0.6 * 0.27, 0.8 * 0.27);
-    let uv2 = r * uv + vec2<f32>(0.37, 0.71);
-    albedo = mix(albedo, textureSampleGrad(layer_albedo, layer_sampler, uv2, i, r * gx, r * gy).rgb, far * 0.5);
+    if far > 0.0 {
+        let r = mat2x2<f32>(0.8 * 0.27, 0.6 * 0.27, -0.6 * 0.27, 0.8 * 0.27);
+        let uv2 = r * uv + vec2<f32>(0.37, 0.71);
+        albedo = mix(albedo, textureSampleGrad(layer_albedo, layer_sampler, uv2, i, r * gx, r * gy).rgb, far * 0.5);
+    }
     out.albedo = albedo;
     let nm = textureSampleGrad(layer_normal, layer_sampler, uv, i, gx, gy);
     var t = nm.xyz * 2.0 - 1.0;
@@ -440,17 +442,45 @@ fn ground_mix(xz: vec2<f32>, g: f32, up: f32) -> GroundMix {
     return out;
 }
 
+// Relief height (normal map alpha) of one layer, the only input the height
+// blend needs before it knows which layers show.
+fn layer_relief(i: i32, in: VsOut, geo: vec3<f32>, d: Grads) -> f32 {
+    let inv_tile = layer_tile(i);
+    if i == 3 {
+        var w = pow(abs(geo), vec3<f32>(4.0));
+        w = w / max(w.x + w.y + w.z, 1e-5);
+        let sg = select(vec3<f32>(-1.0), vec3<f32>(1.0), geo >= vec3<f32>(0.0));
+        let p = in.world_p * inv_tile;
+        let ax = d.x * inv_tile;
+        let ay = d.y * inv_tile;
+        let hx = textureSampleGrad(layer_normal, layer_sampler, vec2<f32>(p.z * sg.x, -p.y), i,
+            vec2<f32>(ax.z * sg.x, -ax.y), vec2<f32>(ay.z * sg.x, -ay.y)).a;
+        let hy = textureSampleGrad(layer_normal, layer_sampler, vec2<f32>(p.x * sg.y, -p.z), i,
+            vec2<f32>(ax.x * sg.y, -ax.z), vec2<f32>(ay.x * sg.y, -ay.z)).a;
+        let hz = textureSampleGrad(layer_normal, layer_sampler, vec2<f32>(-p.x * sg.z, -p.y), i,
+            vec2<f32>(-ax.x * sg.z, -ax.y), vec2<f32>(-ay.x * sg.z, -ay.y)).a;
+        return hx * w.x + hy * w.y + hz * w.z;
+    }
+    let uv = vec2<f32>(in.world_p.x, -in.world_p.z) * inv_tile;
+    let gx = vec2<f32>(d.x.x, -d.x.z) * inv_tile;
+    let gy = vec2<f32>(d.y.x, -d.y.z) * inv_tile;
+    return textureSampleGrad(layer_normal, layer_sampler, uv, i, gx, gy).a;
+}
+
 fn ground_surface(in: VsOut, geo: vec3<f32>, d: Grads) -> LayerSample {
     let mix5 = ground_mix(in.world_p.xz, in.ground, geo.y);
     var w = mix5.w;
     let patches = mix5.patches;
     let far = smoothstep(25.0, 90.0, distance(frame.eye, in.world_p));
-    var s: array<LayerSample, 5>;
+    // First the relief of each present layer, to find the one on top; then
+    // full samples only of the layers that show through the height blend
+    // (usually one or two of the five).
+    var key = array<f32, 5>(-1.0, -1.0, -1.0, -1.0, -1.0);
     var best = 0.0;
     for (var i = 0; i < 5; i++) {
         if w[i] > 0.002 {
-            s[i] = sample_layer(i, in, geo, far, d);
-            best = max(best, w[i] + s[i].orh.z * 0.5);
+            key[i] = w[i] + layer_relief(i, in, geo, d) * 0.5;
+            best = max(best, key[i]);
         }
     }
     var out: LayerSample;
@@ -459,11 +489,12 @@ fn ground_surface(in: VsOut, geo: vec3<f32>, d: Grads) -> LayerSample {
     out.orh = vec3<f32>(0.0);
     var total = 0.0;
     for (var i = 0; i < 5; i++) {
-        if w[i] > 0.002 {
-            let b = max(w[i] + s[i].orh.z * 0.5 - best + 0.18, 0.0);
-            out.albedo += s[i].albedo * b;
-            out.n += s[i].n * b;
-            out.orh += s[i].orh * b;
+        let b = key[i] - best + 0.18;
+        if w[i] > 0.002 && b > 0.0 {
+            let s = sample_layer(i, in, geo, far, d);
+            out.albedo += s.albedo * b;
+            out.n += s.n * b;
+            out.orh += s.orh * b;
             total += b;
         }
     }
