@@ -2611,6 +2611,52 @@ impl World {
         Ok(())
     }
 
+    /// Sets the weight of an animated entity's morph target by name (see
+    /// [`crate::anim::AnimatedModel::morph_targets`]): a face expression, a
+    /// blink. Weights are usually 0..1 and stay until changed.
+    pub fn set_morph_weight(
+        &mut self,
+        id: EntityId,
+        target: &str,
+        weight: f32,
+    ) -> EngineResult<()> {
+        let e = self
+            .animated
+            .get_mut(&id)
+            .ok_or(EngineError::UnknownEntity)?;
+        let index = e
+            .animator
+            .model()
+            .morph_targets
+            .iter()
+            .position(|n| n == target)
+            .ok_or_else(|| {
+                EngineError::InvalidValue(format!("no morph target called {target:?}"))
+            })?;
+        e.animator.set_morph_weight(index, weight)
+    }
+
+    /// Sets the weights of an animated entity's morph targets in model order
+    /// (one per [`crate::anim::AnimatedModel::morph_targets`]; a shorter slice
+    /// sets the first ones). Cheaper than naming each one every frame.
+    pub fn set_morph_weights(&mut self, id: EntityId, weights: &[f32]) -> EngineResult<()> {
+        let e = self
+            .animated
+            .get_mut(&id)
+            .ok_or(EngineError::UnknownEntity)?;
+        let n = e.animator.model().morph_targets.len();
+        if weights.len() > n {
+            return Err(EngineError::InvalidValue(format!(
+                "{} morph weights for {n} morph targets",
+                weights.len()
+            )));
+        }
+        for (i, &w) in weights.iter().enumerate() {
+            e.animator.set_morph_weight(i, w)?;
+        }
+        Ok(())
+    }
+
     /// Advance all skinned clip clocks (call once per frame before render sync).
     pub fn tick_animations(&mut self, dt: f32) {
         for e in self.animated.values_mut() {

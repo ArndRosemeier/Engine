@@ -12,6 +12,9 @@ use std::sync::Arc;
 /// Maximum joints uploaded to the GPU joint palette.
 pub const MAX_JOINTS: usize = 128;
 
+/// Maximum morph targets of one [`AnimatedModel`] (see [`AnimatedModel::morph_targets`]).
+pub const MAX_MORPH_TARGETS: usize = 64;
+
 #[derive(Clone, Debug)]
 pub struct Skeleton {
     pub joint_names: Vec<String>,
@@ -60,6 +63,24 @@ pub struct SkinMesh {
     /// Normal, ORM and emissive maps plus the material's roughness and
     /// metallic factors.
     pub maps: MaterialMaps,
+    /// How the model's morph targets move this mesh (a face's expressions,
+    /// blinks); empty for most meshes.
+    pub morphs: Vec<MeshMorph>,
+}
+
+/// What one morph target of the model does to one mesh: offsets of the
+/// vertices it moves, in the mesh's bind pose (added before skinning). The
+/// GPU keeps them as half floats, so offsets of a few metres at most.
+#[derive(Clone, Debug, Default)]
+pub struct MeshMorph {
+    /// Index into [`AnimatedModel::morph_targets`].
+    pub target: usize,
+    /// The vertices it moves (indices into the mesh's vertex arrays).
+    pub vertices: Vec<u32>,
+    /// Position offset of each of those vertices.
+    pub positions: Vec<Vec3>,
+    /// Normal offset of each (empty: normals stay).
+    pub normals: Vec<Vec3>,
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +117,10 @@ pub struct AnimatedModel {
     pub clips: Vec<AnimationClip>,
     /// Bind-pose local TRS per skeleton joint (from the glTF rest pose).
     pub bind_local: Vec<(Vec3, Quat, Vec3)>,
+    /// Names of the morph targets (at most [`MAX_MORPH_TARGETS`]) that
+    /// [`SkinMesh::morphs`] refer to. Their weights are set per entity with
+    /// `World::set_morph_weight`; all start at 0.
+    pub morph_targets: Vec<String>,
 }
 
 impl AnimatedModel {
@@ -240,6 +265,8 @@ pub struct Animator {
     pub(crate) ik: Option<IkState>,
     /// A pose laid over the clips (a ragdoll, getting up), see [`PoseOverride`].
     pub(crate) pose_override: Option<PoseOverride>,
+    /// Weight of each of the model's morph targets.
+    morph_weights: Vec<f32>,
 }
 
 /// Joint locals that replace the clips' by `weight` (0 = clips only,
@@ -344,7 +371,9 @@ impl Skeleton {
 
 impl Animator {
     pub fn new(model: Arc<AnimatedModel>) -> EngineResult<Self> {
+        validate_morphs(&model)?;
         Ok(Self {
+            morph_weights: vec![0.0; model.morph_targets.len()],
             model,
             clip_index: 0,
             time: 0.0,
@@ -359,6 +388,23 @@ impl Animator {
             ik: None,
             pose_override: None,
         })
+    }
+
+    /// Weight of each of the model's morph targets (see
+    /// [`AnimatedModel::morph_targets`]).
+    pub fn morph_weights(&self) -> &[f32] {
+        &self.morph_weights
+    }
+
+    /// Sets the weight of morph target `index` (usually 0..1; non-finite
+    /// weights count as 0).
+    pub fn set_morph_weight(&mut self, index: usize, weight: f32) -> EngineResult<()> {
+        let n = self.morph_weights.len();
+        let w = self.morph_weights.get_mut(index).ok_or_else(|| {
+            EngineError::InvalidValue(format!("morph target {index} out of range (model has {n})"))
+        })?;
+        *w = if weight.is_finite() { weight } else { 0.0 };
+        Ok(())
     }
 
     /// Seconds to cross-fade between clips (0 switches at once). Default 0.2.
@@ -1430,6 +1476,7 @@ fn load_animated_document(
                 double_sided: primitive.material().double_sided(),
                 albedo,
                 maps: material_maps(&primitive.material(), images)?,
+                morphs: Vec::new(),
             });
         }
     }
@@ -1595,11 +1642,48 @@ fn load_animated_document(
         meshes,
         clips,
         bind_local,
+        morph_targets: Vec::new(),
     })
 }
 
+/// Morph data must fit the GPU tables: at most [`MAX_MORPH_TARGETS`] targets,
+/// and each mesh morph naming a target and vertices that exist.
+fn validate_morphs(model: &AnimatedModel) -> EngineResult<()> {
+    let targets = model.morph_targets.len();
+    if targets > MAX_MORPH_TARGETS {
+        return Err(EngineError::Model(format!(
+            "{targets} morph targets (the engine takes {MAX_MORPH_TARGETS})"
+        )));
+    }
+    for (i, mesh) in model.meshes.iter().enumerate() {
+        for m in &mesh.morphs {
+            let bad = |what: &str| {
+                Err(EngineError::Model(format!(
+                    "mesh {i} morph {}: {what}",
+                    m.target
+                )))
+            };
+            if m.target >= targets {
+                return bad("names a morph target the model doesn't have");
+            }
+            if m.positions.len() != m.vertices.len()
+                || !(m.normals.is_empty() || m.normals.len() == m.vertices.len())
+            {
+                return bad("needs one position (and normal) offset per vertex");
+            }
+            if m.vertices
+                .iter()
+                .any(|&v| v as usize >= mesh.positions.len())
+            {
+                return bad("moves a vertex the mesh doesn't have");
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
 
@@ -1773,5 +1857,64 @@ mod tests {
         );
         let mesh = &model.meshes[0];
         assert!(mesh.maps.normal.is_none() && mesh.maps.is_neutral());
+    }
+
+    /// One triangle on one joint with morph targets.
+    pub(crate) fn morph_model(morphs: Vec<MeshMorph>, targets: &[&str]) -> AnimatedModel {
+        AnimatedModel {
+            skeleton: Skeleton {
+                joint_names: vec!["root".into()],
+                parents: vec![None],
+                inverse_bind: vec![Mat4::IDENTITY],
+                joint_node_indices: vec![0],
+                root_transforms: vec![Mat4::IDENTITY],
+            },
+            meshes: vec![SkinMesh {
+                positions: vec![Vec3::ZERO, Vec3::X, Vec3::Y],
+                normals: vec![Vec3::Z; 3],
+                colors: vec![Vec4::ONE; 3],
+                uvs: vec![[0.0, 0.0]; 3],
+                joints: vec![[0; 4]; 3],
+                weights: vec![[1.0, 0.0, 0.0, 0.0]; 3],
+                indices: vec![0, 1, 2],
+                double_sided: false,
+                albedo: None,
+                maps: Default::default(),
+                morphs,
+            }],
+            clips: Vec::new(),
+            bind_local: vec![(Vec3::ZERO, Quat::IDENTITY, Vec3::ONE)],
+            morph_targets: targets.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn morph_weights_start_at_zero_and_are_validated() {
+        let blink = MeshMorph {
+            target: 1,
+            vertices: vec![2],
+            positions: vec![Vec3::new(0.0, -0.01, 0.0)],
+            normals: vec![],
+        };
+        let mut a = Animator::new(Arc::new(morph_model(
+            vec![blink.clone()],
+            &["smile", "blink"],
+        )))
+        .unwrap();
+        assert_eq!(a.morph_weights(), &[0.0, 0.0]);
+        a.set_morph_weight(1, 0.7).unwrap();
+        a.set_morph_weight(0, f32::NAN).unwrap();
+        assert_eq!(a.morph_weights(), &[0.0, 0.7]);
+        assert!(a.set_morph_weight(2, 1.0).is_err());
+        // A morph naming a missing target, or a missing vertex, is refused.
+        assert!(Animator::new(Arc::new(morph_model(vec![blink.clone()], &["smile"]))).is_err());
+        let far = MeshMorph {
+            vertices: vec![3],
+            ..blink.clone()
+        };
+        assert!(Animator::new(Arc::new(morph_model(vec![far], &["smile", "blink"]))).is_err());
+        let names: Vec<String> = (0..=MAX_MORPH_TARGETS).map(|i| format!("t{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert!(Animator::new(Arc::new(morph_model(Vec::new(), &refs))).is_err());
     }
 }

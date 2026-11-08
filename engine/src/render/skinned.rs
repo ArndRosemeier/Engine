@@ -1,6 +1,6 @@
 //! GPU skinning pipeline and mesh upload.
 
-use crate::anim::{SkinMesh, MAX_JOINTS};
+use crate::anim::{AnimatedModel, SkinMesh, MAX_JOINTS, MAX_MORPH_TARGETS};
 use crate::mesh::InstanceRaw;
 use crate::render::material::{upload_map, GpuMaterial, MapKind, NeutralMaps};
 use bytemuck::{Pod, Zeroable};
@@ -16,7 +16,12 @@ pub struct SkinnedVertex {
     pub uv: [f32; 2],
     pub joints: [u16; 4],
     pub weights: [f32; 4],
+    /// Row of this vertex in the model's morph table, or [`NO_MORPH`].
+    pub morph: u32,
 }
+
+/// `SkinnedVertex::morph` of a vertex no morph target moves.
+pub const NO_MORPH: u32 = u32::MAX;
 
 impl SkinnedVertex {
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -29,6 +34,7 @@ impl SkinnedVertex {
             3 => Float32x2,
             4 => Uint16x4,
             5 => Float32x4,
+            15 => Uint32,
         ],
     };
 }
@@ -37,10 +43,16 @@ impl SkinnedVertex {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct JointPalette {
     pub joints: [[[f32; 4]; 4]; MAX_JOINTS],
+    /// Morph target weights, four per entry.
+    pub morph_weights: [[f32; 4]; MAX_MORPH_TARGETS / 4],
+    /// x: the model's morph target count (the morph table's row width).
+    pub morph_info: [u32; 4],
 }
 
 impl JointPalette {
-    pub fn from_matrices(mats: &[Mat4]) -> Self {
+    /// Joint matrices plus the weights of the model's morph targets (one
+    /// per target, in model order).
+    pub fn with_morphs(mats: &[Mat4], morph_weights: &[f32]) -> Self {
         let mut joints = [[[0.0; 4]; 4]; MAX_JOINTS];
         for (i, m) in mats.iter().take(MAX_JOINTS).enumerate() {
             joints[i] = m.to_cols_array_2d();
@@ -49,16 +61,152 @@ impl JointPalette {
         for slot in joints.iter_mut().skip(mats.len().min(MAX_JOINTS)) {
             *slot = Mat4::IDENTITY.to_cols_array_2d();
         }
-        Self { joints }
+        let mut weights = [[0.0; 4]; MAX_MORPH_TARGETS / 4];
+        let count = morph_weights.len().min(MAX_MORPH_TARGETS);
+        for (i, w) in morph_weights.iter().take(count).enumerate() {
+            weights[i / 4][i % 4] = *w;
+        }
+        Self {
+            joints,
+            morph_weights: weights,
+            morph_info: [count as u32, 0, 0, 0],
+        }
     }
 }
 
-const SKINNED_SHADER: &str = r#"
+/// WGSL shared by the skinned shaders: the joint palette with morph weights
+/// (group 1) and the morph table, and `morph_vertex`, which adds the morph
+/// offsets of a vertex to its bind-pose position and normal.
+pub const SKIN_WGSL: &str = r#"
 struct Joints {
     m: array<mat4x4<f32>, 128>,
+    morph_w: array<vec4<f32>, 16>,
+    morph_info: vec4<u32>,
 };
 
 @group(1) @binding(0) var<uniform> bones: Joints;
+// Per morph table row and target: position offset (x, y | z, -) and normal
+// offset (x, y | z, -) as half floats.
+@group(1) @binding(1) var<storage, read> morph_table: array<vec4<u32>>;
+
+struct Morphed {
+    p: vec3<f32>,
+    n: vec3<f32>,
+};
+
+fn morph_vertex(row: u32, p: vec3<f32>, n: vec3<f32>) -> Morphed {
+    var out = Morphed(p, n);
+    let count = bones.morph_info.x;
+    if row == 0xffffffffu || count == 0u {
+        return out;
+    }
+    for (var t = 0u; t < count; t++) {
+        let w = bones.morph_w[t / 4u][t % 4u];
+        if w == 0.0 {
+            continue;
+        }
+        let d = morph_table[row * count + t];
+        out.p += w * vec3<f32>(unpack2x16float(d.x), unpack2x16float(d.y).x);
+        out.n += w * vec3<f32>(unpack2x16float(d.z), unpack2x16float(d.w).x);
+    }
+    return out;
+}
+"#;
+
+/// f32 to IEEE half float bits (round to nearest; out of range saturates).
+fn f16_bits(v: f32) -> u16 {
+    let b = v.to_bits();
+    let sign = ((b >> 16) & 0x8000) as u16;
+    if !v.is_finite() {
+        return sign;
+    }
+    let a = v.abs();
+    if a < 6.0e-8 {
+        return sign;
+    }
+    if a >= 65504.0 {
+        return sign | 0x7bff;
+    }
+    if a < 6.103_515_6e-5 {
+        // Subnormal: units of 2^-24.
+        return sign | (a * 16_777_216.0).round() as u16;
+    }
+    let exp = ((b >> 23) & 0xff) as i32 - 127 + 15;
+    let mant = b & 0x7f_ffff;
+    let mut h = ((exp as u32) << 10) | (mant >> 13);
+    // Round to nearest, ties to even.
+    let rest = mant & 0x1fff;
+    if rest > 0x1000 || (rest == 0x1000 && h & 1 == 1) {
+        h += 1;
+    }
+    sign | h.min(0x7bff) as u16
+}
+
+fn pack_half2(a: f32, b: f32) -> u32 {
+    f16_bits(a) as u32 | (f16_bits(b) as u32) << 16
+}
+
+/// A model's morph table: the rows of each mesh's vertices (one row per
+/// vertex some target moves, [`NO_MORPH`] for the rest) and the table, one
+/// `[u32; 4]` per row and target (see [`SKIN_WGSL`]).
+pub fn morph_table(model: &AnimatedModel) -> (Vec<Vec<u32>>, Vec<[u32; 4]>) {
+    let targets = model.morph_targets.len();
+    let mut rows: Vec<Vec<u32>> = Vec::with_capacity(model.meshes.len());
+    let mut table: Vec<[u32; 4]> = Vec::new();
+    let mut next = 0u32;
+    for mesh in &model.meshes {
+        let mut mine = vec![NO_MORPH; mesh.positions.len()];
+        if targets == 0 || mesh.morphs.is_empty() {
+            rows.push(mine);
+            continue;
+        }
+        for m in &mesh.morphs {
+            for &v in &m.vertices {
+                if let Some(r) = mine.get_mut(v as usize).filter(|r| **r == NO_MORPH) {
+                    *r = next;
+                    next += 1;
+                }
+            }
+        }
+        let mut offsets =
+            vec![(glam::Vec3::ZERO, glam::Vec3::ZERO); next as usize * targets - table.len()];
+        let base = table.len();
+        for m in &mesh.morphs {
+            for (k, &v) in m.vertices.iter().enumerate() {
+                let Some(&row) = mine.get(v as usize) else {
+                    continue;
+                };
+                let i = row as usize * targets + m.target - base;
+                offsets[i].0 += m.positions[k];
+                offsets[i].1 += m.normals.get(k).copied().unwrap_or_default();
+            }
+        }
+        table.extend(offsets.iter().map(|(p, n)| {
+            [
+                pack_half2(p.x, p.y),
+                pack_half2(p.z, 0.0),
+                pack_half2(n.x, n.y),
+                pack_half2(n.z, 0.0),
+            ]
+        }));
+        rows.push(mine);
+    }
+    (rows, table)
+}
+
+/// The morph table on the GPU (a 1-row zero table when the model has none, so
+/// the bind group is always complete).
+pub fn upload_morph_table(device: &wgpu::Device, table: &[[u32; 4]]) -> wgpu::Buffer {
+    let zero = [[0u32; 4]];
+    let data = if table.is_empty() { &zero[..] } else { table };
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("skinned-morph-table"),
+        contents: bytemuck::cast_slice(data),
+        usage: wgpu::BufferUsages::STORAGE,
+    })
+}
+
+const SKINNED_SHADER: &str = r#"
 @group(2) @binding(0) var albedo_tex: texture_2d<f32>;
 @group(2) @binding(1) var albedo_sampler: sampler;
 
@@ -73,6 +221,7 @@ struct VsIn {
     @location(7) m1: vec4<f32>,
     @location(8) m2: vec4<f32>,
     @location(9) m3: vec4<f32>,
+    @location(15) morph: u32,
 };
 
 struct VsOut {
@@ -97,8 +246,9 @@ fn vs_main(v: VsIn) -> VsOut {
     skin += bones.m[v.joints.z] * v.weights.z;
     skin += bones.m[v.joints.w] * v.weights.w;
 
-    let skinned_pos = skin * vec4<f32>(v.position, 1.0);
-    let skinned_n = skin * vec4<f32>(v.normal, 0.0);
+    let bind = morph_vertex(v.morph, v.position, v.normal);
+    let skinned_pos = skin * vec4<f32>(bind.p, 1.0);
+    let skinned_n = skin * vec4<f32>(bind.n, 0.0);
     let world = model * skinned_pos;
     var out: VsOut;
     out.clip = u.view_proj * world;
@@ -158,16 +308,29 @@ pub struct SkinnedPipelines {
 pub fn joint_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("joint-layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
             },
-            count: None,
-        }],
+            // The model's morph table.
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
     })
 }
 
@@ -182,7 +345,7 @@ pub fn create_skinned_pipelines(
         label: Some("skinned-shader"),
         source: wgpu::ShaderSource::Wgsl(
             format!(
-                "const SKIN_ALPHA_CUT: f32 = {};\n{}{SKINNED_SHADER}{}",
+                "const SKIN_ALPHA_CUT: f32 = {};\n{}{SKIN_WGSL}{SKINNED_SHADER}{}",
                 if super::stencil::scene_samples() > 1 {
                     "0.0"
                 } else {
@@ -287,6 +450,7 @@ impl GpuSkinnedMesh {
         material_sampler: &wgpu::Sampler,
         neutral: &NeutralMaps,
         mesh: &SkinMesh,
+        morph_rows: Option<&[u32]>,
     ) -> Self {
         let mut vertices = Vec::with_capacity(mesh.positions.len());
         for i in 0..mesh.positions.len() {
@@ -297,6 +461,10 @@ impl GpuSkinnedMesh {
                 uv: mesh.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
                 joints: mesh.joints[i],
                 weights: mesh.weights[i],
+                morph: morph_rows
+                    .and_then(|r| r.get(i))
+                    .copied()
+                    .unwrap_or(NO_MORPH),
             });
         }
         let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -344,8 +512,10 @@ impl GpuSkinnedEntity {
         device: &wgpu::Device,
         joint_layout: &wgpu::BindGroupLayout,
         meshes: Vec<GpuSkinnedMesh>,
+        morph_table: &wgpu::Buffer,
         transform: Mat4,
         joints: &[Mat4],
+        morph_weights: &[f32],
     ) -> Self {
         let instance = InstanceRaw::from_matrix(transform);
         let instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -353,7 +523,7 @@ impl GpuSkinnedEntity {
             contents: bytemuck::bytes_of(&instance),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
-        let palette = JointPalette::from_matrices(joints);
+        let palette = JointPalette::with_morphs(joints, morph_weights);
         let joint_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("joint-palette"),
             contents: bytemuck::bytes_of(&palette),
@@ -362,10 +532,16 @@ impl GpuSkinnedEntity {
         let joint_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("joint-bind"),
             layout: joint_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: joint_buf.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: joint_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: morph_table.as_entire_binding(),
+                },
+            ],
         });
         Self {
             meshes,
@@ -375,10 +551,69 @@ impl GpuSkinnedEntity {
         }
     }
 
-    pub fn update(&self, queue: &wgpu::Queue, transform: Mat4, joints: &[Mat4]) {
+    pub fn update(
+        &self,
+        queue: &wgpu::Queue,
+        transform: Mat4,
+        joints: &[Mat4],
+        morph_weights: &[f32],
+    ) {
         let instance = InstanceRaw::from_matrix(transform);
         queue.write_buffer(&self.instance_buf, 0, bytemuck::bytes_of(&instance));
-        let palette = JointPalette::from_matrices(joints);
+        let palette = JointPalette::with_morphs(joints, morph_weights);
         queue.write_buffer(&self.joint_buf, 0, bytemuck::bytes_of(&palette));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::anim::MeshMorph;
+    use glam::Vec3;
+
+    fn half(bits: u16) -> f32 {
+        let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+        let exp = ((bits >> 10) & 0x1f) as i32;
+        let mant = (bits & 0x3ff) as f32;
+        sign * if exp == 0 {
+            mant * 2f32.powi(-24)
+        } else {
+            (1.0 + mant / 1024.0) * 2f32.powi(exp - 15)
+        }
+    }
+
+    #[test]
+    fn half_floats_round_trip() {
+        for v in [0.0, 1.0, -2.5, 0.0123, -0.000_4, 3.0e-6, 1000.0] {
+            let back = half(f16_bits(v));
+            assert!((back - v).abs() <= v.abs() * 1e-3 + 6e-8, "{v} -> {back}");
+        }
+        assert_eq!(f16_bits(1.0), 0x3c00);
+        assert_eq!(f16_bits(-2.0), 0xc000);
+        assert_eq!(f16_bits(1.0e9), 0x7bff);
+    }
+
+    #[test]
+    fn morph_table_rows_cover_moved_vertices() {
+        let m = |target, v: u32, y: f32| MeshMorph {
+            target,
+            vertices: vec![v],
+            positions: vec![Vec3::new(0.0, y, 0.0)],
+            normals: vec![Vec3::X],
+        };
+        let model = crate::anim::tests::morph_model(
+            vec![m(0, 2, 0.5), m(1, 2, -0.25), m(1, 0, 1.0)],
+            &["a", "b"],
+        );
+        let (rows, table) = morph_table(&model);
+        // Vertex 2 gets row 0, vertex 0 row 1; vertex 1 moves with nothing.
+        assert_eq!(rows, vec![vec![1, NO_MORPH, 0]]);
+        assert_eq!(table.len(), 2 * 2);
+        let y = |row: usize, t: usize| half((table[row * 2 + t][0] >> 16) as u16);
+        assert_eq!((y(0, 0), y(0, 1), y(1, 0), y(1, 1)), (0.5, -0.25, 0.0, 1.0));
+        assert_eq!(half(table[0][2] as u16), 1.0, "normal offset x");
+        // No morph targets: every vertex is NO_MORPH and the table is empty.
+        let (rows, table) = morph_table(&crate::anim::tests::morph_model(Vec::new(), &[]));
+        assert!(rows[0].iter().all(|&r| r == NO_MORPH) && table.is_empty());
     }
 }
