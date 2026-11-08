@@ -128,6 +128,10 @@ spawns a glTF/GLB with all its materials (`Model::load` merges it into one
 `Mesh` instead). Paths must lie under the working directory; `load_scene_with`
 takes another root. Animated characters: `AnimatedModel::load`, then
 `world.spawn_animated(model, place)` and `play_animation(id, "Walk")`.
+Faces and other shape changes are morph targets: fill `AnimatedModel::morph_targets`
+and each `SkinMesh::morphs`, then set weights any frame with
+`world.set_morph_weight(id, "eye-left-closure", 1.0)` or `set_morph_weights(id, &weights)`
+(up to 64 targets; the GPU blends them before skinning).
 
 **Texture anything:** `texture_layer(NaturalLayer::RockFace).apply_triplanar(&mut mesh)?`
 wraps a mesh in a generated PBR layer without UVs.

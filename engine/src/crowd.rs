@@ -330,6 +330,8 @@ pub(crate) fn simplify_skin_mesh(
         double_sided: mesh.double_sided,
         albedo: mesh.albedo.clone(),
         maps: mesh.maps.clone(),
+        // Too far to see a face move.
+        morphs: Vec::new(),
     })
 }
 
@@ -346,6 +348,7 @@ pub(crate) fn far_model(model: &AnimatedModel, fraction: f32) -> AnimatedModel {
         meshes,
         clips: Vec::new(),
         bind_local: model.bind_local.clone(),
+        morph_targets: Vec::new(),
     }
 }
 

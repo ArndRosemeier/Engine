@@ -575,12 +575,6 @@ fn fs_cutout(in: MeshOut) {
 const SKINNED_DEPTH_WGSL: &str = r#"
 @group(0) @binding(0) var<uniform> cascade: mat4x4<f32>;
 
-struct Joints {
-    m: array<mat4x4<f32>, 128>,
-};
-
-@group(1) @binding(0) var<uniform> bones: Joints;
-
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -592,6 +586,7 @@ struct VsIn {
     @location(7) m1: vec4<f32>,
     @location(8) m2: vec4<f32>,
     @location(9) m3: vec4<f32>,
+    @location(15) morph: u32,
 };
 
 @vertex
@@ -607,7 +602,8 @@ fn vs_main(v: VsIn) -> @builtin(position) vec4<f32> {
     skin += bones.m[v.joints.y] * v.weights.y;
     skin += bones.m[v.joints.z] * v.weights.z;
     skin += bones.m[v.joints.w] * v.weights.w;
-    let world = model * (skin * vec4<f32>(v.position, 1.0));
+    let bind = morph_vertex(v.morph, v.position, v.normal);
+    let world = model * (skin * vec4<f32>(bind.p, 1.0));
     return cascade * world;
 }
 "#;
@@ -1312,7 +1308,9 @@ impl ShadowGpu {
         });
         let skinned_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shadow-skinned-depth"),
-            source: wgpu::ShaderSource::Wgsl(SKINNED_DEPTH_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}{SKINNED_DEPTH_WGSL}", super::skinned::SKIN_WGSL).into(),
+            ),
         });
 
         let mesh_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

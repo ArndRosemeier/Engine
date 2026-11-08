@@ -390,7 +390,8 @@ pub struct Renderer {
     gpu_batch_source_scratch: Vec<BatchSourceState>,
     gpu_skinned: HashMap<EntityId, GpuSkinnedEntity>,
     /// Vertex/index buffers keyed by `Arc::as_ptr` of the shared [`AnimatedModel`].
-    gpu_skinned_meshes: HashMap<usize, Vec<GpuSkinnedMesh>>,
+    /// Per model: its uploaded meshes and morph table, shared by every entity of it.
+    gpu_skinned_meshes: HashMap<usize, (Vec<GpuSkinnedMesh>, wgpu::Buffer)>,
     gpu_textures: HashMap<TextureId, GpuTexture>,
     gpu_mesh_albedo: HashMap<TextureId, wgpu::BindGroup>,
     gpu_materials: HashMap<MaterialId, GpuTerrainMaterial>,
@@ -1005,20 +1006,26 @@ impl Renderer {
             let joints = std::mem::take(&mut self.joint_out);
             match self.gpu_skinned.get_mut(id) {
                 Some(gpu) => {
-                    gpu.update(&self.queue, anim.transform, &joints);
+                    gpu.update(
+                        &self.queue,
+                        anim.transform,
+                        &joints,
+                        anim.animator.morph_weights(),
+                    );
                     self.gpu_stats.skinned_pose_writes += 1;
                 }
                 None => {
                     let key = Arc::as_ptr(anim.animator.model()) as usize;
-                    let meshes = if let Some(shared) = self.gpu_skinned_meshes.get(&key) {
+                    let (meshes, morphs) = if let Some(shared) = self.gpu_skinned_meshes.get(&key) {
                         shared.clone()
                     } else {
-                        let uploaded: Vec<GpuSkinnedMesh> = anim
-                            .animator
-                            .model()
+                        let model = anim.animator.model();
+                        let (rows, table) = skinned::morph_table(model);
+                        let uploaded: Vec<GpuSkinnedMesh> = model
                             .meshes
                             .iter()
-                            .map(|m| {
+                            .zip(&rows)
+                            .map(|(m, rows)| {
                                 GpuSkinnedMesh::upload(
                                     &self.device,
                                     &self.queue,
@@ -1026,12 +1033,14 @@ impl Renderer {
                                     &self.pipelines.material_sampler,
                                     &self.pipelines.neutral_maps,
                                     m,
+                                    Some(rows),
                                 )
                             })
                             .collect();
-                        self.gpu_skinned_meshes.insert(key, uploaded.clone());
+                        let shared = (uploaded, skinned::upload_morph_table(&self.device, &table));
+                        self.gpu_skinned_meshes.insert(key, shared.clone());
                         self.gpu_stats.skinned_model_uploads += 1;
-                        uploaded
+                        shared
                     };
                     self.gpu_stats.skinned_new += 1;
                     self.gpu_skinned.insert(
@@ -1040,8 +1049,10 @@ impl Renderer {
                             &self.device,
                             &self.skinned.joint_bind_layout,
                             meshes,
+                            &morphs,
                             anim.transform,
                             &joints,
+                            anim.animator.morph_weights(),
                         ),
                     );
                 }
@@ -1902,6 +1913,7 @@ impl Renderer {
                         &p.material_sampler,
                         &p.neutral_maps,
                         m,
+                        None,
                     )
                 },
             );
