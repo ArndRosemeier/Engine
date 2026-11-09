@@ -340,6 +340,12 @@ impl World {
         }
     }
 
+    /// Whether the z-fighting watcher runs (it reads every mesh, so CPU
+    /// copies are kept meanwhile).
+    pub(crate) fn zfight_watching(&self) -> bool {
+        self.zfight.watch.is_some()
+    }
+
     /// `ENGINE_ZFIGHT`: unset or `0` off, `1` 250 m around the camera, a
     /// number that many metres, `all` the whole world.
     pub(crate) fn watch_z_fighting_from_env(&mut self) {

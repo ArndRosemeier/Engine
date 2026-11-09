@@ -59,20 +59,19 @@ impl Renderer {
                 continue;
             }
             let Some(gpu) = self.gpu_meshes.get(&id) else {
-                if e.mesh.index_count() > 0 && !(e.instanced && e.instances.is_empty()) {
+                if e.index_count() > 0 && !(e.instanced && e.instances.is_empty()) {
                     out.push(format!("{}: no GPU mesh", name(id)));
                 }
                 continue;
             };
-            if gpu.vertex_count != e.mesh.vertex_count() || gpu.index_count != e.mesh.index_count()
-            {
+            if gpu.vertex_count != e.vertex_count() || gpu.index_count != e.index_count() {
                 out.push(format!(
                     "{}: GPU mesh {}v/{}i, world {}v/{}i",
                     name(id),
                     gpu.vertex_count,
                     gpu.index_count,
-                    e.mesh.vertex_count(),
-                    e.mesh.index_count()
+                    e.vertex_count(),
+                    e.index_count()
                 ));
             }
             if gpu.xform_rev != e.xform_rev {
@@ -161,7 +160,10 @@ impl Renderer {
     pub(crate) fn reupload_if_asked(&mut self, world: &World) {
         let asked = world.reupload;
         if asked.0 != self.reupload_seen.0 {
-            self.gpu_meshes.clear();
+            // Meshes whose CPU copy is gone cannot be uploaded again: they
+            // keep the copy they have.
+            self.gpu_meshes
+                .retain(|id, _| world.entity(*id).is_ok_and(|e| !e.has_cpu_mesh()));
             self.gpu_instance_batches.clear();
             self.synced_render_epoch = u64::MAX;
             self.draw_source_epoch = u64::MAX;
@@ -307,7 +309,11 @@ impl Renderer {
             .gpu_meshes
             .keys()
             .copied()
-            .filter(|id| world.entity(*id).is_ok_and(|e| e.instance_of.is_none()))
+            .filter(|id| {
+                world
+                    .entity(*id)
+                    .is_ok_and(|e| e.instance_of.is_none() && e.has_cpu_mesh())
+            })
             .collect();
         let (mut compared, mut bytes) = (0usize, 0u64);
         for chunk in ids.chunks(64) {

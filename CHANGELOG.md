@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.010 (2026-11-09)
+
+- Less RAM for big worlds: World::set_cpu_meshes(CpuMeshes::Release) drops each mesh's CPU copy once the renderer has uploaded it (a town's blocks were held twice, in RAM and on the graphics card). Feet still stand on released meshes (their upward faces are kept), openings still work; World::keep_cpu_mesh keeps the ones you will shatter or give a body. The default stays CpuMeshes::Keep, so nothing changes until a game asks. World::cpu_mesh_bytes and cpu_mesh_counts show what is held.
+
 ## 0.009 (2026-11-09)
 
 - Feet stand on what is drawn: foot IK now sets each sole on the highest surface under it, any mesh's upward faces included (not only the terrain and physics bodies), so characters no longer sink into roads, floors or stairs that have no collider. It also corrects a character whose origin is a few centimetres off the ground (a game server's simpler floor) or whose clip has the soles under its own floor; the hips follow the lower foot up or down, and feet keep their tilt while knees bend, so toes and heels stay out of the ground.

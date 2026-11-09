@@ -80,8 +80,8 @@ pub use crate::world::AnimatedEntity;
 pub use crate::world::Loaded;
 pub use crate::world::WorldScan;
 pub use crate::world::{
-    AmbientOcclusion, BloomSettings, EntityId, Frame, GlobalIllumination, Haze, InstanceSubmit,
-    Light, ShadowSettings, Sky, ToneMap, TorchLight, World,
+    AmbientOcclusion, BloomSettings, CpuMeshes, EntityId, Frame, GlobalIllumination, Haze,
+    InstanceSubmit, Light, ShadowSettings, Sky, ToneMap, TorchLight, World,
 };
 pub use crate::world::{NavAgent, NavSettings, NavStats, NavStatus};
 pub use crate::zfight::{ZFightCheck, ZFightReport};
