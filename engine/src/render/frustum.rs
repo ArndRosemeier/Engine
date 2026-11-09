@@ -70,6 +70,48 @@ impl Bounds {
     }
 }
 
+/// World-space box around everything a mesh draws, for occlusion tests
+/// (tighter than [`Bounds`] for tall or flat things like buildings and roads).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Aabb {
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+impl Aabb {
+    /// The box around `points`, or `None` when there are none.
+    pub fn around(points: &[Vec3]) -> Option<Self> {
+        let first = *points.first()?;
+        let (min, max) = points
+            .iter()
+            .fold((first, first), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+        Some(Self { min, max })
+    }
+
+    /// The box around this one moved, turned and scaled by `transform`.
+    pub fn transformed(self, transform: Mat4) -> Self {
+        let centre = transform.transform_point3(0.5 * (self.min + self.max));
+        let half = 0.5 * (self.max - self.min);
+        let m = glam::Mat3::from_mat4(transform);
+        let reach = Vec3::new(
+            m.row(0).abs().dot(half),
+            m.row(1).abs().dot(half),
+            m.row(2).abs().dot(half),
+        );
+        Self {
+            min: centre - reach,
+            max: centre + reach,
+        }
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+        }
+    }
+}
+
 /// The six clip planes of a view-projection, pointing inward.
 #[derive(Clone, Copy, Debug)]
 pub struct Frustum {

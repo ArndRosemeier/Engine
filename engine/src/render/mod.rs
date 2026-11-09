@@ -10,6 +10,7 @@ mod grass;
 mod instance_cull;
 mod lights;
 mod material;
+mod occlusion;
 mod particles_gpu;
 mod pipeline;
 pub(crate) mod pipeline_cache;
@@ -95,6 +96,10 @@ pub struct GpuFrameStats {
     pub boundary_batches: u32,
     pub cull_instances: u64,
     pub cull_workgroups: u64,
+    /// Meshes the occlusion pass tested, and how many it found hidden
+    /// (from the newest answer read back, a frame or two old).
+    pub occlusion_tested: u32,
+    pub occlusion_hidden: u32,
 }
 
 impl GpuFrameStats {
@@ -117,7 +122,7 @@ impl GpuFrameStats {
 
     pub fn draw_line(&self) -> String {
         format!(
-            "shadow_atlas={} horizon={} submit={} inside={} boundary={} tested={} groups={} indirect={}",
+            "shadow_atlas={} horizon={} submit={} inside={} boundary={} tested={} groups={} indirect={} occlusion_tested={} occlusion_hidden={}",
             self.shadow_atlas,
             self.terrain_horizon_rebuilds,
             self.instance_submit,
@@ -126,6 +131,8 @@ impl GpuFrameStats {
             self.cull_instances,
             self.cull_workgroups,
             self.indirect_draws,
+            self.occlusion_tested,
+            self.occlusion_hidden,
         )
     }
 }
@@ -145,6 +152,35 @@ enum CullView {
 struct MainCullSelection {
     ids: Vec<EntityId>,
     compacted: HashSet<EntityId>,
+    /// This frame's occlusion draws, when occlusion culling is on.
+    occlusion: Option<occlusion::OcclusionFrame>,
+}
+
+impl MainCullSelection {
+    fn none() -> Self {
+        Self {
+            ids: Vec::new(),
+            compacted: HashSet::new(),
+            occlusion: None,
+        }
+    }
+
+    /// The occlusion slot `id` draws through in the main view, if any.
+    fn occlusion_slot(&self, id: EntityId) -> Option<(&wgpu::Buffer, u32)> {
+        let frame = self.occlusion.as_ref()?;
+        frame.slots.get(&id).map(|&slot| (&frame.args, slot))
+    }
+}
+
+/// Which part of the depth prepass to draw (see `occlusion.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrepassPhase {
+    /// Everything (occlusion culling off).
+    All,
+    /// Everything but the occlusion candidates not seen lately.
+    Seen,
+    /// Only those candidates, through the occlusion draws.
+    Unseen,
 }
 
 /// Which space a portal level draws, how deep it recurses, and how the scene
@@ -330,6 +366,7 @@ pub(crate) use shadow::ELEMENT_STATE_WORDS;
 
 pub(crate) use stencil::depth_format;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum SceneUniformTarget {
     /// The live camera's view: the one the depth prepass and SSAO see.
     Main,
@@ -443,6 +480,12 @@ pub struct Renderer {
     next_scene_uniform_slot: usize,
     gpu_profiler: Option<GpuProfiler>,
     instance_cull: InstanceCull,
+    /// Skips meshes hidden behind others (see `occlusion.rs`).
+    occlusion: occlusion::Occlusion,
+    /// The main view's (jittered) view-projection this frame.
+    occlusion_view_proj: glam::Mat4,
+    /// This frame filled depth before the world pass (for AO or occlusion).
+    prepass_done: bool,
     pose_scratch: crate::anim::PoseScratch,
     joint_out: Vec<glam::Mat4>,
     /// Last frame after overlay passes (egui). For capture_png.
@@ -611,7 +654,7 @@ impl Renderer {
         ));
         // Independent parts compile on worker threads at once: startup
         // costs about the slowest part instead of the sum of all of them.
-        let (ssao, reflect, gi, voxel, sky, instance_cull, postprocess, taa) =
+        let (ssao, reflect, gi, voxel, sky, instance_cull, postprocess, taa, occlusion) =
             std::thread::scope(|s| {
                 let (device, queue, depth) = (&device, &queue, &depth_texture);
                 let (w, h) = (config.width, config.height);
@@ -623,6 +666,11 @@ impl Renderer {
                 let sky = s.spawn(move || create_sky_pipelines(device, HDR_FORMAT));
                 let cull = s.spawn(move || InstanceCull::new(device));
                 let post = s.spawn(move || Postprocess::new(device, format, w, h));
+                let occlusion = s.spawn(move || {
+                    let mut o = occlusion::Occlusion::new(device, depth.sample_count());
+                    o.resize(device, depth);
+                    o
+                });
                 let taa = taa::Taa::new(device, depth, w, h);
                 (
                     join_worker(ssao),
@@ -633,6 +681,7 @@ impl Renderer {
                     join_worker(cull),
                     join_worker(post),
                     taa,
+                    join_worker(occlusion),
                 )
             });
         shadow.set_ao_view(&device, ssao.view().clone());
@@ -801,6 +850,9 @@ impl Renderer {
             next_scene_uniform_slot: 0,
             gpu_profiler,
             instance_cull,
+            occlusion,
+            occlusion_view_proj: glam::Mat4::IDENTITY,
+            prepass_done: false,
             pose_scratch: Default::default(),
             joint_out: Vec::new(),
             last_color: None,
@@ -884,6 +936,7 @@ impl Renderer {
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
         self.particles.set_depth(&self.device, &self.depth_texture);
+        self.occlusion.resize(&self.device, &self.depth_texture);
         self.ssao.resize(
             &self.device,
             &self.depth_texture,
@@ -1525,6 +1578,9 @@ impl Renderer {
                 label: Some("frame-encoder"),
             });
         self.mark_gpu(&mut encoder, Mark::Start);
+        if world.occlusion_culling() {
+            self.occlusion.collect(&self.device);
+        }
         let taa_on = world.taa() && taa_env_enabled();
         let (width, height) = (self.config.width.max(1), self.config.height.max(1));
         self.taa_jitter = if taa_on {
@@ -1634,6 +1690,7 @@ impl Renderer {
             profiler.resolve(&mut encoder);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
+        self.occlusion.after_submit(&self.device);
         self.cpu_spans.mark("render.submit", &mut t);
         if let Some(profiler) = self.gpu_profiler.as_mut() {
             profiler.read_and_report(&self.device);
@@ -1891,6 +1948,9 @@ impl Renderer {
         };
         let vp = taa::jittered(vp, self.taa_jitter);
         self.frustum = Frustum::from_view_projection(vp);
+        if target == SceneUniformTarget::Main {
+            self.occlusion_view_proj = vp;
+        }
         let light_dir = world.light().direction.normalize_or_zero();
         let eye = camera.eye();
         let haze = world.screen_haze();
@@ -2067,22 +2127,77 @@ impl Renderer {
         self.cpu_spans.mark("world.collect_draws", &mut t);
         self.prepare_terrain_bundle(world);
         let submit = world.instance_submit();
-        let main_cull = if submit == InstanceSubmit::GpuIndirect {
+        let mut main_cull = if submit == InstanceSubmit::GpuIndirect {
             let frustum = self.frustum;
             let selection = self.select_main_culls(&frustum);
-            self.dispatch_instance_cull(encoder, &frustum, &selection.ids, CullView::Main);
+            self.dispatch_instance_cull(encoder, &frustum, &selection.ids, CullView::Main, None);
             selection
         } else {
-            MainCullSelection {
-                ids: Vec::new(),
-                compacted: HashSet::new(),
-            }
+            MainCullSelection::none()
+        };
+        let occlusion_ids = if world.occlusion_culling() {
+            let ids = self.occlusion_candidates(world, live);
+            main_cull.occlusion = Some(self.begin_occlusion(&ids));
+            ids
+        } else {
+            Vec::new()
         };
 
         self.cpu_spans.mark("world.cull", &mut t);
         let depth = self.depth_view.clone();
+        let occluding = main_cull.occlusion.is_some();
+        self.prepass_done = ao.is_some() || occluding;
+        if self.prepass_done {
+            let phase = if occluding {
+                PrepassPhase::Seen
+            } else {
+                PrepassPhase::All
+            };
+            self.encode_depth_prepass(encoder, world, live, &main_cull, main_uniform_slot, phase);
+        }
+        if occluding {
+            self.occlusion.encode(
+                &self.device,
+                &self.queue,
+                encoder,
+                self.occlusion_view_proj,
+                &occlusion_ids,
+            );
+            self.encode_depth_prepass(
+                encoder,
+                world,
+                live,
+                &main_cull,
+                main_uniform_slot,
+                PrepassPhase::Unseen,
+            );
+            if submit == InstanceSubmit::GpuIndirect {
+                // Instanced props: compact again, now also dropping the
+                // instances hidden behind the pyramid. The prepass above
+                // drew them all; the world pass draws only these.
+                let mut seen = HashSet::new();
+                let batches: Vec<EntityId> = self
+                    .batch_opaque
+                    .iter()
+                    .chain(&self.batch_terrain)
+                    .chain(&self.batch_transparent)
+                    .copied()
+                    .filter(|id| seen.insert(*id))
+                    .collect();
+                let (test, pyramid) = self.occlusion.test_resources();
+                let hiz = self.instance_cull.hiz_bind(&self.device, test, pyramid);
+                let frustum = self.frustum;
+                self.dispatch_instance_cull(
+                    encoder,
+                    &frustum,
+                    &batches,
+                    CullView::Main,
+                    Some(&hiz),
+                );
+                main_cull.compacted.extend(batches);
+            }
+        }
         if let Some(ao) = ao {
-            self.encode_depth_prepass(encoder, world, live, &main_cull, main_uniform_slot, &depth);
             let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
             self.ssao.prepare(
                 &self.queue,
@@ -2100,7 +2215,7 @@ impl Renderer {
         // With a prepass the world pass keeps its depth: hidden fragments
         // then fail the depth test before any shading runs.
         let own_depth = world.debug_shading & 65536 != 0;
-        let (depth_load, stencil_load) = if self.ao_active && !own_depth {
+        let (depth_load, stencil_load) = if self.prepass_done && !own_depth {
             (wgpu::LoadOp::Load, wgpu::LoadOp::Load)
         } else {
             (wgpu::LoadOp::Clear(DEPTH_CLEAR), wgpu::LoadOp::Clear(0))
@@ -2173,10 +2288,7 @@ impl Renderer {
         // A probe sees every room, not just the ones the camera does.
         world.set_room_bypass(true);
         let live = world.living_in();
-        let no_cull = MainCullSelection {
-            ids: Vec::new(),
-            compacted: HashSet::new(),
-        };
+        let no_cull = MainCullSelection::none();
         let clear = world.clear_color().to_vec3();
         let far = world.camera().far().max(100.0);
         let (color, resolve, depth) = {
@@ -2550,19 +2662,30 @@ impl Renderer {
         space: SpaceId,
         main_cull: &MainCullSelection,
         slot: usize,
-        depth: &wgpu::TextureView,
+        phase: PrepassPhase,
     ) {
+        let depth = &self.depth_view.clone();
+        let unseen = phase == PrepassPhase::Unseen;
+        let (depth_load, stencil_load) = if unseen {
+            (wgpu::LoadOp::Load, wgpu::LoadOp::Load)
+        } else {
+            (wgpu::LoadOp::Clear(DEPTH_CLEAR), wgpu::LoadOp::Clear(0))
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("depth-prepass"),
+            label: Some(if unseen {
+                "depth-prepass-unseen"
+            } else {
+                "depth-prepass"
+            }),
             color_attachments: &[],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(DEPTH_CLEAR),
+                    load: depth_load,
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: stencil::has_stencil().then_some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(0),
+                    load: stencil_load,
                     store: wgpu::StoreOp::Store,
                 }),
             }),
@@ -2573,6 +2696,32 @@ impl Renderer {
         let mut indirect_draws = 0;
         let scene_bind = self.pipelines.scene_bind_group(slot);
         pass.set_bind_group(0, scene_bind, &[]);
+        if unseen {
+            // Phase 2: candidates not drawn in phase 1, each through its
+            // occlusion draw (zero instances when hidden).
+            let frame = main_cull
+                .occlusion
+                .as_ref()
+                .expect("the unseen prepass runs only with occlusion culling");
+            pass.set_pipeline(&self.pipelines.depth_prepass);
+            for &id in &self.draw_opaque {
+                if frame.first.contains(&id) {
+                    continue;
+                }
+                let Some(&cslot) = frame.slots.get(&id) else {
+                    continue;
+                };
+                let entity = world.entity(id).expect("draw list is live");
+                let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
+                let albedo = entity
+                    .albedo
+                    .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
+                    .unwrap_or(&self.pipelines.white_albedo);
+                pass.set_bind_group(1, albedo, &[]);
+                submit_occluded_draw(&mut pass, gpu, &frame.args, cslot, OPAQUE_INDIRECT_OFFSET);
+            }
+            return;
+        }
         if world.space_draws_environment(space) {
             if let Some(clip) = self.clipmap.as_ref() {
                 clip.draw_land_depth(&mut pass, &self.shadow.resource_bind);
@@ -2590,6 +2739,16 @@ impl Renderer {
         pass.set_pipeline(&self.pipelines.depth_prepass);
         for &id in &self.draw_opaque {
             if !entity_in_space(world, id, space) {
+                continue;
+            }
+            if phase == PrepassPhase::Seen
+                && main_cull.occlusion_slot(id).is_some()
+                && !main_cull
+                    .occlusion
+                    .as_ref()
+                    .is_some_and(|f| f.first.contains(&id))
+            {
+                // Waits for phase 2 and the occlusion test.
                 continue;
             }
             let entity = world.entity(id).expect("draw list is live");
@@ -2729,7 +2888,7 @@ impl Renderer {
         // depth testing and shade every hidden fragment (2.4 -> 1.2 ms for
         // lod_forest on an RTX 5070). Leaf edges the prepass left out still
         // draw, they just don't occlude each other.
-        let nowrite = stamp && self.ao_active && world.debug_shading & (16384 | 65536) == 0;
+        let nowrite = stamp && self.prepass_done && world.debug_shading & (16384 | 65536) == 0;
         self.mark_scene(pass, stamp, SceneMark::Begin);
         pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
 
@@ -2793,6 +2952,10 @@ impl Renderer {
                 .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
                 .unwrap_or(&self.pipelines.white_albedo);
             pass.set_bind_group(1, albedo, &[]);
+            if let Some((args, cslot)) = stamp.then(|| main_cull.occlusion_slot(id)).flatten() {
+                submit_occluded_draw(pass, gpu, args, cslot, OPAQUE_INDIRECT_OFFSET);
+                continue;
+            }
             submit_mesh_draw(
                 pass,
                 gpu,
@@ -2945,6 +3108,10 @@ impl Renderer {
                 .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
                 .unwrap_or(&self.pipelines.white_albedo);
             pass.set_bind_group(1, albedo, &[]);
+            if let Some((args, cslot)) = stamp.then(|| main_cull.occlusion_slot(id)).flatten() {
+                submit_occluded_draw(pass, gpu, args, cslot, TRANSLUCENT_INDIRECT_OFFSET);
+                continue;
+            }
             submit_mesh_draw(
                 pass,
                 gpu,
@@ -3170,6 +3337,7 @@ impl Renderer {
                     frustum,
                     &selection.compact_batches,
                     CullView::Shadow,
+                    None,
                 );
             }
             self.prepare_shadow_bundle(slot, selection);
@@ -3255,6 +3423,44 @@ impl Renderer {
         self.size
     }
 
+    /// This frame's occlusion candidates: single meshes the main view draws.
+    fn occlusion_candidates(&self, world: &World, space: SpaceId) -> Vec<EntityId> {
+        self.draw_opaque
+            .iter()
+            .copied()
+            .filter(|&id| {
+                entity_in_space(world, id, space)
+                    && self
+                        .gpu_meshes
+                        .get(&id)
+                        .is_some_and(|gpu| gpu.world_box.is_some() && gpu.instance_count > 0)
+            })
+            .collect()
+    }
+
+    fn begin_occlusion(&mut self, ids: &[EntityId]) -> occlusion::OcclusionFrame {
+        let rows: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                let gpu = self
+                    .gpu_meshes
+                    .get(id)
+                    .expect("occlusion candidate is synced");
+                (
+                    *id,
+                    gpu.world_box.expect("occlusion candidate has a box"),
+                    u32::try_from(gpu.opaque_index_count).expect("index count exceeds u32"),
+                    u32::try_from(gpu.index_count).expect("index count exceeds u32"),
+                    u32::try_from(gpu.instance_count).expect("instance count exceeds u32"),
+                )
+            })
+            .collect();
+        let counts = self.occlusion.counts();
+        self.gpu_stats.occlusion_tested = counts.tested;
+        self.gpu_stats.occlusion_hidden = counts.hidden;
+        self.occlusion.begin(&self.device, &self.queue, &rows)
+    }
+
     fn select_main_culls(&mut self, frustum: &Frustum) -> MainCullSelection {
         let mut seen = HashSet::new();
         let mut ids = Vec::new();
@@ -3293,7 +3499,11 @@ impl Renderer {
                 }
             }
         }
-        MainCullSelection { ids, compacted }
+        MainCullSelection {
+            ids,
+            compacted,
+            occlusion: None,
+        }
     }
 
     fn select_shadow_culls(
@@ -3425,6 +3635,7 @@ impl Renderer {
         frustum: &Frustum,
         ids: &[EntityId],
         view: CullView,
+        hiz: Option<&wgpu::BindGroup>,
     ) {
         let jobs: Vec<CullJob<'_>> = ids
             .iter()
@@ -3460,7 +3671,7 @@ impl Renderer {
             })
             .collect();
         self.instance_cull
-            .dispatch(&self.queue, encoder, frustum, &jobs);
+            .dispatch(&self.queue, encoder, frustum, &jobs, hiz);
         let job_count = u32::try_from(jobs.len()).expect("cull dispatch count exceeds u32");
         self.gpu_stats.compute_culls += job_count;
         self.gpu_stats.boundary_batches += job_count;
@@ -3477,7 +3688,9 @@ impl Renderer {
             return;
         }
         let sun = if world.shadows().is_some() { 3 } else { 0 };
-        let views = 1 + sun + self.shadow.lamps.frame_views.len();
+        // The main view culls twice with occlusion on: frustum, then depth.
+        let main = if world.occlusion_culling() { 2 } else { 1 };
+        let views = main + sun + self.shadow.lamps.frame_views.len();
         let active_ranges = self
             .gpu_instance_batches
             .values()
@@ -3974,6 +4187,20 @@ fn submit_mesh_draw(
             pass.draw_indexed(indices, 0, 0..gpu.instance_count as u32);
         }
     }
+}
+
+/// One mesh drawn through its occlusion draw (see `occlusion.rs`).
+fn submit_occluded_draw(
+    pass: &mut wgpu::RenderPass<'_>,
+    gpu: &GpuMesh,
+    args: &wgpu::Buffer,
+    slot: u32,
+    range_offset: u64,
+) {
+    pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
+    pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
+    pass.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+    pass.draw_indexed_indirect(args, occlusion::OcclusionFrame::offset(slot, range_offset));
 }
 
 fn entity_in_space(world: &World, id: EntityId, space: SpaceId) -> bool {

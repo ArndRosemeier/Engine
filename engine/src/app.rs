@@ -414,6 +414,11 @@ impl App {
                 trace.end_frame(raw_dt * 1000.0);
             }
             let gpu = renderer.take_gpu_stats();
+            self.world
+                .set_occlusion_stats(crate::world::OcclusionStats {
+                    tested: gpu.occlusion_tested,
+                    hidden: gpu.occlusion_hidden,
+                });
             let notes = self.world.take_hitch_spans();
             let phases = HitchPhases {
                 update_ms,

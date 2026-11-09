@@ -481,6 +481,15 @@ world.set_target_fps(Some(60.0))?;    // keep 60 FPS: pull LOD and grass in, the
 world.set_vsync(false);               // uncapped frame rate (the title bar always shows FPS)
 ```
 
+**Occlusion culling** (off by default; worth it in cities and other dense
+scenes): `world.set_occlusion_culling(true)` stops drawing meshes and
+instances hidden behind others, such as the blocks behind a street wall. The
+depth prepass draws what was visible a frame ago, a depth pyramid is built
+from it, and the GPU tests every other mesh's box against this frame's depth,
+so nothing pops in: a stale answer only costs speed. Shadow maps still draw
+every caster (light bounce and reflections use them off screen too).
+`world.occlusion_stats()` says how many meshes were tested and hidden.
+
 Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_global_illumination`,
 `set_bloom`, `set_tone_map`, `set_haze`, `set_lod_bias`, `set_view_distance`.
 
@@ -539,6 +548,7 @@ cargo run --release -p <name>
 | `moons` | A night under three moons of different sizes, colours, cycles and paths (Space: time, arrows: hour and day, M: one moon to compare) |
 | `fog_volumes` | Colour grading and fog by zone: the camera flies from a warm old town into a smog-choked factory district and back (T: transition time, G: volumes on/off) |
 | `decals` | Scorch marks, cracks, frost, impacts, paint and glowing power marks sprayed on terrain, a wall, a sliding block and people walking by (click sprays, 1-6 pick the kind, B the budget) |
+| `occlusion_city` | 2 000 towers and 4 000 lamps on a street grid: occlusion culling skips the ones hidden behind the first walls (`OCCLUSION_CITY_VIEW=street/roof/air`, `ENGINE_OCCLUSION=0` to compare) |
 | `interiors` | A city block of office towers, every floor furnished (about a million triangles); from the street only the rooms you can see through windows are drawn (C toggles culling, I interiors, click punches a wall open) |
 | `reflections` | A rain-wet street between glass towers at dusk mirrors lamps, windows and chrome spheres; a polished hall's chrome ball shows the hall from a reflection probe (R toggles SSR, P the probe) |
 | `zfight` | The z-fighting finder: a yard with four classic mistakes marked with magenta posts; F shows the fixed yard |
@@ -567,6 +577,8 @@ Every program built on the engine understands these:
 | `ENGINE_SCREENSHOT_WAIT=1` | Wait for `world.mark_ready()` before counting screenshot frames |
 | `ENGINE_MSAA=4` | 4x MSAA on top of TAA (default 1 while TAA is on: TAA smooths edges and costs 10-15% less at 4K; 4 when `ENGINE_TAA=0`) |
 | `ENGINE_TONEMAP=aces` | Tone-map with ACES instead of AgX (`world.set_tone_map(ToneMap::Aces)` in code) |
+| `ENGINE_OCCLUSION=0` or `=1` | Switch occlusion culling off or on whatever the game set (`world.set_occlusion_culling`), to compare frame times |
+| `ENGINE_OCCLUSION_CHECK=1` | Read every frame's occlusion answers back and compare them with the CPU copy of the test; prints mismatches (slow, for driver trouble) |
 | `ENGINE_INSTANCE_SUBMIT=cpu` | Draw every instance from the CPU instead of culling instances per view and shadow cascade on the GPU (default `gpu`) |
 | `ENGINE_TAA=0` | Turn temporal anti-aliasing off (`world.set_taa(false)` in code) |
 | `ENGINE_PRESENT_MODE` | `fifo` (default, vsync), `fifo-relaxed`, `mailbox` or `immediate` (uncapped, to see the real frame rate) |
