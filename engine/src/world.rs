@@ -1349,11 +1349,21 @@ impl World {
         let Some(t) = &mut self.auto_tune else {
             return;
         };
-        match t.tick(dt, self.lod_bias, gi, ao) {
+        // TEMP diagnosis (test branch only): `ENGINE_TUNE_ONLY=bias` never
+        // drops features, `=features` never moves the bias.
+        let only = std::env::var("ENGINE_TUNE_ONLY").unwrap_or_default();
+        let seen_bias = if only == "features" {
+            crate::quality::MIN_TUNED_BIAS
+        } else {
+            self.lod_bias
+        };
+        match t.tick(dt, seen_bias, gi, ao) {
             TuneStep::Hold => {}
-            TuneStep::Bias(b) => self.lod_bias = b,
-            TuneStep::DropGi => self.global_illumination = None,
-            TuneStep::DropAo => self.ambient_occlusion = None,
+            TuneStep::Bias(b) if only != "features" => self.lod_bias = b,
+            TuneStep::Bias(_) => {}
+            TuneStep::DropGi if only != "bias" => self.global_illumination = None,
+            TuneStep::DropAo if only != "bias" => self.ambient_occlusion = None,
+            TuneStep::DropGi | TuneStep::DropAo => {}
         }
     }
 
