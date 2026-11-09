@@ -149,6 +149,153 @@ enum CullView {
     Shadow,
 }
 
+/// Below this many opaque draws they are recorded straight into the pass.
+const OPAQUE_BUNDLE_MIN_DRAWS: usize = 256;
+/// Opaque draws per bundle recorded on one thread.
+const OPAQUE_BUNDLE_CHUNK: usize = 128;
+
+/// How one opaque draw is submitted.
+#[derive(Clone, Copy)]
+enum OpaqueSubmit<'r> {
+    /// Straight or GPU-compacted instances (`submit_mesh_draw`).
+    Mesh(MeshSubmit),
+    /// Through its occlusion draw (`submit_occluded_draw`): args, slot.
+    Occluded(&'r wgpu::Buffer, u32),
+}
+
+/// One opaque mesh draw, with everything it binds already looked up.
+struct OpaqueDraw<'r> {
+    albedo: &'r wgpu::BindGroup,
+    gpu: &'r GpuMesh,
+    submit: OpaqueSubmit<'r>,
+}
+
+impl<'r> OpaqueDraw<'r> {
+    /// The buffers the draw reads: instances, and indirect args with their
+    /// byte offset when the GPU decides the count.
+    fn sources(&self) -> (&'r wgpu::Buffer, Option<(&'r wgpu::Buffer, u64)>) {
+        let g = self.gpu;
+        match self.submit {
+            OpaqueSubmit::Mesh(MeshSubmit::Compacted) => (
+                &g.compact_buf,
+                Some((&g.indirect_buf, OPAQUE_INDIRECT_OFFSET)),
+            ),
+            OpaqueSubmit::Mesh(MeshSubmit::Direct) => (&g.instance_buf, None),
+            OpaqueSubmit::Occluded(args, slot) => (
+                &g.instance_buf,
+                Some((
+                    args,
+                    occlusion::OcclusionFrame::offset(slot, OPAQUE_INDIRECT_OFFSET),
+                )),
+            ),
+        }
+    }
+
+    /// Record the draw: the same commands `submit_mesh_draw` and
+    /// `submit_occluded_draw` give a pass.
+    fn record(&self, bundle: &mut wgpu::RenderBundleEncoder<'r>) {
+        let g = self.gpu;
+        let (instances, indirect) = self.sources();
+        bundle.set_bind_group(1, self.albedo, &[]);
+        bundle.set_vertex_buffer(0, g.vertex_buf.slice(..));
+        bundle.set_vertex_buffer(1, instances.slice(..));
+        bundle.set_index_buffer(g.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+        match indirect {
+            Some((args, offset)) => bundle.draw_indexed_indirect(args, offset),
+            None => bundle.draw_indexed(
+                0..g.opaque_index_count as u32,
+                0,
+                0..g.instance_count as u32,
+            ),
+        }
+    }
+}
+
+/// Everything one recorded opaque draw baked into its bundle. Equal keys
+/// mean the bundle would be recorded the same, so it is used again.
+#[derive(PartialEq)]
+struct OpaqueKey {
+    albedo: wgpu::BindGroup,
+    vertex: wgpu::Buffer,
+    index: wgpu::Buffer,
+    instances: wgpu::Buffer,
+    /// Indirect args and offset, or the direct index and instance counts.
+    indirect: Option<(wgpu::Buffer, u64)>,
+    counts: (u32, u32),
+}
+
+impl OpaqueKey {
+    fn matches(&self, d: &OpaqueDraw<'_>) -> bool {
+        let g = d.gpu;
+        let (instances, indirect) = d.sources();
+        self.albedo == *d.albedo
+            && self.vertex == g.vertex_buf
+            && self.index == g.index_buf
+            && self.instances == *instances
+            && match (&self.indirect, indirect) {
+                (Some((a, o)), Some((b, p))) => a == b && *o == p,
+                (None, None) => {
+                    self.counts == (g.opaque_index_count as u32, g.instance_count as u32)
+                }
+                _ => false,
+            }
+    }
+
+    fn of(d: &OpaqueDraw<'_>) -> Self {
+        let g = d.gpu;
+        let (instances, indirect) = d.sources();
+        Self {
+            albedo: d.albedo.clone(),
+            vertex: g.vertex_buf.clone(),
+            index: g.index_buf.clone(),
+            instances: instances.clone(),
+            indirect: indirect.map(|(b, o)| (b.clone(), o)),
+            counts: if indirect.is_some() {
+                (0, 0)
+            } else {
+                (g.opaque_index_count as u32, g.instance_count as u32)
+            },
+        }
+    }
+}
+
+/// One chunk of recorded opaque draws: its keys and its bundle.
+struct OpaqueChunk {
+    keys: Vec<OpaqueKey>,
+    bundle: wgpu::RenderBundle,
+}
+
+/// Which opaque pass a set of bundles is for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OpaqueTarget {
+    /// The depth prepass (phase `All` or `Seen`).
+    Prepass(PrepassPhase),
+    /// The top-level world pass.
+    World,
+}
+
+/// The top-level view's opaque mesh draws for one pass as bundles, kept
+/// from frame to frame: a chunk whose draws bake in the same buffers and
+/// bind groups is used again, the others are recorded anew on the frame's
+/// threads.
+#[derive(Default)]
+struct OpaqueBundles {
+    /// What every chunk shares (scene bind group, pipeline, samples); when
+    /// it changes every chunk is recorded anew.
+    shared: Option<(wgpu::BindGroup, wgpu::RenderPipeline, u32)>,
+    chunks: Vec<OpaqueChunk>,
+    /// This frame's use: what the chunks were checked for, and how many.
+    frame: Option<OpaqueFrame>,
+}
+
+struct OpaqueFrame {
+    target: OpaqueTarget,
+    space: SpaceId,
+    uniform_slot: usize,
+    chunks: usize,
+    indirect_draws: u32,
+}
+
 struct MainCullSelection {
     ids: Vec<EntityId>,
     compacted: HashSet<EntityId>,
@@ -211,6 +358,9 @@ struct ScenePass {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ShadowDraw {
     id: EntityId,
+    /// Which group of shadow sources it is in (its source index /
+    /// [`SHADOW_GROUP`]); a view's mesh bundles are recorded per group.
+    group: u32,
     submit: MeshSubmit,
     /// Textured casters go through the alpha-tested shadow pipeline.
     albedo: Option<TextureId>,
@@ -222,10 +372,23 @@ struct ShadowCullSelection {
     compact_batches: Vec<EntityId>,
 }
 
-#[derive(Default, PartialEq, Eq)]
-struct ShadowBundleKey {
-    draws: Vec<ShadowDraw>,
+/// Shadow mesh sources per bundle group: one changed caster re-records
+/// only its group's bundle, not the whole view's.
+const SHADOW_GROUP: usize = 128;
+
+/// One shadow view's recorded casters: mesh bundles per source group, and
+/// one bundle of instance batches (which change more often).
+#[derive(Default)]
+struct ShadowViewBundles {
+    groups: Vec<ShadowGroupBundle>,
     batch_draws: Vec<ShadowDraw>,
+    batches: Option<wgpu::RenderBundle>,
+}
+
+struct ShadowGroupBundle {
+    group: u32,
+    draws: Vec<ShadowDraw>,
+    bundle: wgpu::RenderBundle,
 }
 
 struct GpuInstanceBatch {
@@ -468,8 +631,12 @@ pub struct Renderer {
     shadow_mesh_sources: Vec<EntityId>,
     shadow_batch_sources: Vec<EntityId>,
     /// Sun cascades first, then lamp shadow layers.
-    shadow_bundle_keys: Vec<ShadowBundleKey>,
-    shadow_bundles: Vec<Option<wgpu::RenderBundle>>,
+    shadow_bundles: Vec<ShadowViewBundles>,
+    /// This frame's opaque mesh draws for the top-level view, recorded on
+    /// the frame's threads; made and dropped within `encode_world`.
+    /// The top-level view's opaque draws as bundles: depth prepass, world pass.
+    opaque_prepass: OpaqueBundles,
+    opaque_world: OpaqueBundles,
     draw_opaque: Vec<EntityId>,
     draw_terrain: Vec<EntityId>,
     draw_transparent: Vec<EntityId>,
@@ -488,8 +655,9 @@ pub struct Renderer {
     occlusion_view_proj: glam::Mat4,
     /// This frame filled depth before the world pass (for AO or occlusion).
     prepass_done: bool,
-    pose_scratch: crate::anim::PoseScratch,
-    joint_out: Vec<glam::Mat4>,
+    /// This frame's skinning matrices, one list per animated entity in
+    /// `World::animated_entities` order (kept to reuse the memory).
+    poses: Vec<Vec<glam::Mat4>>,
     /// Last frame after overlay passes (egui). For capture_png.
     last_color: Option<wgpu::Texture>,
     /// Keep a copy of the next presented frame for `capture_png`. Copying the
@@ -837,10 +1005,11 @@ impl Renderer {
             shadow_source_epoch: 0,
             shadow_mesh_sources: Vec::new(),
             shadow_batch_sources: Vec::new(),
-            shadow_bundle_keys: (0..3 + lights::SHADOW_LAYERS)
-                .map(|_| ShadowBundleKey::default())
+            shadow_bundles: (0..3 + lights::SHADOW_LAYERS)
+                .map(|_| ShadowViewBundles::default())
                 .collect(),
-            shadow_bundles: (0..3 + lights::SHADOW_LAYERS).map(|_| None).collect(),
+            opaque_prepass: OpaqueBundles::default(),
+            opaque_world: OpaqueBundles::default(),
             draw_opaque: Vec::new(),
             draw_terrain: Vec::new(),
             draw_transparent: Vec::new(),
@@ -856,8 +1025,7 @@ impl Renderer {
             occlusion,
             occlusion_view_proj: glam::Mat4::IDENTITY,
             prepass_done: false,
-            pose_scratch: Default::default(),
-            joint_out: Vec::new(),
+            poses: Vec::new(),
             last_color: None,
             capture_next_frame: false,
             particles,
@@ -1127,10 +1295,38 @@ impl Renderer {
         self.gpu_skinned_meshes
             .retain(|k, _| live_models.contains(k));
 
-        for (id, anim) in world.animated_entities() {
-            anim.animator
-                .write_pose(&mut self.pose_scratch, &mut self.joint_out);
-            let joints = std::mem::take(&mut self.joint_out);
+        // Every pose first, on the frame's threads when there are several
+        // (each reads only its own animator), then the uploads in order.
+        let animated: Vec<(&EntityId, &crate::world::AnimatedEntity)> =
+            world.animated_entities().collect();
+        if self.poses.len() < animated.len() {
+            self.poses.resize_with(animated.len(), Vec::new);
+        }
+        let poses = &mut self.poses[..animated.len()];
+        let pose = |scratch: &mut crate::anim::PoseScratch,
+                    (out, (_, anim)): (
+            &mut Vec<glam::Mat4>,
+            &(&EntityId, &crate::world::AnimatedEntity),
+        )| {
+            anim.animator.write_pose(scratch, out);
+        };
+        if animated.len() >= crate::world::ANIM_PARALLEL_POSES {
+            use rayon::prelude::*;
+            crate::parallel::frame_pool().install(|| {
+                poses
+                    .par_iter_mut()
+                    .zip(animated.par_iter())
+                    .for_each_init(crate::anim::PoseScratch::default, pose)
+            });
+        } else {
+            let mut scratch = crate::anim::PoseScratch::default();
+            for pair in poses.iter_mut().zip(animated.iter()) {
+                pose(&mut scratch, pair);
+            }
+        }
+        self.cpu_spans.mark("sync.poses", &mut t);
+        for (i, (id, anim)) in animated.into_iter().enumerate() {
+            let joints = std::mem::take(&mut self.poses[i]);
             match self.gpu_skinned.get_mut(id) {
                 Some(gpu) => {
                     gpu.update(
@@ -1186,8 +1382,9 @@ impl Renderer {
                     );
                 }
             }
-            self.joint_out = joints;
+            self.poses[i] = joints;
         }
+        self.cpu_spans.mark("sync.skinned", &mut t);
     }
 
     fn sync_entity_mesh(&mut self, id: EntityId, entity: &Entity) {
@@ -1284,12 +1481,8 @@ impl Renderer {
     }
 
     fn invalidate_shadow_bundles(&mut self) {
-        for key in &mut self.shadow_bundle_keys {
-            key.draws.clear();
-            key.batch_draws.clear();
-        }
-        for bundle in &mut self.shadow_bundles {
-            *bundle = None;
+        for view in &mut self.shadow_bundles {
+            *view = ShadowViewBundles::default();
         }
     }
 
@@ -1565,18 +1758,12 @@ impl Renderer {
         after: impl FnOnce(&wgpu::Device, &wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView),
     ) -> Result<(), wgpu::SurfaceError> {
         let mut t = std::time::Instant::now();
-        let frame = self.surface.get_current_texture()?;
-        self.cpu_spans.mark("render.acquire", &mut t);
-        // Acquiring waits for the display, so the time between acquires is
-        // the even rhythm frames reach the screen at.
-        let acquired = std::time::Instant::now();
-        if let Some(last) = self.last_acquire.replace(acquired) {
-            self.acquire_interval = Some((acquired - last).as_secs_f32());
-        }
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
+        // The scene draws into Engine's own targets, and only the last
+        // steps (post-processing, the UI) into the window's image. So the
+        // scene is recorded and sent to the GPU first, and the window's
+        // image is waited for afterwards: the GPU starts on the scene while
+        // the display is still busy. The queue runs submissions in order,
+        // so the post-processing always reads the finished scene.
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1596,7 +1783,17 @@ impl Renderer {
             glam::Vec2::ZERO
         };
         let (scene_view, scene_resolve) = self.postprocess.scene_attachment();
-        self.encode_world(&mut encoder, &scene_view, scene_resolve.as_ref(), world);
+        // Command buffers recorded on other threads, in submission order,
+        // all before `encoder`'s own (submitted together, so every buffer
+        // write of this frame lands before any of them runs).
+        let mut recorded: Vec<wgpu::CommandBuffer> = Vec::new();
+        self.encode_world(
+            &mut encoder,
+            &mut recorded,
+            &scene_view,
+            scene_resolve.as_ref(),
+            world,
+        );
         self.write_audit(world);
         self.gpu_check_if_asked(world);
         self.mark_gpu(&mut encoder, Mark::SceneDone);
@@ -1676,6 +1873,29 @@ impl Renderer {
         }
         self.mark_gpu(&mut encoder, Mark::WorldDone);
         self.cpu_spans.mark("render.particles_fx", &mut t);
+        self.queue.submit(
+            recorded
+                .into_iter()
+                .chain(std::iter::once(encoder.finish())),
+        );
+        self.cpu_spans.mark("render.submit_scene", &mut t);
+
+        let frame = self.surface.get_current_texture()?;
+        self.cpu_spans.mark("render.acquire", &mut t);
+        // Acquiring waits for the display, so the time between acquires is
+        // the even rhythm frames reach the screen at.
+        let acquired = std::time::Instant::now();
+        if let Some(last) = self.last_acquire.replace(acquired) {
+            self.acquire_interval = Some((acquired - last).as_secs_f32());
+        }
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("present-encoder"),
+            });
         self.postprocess.encode(
             &self.queue,
             &mut encoder,
@@ -2064,6 +2284,7 @@ impl Renderer {
     fn encode_world(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
+        recorded: &mut Vec<wgpu::CommandBuffer>,
         color: &wgpu::TextureView,
         resolve: Option<&wgpu::TextureView>,
         world: &World,
@@ -2118,7 +2339,8 @@ impl Renderer {
         if self.shadow.encode_horizon(encoder) {
             self.gpu_stats.terrain_horizon_rebuilds += 1;
         }
-        self.encode_shadow_pass(encoder, world);
+        self.cpu_spans.mark("world.shadow_setup", &mut t);
+        self.encode_shadow_pass(encoder, recorded, world);
         self.mark_gpu(encoder, Mark::ShadowDone);
         self.cpu_spans.mark("world.shadows", &mut t);
         if let Some(placement) = gi_placement {
@@ -2176,6 +2398,14 @@ impl Renderer {
             } else {
                 PrepassPhase::All
             };
+            self.prepare_opaque_bundles(
+                OpaqueTarget::Prepass(phase),
+                world,
+                live,
+                &main_cull,
+                main_uniform_slot,
+            );
+            self.cpu_spans.mark("world.record_opaque", &mut t);
             self.encode_depth_prepass(encoder, world, live, &main_cull, main_uniform_slot, phase);
         }
         if occluding {
@@ -2235,6 +2465,14 @@ impl Renderer {
         }
         self.mark_gpu(encoder, Mark::AoDone);
         self.cpu_spans.mark("world.prepass_ao", &mut t);
+        self.prepare_opaque_bundles(
+            OpaqueTarget::World,
+            world,
+            live,
+            &main_cull,
+            main_uniform_slot,
+        );
+        self.cpu_spans.mark("world.record_opaque", &mut t);
         // With a prepass the world pass keeps its depth: hidden fragments
         // then fail the depth test before any shading runs.
         let own_depth = world.debug_shading & 65536 != 0;
@@ -2292,6 +2530,8 @@ impl Renderer {
             Some(main_uniform_slot),
         );
         drop(pass);
+        self.opaque_prepass.frame = None;
+        self.opaque_world.frame = None;
         self.cpu_spans.mark("world.main_pass", &mut t);
     }
 
@@ -2678,6 +2918,179 @@ impl Renderer {
     /// Lay the live view's opaque depth before shading, for SSAO and so the
     /// world pass shades each pixel once. Foliage cutouts and see-through
     /// surfaces stay out; they still draw, and test, in the world pass.
+    /// Get the top-level view's opaque mesh draws for one pass ready as
+    /// render bundles, in chunks. The draws are exactly the ones that pass
+    /// would make itself (same list, order, culling and occlusion choices).
+    /// Chunks whose draws are unchanged are kept; the others are recorded on
+    /// the frame's threads, reading only renderer state that nothing changes
+    /// meanwhile. The chunks stay in draw order and are executed in that
+    /// order, so the result matches drawing one by one. With too few draws
+    /// for bundles to pay off there are none, and the pass draws directly.
+    fn prepare_opaque_bundles(
+        &mut self,
+        target: OpaqueTarget,
+        world: &World,
+        space: SpaceId,
+        main_cull: &MainCullSelection,
+        uniform_slot: usize,
+    ) {
+        let albedo_of = |entity: &Entity| {
+            entity
+                .albedo
+                .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
+                .unwrap_or(&self.pipelines.white_albedo)
+        };
+        let mut draws: Vec<OpaqueDraw<'_>> = Vec::new();
+        for &id in &self.draw_opaque {
+            if !entity_in_space(world, id, space) {
+                continue;
+            }
+            let occlusion = main_cull.occlusion_slot(id);
+            let submit = match target {
+                // Candidates not seen lately wait for the occlusion test.
+                OpaqueTarget::Prepass(PrepassPhase::Seen)
+                    if occlusion.is_some()
+                        && !main_cull
+                            .occlusion
+                            .as_ref()
+                            .is_some_and(|f| f.first.contains(&id)) =>
+                {
+                    continue;
+                }
+                OpaqueTarget::World if occlusion.is_some() => {
+                    let (args, slot) = occlusion.expect("checked");
+                    OpaqueSubmit::Occluded(args, slot)
+                }
+                _ => OpaqueSubmit::Mesh(mesh_submit(&main_cull.compacted, id)),
+            };
+            let entity = world.entity(id).expect("draw list is live");
+            draws.push(OpaqueDraw {
+                albedo: albedo_of(entity),
+                gpu: self.gpu_meshes.get(&id).expect("draw list is synced"),
+                submit,
+            });
+        }
+        for &prototype in &self.batch_opaque {
+            if !entity_in_space(world, prototype, space) {
+                continue;
+            }
+            let entity = world
+                .entity(prototype)
+                .expect("batch draw prototype is live");
+            let batch = self
+                .gpu_instance_batches
+                .get(&prototype)
+                .expect("batch draw is synced");
+            draws.push(OpaqueDraw {
+                albedo: albedo_of(entity),
+                gpu: &batch.gpu,
+                submit: OpaqueSubmit::Mesh(mesh_submit(&main_cull.compacted, prototype)),
+            });
+        }
+        let cache = match target {
+            OpaqueTarget::Prepass(_) => &self.opaque_prepass,
+            OpaqueTarget::World => &self.opaque_world,
+        };
+        if draws.len() < OPAQUE_BUNDLE_MIN_DRAWS {
+            let empty = OpaqueBundles::default();
+            match target {
+                OpaqueTarget::Prepass(_) => self.opaque_prepass = empty,
+                OpaqueTarget::World => self.opaque_world = empty,
+            }
+            return;
+        }
+        let nowrite = self.prepass_done && world.debug_shading & (16384 | 65536) == 0;
+        let scene_bind = self.pipelines.scene_bind_group(uniform_slot);
+        let pipeline = match target {
+            OpaqueTarget::Prepass(_) => &self.pipelines.depth_prepass,
+            OpaqueTarget::World if nowrite => &self.pipelines.opaque_nowrite,
+            OpaqueTarget::World => &self.pipelines.opaque,
+        };
+        let world_pass = target == OpaqueTarget::World;
+        let samples = stencil::scene_samples();
+        let shared_same = cache
+            .shared
+            .as_ref()
+            .is_some_and(|(bind, pipe, n)| bind == scene_bind && pipe == pipeline && *n == samples);
+        let chunks: Vec<&[OpaqueDraw<'_>]> = draws.chunks(OPAQUE_BUNDLE_CHUNK).collect();
+        // A chunk is kept when every draw in it is the same as last time.
+        let keep: Vec<bool> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, chunk)| {
+                shared_same
+                    && cache.chunks.get(i).is_some_and(|c| {
+                        c.keys.len() == chunk.len()
+                            && c.keys.iter().zip(chunk.iter()).all(|(k, d)| k.matches(d))
+                    })
+            })
+            .collect();
+        let device = &self.device;
+        let record = |chunk: &[OpaqueDraw<'_>]| {
+            let color = [Some(HDR_FORMAT)];
+            let mut bundle =
+                device.create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
+                    label: Some("opaque-meshes"),
+                    color_formats: if world_pass { &color } else { &[] },
+                    depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                        format: depth_format(),
+                        depth_read_only: false,
+                        stencil_read_only: true,
+                    }),
+                    sample_count: samples,
+                    multiview: None,
+                });
+            bundle.set_bind_group(0, scene_bind, &[]);
+            bundle.set_pipeline(pipeline);
+            for d in chunk {
+                d.record(&mut bundle);
+            }
+            bundle.finish(&wgpu::RenderBundleDescriptor {
+                label: Some("opaque-meshes"),
+            })
+        };
+        let jobs: Vec<usize> = (0..chunks.len()).filter(|&i| !keep[i]).collect();
+        let recorded: Vec<wgpu::RenderBundle> = {
+            use rayon::prelude::*;
+            crate::parallel::frame_pool()
+                .install(|| jobs.par_iter().map(|&i| record(chunks[i])).collect())
+        };
+        let indirect_draws = draws
+            .iter()
+            .filter(|d| matches!(d.submit, OpaqueSubmit::Mesh(MeshSubmit::Compacted)))
+            .count() as u32;
+        let mut fresh: Vec<Option<OpaqueChunk>> = (0..chunks.len()).map(|_| None).collect();
+        for (i, bundle) in jobs.into_iter().zip(recorded) {
+            fresh[i] = Some(OpaqueChunk {
+                keys: chunks[i].iter().map(OpaqueKey::of).collect(),
+                bundle,
+            });
+        }
+        let shared = (scene_bind.clone(), pipeline.clone(), samples);
+        let n = chunks.len();
+        drop(chunks);
+        drop(draws);
+        let cache = match target {
+            OpaqueTarget::Prepass(_) => &mut self.opaque_prepass,
+            OpaqueTarget::World => &mut self.opaque_world,
+        };
+        let mut old = std::mem::take(&mut cache.chunks).into_iter();
+        for (i, f) in fresh.into_iter().enumerate() {
+            let kept = old.next();
+            cache.chunks.push(f.unwrap_or_else(|| {
+                kept.unwrap_or_else(|| panic!("opaque chunk {i} kept but not cached"))
+            }));
+        }
+        cache.shared = Some(shared);
+        cache.frame = Some(OpaqueFrame {
+            target,
+            space,
+            uniform_slot,
+            chunks: n,
+            indirect_draws,
+        });
+    }
+
     fn encode_depth_prepass(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -2759,8 +3172,20 @@ impl Renderer {
             self.voxel.draw(&mut pass, &draws);
         }
 
+        let bundles = self.opaque_prepass.frame.as_ref().filter(|f| {
+            f.target == OpaqueTarget::Prepass(phase) && f.space == space && f.uniform_slot == slot
+        });
+        if let Some(frame) = bundles {
+            pass.execute_bundles(
+                self.opaque_prepass.chunks[..frame.chunks]
+                    .iter()
+                    .map(|c| &c.bundle),
+            );
+            // Bundles leave the pass with nothing bound.
+            pass.set_bind_group(0, scene_bind, &[]);
+        }
         pass.set_pipeline(&self.pipelines.depth_prepass);
-        for &id in &self.draw_opaque {
+        for &id in self.draw_opaque.iter().filter(|_| bundles.is_none()) {
             if !entity_in_space(world, id, space) {
                 continue;
             }
@@ -2790,7 +3215,7 @@ impl Renderer {
                 &mut indirect_draws,
             );
         }
-        for &prototype in &self.batch_opaque {
+        for &prototype in self.batch_opaque.iter().filter(|_| bundles.is_none()) {
             if !entity_in_space(world, prototype, space) {
                 continue;
             }
@@ -2957,6 +3382,39 @@ impl Renderer {
         }
 
         self.mark_scene(pass, stamp, SceneMark::Voxel);
+        // The top-level view's opaque meshes were recorded on the frame's
+        // threads for exactly this space, uniform slot and depth mode.
+        // The top-level view's opaque meshes, when recorded on the frame's
+        // threads for exactly this space, uniform slot and pipeline.
+        let pipeline = if portal_mask {
+            &self.pipelines.opaque_portal
+        } else if nowrite {
+            &self.pipelines.opaque_nowrite
+        } else {
+            &self.pipelines.opaque
+        };
+        let bundles = self
+            .opaque_world
+            .frame
+            .as_ref()
+            .filter(|f| {
+                stamp
+                    && f.target == OpaqueTarget::World
+                    && f.space == space
+                    && f.uniform_slot == uniform_slot
+                    && self
+                        .opaque_world
+                        .shared
+                        .as_ref()
+                        .is_some_and(|(_, p, _)| p == pipeline)
+            })
+            .map(|f| (f.chunks, f.indirect_draws));
+        if let Some((chunks, indirect_draws)) = bundles {
+            pass.execute_bundles(self.opaque_world.chunks[..chunks].iter().map(|c| &c.bundle));
+            self.gpu_stats.indirect_draws += indirect_draws;
+            pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
+        }
+        let direct = bundles.is_none();
         pass.set_pipeline(if portal_mask {
             &self.pipelines.opaque_portal
         } else if nowrite {
@@ -2964,7 +3422,7 @@ impl Renderer {
         } else {
             &self.pipelines.opaque
         });
-        for &id in &self.draw_opaque {
+        for &id in self.draw_opaque.iter().filter(|_| direct) {
             if !entity_in_space(world, id, space) {
                 continue;
             }
@@ -2993,7 +3451,7 @@ impl Renderer {
             );
         }
         self.mark_scene(pass, stamp, SceneMark::Meshes);
-        for &prototype in &self.batch_opaque {
+        for &prototype in self.batch_opaque.iter().filter(|_| direct) {
             if !entity_in_space(world, prototype, space) {
                 continue;
             }
@@ -3248,91 +3706,92 @@ impl Renderer {
         self.mark_scene(pass, stamp, SceneMark::End);
     }
 
-    fn prepare_shadow_bundle(&mut self, cascade: usize, selection: &ShadowCullSelection) {
-        let key = &self.shadow_bundle_keys[cascade];
-        if key.draws == selection.draws && key.batch_draws == selection.batch_draws {
-            return;
+    /// Record the shadow bundles whose casters changed, all at once on the
+    /// frame's threads. A view's meshes are bundled per source group and
+    /// its instance batches in one more bundle; only bundles whose own
+    /// casters changed are recorded. Each reads only shared, unchanging
+    /// renderer state and goes to its own place; all are done before any
+    /// pass uses them.
+    fn prepare_shadow_bundles(&mut self, slots: &[usize], selections: &[ShadowCullSelection]) {
+        // (slot, group, draws, batches); `group` is the place in the
+        // view's new group list (unused for batches).
+        let mut jobs: Vec<(usize, usize, &[ShadowDraw], bool)> = Vec::new();
+        let mut kept: Vec<Vec<Option<ShadowGroupBundle>>> = Vec::new();
+        for (&slot, selection) in slots.iter().zip(selections) {
+            let view = &mut self.shadow_bundles[slot];
+            let mut old: HashMap<u32, ShadowGroupBundle> = std::mem::take(&mut view.groups)
+                .into_iter()
+                .map(|g| (g.group, g))
+                .collect();
+            let mut list = Vec::new();
+            for run in selection.draws.chunk_by(|a, b| a.group == b.group) {
+                let reuse = old.remove(&run[0].group).filter(|g| g.draws == run);
+                if reuse.is_none() {
+                    jobs.push((slot, list.len(), run, false));
+                }
+                list.push(reuse);
+            }
+            kept.push(list);
+            if view.batch_draws != selection.batch_draws {
+                view.batch_draws.clone_from(&selection.batch_draws);
+                view.batches = None;
+                if !selection.batch_draws.is_empty() {
+                    jobs.push((slot, 0, &selection.batch_draws, true));
+                }
+            }
         }
-        self.shadow_bundle_keys[cascade]
-            .draws
-            .clone_from(&selection.draws);
-        self.shadow_bundle_keys[cascade]
-            .batch_draws
-            .clone_from(&selection.batch_draws);
-        if selection.draws.is_empty() && selection.batch_draws.is_empty() {
-            self.shadow_bundles[cascade] = None;
-            return;
-        }
-
-        let mut bundle =
-            self.device
-                .create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
-                    label: Some("visible-shadow-casters"),
-                    color_formats: &[],
-                    depth_stencil: Some(wgpu::RenderBundleDepthStencil {
-                        format: wgpu::TextureFormat::Depth32Float,
-                        depth_read_only: false,
-                        stencil_read_only: true,
-                    }),
-                    sample_count: 1,
-                    multiview: None,
-                });
-        let view_bind = if cascade < 3 {
-            &self.shadow.cascade_binds[cascade]
-        } else {
-            &self.shadow.lamps.layer_binds[cascade - 3]
+        let ctx = ShadowBundleCtx {
+            device: &self.device,
+            shadow: &self.shadow,
+            gpu_meshes: &self.gpu_meshes,
+            gpu_mesh_albedo: &self.gpu_mesh_albedo,
+            gpu_instance_batches: &self.gpu_instance_batches,
         };
-        bundle.set_bind_group(0, view_bind, &[]);
-        // Untextured casters first on the cheap depth-only pipeline, then the
-        // textured ones through the alpha test.
-        for cutout in [false, true] {
-            let pipeline = if cutout {
-                match self.shadow.cutout_pipeline.as_ref() {
-                    Some(p) => p,
-                    None => &self.shadow.mesh_pipeline,
-                }
+        let record = |&(slot, _, draws, batches): &(usize, usize, &[ShadowDraw], bool)| {
+            ctx.record(slot, draws, batches)
+        };
+        let recorded: Vec<wgpu::RenderBundle> = if jobs.len() > 1 {
+            use rayon::prelude::*;
+            crate::parallel::frame_pool().install(|| jobs.par_iter().map(record).collect())
+        } else {
+            jobs.iter().map(record).collect()
+        };
+        let index: HashMap<usize, usize> = slots.iter().enumerate().map(|(i, &s)| (s, i)).collect();
+        for ((slot, place, draws, batches), bundle) in jobs.into_iter().zip(recorded) {
+            if batches {
+                self.shadow_bundles[slot].batches = Some(bundle);
             } else {
-                &self.shadow.mesh_pipeline
-            };
-            bundle.set_pipeline(pipeline);
-            let albedo_of =
-                |draw: &ShadowDraw| draw.albedo.and_then(|tid| self.gpu_mesh_albedo.get(&tid));
-            for draw in &selection.draws {
-                let albedo = albedo_of(draw);
-                if albedo.is_some() != cutout {
-                    continue;
-                }
-                if let Some(bind) = albedo {
-                    bundle.set_bind_group(1, bind, &[]);
-                }
-                let gpu = self
-                    .gpu_meshes
-                    .get(&draw.id)
-                    .expect("shadow bundle caster is synced");
-                encode_shadow_bundle_draw(&mut bundle, gpu, draw.submit);
-            }
-            for draw in &selection.batch_draws {
-                let albedo = albedo_of(draw);
-                if albedo.is_some() != cutout {
-                    continue;
-                }
-                if let Some(bind) = albedo {
-                    bundle.set_bind_group(1, bind, &[]);
-                }
-                let gpu = &self
-                    .gpu_instance_batches
-                    .get(&draw.id)
-                    .expect("shadow bundle batch is synced")
-                    .gpu;
-                encode_shadow_bundle_draw(&mut bundle, gpu, draw.submit);
+                kept[index[&slot]][place] = Some(ShadowGroupBundle {
+                    group: draws[0].group,
+                    draws: draws.to_vec(),
+                    bundle,
+                });
             }
         }
-        self.shadow_bundles[cascade] = Some(bundle.finish(&wgpu::RenderBundleDescriptor {
-            label: Some("visible-shadow-casters"),
-        }));
+        for (&slot, list) in slots.iter().zip(kept) {
+            self.shadow_bundles[slot].groups = list
+                .into_iter()
+                .map(|g| g.expect("every shadow group is kept or recorded"))
+                .collect();
+        }
     }
 
-    fn encode_shadow_pass(&mut self, encoder: &mut wgpu::CommandEncoder, world: &World) {
+    /// The shadow views (sun cascades, lamp layers), each in its own
+    /// command buffer, recorded side by side on the frame's threads.
+    ///
+    /// Order is kept by construction: the commands `encoder` holds so far
+    /// are closed into `recorded` first, then each view's buffer follows in
+    /// view order, and `encoder` starts afresh for what comes after. The
+    /// queue runs them in that order. Each view's instance cull (which
+    /// shares buffers between views) is put in its own view's buffer, ahead
+    /// of its pass, here on this thread; the threads only add the passes,
+    /// reading renderer state that nothing changes meanwhile.
+    fn encode_shadow_pass(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        recorded: &mut Vec<wgpu::CommandBuffer>,
+        world: &World,
+    ) {
         let sun = world.shadows().is_some();
         let lamp_views = self.shadow.lamps.frame_views.clone();
         if !sun && lamp_views.is_empty() {
@@ -3352,18 +3811,30 @@ impl Renderer {
             frustums.push(Frustum::from_view_projection(*vp));
             slots.push(3 + i);
         }
+        let mut t = std::time::Instant::now();
         let selections = self.select_shadow_culls(world, &frustums);
+        self.cpu_spans.mark("shadows.select", &mut t);
+        self.prepare_shadow_bundles(&slots, &selections);
+        self.cpu_spans.mark("shadows.bundles", &mut t);
+
+        let new_encoder = |device: &wgpu::Device, label| {
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) })
+        };
+        let before = std::mem::replace(encoder, new_encoder(&self.device, "after-shadows"));
+        recorded.push(before.finish());
+        let default_space = world.living_in() == SpaceId::DEFAULT;
+        let mut views = Vec::new();
         for ((frustum, selection), &slot) in frustums.iter().zip(&selections).zip(&slots) {
+            let mut view_encoder = new_encoder(&self.device, "shadow-view");
             if submit == InstanceSubmit::GpuIndirect {
                 self.dispatch_instance_cull(
-                    encoder,
+                    &mut view_encoder,
                     frustum,
                     &selection.compact_batches,
                     CullView::Shadow,
                     None,
                 );
             }
-            self.prepare_shadow_bundle(slot, selection);
             self.gpu_stats.indirect_draws += u32::try_from(
                 selection
                     .batch_draws
@@ -3372,15 +3843,52 @@ impl Renderer {
                     .count(),
             )
             .expect("shadow indirect draw count exceeds u32");
+            let skinned = world
+                .animated_entities()
+                .filter(|(id, anim)| anim.space() == world.living_in() && !world.room_hidden(**id))
+                .filter(|(_, anim)| {
+                    let t = anim.transform().w_axis.truncate();
+                    if slot < 3 {
+                        t.distance(focus) <= far + 16.0
+                    } else {
+                        frustum.intersects_sphere(t + glam::Vec3::Y, 1.5)
+                    }
+                })
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>();
+            let voxel =
+                (default_space && self.voxel.is_drawing()).then(|| self.voxel.visible_in(frustum));
+            views.push((slot, view_encoder, skinned, voxel));
+        }
+        let this = &*self;
+        let views: Vec<ShadowViewWork<'_>> = views
+            .into_iter()
+            .map(|(slot, encoder, skinned, voxel)| ShadowViewWork {
+                slot,
+                encoder,
+                skinned: skinned
+                    .iter()
+                    .filter_map(|id| this.gpu_skinned.get(id))
+                    .collect(),
+                voxel,
+            })
+            .collect();
+        let record = |work: ShadowViewWork<'_>| -> wgpu::CommandBuffer {
+            let ShadowViewWork {
+                slot,
+                mut encoder,
+                skinned,
+                voxel,
+            } = work;
             let (target, view_bind) = if slot < 3 {
                 (
-                    &self.shadow.layer_views[slot],
-                    &self.shadow.cascade_binds[slot],
+                    &this.shadow.layer_views[slot],
+                    &this.shadow.cascade_binds[slot],
                 )
             } else {
                 (
-                    &self.shadow.lamps.layer_views[slot - 3],
-                    &self.shadow.lamps.layer_binds[slot - 3],
+                    &this.shadow.lamps.layer_views[slot - 3],
+                    &this.shadow.lamps.layer_binds[slot - 3],
                 )
             };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -3401,33 +3909,21 @@ impl Renderer {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            if let Some(bundle) = self.shadow_bundles[slot].as_ref() {
-                pass.execute_bundles(std::iter::once(bundle));
-            }
-            if world.living_in() == SpaceId::DEFAULT && self.voxel.is_drawing() {
-                let draws = self.voxel.visible_in(frustum);
-                pass.set_pipeline(&self.shadow.voxel_pipeline);
+            let view = &this.shadow_bundles[slot];
+            pass.execute_bundles(
+                view.groups
+                    .iter()
+                    .map(|g| &g.bundle)
+                    .chain(view.batches.as_ref()),
+            );
+            if let Some(draws) = voxel {
+                pass.set_pipeline(&this.shadow.voxel_pipeline);
                 pass.set_bind_group(0, view_bind, &[]);
-                self.voxel.draw(&mut pass, &draws);
+                this.voxel.draw(&mut pass, &draws);
             }
-            pass.set_pipeline(&self.shadow.skinned_pipeline);
+            pass.set_pipeline(&this.shadow.skinned_pipeline);
             pass.set_bind_group(0, view_bind, &[]);
-            for (id, anim) in world.animated_entities() {
-                if anim.space() != world.living_in() || world.room_hidden(*id) {
-                    continue;
-                }
-                let Some(gpu) = self.gpu_skinned.get(id) else {
-                    continue;
-                };
-                let t = anim.transform().w_axis.truncate();
-                let near = if slot < 3 {
-                    t.distance(focus) <= far + 16.0
-                } else {
-                    frustum.intersects_sphere(t + glam::Vec3::Y, 1.5)
-                };
-                if !near {
-                    continue;
-                }
+            for gpu in skinned {
                 pass.set_bind_group(1, &gpu.joint_bind, &[]);
                 pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
                 for mesh in &gpu.meshes {
@@ -3436,10 +3932,18 @@ impl Renderer {
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                 }
             }
-            if slot < 3 && world.living_in() == SpaceId::DEFAULT {
-                self.crowd.draw_shadow(&mut pass, view_bind);
+            if slot < 3 && default_space {
+                this.crowd.draw_shadow(&mut pass, view_bind);
             }
-        }
+            drop(pass);
+            encoder.finish()
+        };
+        let buffers: Vec<wgpu::CommandBuffer> = {
+            use rayon::prelude::*;
+            crate::parallel::frame_pool().install(|| views.into_par_iter().map(record).collect())
+        };
+        // `collect` keeps the views' order whatever thread finished first.
+        recorded.extend(buffers);
     }
 
     pub fn size(&self) -> PhysicalSize<u32> {
@@ -3546,7 +4050,8 @@ impl Renderer {
                 compact_batches: Vec::new(),
             })
             .collect();
-        for &id in &self.shadow_mesh_sources {
+        for (source, &id) in self.shadow_mesh_sources.iter().enumerate() {
+            let group = (source / SHADOW_GROUP) as u32;
             if !entity_in_space(world, id, world.living_in()) {
                 continue;
             }
@@ -3564,6 +4069,7 @@ impl Renderer {
                     Visibility::Inside | Visibility::Intersecting => {
                         selection.draws.push(ShadowDraw {
                             id,
+                            group,
                             submit: MeshSubmit::Direct,
                             albedo,
                         });
@@ -3591,6 +4097,7 @@ impl Renderer {
                         selection.compact_batches.push(prototype);
                         selection.batch_draws.push(ShadowDraw {
                             id: prototype,
+                            group: 0,
                             submit: MeshSubmit::Compacted,
                             albedo,
                         });
@@ -3599,6 +4106,7 @@ impl Renderer {
                         self.gpu_stats.direct_inside_batches += 1;
                         selection.batch_draws.push(ShadowDraw {
                             id: prototype,
+                            group: 0,
                             submit: MeshSubmit::Direct,
                             albedo,
                         });
@@ -3607,6 +4115,7 @@ impl Renderer {
                         selection.compact_batches.push(prototype);
                         selection.batch_draws.push(ShadowDraw {
                             id: prototype,
+                            group: 0,
                             submit: MeshSubmit::Compacted,
                             albedo,
                         });
@@ -4140,6 +4649,90 @@ fn batch_slot_capacity(instance_count: usize) -> usize {
         .checked_next_power_of_two()
         .expect("instance batch slot capacity overflow")
         .max(8)
+}
+
+/// One shadow view to record on a frame thread: its own encoder (holding
+/// its instance cull already) and what it draws besides its bundles.
+struct ShadowViewWork<'r> {
+    slot: usize,
+    encoder: wgpu::CommandEncoder,
+    skinned: Vec<&'r GpuSkinnedEntity>,
+    voxel: Option<Vec<(std::ops::Range<u32>, i32, u32)>>,
+}
+
+/// What recording a shadow bundle reads: shared and unchanged while the
+/// bundles are recorded, so several threads can read it at once.
+struct ShadowBundleCtx<'r> {
+    device: &'r wgpu::Device,
+    shadow: &'r ShadowGpu,
+    gpu_meshes: &'r HashMap<EntityId, GpuMesh>,
+    gpu_mesh_albedo: &'r HashMap<TextureId, wgpu::BindGroup>,
+    gpu_instance_batches: &'r HashMap<EntityId, GpuInstanceBatch>,
+}
+
+impl ShadowBundleCtx<'_> {
+    /// One view's casters: `draws` are plain meshes, or instance batches
+    /// when `batches`.
+    fn record(&self, cascade: usize, draws: &[ShadowDraw], batches: bool) -> wgpu::RenderBundle {
+        let mut bundle =
+            self.device
+                .create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
+                    label: Some("visible-shadow-casters"),
+                    color_formats: &[],
+                    depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_read_only: false,
+                        stencil_read_only: true,
+                    }),
+                    sample_count: 1,
+                    multiview: None,
+                });
+        let view_bind = if cascade < 3 {
+            &self.shadow.cascade_binds[cascade]
+        } else {
+            &self.shadow.lamps.layer_binds[cascade - 3]
+        };
+        bundle.set_bind_group(0, view_bind, &[]);
+        // Untextured casters first on the cheap depth-only pipeline, then the
+        // textured ones through the alpha test.
+        for cutout in [false, true] {
+            let pipeline = if cutout {
+                match self.shadow.cutout_pipeline.as_ref() {
+                    Some(p) => p,
+                    None => &self.shadow.mesh_pipeline,
+                }
+            } else {
+                &self.shadow.mesh_pipeline
+            };
+            bundle.set_pipeline(pipeline);
+            let albedo_of =
+                |draw: &ShadowDraw| draw.albedo.and_then(|tid| self.gpu_mesh_albedo.get(&tid));
+            for draw in draws {
+                let albedo = albedo_of(draw);
+                if albedo.is_some() != cutout {
+                    continue;
+                }
+                if let Some(bind) = albedo {
+                    bundle.set_bind_group(1, bind, &[]);
+                }
+                let gpu = if batches {
+                    &self
+                        .gpu_instance_batches
+                        .get(&draw.id)
+                        .expect("shadow bundle batch is synced")
+                        .gpu
+                } else {
+                    self.gpu_meshes
+                        .get(&draw.id)
+                        .expect("shadow bundle caster is synced")
+                };
+                encode_shadow_bundle_draw(&mut bundle, gpu, draw.submit);
+            }
+        }
+        bundle.finish(&wgpu::RenderBundleDescriptor {
+            label: Some("visible-shadow-casters"),
+        })
+    }
 }
 
 fn encode_shadow_bundle_draw<'a>(
