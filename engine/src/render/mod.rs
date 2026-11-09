@@ -641,9 +641,8 @@ pub struct Renderer {
     shadow_batch_sources: Vec<EntityId>,
     /// Sun cascades first, then lamp shadow layers.
     shadow_bundles: Vec<ShadowViewBundles>,
-    /// This frame's opaque mesh draws for the top-level view, recorded on
-    /// the frame's threads; made and dropped within `encode_world`.
-    /// The top-level view's opaque draws as bundles: depth prepass, world pass.
+    /// The top-level view's opaque draws as bundles, kept from frame to
+    /// frame: depth prepass, world pass.
     opaque_prepass: OpaqueBundles,
     opaque_world: OpaqueBundles,
     draw_opaque: Vec<EntityId>,
@@ -2932,9 +2931,6 @@ impl Renderer {
         }
     }
 
-    /// Lay the live view's opaque depth before shading, for SSAO and so the
-    /// world pass shades each pixel once. Foliage cutouts and see-through
-    /// surfaces stay out; they still draw, and test, in the world pass.
     /// Get the top-level view's opaque mesh draws for one pass ready as
     /// render bundles, in chunks. The draws are exactly the ones that pass
     /// would make itself (same list, order, culling and occlusion choices).
@@ -3108,6 +3104,9 @@ impl Renderer {
         });
     }
 
+    /// Lay the live view's opaque depth before shading, for SSAO and so the
+    /// world pass shades each pixel once. Foliage cutouts and see-through
+    /// surfaces stay out; they still draw, and test, in the world pass.
     fn encode_depth_prepass(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -3427,8 +3426,6 @@ impl Renderer {
         }
 
         self.mark_scene(pass, stamp, SceneMark::Voxel);
-        // The top-level view's opaque meshes were recorded on the frame's
-        // threads for exactly this space, uniform slot and depth mode.
         // The top-level view's opaque meshes, when recorded on the frame's
         // threads for exactly this space, uniform slot and pipeline.
         let pipeline = if portal_mask {
