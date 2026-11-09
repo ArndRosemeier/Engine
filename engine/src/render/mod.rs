@@ -11,6 +11,7 @@ mod grass;
 mod instance_cull;
 mod lights;
 mod material;
+mod material_table;
 mod occlusion;
 mod particles_gpu;
 mod pipeline;
@@ -177,6 +178,9 @@ enum OpaqueSubmit<'r> {
 /// One opaque mesh draw, with everything it binds already looked up.
 struct OpaqueDraw<'r> {
     albedo: &'r wgpu::BindGroup,
+    /// Its material-table slot, when its instances carry the current one:
+    /// multi-draws then read the texture arrays instead of `albedo`.
+    material: Option<u32>,
     gpu: &'r GpuMesh,
     submit: OpaqueSubmit<'r>,
 }
@@ -299,6 +303,8 @@ const OPAQUE_MULTI_MIN_DRAWS: usize = 64;
 /// `multi_draw_indexed_indirect`.
 struct MultiGroup {
     albedo: wgpu::BindGroup,
+    /// Through the texture-array pipeline (`albedo` is the material table).
+    bindless: bool,
     vertex: wgpu::Buffer,
     index: wgpu::Buffer,
     instances: wgpu::Buffer,
@@ -318,6 +324,8 @@ struct MultiGroup {
 #[derive(Default)]
 struct MultiDraw {
     pipeline: Option<wgpu::RenderPipeline>,
+    /// For the groups that read the material table.
+    bindless_pipeline: Option<wgpu::RenderPipeline>,
     groups: Vec<MultiGroup>,
     /// The direct draws' arguments, as last written.
     args: Option<wgpu::Buffer>,
@@ -337,6 +345,12 @@ impl MultiDraw {
         pass.set_bind_group(0, scene_bind, &[]);
         let mut bound: Option<&MultiGroup> = None;
         for g in &self.groups {
+            if g.bindless && bound.is_none_or(|b| !b.bindless) {
+                let Some(bindless) = self.bindless_pipeline.as_ref() else {
+                    continue;
+                };
+                pass.set_pipeline(bindless);
+            }
             let args = if g.occluded {
                 self.occlusion_args.as_ref()
             } else {
@@ -363,6 +377,8 @@ impl MultiDraw {
         if let Some(rest) = self.rest.as_ref() {
             pass.execute_bundles(std::iter::once(rest));
             pass.set_bind_group(0, scene_bind, &[]);
+        } else if bound.is_some_and(|b| b.bindless) {
+            pass.set_pipeline(pipeline);
         }
         self.groups.len() as u32
     }
@@ -824,6 +840,9 @@ pub struct Renderer {
     arenas: geometry::MeshArenas,
     /// The GPU draws many meshes per call (`MultiDraw`).
     multi_draw: bool,
+    /// Texture arrays: the material table and the opaque pipelines that
+    /// read it, so multi-draws need not split by texture.
+    bindless: Option<Bindless>,
     /// GPU-mode instance buffers, one per prototype instead of one per spatial bin.
     gpu_instance_batches: HashMap<EntityId, GpuInstanceBatch>,
     gpu_batch_sources: Vec<BatchSourceState>,
@@ -953,6 +972,19 @@ impl Renderer {
         if multi_draw {
             required_features |= multi_draw_features;
         }
+        let mut required_limits = wgpu::Limits::default();
+        let texture_arrays = multi_draw
+            && adapter
+                .features()
+                .contains(material_table::MATERIAL_TABLE_FEATURES)
+            && adapter.limits().max_binding_array_elements_per_shader_stage
+                >= material_table::MATERIAL_TABLE_ELEMENTS
+            && !material_table::disabled_by_env();
+        if texture_arrays {
+            required_features |= material_table::MATERIAL_TABLE_FEATURES;
+            required_limits.max_binding_array_elements_per_shader_stage =
+                material_table::MATERIAL_TABLE_ELEMENTS;
+        }
         if gpu_profile_interval.is_some() {
             let timestamp_features =
                 wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
@@ -972,7 +1004,7 @@ impl Renderer {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("engine-device"),
                 required_features,
-                required_limits: wgpu::Limits::default(),
+                required_limits,
                 memory_hints: wgpu::MemoryHints::Performance,
                 trace: wgpu::Trace::Off,
             })
@@ -1113,6 +1145,26 @@ impl Renderer {
         );
         shadow.set_gi_views(&device, gi.probe_views().clone());
         let pipelines = create_pipelines(&device, &queue, HDR_FORMAT, &shadow);
+        let bindless = texture_arrays.then(|| {
+            let mut table = material_table::MaterialTable::new(&device);
+            let white = material::GpuMaterial::new(
+                &device,
+                &queue,
+                &pipelines.albedo_layout,
+                &pipelines.albedo_sampler,
+                &pipelines.neutral_maps,
+                None,
+                None,
+            );
+            table.insert(&queue, None, &white, false);
+            let pipes = pipeline::create_bindless_pipelines(
+                &device,
+                HDR_FORMAT,
+                &pipelines.bind_layout,
+                &table.layout,
+            );
+            Bindless { table, pipes }
+        });
         let (terrain, water, skinned, crowd, portal, particles, ribbons, water_gpu) =
             std::thread::scope(|s| {
                 let (device, depth) = (&device, &depth_texture);
@@ -1227,6 +1279,7 @@ impl Renderer {
             gpu_meshes: HashMap::new(),
             arenas: geometry::MeshArenas::default(),
             multi_draw,
+            bindless,
             gpu_instance_batches: HashMap::new(),
             gpu_batch_sources: Vec::new(),
             gpu_batch_source_scratch: Vec::new(),
@@ -1672,6 +1725,17 @@ impl Renderer {
         self.cpu_spans.mark("sync.skinned", &mut t);
     }
 
+    /// The material-table slot a mesh with `albedo` draws with (texture
+    /// arrays), as `albedo_of` picks its bind group; `None` without a table
+    /// or when the table is full.
+    fn material_slot(&self, albedo: Option<TextureId>) -> Option<u32> {
+        let table = &self.bindless.as_ref()?.table;
+        match albedo {
+            Some(tid) if self.gpu_mesh_albedo.contains_key(&tid) => table.slot(Some(tid)),
+            _ => table.slot(None),
+        }
+    }
+
     fn sync_entity_mesh(&mut self, id: EntityId, entity: &Entity) {
         if entity.instanced && entity.instances.is_empty() {
             if let Some(gpu) = self.gpu_meshes.get_mut(&id) {
@@ -1694,11 +1758,12 @@ impl Renderer {
             return;
         }
 
+        let material = self.material_slot(entity.albedo);
         if let Some(gpu) = self.gpu_meshes.get(&id) {
             let same_mesh = entity.instance_of.is_some()
                 || (gpu.vertex_count == entity.vertex_count()
                     && gpu.index_count == entity.index_count());
-            if same_mesh && gpu.xform_rev == entity.xform_rev {
+            if same_mesh && gpu.xform_rev == entity.xform_rev && gpu.material == material {
                 return;
             }
         }
@@ -1712,6 +1777,11 @@ impl Renderer {
         } else {
             self.instance_scratch
                 .push(InstanceRaw::from_matrix(entity.transform));
+        }
+        if let Some(slot) = material {
+            for raw in &mut self.instance_scratch {
+                raw.material = slot;
+            }
         }
 
         let shadow_buffers_changed = match self.gpu_meshes.get_mut(&id) {
@@ -1742,6 +1812,7 @@ impl Renderer {
                     reallocated
                 };
                 gpu.xform_rev = entity.xform_rev;
+                gpu.material = material;
                 buffers_changed
             }
             None => {
@@ -1768,6 +1839,7 @@ impl Renderer {
                     )
                 };
                 gpu.xform_rev = entity.xform_rev;
+                gpu.material = material;
                 self.gpu_meshes.insert(id, gpu);
                 self.gpu_stats.mesh_new += 1;
                 false
@@ -3297,9 +3369,13 @@ impl Renderer {
                 _ => OpaqueSubmit::Mesh(mesh_submit(&main_cull.compacted, id)),
             };
             let entity = world.entity(id).expect("draw list is live");
+            let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
             draws.push(OpaqueDraw {
                 albedo: albedo_of(entity),
-                gpu: self.gpu_meshes.get(&id).expect("draw list is synced"),
+                material: gpu
+                    .material
+                    .filter(|&m| Some(m) == self.material_slot(entity.albedo)),
+                gpu,
                 submit,
             });
         }
@@ -3316,6 +3392,7 @@ impl Renderer {
                 .expect("batch draw is synced");
             draws.push(OpaqueDraw {
                 albedo: albedo_of(entity),
+                material: None,
                 gpu: &batch.gpu,
                 submit: OpaqueSubmit::Mesh(mesh_submit(&main_cull.compacted, prototype)),
             });
@@ -3376,6 +3453,14 @@ impl Renderer {
                 multi.written = plan.args;
             }
             multi.pipeline = Some(pipeline);
+            multi.bindless_pipeline = self.bindless.as_ref().map(|b| {
+                match target {
+                    OpaqueTarget::Prepass(_) => &b.pipes.depth_prepass,
+                    OpaqueTarget::World if nowrite => &b.pipes.opaque_nowrite,
+                    OpaqueTarget::World => &b.pipes.opaque,
+                }
+                .clone()
+            });
             multi.groups = plan.groups;
             multi.occlusion_args = plan.occlusion_args;
             multi.rest = plan.rest;
@@ -3486,7 +3571,14 @@ impl Renderer {
         world_pass: bool,
         samples: u32,
     ) -> MultiPlan {
-        type Key = (wgpu::BindGroup, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer);
+        type Key = (
+            wgpu::BindGroup,
+            bool,
+            wgpu::Buffer,
+            wgpu::Buffer,
+            wgpu::Buffer,
+        );
+        let table = self.bindless.as_ref().map(|b| &b.table);
         // wgpu handles hash by their id, which never changes.
         #[allow(clippy::mutable_key_type)]
         let mut index: HashMap<Key, usize> = HashMap::new();
@@ -3500,8 +3592,13 @@ impl Renderer {
                 continue;
             }
             let g = d.gpu;
+            // Texture arrays: every material of a sampler kind in one group.
+            let table_bind = d
+                .material
+                .and_then(|slot| table.and_then(|t| t.bind_for(slot)));
             let key: Key = (
-                d.albedo.clone(),
+                table_bind.unwrap_or(d.albedo).clone(),
+                table_bind.is_some(),
                 g.vertex_buf.clone(),
                 g.index_buf.clone(),
                 g.instance_buf.clone(),
@@ -3527,11 +3624,12 @@ impl Renderer {
         let stride = std::mem::size_of::<DrawIndexedArgs>() as u64;
         let mut args = Vec::new();
         let mut groups = Vec::new();
-        for (((albedo, vertex, index, instances), own), mut slots) in
+        for (((albedo, bindless, vertex, index, instances), own), mut slots) in
             keys.into_iter().zip(direct).zip(occluded)
         {
             let group = |occluded, offset, count| MultiGroup {
                 albedo: albedo.clone(),
+                bindless,
                 vertex: vertex.clone(),
                 index: index.clone(),
                 instances: instances.clone(),
@@ -3550,6 +3648,9 @@ impl Renderer {
                 }
             }
         }
+        // Plain groups first, then the texture-array ones: one pipeline
+        // switch.
+        groups.sort_by_key(|g| g.bindless);
         let indirect_draws = rest.len() as u32;
         let rest = (!rest.is_empty()).then(|| {
             let color = [Some(HDR_FORMAT)];
@@ -4831,9 +4932,14 @@ impl Renderer {
                     .entity(*id)
                     .ok()
                     .and_then(|e| e.albedo)
-                    .filter(|t| self.gpu_mesh_albedo.contains_key(t))
-                    .map(|t| t.0);
-                (albedo, gpu.geometry.page, gpu.instance_page())
+                    .filter(|t| self.gpu_mesh_albedo.contains_key(t));
+                // With texture arrays the multi-draw groups ignore the
+                // texture (only the sampler kind splits them).
+                let texture = match (self.bindless.as_ref(), self.material_slot(albedo)) {
+                    (Some(b), Some(slot)) => (0, b.table.repeats(slot) as u64),
+                    _ => (1, albedo.map_or(0, |t| t.0)),
+                };
+                (texture, gpu.geometry.page, gpu.instance_page())
             });
         }
         ids
@@ -5403,7 +5509,7 @@ impl Renderer {
                 continue;
             }
             let p = &self.pipelines;
-            let bind = if let Some(maps) = world.surface_maps(tid) {
+            let (gpu_material, repeat) = if let Some(maps) = world.surface_maps(tid) {
                 // Imported material sets: mipmapped, repeating, full PBR.
                 let cpu = &world.textures()[&tid];
                 let albedo = material::upload_map(
@@ -5417,7 +5523,7 @@ impl Renderer {
                     material::MapKind::Color,
                 )
                 .create_view(&Default::default());
-                material::GpuMaterial::new(
+                let material = material::GpuMaterial::new(
                     &self.device,
                     &self.queue,
                     &p.albedo_layout,
@@ -5425,14 +5531,14 @@ impl Renderer {
                     &p.neutral_maps,
                     Some(&albedo),
                     Some(maps),
-                )
-                .bind
+                );
+                (material, true)
             } else {
                 let gpu = self
                     .gpu_textures
                     .get(&tid)
                     .expect("mesh albedo missing on GPU");
-                material::GpuMaterial::new(
+                let material = material::GpuMaterial::new(
                     &self.device,
                     &self.queue,
                     &p.albedo_layout,
@@ -5440,13 +5546,27 @@ impl Renderer {
                     &p.neutral_maps,
                     Some(&gpu.view),
                     None,
-                )
-                .bind
+                );
+                (material, false)
             };
+            if let Some(b) = self.bindless.as_mut() {
+                b.table
+                    .insert(&self.queue, Some(tid), &gpu_material, repeat);
+            }
+            let bind = gpu_material.bind;
             self.gpu_mesh_albedo.insert(tid, bind);
         }
         self.gpu_mesh_albedo
             .retain(|id, _| world.textures().contains_key(id));
+        if let Some(b) = self.bindless.as_mut() {
+            b.table.retain(|id| world.textures().contains_key(&id));
+            let p = &self.pipelines;
+            b.table.flush(
+                &self.device,
+                &p.neutral_maps,
+                [&p.albedo_sampler, &p.material_sampler],
+            );
+        }
 
         for (id, mat) in world.materials() {
             if self.gpu_materials.contains_key(id) {
@@ -5986,4 +6106,10 @@ mod vsync_tests {
         let refresh_paced_only = [wgpu::PresentMode::Fifo, wgpu::PresentMode::Mailbox];
         resolve_present_mode(false, &refresh_paced_only);
     }
+}
+
+/// Texture arrays (see `material_table.rs`).
+struct Bindless {
+    table: material_table::MaterialTable,
+    pipes: pipeline::BindlessPipelines,
 }

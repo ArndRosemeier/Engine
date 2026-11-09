@@ -535,6 +535,16 @@ per frame on the world. Shadow maps (sun cascades, their static cache and
 lamps) draw their casters the same way. GPU-culled instanced props keep their
 own draws.
 
+**Texture arrays** (automatic where the GPU supports them; Vulkan and DX12
+cards do): every mesh texture set sits in one material table, the four maps
+of up to 4,096 materials in GPU texture arrays and their factors in a buffer.
+Each instance carries its mesh's slot, so the multi-draws above no longer
+split by texture, only by the sampler kind (baked albedo or imported
+material). In occlusion_city with 16 facade textures
+(`OCCLUSION_CITY_TEXTURES=16`) the towers go out in 5 calls instead of
+1,696, with the same picture. Shadow cutouts (textured foliage casters)
+still split by texture. `ENGINE_TEXTURE_ARRAYS=0` turns it off.
+
 Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_global_illumination`,
 `set_bloom`, `set_tone_map`, `set_haze`, `set_lod_bias`, `set_view_distance`.
 
@@ -625,6 +635,7 @@ Every program built on the engine understands these:
 | `ENGINE_OCCLUSION=0`, `=1` or `=auto` | Occlusion culling off, on or automatic whatever the game set (`world.set_occlusion_mode`), to compare frame times |
 | `ENGINE_RENDER_SCALE=0.75` | Draw the scene at that share of the window and upscale (0.5 to 1.0), whatever `world.set_render_scale` says |
 | `ENGINE_MULTI_DRAW=0` | Draw every opaque mesh with its own draw call instead of multi-draws, to compare |
+| `ENGINE_TEXTURE_ARRAYS=0` | Split multi-draws by texture instead of reading every texture through the material table, to compare |
 | `ENGINE_SHADOW_CACHE=0` | Draw every sun shadow caster every frame (no static cache), to compare frame times |
 | `ENGINE_SHADOW_REFRESH=1` | Draw every sun cascade every frame, whatever `world.set_shadow_cascade_refresh` says, to compare frame times |
 | `ENGINE_OCCLUSION_CHECK=1` | Read every frame's occlusion answers back and compare them with the CPU copy of the test; prints mismatches (slow, for driver trouble) |

@@ -1675,6 +1675,10 @@ pub(crate) struct InstanceRaw {
     pub model: [[f32; 4]; 4],
     /// Linear RGBA multiply (white = authored look).
     pub tint: [f32; 4],
+    /// The mesh's slot in the renderer's material table (texture arrays),
+    /// stamped when the instances are uploaded.
+    pub material: u32,
+    pub _pad: [u32; 3],
 }
 
 impl InstanceRaw {
@@ -1686,6 +1690,8 @@ impl InstanceRaw {
         Self {
             model: m.to_cols_array_2d(),
             tint: [tint.r, tint.g, tint.b, tint.a],
+            material: 0,
+            _pad: [0; 3],
         }
     }
 
@@ -1698,6 +1704,7 @@ impl InstanceRaw {
             8 => Float32x4,
             9 => Float32x4,
             10 => Float32x4,
+            15 => Uint32,
         ],
     };
 }

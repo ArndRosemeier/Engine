@@ -311,7 +311,7 @@ mod tests {
         use bytemuck::bytes_of;
         use glam::Mat4;
 
-        assert_eq!(std::mem::size_of::<InstanceRaw>(), 80);
+        assert_eq!(std::mem::size_of::<InstanceRaw>(), 96);
         let red = Color::rgb01_unchecked(1.0, 0.25, 0.125);
         let raw = InstanceRaw::from_matrix_tint(Mat4::IDENTITY, red);
         let bytes = bytes_of(&raw);

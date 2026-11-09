@@ -1623,3 +1623,92 @@ pub fn create_pipelines(
         white_albedo,
     }
 }
+
+/// The opaque scene pipelines reading materials through the material table
+/// (texture arrays): what multi-draws use, so one call can cover meshes
+/// with different textures.
+pub struct BindlessPipelines {
+    pub opaque: wgpu::RenderPipeline,
+    pub opaque_nowrite: wgpu::RenderPipeline,
+    pub depth_prepass: wgpu::RenderPipeline,
+}
+
+pub fn create_bindless_pipelines(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    bind_layout: &wgpu::BindGroupLayout,
+    table_layout: &wgpu::BindGroupLayout,
+) -> BindlessPipelines {
+    let source = super::material_table::bindless_scene_source(&format!(
+        "{}{SHADER}{}",
+        scene_shader_prefix(),
+        super::material::material_wgsl(1)
+    ));
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("lit-shader-bindless"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("pipeline-layout-bindless"),
+        bind_group_layouts: &[bind_layout, table_layout],
+        push_constant_ranges: &[],
+    });
+    let make = |label: &str, depth_write: bool, prepass: bool| {
+        let targets = [Some(wgpu::ColorTargetState {
+            format,
+            blend: Some(wgpu::BlendState::REPLACE),
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let dither: &[(&str, f64)] = if super::stencil::scene_samples() == 1 {
+            &[("SCENE_ALPHA_DITHER", 1.0)]
+        } else {
+            &[]
+        };
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &MESH_BUFFERS,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some(if prepass { "fs_depth" } else { "fs_main" }),
+                targets: if prepass { &[] } else { &targets },
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: if prepass { &[] } else { dither },
+                    ..Default::default()
+                },
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(super::stencil::scene_depth_stencil_unmasked_write(
+                depth_write,
+            )),
+            multisample: super::stencil::scene_multisample(!prepass),
+            multiview: None,
+            cache: crate::render::pipeline_cache::get(device).as_ref(),
+        })
+    };
+    let (opaque, opaque_nowrite, depth_prepass) = std::thread::scope(|s| {
+        let opaque = s.spawn(|| make("opaque-pipeline-bindless", true, false));
+        let nowrite = s.spawn(|| make("opaque-nowrite-pipeline-bindless", false, false));
+        let prepass = s.spawn(|| make("opaque-depth-prepass-bindless", true, true));
+        (
+            super::join_worker(opaque),
+            super::join_worker(nowrite),
+            super::join_worker(prepass),
+        )
+    });
+    BindlessPipelines {
+        opaque,
+        opaque_nowrite,
+        depth_prepass,
+    }
+}
