@@ -933,6 +933,8 @@ pub struct World {
     ribbons: RibbonWorld,
     quality: crate::quality::Quality,
     taa: bool,
+    occlusion_culling: bool,
+    occlusion_stats: OcclusionStats,
     tone_map: ToneMap,
     grass: f32,
     auto_tune: Option<crate::quality::AutoTune>,
@@ -1056,6 +1058,8 @@ impl Default for World {
             ribbons: RibbonWorld::default(),
             quality: crate::quality::Quality::High,
             taa: true,
+            occlusion_culling: false,
+            occlusion_stats: OcclusionStats::default(),
             tone_map: ToneMap::default(),
             grass: 1.0,
             auto_tune: None,
@@ -1418,6 +1422,31 @@ impl World {
 
     pub fn taa(&self) -> bool {
         self.taa
+    }
+
+    /// Occlusion culling (off by default): skip meshes hidden behind other
+    /// things, such as the blocks behind a street wall. The GPU tests each
+    /// mesh's box against this frame's depth, so nothing pops in; what it
+    /// saves is the vertex and pixel work of everything out of sight. It pays
+    /// in dense scenes (cities, interiors, forests seen from inside) and costs
+    /// a little in open ones. `ENGINE_OCCLUSION=0` or `=1` overrides this for
+    /// comparisons. Only plain (non-instanced) meshes are tested.
+    pub fn set_occlusion_culling(&mut self, on: bool) {
+        self.occlusion_culling = on;
+    }
+
+    /// What occlusion culling found in a recent frame (zeros while it is off).
+    pub fn occlusion_stats(&self) -> OcclusionStats {
+        self.occlusion_stats
+    }
+
+    pub(crate) fn set_occlusion_stats(&mut self, stats: OcclusionStats) {
+        self.occlusion_stats = stats;
+    }
+
+    /// Whether occlusion culling runs (the setting, or `ENGINE_OCCLUSION`).
+    pub fn occlusion_culling(&self) -> bool {
+        occlusion_env().unwrap_or(self.occlusion_culling)
     }
 
     /// The last preset given to [`Self::set_quality`].
@@ -4971,4 +5000,23 @@ mod vsync_tests {
         world.set_vsync(true);
         assert!(world.vsync());
     }
+}
+
+/// Meshes the occlusion pass tested in a frame and how many were hidden.
+/// The answer comes back from the GPU a frame or two late.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OcclusionStats {
+    pub tested: u32,
+    pub hidden: u32,
+}
+
+/// `ENGINE_OCCLUSION=0|1` overrides [`World::set_occlusion_culling`].
+fn occlusion_env() -> Option<bool> {
+    static ENV: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *ENV.get_or_init(|| match std::env::var("ENGINE_OCCLUSION").as_deref() {
+        Ok("0") => Some(false),
+        Ok("1") => Some(true),
+        Ok(other) => panic!("ENGINE_OCCLUSION must be 0 or 1, got {other:?}"),
+        Err(_) => None,
+    })
 }

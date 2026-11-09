@@ -2243,6 +2243,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "occlusion_city"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "glam 0.33.12",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

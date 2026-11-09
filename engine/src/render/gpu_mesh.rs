@@ -1,4 +1,4 @@
-use super::frustum::Bounds;
+use super::frustum::{Aabb, Bounds};
 use super::instance_cull::{DrawIndexedArgs, InstanceCull};
 use crate::mesh::{BuiltMesh, InstanceRaw};
 use glam::Mat4;
@@ -20,6 +20,7 @@ struct MeshGpuSource {
     opaque_index_count: usize,
     vertex_count: usize,
     local_bounds: Option<Bounds>,
+    local_box: Option<Aabb>,
 }
 
 pub struct GpuMesh {
@@ -38,6 +39,10 @@ pub struct GpuMesh {
     local_bounds: Option<Bounds>,
     /// What the draw actually covers: the local sphere at every instance.
     pub bounds: Option<Bounds>,
+    /// Local box around the vertices, before any instance transform.
+    local_box: Option<Aabb>,
+    /// The local box at every instance: what occlusion culling tests.
+    pub world_box: Option<Aabb>,
     /// `Entity::xform_rev` at the last instance upload.
     pub xform_rev: u64,
 }
@@ -61,6 +66,7 @@ impl GpuMesh {
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_SRC,
         });
         let local_bounds = Bounds::around(&mesh.positions);
+        let local_box = Aabb::around(&mesh.positions);
         Self::with_buffers(
             device,
             cull,
@@ -71,6 +77,7 @@ impl GpuMesh {
                 opaque_index_count: mesh.opaque_index_count.min(mesh.indices.len()),
                 vertex_count: mesh.positions.len(),
                 local_bounds,
+                local_box,
             },
             instances,
         )
@@ -93,6 +100,7 @@ impl GpuMesh {
                 opaque_index_count: src.opaque_index_count,
                 vertex_count: src.vertex_count,
                 local_bounds: src.local_bounds,
+                local_box: src.local_box,
             },
             instances,
         )
@@ -111,6 +119,7 @@ impl GpuMesh {
             opaque_index_count,
             vertex_count,
             local_bounds,
+            local_box,
         } = mesh;
         let instance_buf = instance_buffer(device, instances, "instances");
         let compact_buf = instance_buffer(device, instances, "instances-compact");
@@ -130,6 +139,8 @@ impl GpuMesh {
             instance_capacity: instances.len().max(1),
             local_bounds,
             bounds: spread_over(local_bounds, instances),
+            local_box,
+            world_box: box_over(local_box, instances),
             xform_rev: 0,
         }
     }
@@ -170,6 +181,7 @@ impl GpuMesh {
     pub fn clear_instances(&mut self) {
         self.instance_count = 0;
         self.bounds = None;
+        self.world_box = None;
     }
 
     pub fn update_instances(
@@ -195,6 +207,7 @@ impl GpuMesh {
         }
         self.instance_count = instances.len();
         self.bounds = spread_over(self.local_bounds, instances);
+        self.world_box = box_over(self.local_box, instances);
         reallocated
     }
 }
@@ -243,4 +256,13 @@ fn spread_over(local: Option<Bounds>, instances: &[InstanceRaw]) -> Option<Bound
         .iter()
         .map(|i| local.transformed(Mat4::from_cols_array_2d(&i.model)))
         .reduce(Bounds::union)
+}
+
+/// The box covering `local` placed at each instance.
+fn box_over(local: Option<Aabb>, instances: &[InstanceRaw]) -> Option<Aabb> {
+    let local = local?;
+    instances
+        .iter()
+        .map(|i| local.transformed(Mat4::from_cols_array_2d(&i.model)))
+        .reduce(Aabb::union)
 }

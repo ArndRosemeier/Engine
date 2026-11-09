@@ -104,6 +104,7 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
     if !intersects_sphere(world_c, world_r) {
         return;
     }
+    EXTRA_TEST
     let slot = atomicAdd(&draws[0].instance_count, 1u);
     dst[slot] = inst;
     if params.draw_slots > 1u {
@@ -112,8 +113,24 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// The occlusion variant: also drops instances whose sphere's box lies
+/// behind this frame's depth pyramid (see `occlusion.rs`).
+const HIZ_TEST: &str = r#"
+    if !may_show(world_c - vec3<f32>(world_r), world_c + vec3<f32>(world_r)) {
+        return;
+    }
+"#;
+
+const HIZ_BINDINGS: &str = r#"
+@group(2) @binding(0) var<uniform> occ: Params;
+@group(2) @binding(1) var pyramid: texture_2d<f32>;
+"#;
+
 pub struct InstanceCull {
     pipeline: wgpu::ComputePipeline,
+    /// Frustum and occlusion test (main view after the depth pyramid).
+    hiz_pipeline: wgpu::ComputePipeline,
+    hiz_layout: wgpu::BindGroupLayout,
     params_layout: wgpu::BindGroupLayout,
     mesh_layout: wgpu::BindGroupLayout,
     params_buf: wgpu::Buffer,
@@ -205,26 +222,70 @@ impl InstanceCull {
                 },
             ],
         });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("instance-cull"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        let hiz_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("instance-cull-hiz"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("instance-cull-pipeline-layout"),
-            bind_group_layouts: &[&params_layout, &mesh_layout],
-            push_constant_ranges: &[],
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("instance-cull-pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("compact"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: crate::render::pipeline_cache::get(device).as_ref(),
-        });
+        let build = |label: &str, src: String, layouts: &[&wgpu::BindGroupLayout]| {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(src.into()),
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(label),
+                bind_group_layouts: layouts,
+                push_constant_ranges: &[],
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("compact"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: crate::render::pipeline_cache::get(device).as_ref(),
+            })
+        };
+        let pipeline = build(
+            "instance-cull-pipeline",
+            SHADER.replace("EXTRA_TEST", ""),
+            &[&params_layout, &mesh_layout],
+        );
+        let hiz_src = format!(
+            "{}{HIZ_BINDINGS}{}",
+            SHADER.replace("EXTRA_TEST", HIZ_TEST),
+            super::occlusion::BOX_TEST_WGSL
+        );
+        let hiz_pipeline = build(
+            "instance-cull-hiz-pipeline",
+            hiz_src,
+            &[&params_layout, &mesh_layout, &hiz_layout],
+        );
         let (params_buf, params_bind) = params_buffer(device, &params_layout, params_stride, 1);
         Self {
             pipeline,
+            hiz_pipeline,
+            hiz_layout,
             params_layout,
             mesh_layout,
             params_buf,
@@ -281,12 +342,38 @@ impl InstanceCull {
         })
     }
 
+    /// The occlusion pass's uniform and depth pyramid, for [`Self::dispatch`].
+    pub fn hiz_bind(
+        &self,
+        device: &wgpu::Device,
+        test: &wgpu::Buffer,
+        pyramid: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("instance-cull-hiz"),
+            layout: &self.hiz_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: test.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(pyramid),
+                },
+            ],
+        })
+    }
+
+    /// Compact each job's instances to those in `frustum` and, with `hiz`
+    /// (a [`Self::hiz_bind`] group), not hidden behind the depth pyramid.
     pub fn dispatch(
         &mut self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         frustum: &Frustum,
         jobs: &[CullJob<'_>],
+        hiz: Option<&wgpu::BindGroup>,
     ) {
         let dispatch_count: usize = jobs.iter().map(|job| job.active_ranges.len()).sum();
         if dispatch_count == 0 {
@@ -343,7 +430,13 @@ impl InstanceCull {
             label: Some("instance-cull"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        match hiz {
+            Some(bind) => {
+                pass.set_pipeline(&self.hiz_pipeline);
+                pass.set_bind_group(2, bind, &[]);
+            }
+            None => pass.set_pipeline(&self.pipeline),
+        }
         let mut dispatch_index = 0usize;
         for job in jobs {
             pass.set_bind_group(1, &job.gpu.cull_bind, &[]);

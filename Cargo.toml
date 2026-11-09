@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "engine",
     "examples/hello_mesh",
+    "examples/occlusion_city",
     "examples/procedural_caves",
     "examples/gpu_field_demo",
     "examples/populate_world",

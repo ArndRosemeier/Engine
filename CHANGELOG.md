@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.011 (2026-11-09)
+
+- Occlusion culling: world.set_occlusion_culling(true) stops drawing meshes and instanced props hidden behind others, such as every block behind a street wall. The GPU tests each mesh's box against this frame's own depth, so nothing pops in; in the new occlusion_city example 93% of 2 000 towers are skipped at street level and the GPU frame drops by about 30%. world.occlusion_stats() tells how many were tested and hidden; ENGINE_OCCLUSION=0/1 overrides the setting, ENGINE_OCCLUSION_CHECK=1 checks the GPU's answers against a CPU copy. Shadow maps still draw every caster.
+
 ## 0.010 (2026-11-09)
 
 - Less RAM for big worlds: World::set_cpu_meshes(CpuMeshes::Release) drops each mesh's CPU copy once the renderer has uploaded it (a town's blocks were held twice, in RAM and on the graphics card). Feet still stand on released meshes (their upward faces are kept), openings still work; World::keep_cpu_mesh keeps the ones you will shatter or give a body. The default stays CpuMeshes::Keep, so nothing changes until a game asks. World::cpu_mesh_bytes, ground_mesh_bytes and cpu_mesh_counts show what is held.
