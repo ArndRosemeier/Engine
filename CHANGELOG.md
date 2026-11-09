@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.021 (2026-11-09)
+
+- Instance transforms share GPU buffers too: every mesh's placements live in a few shared pages instead of a buffer per mesh (the next step towards drawing many meshes per draw call). Pictures identical (occlusion_city pixel for pixel, GPU byte check clean). Fixed: the terrain bundle is recorded anew when a terrain mesh's buffers change.
+
 ## 0.020 (2026-11-09)
 
 - Meshes share GPU buffers: every mesh's vertices and indices now live in a few large pages (about 4 to 66 MB each) instead of two buffers per mesh, and each draw names its place in the page. Pictures are identical (occlusion_city and buildings checked pixel for pixel, a GPU byte check of every mesh is clean). It is the groundwork for drawing many meshes per draw call (next). ENGINE_FRAME_STATS counts the pages' size in the mesh memory.

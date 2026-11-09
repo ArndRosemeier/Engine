@@ -1,5 +1,5 @@
 use super::frustum::{Aabb, Bounds};
-use super::geometry::{GeometryArena, GpuGeometry};
+use super::geometry::{GpuGeometry, GpuInstances, MeshArenas};
 use super::instance_cull::{DrawIndexedArgs, InstanceCull};
 use crate::mesh::{BuiltMesh, InstanceRaw};
 use glam::Mat4;
@@ -44,7 +44,12 @@ pub struct GpuMesh {
     /// Its place in the shared geometry arena (shared by meshes made with
     /// [`Self::share_vertices`]).
     pub geometry: Arc<GpuGeometry>,
+    /// The instance arena page holding this mesh's instances, from slot
+    /// [`Self::first_instance`]: bind [`Self::instance_slice`] for a draw
+    /// of its own, or the whole page with `first_instance`.
     pub instance_buf: wgpu::Buffer,
+    pub first_instance: u32,
+    instance_slots: GpuInstances,
     pub compact_buf: wgpu::Buffer,
     pub indirect_buf: wgpu::Buffer,
     pub cull_bind: wgpu::BindGroup,
@@ -71,18 +76,22 @@ impl GpuMesh {
     pub fn upload(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        arena: &GeometryArena,
+        arenas: &MeshArenas,
         mesh: &BuiltMesh,
         instances: &[InstanceRaw],
         cull: &InstanceCull,
     ) -> Self {
         let vertices = mesh.to_interleaved();
-        let geometry = arena.upload(device, queue, &vertices, &mesh.indices);
+        let geometry = arenas
+            .geometry
+            .upload(device, queue, &vertices, &mesh.indices);
         let local_bounds = Bounds::around(&mesh.positions);
         let local_box = Aabb::around(&mesh.positions);
         let sways = vertices.iter().any(|v| vertex_sways(v.surface3[3]));
         Self::with_buffers(
             device,
+            queue,
+            arenas,
             cull,
             MeshGpuSource {
                 geometry,
@@ -100,12 +109,16 @@ impl GpuMesh {
     /// Same vertex/index buffers as `src`; a new instance buffer.
     pub fn share_vertices(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        arenas: &MeshArenas,
         src: &Self,
         instances: &[InstanceRaw],
         cull: &InstanceCull,
     ) -> Self {
         Self::with_buffers(
             device,
+            queue,
+            arenas,
             cull,
             MeshGpuSource {
                 geometry: src.geometry.clone(),
@@ -122,6 +135,8 @@ impl GpuMesh {
 
     fn with_buffers(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        arenas: &MeshArenas,
         cull: &InstanceCull,
         mesh: MeshGpuSource,
         instances: &[InstanceRaw],
@@ -135,17 +150,21 @@ impl GpuMesh {
             local_box,
             sways,
         } = mesh;
-        let instance_buf = instance_buffer(device, instances, "instances");
+        let instance_slots = arenas
+            .instances
+            .alloc(device, queue, instances, instances.len());
         let compact_buf = instance_buffer(device, instances, "instances-compact");
         let indirect_buf = indirect_buffer(device, &geometry, opaque_index_count, index_count);
-        let cull_bind = cull.mesh_bind(device, &instance_buf, &compact_buf, &indirect_buf);
+        let cull_bind = cull.mesh_bind(device, &instance_slots.buffer, &compact_buf, &indirect_buf);
         Self {
             vertex_buf: geometry.vertex_buf.clone(),
             index_buf: geometry.index_buf.clone(),
             base_vertex: geometry.base_vertex,
             first_index: geometry.first_index,
             geometry,
-            instance_buf,
+            instance_buf: instance_slots.buffer.clone(),
+            first_instance: instance_slots.first,
+            instance_slots,
             compact_buf,
             indirect_buf,
             cull_bind,
@@ -161,6 +180,21 @@ impl GpuMesh {
             xform_rev: 0,
             sways,
         }
+    }
+
+    /// This mesh's own instance slots, to bind for a draw of its own.
+    pub fn instance_slice(&self) -> wgpu::BufferSlice<'_> {
+        self.instance_slots.slice()
+    }
+
+    /// Its instance slots from `slot` on.
+    pub fn instance_slice_from(&self, slot: usize) -> wgpu::BufferSlice<'_> {
+        self.instance_buf.slice(
+            self.instance_slots.byte_offset(slot)
+                ..self
+                    .instance_slots
+                    .byte_offset(self.instance_slots.capacity as usize),
+        )
     }
 
     /// `range` of this mesh's own indices, as a range of `index_buf`.
@@ -194,13 +228,9 @@ impl GpuMesh {
         if instances.is_empty() {
             return;
         }
-        let byte_offset = start
-            .checked_mul(std::mem::size_of::<InstanceRaw>())
-            .and_then(|offset| u64::try_from(offset).ok())
-            .expect("partial instance write byte offset overflow");
         queue.write_buffer(
             &self.instance_buf,
-            byte_offset,
+            self.instance_slots.byte_offset(start),
             bytemuck::cast_slice(instances),
         );
     }
@@ -216,12 +246,17 @@ impl GpuMesh {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        arenas: &MeshArenas,
         instances: &[InstanceRaw],
         cull: &InstanceCull,
     ) -> bool {
         let reallocated = instances.len() > self.instance_capacity;
         if reallocated {
-            self.instance_buf = instance_buffer(device, instances, "instances");
+            self.instance_slots = arenas
+                .instances
+                .alloc(device, queue, instances, instances.len());
+            self.instance_buf = self.instance_slots.buffer.clone();
+            self.first_instance = self.instance_slots.first;
             self.compact_buf = instance_buffer(device, instances, "instances-compact");
             self.cull_bind = cull.mesh_bind(
                 device,
@@ -231,7 +266,11 @@ impl GpuMesh {
             );
             self.instance_capacity = instances.len();
         } else if !instances.is_empty() {
-            queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
+            queue.write_buffer(
+                &self.instance_buf,
+                self.instance_slots.byte_offset(0),
+                bytemuck::cast_slice(instances),
+            );
         }
         self.instance_count = instances.len();
         self.bounds = spread_over(self.local_bounds, instances);
