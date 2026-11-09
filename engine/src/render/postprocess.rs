@@ -146,7 +146,11 @@ fn bloom_sizes(width: u32, height: u32) -> Vec<(u32, u32)> {
 }
 
 pub struct Postprocess {
+    /// The world pass's colour, at the scene's (possibly scaled) size.
     scene: Target,
+    /// Window-sized colour the upscaling resolve writes, when the scene is
+    /// drawn smaller than the window; bloom and tone mapping read it.
+    upscaled: Option<Target>,
     /// Multisampled world-pass colour, resolved into `scene`. None without MSAA.
     scene_msaa: Option<Target>,
     bloom: BloomChain,
@@ -159,8 +163,11 @@ pub struct Postprocess {
     down: wgpu::RenderPipeline,
     up: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
+    /// Window size (bloom and tone mapping).
     width: u32,
     height: u32,
+    /// Scene size.
+    scene_size: (u32, u32),
 }
 
 struct Pass {
@@ -264,6 +271,7 @@ impl Postprocess {
         let passes = create_passes(device, &layout, &sampler, &scene, &bloom);
         Self {
             scene,
+            upscaled: None,
             scene_msaa: create_msaa_target(device, width, height),
             bloom,
             sampler,
@@ -275,27 +283,40 @@ impl Postprocess {
             composite,
             width: width.max(1),
             height: height.max(1),
+            scene_size: (width.max(1), height.max(1)),
         }
     }
 
-    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+    /// New sizes: the scene's (`scene`) and the window's. When the scene is
+    /// smaller, a window-sized target receives the upscaled frame.
+    pub fn resize(&mut self, device: &wgpu::Device, scene: (u32, u32), width: u32, height: u32) {
         let width = width.max(1);
         let height = height.max(1);
-        if self.width == width && self.height == height {
+        let scene = (scene.0.max(1), scene.1.max(1));
+        if self.width == width && self.height == height && self.scene_size == scene {
             return;
         }
-        self.scene = Target::with_samples(device, "hdr-scene-color", width, height, 1);
+        self.scene = Target::with_samples(device, "hdr-scene-color", scene.0, scene.1, 1);
+        self.scene_msaa = create_msaa_target(device, scene.0, scene.1);
+        self.upscaled = (scene != (width, height))
+            .then(|| Target::with_samples(device, "hdr-upscaled-color", width, height, 1));
         self.bloom = BloomChain::new(device, width, height);
-        self.scene_msaa = create_msaa_target(device, width, height);
         self.passes = create_passes(
             device,
             &self.layout,
             &self.sampler,
-            &self.scene,
+            self.upscaled.as_ref().unwrap_or(&self.scene),
             &self.bloom,
         );
         self.width = width;
         self.height = height;
+        self.scene_size = scene;
+    }
+
+    /// Where the TAA / upscaling resolve writes: the scene itself, or the
+    /// window-sized target when the scene is drawn smaller.
+    pub fn resolve_target(&self) -> &wgpu::Texture {
+        &self.upscaled.as_ref().unwrap_or(&self.scene)._texture
     }
 
     /// The resolved HDR scene colour (what bloom and tone mapping read).

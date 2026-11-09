@@ -23,7 +23,7 @@ mod skinned;
 mod sky_pipeline;
 mod ssao;
 mod stencil;
-mod taa;
+pub(crate) mod taa;
 mod terrain_pipeline;
 mod terrain_shadow;
 mod voxel_terrain;
@@ -680,6 +680,9 @@ pub struct Renderer {
     taa_frame: u32,
     /// This frame's camera jitter in NDC (zero with TAA off).
     taa_jitter: glam::Vec2,
+    /// Share of the window's width and height the scene is drawn at
+    /// (`World::set_render_scale`); below 1 the TAA pass upscales.
+    render_scale: f32,
 }
 
 impl Renderer {
@@ -1044,6 +1047,7 @@ impl Renderer {
             taa,
             taa_frame: 0,
             taa_jitter: glam::Vec2::ZERO,
+            render_scale: 1.0,
         }
     }
 
@@ -1109,24 +1113,36 @@ impl Renderer {
         self.rebuild_seen = asked;
     }
 
+    /// The size the scene is drawn at: the window's, scaled by the render
+    /// scale.
+    fn scene_size(&self) -> (u32, u32) {
+        taa::scaled_size(self.config.width, self.config.height, self.render_scale)
+    }
+
+    /// Follow the world's render scale; a new one rebuilds the scene targets.
+    fn follow_render_scale(&mut self, world: &World) {
+        let scale = render_scale_env()
+            .unwrap_or(world.render_scale())
+            .clamp(taa::MIN_RENDER_SCALE, 1.0);
+        if (scale - self.render_scale).abs() > 1e-4 {
+            self.render_scale = scale;
+            self.rebuild_screen_targets();
+        }
+    }
+
     /// Everything sized to the window: depth, AO, reflections, post, TAA.
+    /// The scene's targets are drawn at the render scale's share of it.
     fn rebuild_screen_targets(&mut self) {
-        let (depth_texture, depth_view) =
-            create_depth(&self.device, self.config.width, self.config.height);
+        let (sw, sh) = self.scene_size();
+        let (depth_texture, depth_view) = create_depth(&self.device, sw, sh);
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
         self.particles.set_depth(&self.device, &self.depth_texture);
         self.occlusion.resize(&self.device, &self.depth_texture);
-        self.ssao.resize(
-            &self.device,
-            &self.depth_texture,
-            self.config.width,
-            self.config.height,
-        );
+        self.ssao.resize(&self.device, &self.depth_texture, sw, sh);
         self.shadow
             .set_ao_view(&self.device, self.ssao.view().clone());
-        self.reflect
-            .resize(&self.device, self.config.width, self.config.height);
+        self.reflect.resize(&self.device, sw, sh);
         self.shadow.set_reflection_views(
             &self.device,
             self.reflect.ssr_view().clone(),
@@ -1138,8 +1154,12 @@ impl Renderer {
         self.terrain_bundle_ids.clear();
         self.terrain_bundle = None;
         self.portal.resize();
-        self.postprocess
-            .resize(&self.device, self.config.width, self.config.height);
+        self.postprocess.resize(
+            &self.device,
+            (sw, sh),
+            self.config.width,
+            self.config.height,
+        );
         self.taa.resize(
             &self.device,
             &self.depth_texture,
@@ -1766,6 +1786,7 @@ impl Renderer {
         world: &World,
         after: impl FnOnce(&wgpu::Device, &wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView),
     ) -> Result<(), wgpu::SurfaceError> {
+        self.follow_render_scale(world);
         let mut t = std::time::Instant::now();
         // The scene draws into Engine's own targets, and only the last
         // steps (post-processing, the UI) into the window's image. So the
@@ -1784,10 +1805,13 @@ impl Renderer {
         }
         let taa_on = world.taa() && taa_env_enabled();
         let (width, height) = (self.config.width.max(1), self.config.height.max(1));
+        // Jitter moves by a fraction of a scene pixel (smaller than a window
+        // pixel when the scene is drawn at a lower scale).
+        let (scene_w, scene_h) = self.scene_size();
         self.taa_jitter = if taa_on {
             self.taa_frame = self.taa_frame.wrapping_add(1);
             let j = taa::jitter_pixels(self.taa_frame);
-            glam::Vec2::new(j.x * 2.0 / width as f32, j.y * 2.0 / height as f32)
+            glam::Vec2::new(j.x * 2.0 / scene_w as f32, j.y * 2.0 / scene_h as f32)
         } else {
             glam::Vec2::ZERO
         };
@@ -1864,18 +1888,24 @@ impl Renderer {
                 world.render_origin(),
             );
         }
-        if taa_on {
+        // TAA, and the upscale to the window's size when the scene is drawn
+        // smaller (it runs with TAA off too, then without history).
+        if taa_on || self.taa.upscaling() {
+            if !taa_on {
+                self.taa.reset();
+            }
             let aspect = width as f32 / height as f32;
             let vp = Self::main_scene_camera(world).view_projection(aspect);
-            let (view, texture) = self.postprocess.scene_target();
+            let (view, _) = self.postprocess.scene_target();
             self.taa.encode(
                 &self.device,
                 &self.queue,
                 &mut encoder,
                 view,
-                texture,
+                self.postprocess.resolve_target(),
                 vp,
                 self.taa_jitter,
+                taa_on,
             );
         } else {
             self.taa.reset();
@@ -4895,6 +4925,18 @@ fn tone_map_env() -> Option<crate::world::ToneMap> {
         std::env::var("ENGINE_TONEMAP")
             .ok()
             .and_then(|v| crate::world::ToneMap::from_name(&v))
+    })
+}
+
+/// `ENGINE_RENDER_SCALE=0.75` draws the scene at that share of the window,
+/// whatever the game set.
+fn render_scale_env() -> Option<f32> {
+    static SCALE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| {
+        std::env::var("ENGINE_RENDER_SCALE")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite())
     })
 }
 
