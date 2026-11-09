@@ -118,4 +118,33 @@ mod tests {
         assert!(world.remove_fog_volume(id));
         assert_eq!(world.screen_grade(), ColorGrade::NEUTRAL);
     }
+
+    #[test]
+    fn a_layered_volume_keeps_the_changing_base_grade() {
+        let mut world = World::new();
+        world.set_zone_transition(0.0).unwrap();
+        world
+            .add_fog_volume(
+                FogVolume::new((0.0, 0.0, 0.0), (50.0, 50.0, 50.0))
+                    .grade_on_top(ColorGrade::smog())
+                    .blend(0.0),
+            )
+            .unwrap();
+        world.look_first_person((0.0, 5.0, 0.0), 0.0, 0.0);
+        let warm = ColorGrade::warm();
+        world.set_color_grade(warm).unwrap();
+        world.tick_grading(1.0 / 60.0);
+        assert_eq!(world.screen_grade(), warm.layered(&ColorGrade::smog()));
+        // The base changes (the sun sets): the screen follows it.
+        world.set_color_grade(ColorGrade::cool()).unwrap();
+        world.tick_grading(1.0 / 60.0);
+        assert_eq!(
+            world.screen_grade(),
+            ColorGrade::cool().layered(&ColorGrade::smog())
+        );
+        assert_eq!(
+            ColorGrade::warm().layered(&ColorGrade::NEUTRAL),
+            ColorGrade::warm()
+        );
+    }
 }

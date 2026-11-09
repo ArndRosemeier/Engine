@@ -1833,6 +1833,7 @@ impl Renderer {
             dither_frame: (self.taa_frame % 64) as f32,
             sky_down: sky_light.down,
             season: world.season(),
+            glow: world.glow_table(),
         };
         // Destination and live views share one encoder. Queue writes land
         // before that encoder runs, so they cannot share a uniform buffer.

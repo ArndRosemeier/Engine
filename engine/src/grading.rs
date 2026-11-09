@@ -141,6 +141,23 @@ impl ColorGrade {
         Ok(())
     }
 
+    /// `layer`'s change from neutral applied on top of `self`: exposures
+    /// and shifts add, contrast, saturation and the tone multipliers
+    /// multiply, vignettes stack. A smog layer over a golden evening stays
+    /// golden underneath.
+    pub fn layered(&self, layer: &Self) -> Self {
+        Self {
+            exposure: self.exposure + layer.exposure,
+            contrast: self.contrast * layer.contrast,
+            saturation: self.saturation * layer.saturation,
+            temperature: (self.temperature + layer.temperature).clamp(-1.0, 1.0),
+            tint: (self.tint + layer.tint).clamp(-1.0, 1.0),
+            shadows: self.shadows * layer.shadows,
+            highlights: self.highlights * layer.highlights,
+            vignette: self.vignette + layer.vignette * (1.0 - self.vignette),
+        }
+    }
+
     /// `self` moved `t` (0..1) of the way to `other`.
     pub fn lerp(&self, other: &Self, t: f32) -> Self {
         let f = |a: f32, b: f32| a + (b - a) * t;
@@ -180,6 +197,11 @@ pub struct FogVolume {
     pub fog: Option<VolumeFog>,
     /// Higher wins where volumes overlap.
     pub priority: i32,
+    /// The grade goes on top of the look below it (the base grade and
+    /// weaker volumes, see [`ColorGrade::layered`]) instead of replacing
+    /// it, so a volume that is always on does not wipe a changing base
+    /// grade (a running day).
+    pub layered: bool,
 }
 
 impl FogVolume {
@@ -191,11 +213,20 @@ impl FogVolume {
             grade: None,
             fog: None,
             priority: 0,
+            layered: false,
         }
     }
 
     pub fn grade(mut self, grade: ColorGrade) -> Self {
         self.grade = Some(grade);
+        self
+    }
+
+    /// A grade laid on top of the look below instead of replacing it (see
+    /// [`Self::layered`]).
+    pub fn grade_on_top(mut self, grade: ColorGrade) -> Self {
+        self.grade = Some(grade);
+        self.layered = true;
         self
     }
 
@@ -412,7 +443,8 @@ impl Grading {
                 continue;
             }
             if let Some(g) = &v.grade {
-                grade = grade.lerp(g, w);
+                let target = if v.layered { grade.layered(g) } else { *g };
+                grade = grade.lerp(&target, w);
             }
             if let Some(f) = &v.fog {
                 let vol = FogState {

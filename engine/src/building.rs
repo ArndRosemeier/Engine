@@ -40,7 +40,7 @@
 
 use crate::color::Color;
 use crate::error::{EngineError, EngineResult};
-use crate::mesh::{BuiltMesh, Mesh};
+use crate::mesh::{AlbedoMap, BuiltMesh, MaterialMaps, Mesh};
 use glam::{Vec2, Vec3};
 use std::sync::Arc;
 
@@ -215,6 +215,22 @@ pub struct BuildingPlan {
     /// Gaps that are always open (doorways): rooms on each side (`None`
     /// outside) and the outline.
     gaps: Vec<PlanGap>,
+    /// Textured geometry, one mesh per texture (see [`Self::add_texture`]).
+    layers: Vec<PlanLayer>,
+}
+
+/// A texture registered on a plan with [`BuildingPlan::add_texture`]; give
+/// it to [`BuildingPlan::add_parts`] for the faces drawn with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PlanTexture(pub u16);
+
+/// The faces of a plan drawn with one texture.
+#[derive(Clone, Debug)]
+pub(crate) struct PlanLayer {
+    pub albedo: Arc<AlbedoMap>,
+    pub maps: Option<Arc<MaterialMaps>>,
+    /// `mesh.elements` holds local index + 1, as in the plan's own mesh.
+    pub mesh: BuiltMesh,
 }
 
 /// A doorway in a plan: always open.
@@ -255,18 +271,107 @@ impl BuildingPlan {
             tile: 3.0,
             rooms: Vec::new(),
             gaps: Vec::new(),
+            layers: Vec::new(),
         })
     }
 
-    /// Add an element. `mesh` is its look in the building's space (None: a
-    /// box of `color` filling the element). Triangles of the mesh vanish
-    /// when the element breaks.
-    pub fn add(
+    /// Register a texture (albedo and its maps, triplanar or by UV) for
+    /// [`Self::add_parts`]. Register each texture once per plan: every face
+    /// drawn with it goes into one mesh, so a damaged building keeps its
+    /// brick, stone and plaster at a draw call per texture.
+    pub fn add_texture(
+        &mut self,
+        albedo: AlbedoMap,
+        maps: Option<MaterialMaps>,
+    ) -> EngineResult<PlanTexture> {
+        if albedo.width == 0
+            || albedo.height == 0
+            || albedo.rgba.len() != albedo.width as usize * albedo.height as usize * 4
+        {
+            return Err(EngineError::InvalidMesh(format!(
+                "plan texture is {}x{} with {} bytes",
+                albedo.width,
+                albedo.height,
+                albedo.rgba.len()
+            )));
+        }
+        if let Some(m) = &maps {
+            m.validate()?;
+        }
+        if self.layers.len() >= u16::MAX as usize {
+            return Err(EngineError::InvalidValue(
+                "a plan has at most 65535 textures".into(),
+            ));
+        }
+        self.layers.push(PlanLayer {
+            albedo: Arc::new(albedo),
+            maps: maps.filter(|m| !m.is_neutral()).map(Arc::new),
+            mesh: BuiltMesh::default(),
+        });
+        Ok(PlanTexture(self.layers.len() as u16 - 1))
+    }
+
+    /// [`Self::add_texture`] with the albedo and maps a mesh carries (None
+    /// when it has no albedo).
+    pub fn add_texture_of(&mut self, mesh: &Mesh) -> EngineResult<Option<PlanTexture>> {
+        match mesh.albedo() {
+            Some(a) => self
+                .add_texture(a.clone(), mesh.material_maps().cloned())
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Add an element drawn by several meshes, each untextured (`None`:
+    /// vertex colours only) or with a registered texture. A mesh's own
+    /// albedo is ignored here; the texture decides. Triangles of every part
+    /// vanish when the element breaks.
+    pub fn add_parts(
         &mut self,
         element: Element,
-        mesh: Option<&Mesh>,
-        color: Color,
+        parts: &[(&Mesh, Option<PlanTexture>)],
     ) -> EngineResult<ElementId> {
+        let id = self.push_element(element, parts)?;
+        self.index();
+        Ok(id)
+    }
+
+    /// Many elements at once ([`Self::add_parts`] for each), indexing the
+    /// plan only once: big towers plan in linear time.
+    pub fn add_all<'a>(
+        &mut self,
+        elements: impl IntoIterator<Item = (Element, Vec<(&'a Mesh, Option<PlanTexture>)>)>,
+    ) -> EngineResult<Vec<ElementId>> {
+        let mut ids = Vec::new();
+        let mut result = Ok(());
+        for (element, parts) in elements {
+            match self.push_element(element, &parts) {
+                Ok(id) => ids.push(id),
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
+        self.index();
+        result.map(|_| ids)
+    }
+
+    /// The faces drawn with `texture`, with their elements (index + 1).
+    pub fn textured_mesh(&self, texture: PlanTexture) -> Option<&BuiltMesh> {
+        self.layers.get(texture.0 as usize).map(|l| &l.mesh)
+    }
+
+    /// Number of registered textures.
+    pub fn texture_count(&self) -> usize {
+        self.layers.len()
+    }
+
+    pub(crate) fn layers(&self) -> &[PlanLayer] {
+        &self.layers
+    }
+
+    fn check_element(&self, element: &Element) -> EngineResult<()> {
         if !(element.center.is_finite() && element.half.is_finite())
             || element.half.min_element() <= 0.0
         {
@@ -291,12 +396,40 @@ impl BuildingPlan {
                 "a building has at most 1M elements".into(),
             ));
         }
+        Ok(())
+    }
+
+    /// Add an element's geometry without re-indexing the storeys.
+    fn push_element(
+        &mut self,
+        element: Element,
+        parts: &[(&Mesh, Option<PlanTexture>)],
+    ) -> EngineResult<ElementId> {
+        self.check_element(&element)?;
+        if let Some(t) = parts
+            .iter()
+            .filter_map(|(_, t)| *t)
+            .find(|t| t.0 as usize >= self.layers.len())
+        {
+            return Err(EngineError::InvalidValue(format!(
+                "plan texture {} was not registered",
+                t.0
+            )));
+        }
         let id = self.elements.len() as u32;
-        let built = match mesh {
-            Some(m) => m.build(),
-            None => Mesh::box_at(element.center, element.half * 2.0, color)?.build(),
-        };
-        append(&mut self.mesh, &built, id + 1);
+        for (mesh, texture) in parts {
+            let built = mesh.build();
+            match texture {
+                Some(t) => append(&mut self.layers[t.0 as usize].mesh, &built, id + 1),
+                None => append(&mut self.mesh, &built, id + 1),
+            }
+        }
+        self.grow_footprint(&element);
+        self.elements.push(element);
+        Ok(ElementId(id))
+    }
+
+    fn grow_footprint(&mut self, element: &Element) {
         let lo = Vec2::new(
             element.center.x - element.half.x,
             element.center.z - element.half.z,
@@ -307,9 +440,27 @@ impl BuildingPlan {
         );
         self.footprint_min = self.footprint_min.min(lo);
         self.footprint_max = self.footprint_max.max(hi);
-        self.elements.push(element);
-        self.index();
-        Ok(ElementId(id))
+    }
+
+    /// Add an element. `mesh` is its look in the building's space (None: a
+    /// box of `color` filling the element). Triangles of the mesh vanish
+    /// when the element breaks.
+    pub fn add(
+        &mut self,
+        element: Element,
+        mesh: Option<&Mesh>,
+        color: Color,
+    ) -> EngineResult<ElementId> {
+        self.check_element(&element)?;
+        let boxed;
+        let mesh = match mesh {
+            Some(m) => m,
+            None => {
+                boxed = Mesh::box_at(element.center, element.half * 2.0, color)?;
+                &boxed
+            }
+        };
+        self.add_parts(element, &[(mesh, None)])
     }
 
     /// Rebuild the per-storey lists after an element was added.
@@ -651,46 +802,54 @@ impl BuildingPlan {
 
     /// The geometry of a set of elements only (for a falling part), with
     /// element ids renumbered by `id_of(local) -> u32` (0 drops the triangle).
-    pub(crate) fn extract(&self, mut id_of: impl FnMut(u32) -> u32) -> BuiltMesh {
-        let m = &self.mesh;
-        let mut out = BuiltMesh {
-            surface: m.surface,
-            ..Default::default()
-        };
-        let mut remap = vec![u32::MAX; m.positions.len()];
-        let mut keep = |out: &mut BuiltMesh, v: usize, id: u32| -> u32 {
-            if remap[v] == u32::MAX {
-                remap[v] = out.positions.len() as u32;
-                out.positions.push(m.positions[v]);
-                out.normals.push(m.normals[v]);
-                out.colors.push(m.colors[v]);
-                out.uvs.push(m.uvs.get(v).copied().unwrap_or([0.0; 2]));
-                if !m.surface_overrides.is_empty() {
-                    out.surface_overrides.push(m.surface_overrides[v]);
-                }
-                out.elements.push(id);
-            }
-            remap[v]
-        };
-        for (n, tri) in m.indices.chunks_exact(3).enumerate() {
-            let local = m.elements[tri[0] as usize];
-            if local == 0 {
-                continue;
-            }
-            let id = id_of(local - 1);
-            if id == 0 {
-                continue;
-            }
-            for &v in tri {
-                let i = keep(&mut out, v as usize, id);
-                out.indices.push(i);
-            }
-            if n * 3 < m.opaque_index_count {
-                out.opaque_index_count = out.indices.len();
-            }
-        }
-        out
+    pub(crate) fn extract(&self, id_of: impl FnMut(u32) -> u32) -> BuiltMesh {
+        extract_from(&self.mesh, id_of)
     }
+
+    /// [`Self::extract`] for the faces drawn with one texture.
+    pub(crate) fn extract_layer(&self, layer: usize, id_of: impl FnMut(u32) -> u32) -> BuiltMesh {
+        extract_from(&self.layers[layer].mesh, id_of)
+    }
+}
+
+fn extract_from(m: &BuiltMesh, mut id_of: impl FnMut(u32) -> u32) -> BuiltMesh {
+    let mut out = BuiltMesh {
+        surface: m.surface,
+        ..Default::default()
+    };
+    let mut remap = vec![u32::MAX; m.positions.len()];
+    let mut keep = |out: &mut BuiltMesh, v: usize, id: u32| -> u32 {
+        if remap[v] == u32::MAX {
+            remap[v] = out.positions.len() as u32;
+            out.positions.push(m.positions[v]);
+            out.normals.push(m.normals[v]);
+            out.colors.push(m.colors[v]);
+            out.uvs.push(m.uvs.get(v).copied().unwrap_or([0.0; 2]));
+            if !m.surface_overrides.is_empty() {
+                out.surface_overrides.push(m.surface_overrides[v]);
+            }
+            out.elements.push(id);
+        }
+        remap[v]
+    };
+    for (n, tri) in m.indices.chunks_exact(3).enumerate() {
+        let local = m.elements[tri[0] as usize];
+        if local == 0 {
+            continue;
+        }
+        let id = id_of(local - 1);
+        if id == 0 {
+            continue;
+        }
+        for &v in tri {
+            let i = keep(&mut out, v as usize, id);
+            out.indices.push(i);
+        }
+        if n * 3 < m.opaque_index_count {
+            out.opaque_index_count = out.indices.len();
+        }
+    }
+    out
 }
 
 /// Append `src` to `dst`, tagging its vertices with `element`.
@@ -699,16 +858,22 @@ fn append(dst: &mut BuiltMesh, src: &BuiltMesh, element: u32) {
     // Opaque triangles first, then transparent ones, as the renderer expects.
     let opaque_src = &src.indices[..src.opaque_index_count.min(src.indices.len())];
     let clear_src = &src.indices[src.opaque_index_count.min(src.indices.len())..];
-    let (opaque_dst, clear_dst) = dst
-        .indices
-        .split_at(dst.opaque_index_count.min(dst.indices.len()));
-    let mut indices: Vec<u32> = opaque_dst.to_vec();
-    indices.extend(opaque_src.iter().map(|i| i + base));
-    let opaque = indices.len();
-    indices.extend_from_slice(clear_dst);
-    indices.extend(clear_src.iter().map(|i| i + base));
-    dst.indices = indices;
-    dst.opaque_index_count = opaque;
+    if dst.opaque_index_count >= dst.indices.len() && clear_src.is_empty() {
+        // All opaque so far: append in place (keeps planning linear).
+        dst.indices.extend(opaque_src.iter().map(|i| i + base));
+        dst.opaque_index_count = dst.indices.len();
+    } else {
+        let (opaque_dst, clear_dst) = dst
+            .indices
+            .split_at(dst.opaque_index_count.min(dst.indices.len()));
+        let mut indices: Vec<u32> = opaque_dst.to_vec();
+        indices.extend(opaque_src.iter().map(|i| i + base));
+        let opaque = indices.len();
+        indices.extend_from_slice(clear_dst);
+        indices.extend(clear_src.iter().map(|i| i + base));
+        dst.indices = indices;
+        dst.opaque_index_count = opaque;
+    }
     let had_overrides = !dst.surface_overrides.is_empty();
     if !src.surface_overrides.is_empty() && !had_overrides {
         dst.surface_overrides = vec![dst.surface; dst.positions.len()];
@@ -1313,12 +1478,34 @@ fn mounds(plan: &BuildingPlan, collapse: Option<Collapse>) -> Vec<RubbleMound> {
             let height = (c.height * 0.3)
                 .min((vol * 0.18 / std::f32::consts::PI).cbrt() * 0.9)
                 .max(1.0);
-            vec![RubbleMound {
+            let yaw = h.unit() * std::f32::consts::TAU;
+            if c.base_y <= ground + 0.5 {
+                // Down to the ground: the heap spreads past the walls.
+                return vec![RubbleMound {
+                    center: Vec3::new(centroid.x, c.base_y, centroid.y),
+                    radius: rad * 1.35,
+                    height,
+                    yaw,
+                }];
+            }
+            // On a standing storey: the heap stays on its roof (a lumpy
+            // dome reaches about 1.13 of its radius), and what does not fit
+            // pours down the sides as a low skirt on the ground.
+            let (lo, hi) = plan.footprint();
+            let inner = ((hi - lo).min_element() * 0.5 / 1.13).max(0.5);
+            let mut out = vec![RubbleMound {
                 center: Vec3::new(centroid.x, c.base_y, centroid.y),
-                radius: rad * 1.35,
-                height,
-                yaw: h.unit() * std::f32::consts::TAU,
-            }]
+                radius: inner,
+                height: height.min(inner * 0.8),
+                yaw,
+            }];
+            out.push(RubbleMound {
+                center: Vec3::new(centroid.x, ground, centroid.y),
+                radius: rad * 1.3,
+                height: (c.base_y - ground).min(height * 0.5).clamp(0.6, 2.5),
+                yaw: yaw + 1.3,
+            });
+            out
         }
         CollapseMode::Topple { hinge, toward } => {
             let mut out = vec![RubbleMound {
@@ -1462,6 +1649,39 @@ mod tests {
         assert_eq!(c.mode, CollapseMode::Pancake);
         assert_eq!(b.mounds().len(), 1);
         assert!(b.mounds()[0].height >= 1.0);
+    }
+
+    #[test]
+    fn a_pancake_above_the_ground_floor_keeps_its_heap_on_the_roof() {
+        let mut b = Building::new(tower());
+        let plan = b.plan().clone();
+        let ring = plan.rings[2].clone();
+        let mut ids: Vec<ElementId> = ring
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| k % 3 != 0)
+            .map(|(_, &i)| ElementId(i))
+            .collect();
+        ids.extend(
+            plan.elements()
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.kind == ElementKind::Column && e.floor == 2)
+                .map(|(i, _)| ElementId(i as u32)),
+        );
+        let c = b.break_elements(&ids).collapse.expect("collapse");
+        assert_eq!((c.from_floor, c.mode), (2, CollapseMode::Pancake));
+        let (lo, hi) = plan.footprint();
+        let top = b.mounds()[0];
+        assert!(top.center.y > 6.0, "on the standing storeys");
+        assert!(
+            top.radius * 1.13 <= (hi - lo).min_element() * 0.5 + 1e-3,
+            "no overhang: {top:?}"
+        );
+        assert!(
+            b.mounds().iter().any(|m| m.center.y.abs() < 1e-3),
+            "a skirt on the ground"
+        );
     }
 
     #[test]

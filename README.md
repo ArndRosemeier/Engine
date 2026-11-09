@@ -133,6 +133,21 @@ and each `SkinMesh::morphs`, then set weights any frame with
 `world.set_morph_weight(id, "eye-left-closure", 1.0)` or `set_morph_weights(id, &weights)`
 (up to 64 targets; the GPU blends them before skinning).
 
+**Robots and machines of moving parts, with LODs:** make each part's levels
+once (`part.simplified(0.2)` gives a lighter mesh with the same textures),
+`let model = world.spawn_lod(levels)?`, and for every copy
+`let thigh = world.spawn_lod_like(model, &[])?; world.attach_lod(thigh, hip_pivot, Place::default())?`.
+The set follows its pivot as it moves, picks its level by distance and shares
+the model's meshes and maps with every other copy; it goes when the pivot is
+despawned.
+
+**Lights that switch with the hour:** put emissive surfaces on a glow channel
+(`SurfaceMaterial { emission: 1.2, ..SurfaceMaterial::DEFAULT }.on_glow_channel(3)`)
+and switch the channel any frame with `world.set_glow_channel(3, strength, Some(colour))`:
+windows that come on at dusk, neon that flickers, no mesh rebuilt. Fog volumes
+with `grade_on_top(grade)` add their look to a base grade that changes with the
+day instead of replacing it.
+
 **Texture anything:** `texture_layer(NaturalLayer::RockFace).apply_triplanar(&mut mesh)?`
 wraps a mesh in a generated PBR layer without UVs.
 
@@ -213,7 +228,12 @@ same update closure with no window or GPU (`frame(dt, update)` for one frame,
 **Breakable buildings:** a building is a list of elements (wall panels per
 bay per floor, slab tiles, columns, roof pieces, inner walls), each a box with
 a strength. `BuildingPlan::tower(&TowerSpec { .. })` makes a generic one, or
-add your own elements and their meshes with `BuildingPlan::add`. Share the
+add your own elements and their meshes with `BuildingPlan::add`. Textured
+buildings: register each texture once with `plan.add_texture(albedo, maps)`
+and give an element its meshes with `add_parts(element, &[(&mesh, Some(tex))])`
+(`add_all` adds many elements in one go, so big towers plan in linear time);
+broken buildings then keep their brick and stone, one draw call per texture,
+and buildings with the same textures share them on the GPU. Share the
 plan (`Arc`) and `world.spawn_building(plan, place)?`. Then
 `hit_building(id, point, radius, power)`, `hit_buildings(..)`,
 `break_building_elements(..)` and `cast_ray_buildings(..)`. Broken elements are
