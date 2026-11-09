@@ -9,6 +9,13 @@
 //!
 //! Reprojection follows the camera only (no per-object motion vectors), so
 //! fast-moving objects lean on the colour clamp.
+//!
+//! With a render scale below 1 the scene is drawn smaller than the window
+//! and this pass also upscales (like FSR 2 or Unreal's TSR): the history is
+//! window-sized, and each frame's few, jittered samples are splatted into it
+//! with a small Gaussian at the spot each one really covers. Over the jitter
+//! sequence every window pixel gathers samples close to its own centre, so
+//! the picture converges to nearly full detail when the view is still.
 
 use glam::{Mat4, Vec2};
 
@@ -28,6 +35,20 @@ struct TaaUniform {
     jitter: [f32; 2],
     reset: f32,
     blend: f32,
+}
+
+/// Lowest render scale: below half the window a 3x3 neighbourhood of
+/// samples no longer covers a window pixel's footprint.
+pub const MIN_RENDER_SCALE: f32 = 0.5;
+
+/// The scene's size for a window size and render scale (at least 1 x 1).
+pub fn scaled_size(width: u32, height: u32, scale: f32) -> (u32, u32) {
+    let s = scale.clamp(MIN_RENDER_SCALE, 1.0);
+    if s >= 1.0 {
+        return (width.max(1), height.max(1));
+    }
+    let f = |n: u32| ((n as f32 * s).round() as u32).clamp(1, n.max(1));
+    (f(width), f(height))
 }
 
 fn halton(mut index: u32, base: u32) -> f32 {
@@ -59,6 +80,8 @@ struct History {
 
 pub struct Taa {
     pipeline: wgpu::RenderPipeline,
+    /// The upscaling resolve, used when the scene is smaller than the window.
+    upscale: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     uniform: wgpu::Buffer,
@@ -72,11 +95,16 @@ pub struct Taa {
     prev_vp: Option<Mat4>,
     /// Depth-only view of the scene depth (stencil cannot be bound).
     depth_view: wgpu::TextureView,
+    /// Window (output and history) size.
     width: u32,
     height: u32,
+    /// Whether the scene is drawn smaller than the window.
+    upscaling: bool,
 }
 
 impl Taa {
+    /// `depth` is the scene's depth (scene-sized); `width` x `height` is the
+    /// window, the size the result and its history have.
     pub fn new(device: &wgpu::Device, depth: &wgpu::Texture, width: u32, height: u32) -> Self {
         let multisampled = depth.sample_count() > 1;
         let depth_type = if multisampled {
@@ -136,31 +164,35 @@ impl Taa {
             bind_group_layouts: &[&layout],
             push_constant_ranges: &[],
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("taa-resolve"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_taa"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: crate::render::pipeline_cache::get(device).as_ref(),
-        });
+        let make = |label: &str, entry: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: crate::render::pipeline_cache::get(device).as_ref(),
+            })
+        };
+        let pipeline = make("taa-resolve", "fs_taa");
+        let upscale = make("taa-upscale", "fs_taau");
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("taa-sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -173,8 +205,10 @@ impl Taa {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let upscaling = depth.width() != width.max(1) || depth.height() != height.max(1);
         Self {
             pipeline,
+            upscale,
             layout,
             sampler,
             uniform,
@@ -189,6 +223,7 @@ impl Taa {
             depth_view: depth_only(depth),
             width,
             height,
+            upscaling,
         }
     }
 
@@ -209,6 +244,13 @@ impl Taa {
         self.valid = false;
         self.width = width;
         self.height = height;
+        self.upscaling = depth.width() != width.max(1) || depth.height() != height.max(1);
+    }
+
+    /// Whether the scene is smaller than the window, so this pass must run
+    /// every frame (with TAA off too) to bring it up to the window's size.
+    pub fn upscaling(&self) -> bool {
+        self.upscaling
     }
 
     /// Forget the history (camera cut, TAA switched off).
@@ -217,9 +259,12 @@ impl Taa {
         self.prev_vp = None;
     }
 
-    /// Resolve `scene` against the history and copy the result back into
-    /// `scene_texture`, so later passes read the anti-aliased frame.
-    /// `vp` is this frame's unjittered view-projection.
+    /// Resolve `scene` against the history and copy the result into
+    /// `output` (the scene texture itself, or the window-sized target when
+    /// upscaling), so later passes read the anti-aliased frame.
+    /// `vp` is this frame's unjittered view-projection. With `temporal`
+    /// off (TAA switched off while upscaling) no history is used or kept:
+    /// the frame is only filtered up to the window's size.
     #[allow(clippy::too_many_arguments)]
     pub fn encode(
         &mut self,
@@ -227,9 +272,10 @@ impl Taa {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         scene_view: &wgpu::TextureView,
-        scene_texture: &wgpu::Texture,
+        output: &wgpu::Texture,
         vp: Mat4,
         jitter_ndc: Vec2,
+        temporal: bool,
     ) {
         if self.binds.is_none() {
             let make = |read: usize| {
@@ -263,7 +309,7 @@ impl Taa {
             self.binds = Some([make(0), make(1)]);
         }
         let prev_vp = self.prev_vp.unwrap_or(vp);
-        let reset = !self.valid || !mat_finite(vp) || !mat_finite(vp.inverse());
+        let reset = !temporal || !self.valid || !mat_finite(vp) || !mat_finite(vp.inverse());
         let params = TaaUniform {
             inv_vp: vp.inverse().to_cols_array_2d(),
             prev_vp: prev_vp.to_cols_array_2d(),
@@ -289,14 +335,18 @@ impl Taa {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(if self.upscaling {
+                &self.upscale
+            } else {
+                &self.pipeline
+            });
             let binds = self.binds.as_ref().expect("taa binds");
             pass.set_bind_group(0, &binds[read], &[]);
             pass.draw(0..3, 0..1);
         }
         encoder.copy_texture_to_texture(
             self.history[write].texture.as_image_copy(),
-            scene_texture.as_image_copy(),
+            output.as_image_copy(),
             wgpu::Extent3d {
                 width: self.width,
                 height: self.height,
@@ -304,8 +354,8 @@ impl Taa {
             },
         );
         self.current = write;
-        self.valid = true;
-        self.prev_vp = Some(vp);
+        self.valid = temporal;
+        self.prev_vp = temporal.then_some(vp);
     }
 }
 
@@ -449,12 +499,80 @@ fn fs_taa(i: VOut) -> @location(0) vec4<f32> {
     let out = mix(hist, squash(cur), t.blend);
     return vec4(unsquash(out), 1.0);
 }
+
+// Upscaling resolve: the scene is smaller than the window (and history).
+// Each scene pixel q was drawn at its centre shifted by the jitter, so it
+// shows the unjittered spot q + 0.5 - jitter (in scene pixels). The window
+// pixel takes the samples of the 3x3 scene pixels around its own centre,
+// weighted by a Gaussian of their distance, and gives the new frame more
+// weight in the history the closer its nearest sample lies.
+@fragment
+fn fs_taau(i: VOut) -> @location(0) vec4<f32> {
+    let size = vec2<i32>(textureDimensions(cur_tex));
+    let in_size = vec2<f32>(size);
+    // Jitter in scene pixels, y down like the texture.
+    let jit = t.jitter * vec2<f32>(0.5, -0.5) * in_size;
+    let p = i.uv * in_size;
+    let q0 = vec2<i32>(floor(p + jit));
+    var m1 = vec3<f32>(0.0);
+    var m2 = vec3<f32>(0.0);
+    var sum = vec3<f32>(0.0);
+    var wsum = 0.0;
+    var wmax = 0.0;
+    var depth = 0.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let q = clamp(q0 + vec2<i32>(x, y), vec2<i32>(0), size - 1);
+            let c = squash(textureLoad(cur_tex, q, 0).rgb);
+            let d = vec2<f32>(q) + 0.5 - jit - p;
+            let w = exp(-2.29 * dot(d, d));
+            sum += c * w;
+            wsum += w;
+            wmax = max(wmax, w);
+            m1 += c;
+            m2 += c * c;
+            depth = max(depth, textureLoad(depth_tex, q, 0));
+        }
+    }
+    let cur = sum / max(wsum, 1e-5);
+    if t.reset > 0.5 {
+        return vec4(unsquash(cur), 1.0);
+    }
+    let mean = m1 / 9.0;
+    let sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3<f32>(0.0)));
+    let lo = min(mean - sigma * 1.25, cur);
+    let hi = max(mean + sigma * 1.25, cur);
+    // This pixel's own unjittered centre.
+    let ndc = vec2<f32>(i.uv.x * 2.0 - 1.0, 1.0 - i.uv.y * 2.0);
+    let world = t.inv_vp * vec4<f32>(ndc, depth, 1.0);
+    let prev = t.prev_vp * world;
+    if abs(prev.w) < 1e-8 {
+        return vec4(unsquash(cur), 1.0);
+    }
+    let prev_uv = (prev.xy / prev.w) * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+    if any(prev_uv < vec2<f32>(0.0)) || any(prev_uv > vec2<f32>(1.0)) {
+        return vec4(unsquash(cur), 1.0);
+    }
+    let hist = clamp(squash(sample_history(prev_uv)), lo, hi);
+    let alpha = clamp(t.blend * mix(0.3, 1.5, wmax), 0.02, 0.5);
+    return vec4(unsquash(mix(hist, cur, alpha)), 1.0);
+}
 "#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use glam::{Vec3, Vec4};
+
+    #[test]
+    fn scaled_sizes_round_and_clamp() {
+        assert_eq!(scaled_size(1920, 1080, 1.0), (1920, 1080));
+        assert_eq!(scaled_size(1920, 1080, 2.0), (1920, 1080));
+        assert_eq!(scaled_size(3840, 2160, 0.5), (1920, 1080));
+        assert_eq!(scaled_size(3840, 2160, 0.1), (1920, 1080));
+        assert_eq!(scaled_size(2560, 1440, 0.75), (1920, 1080));
+        assert_eq!(scaled_size(1, 1, 0.5), (1, 1));
+    }
 
     #[test]
     fn jitter_stays_inside_the_pixel_and_covers_it() {

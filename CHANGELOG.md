@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.017 (2026-11-09)
+
+- Adjustable render resolution: world.set_render_scale(0.5 to 1.0) draws the scene smaller than the window and the TAA pass upscales it to full size (like FSR 2 or Unreal's TSR). Off by default (1.0). ENGINE_RENDER_SCALE overrides it. At 0.5 the scene pass costs about a third and AO about 40% as much (lavapipe, occlusion_city).
+
 ## 0.016 (2026-11-09)
 
 - Far sun shadows are drawn on alternate frames: the near cascade every frame, the middle and far ones taking turns, so each frame draws two shadow maps instead of three (shadow pass about 40% cheaper, pictures unchanged). World::set_shadow_cascade_refresh sets the intervals; [1, 1, 1] or ENGINE_SHADOW_REFRESH=1 draws all three every frame.

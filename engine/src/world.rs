@@ -935,6 +935,8 @@ pub struct World {
     ribbons: RibbonWorld,
     quality: crate::quality::Quality,
     taa: bool,
+    /// Share of the window the scene is drawn at (1 = full size).
+    render_scale: f32,
     occlusion_culling: bool,
     occlusion_stats: OcclusionStats,
     tone_map: ToneMap,
@@ -1061,6 +1063,7 @@ impl Default for World {
             ribbons: RibbonWorld::default(),
             quality: crate::quality::Quality::High,
             taa: true,
+            render_scale: 1.0,
             occlusion_culling: false,
             occlusion_stats: OcclusionStats::default(),
             tone_map: ToneMap::default(),
@@ -1433,6 +1436,28 @@ impl World {
 
     pub fn taa(&self) -> bool {
         self.taa
+    }
+
+    /// Draw the scene at this share of the window's width and height, and
+    /// let the TAA pass upscale it to the window (like FSR 2 or Unreal's
+    /// TSR). 1.0 (the default) draws at full size; 0.75 draws 56% of the
+    /// pixels, 0.5 a quarter. Everything sized to the screen (depth, AO,
+    /// reflections, occlusion) shrinks with it, so GPU time spent per pixel
+    /// drops about in step; bloom, tone mapping and the UI stay at full
+    /// size. With TAA on, a still view gathers nearly full detail over a few
+    /// frames; with it off the frame is only filtered up. Clamped to
+    /// 0.5..=1.0. `ENGINE_RENDER_SCALE` overrides it.
+    pub fn set_render_scale(&mut self, scale: f32) {
+        self.render_scale = if scale.is_finite() {
+            scale.clamp(crate::render::taa::MIN_RENDER_SCALE, 1.0)
+        } else {
+            1.0
+        };
+    }
+
+    /// See [`World::set_render_scale`].
+    pub fn render_scale(&self) -> f32 {
+        self.render_scale
     }
 
     /// Occlusion culling (off by default): skip meshes hidden behind other
