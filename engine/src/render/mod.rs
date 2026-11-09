@@ -467,6 +467,7 @@ impl Renderer {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             // `WGPU_BACKEND=dx12|vulkan|metal` picks one (a driver test).
             backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY),
+            backend_options: dx12_options(),
             ..Default::default()
         });
         let surface = instance
@@ -3991,6 +3992,23 @@ fn tone_map_env() -> Option<crate::world::ToneMap> {
 fn taa_env_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("ENGINE_TAA").map_or(true, |v| v.trim() != "0"))
+}
+
+/// DirectX 12 compiles shaders with FXC unless told otherwise, and FXC
+/// cannot build every Engine shader. `ENGINE_DXC_DIR=<folder>` (holding
+/// `dxcompiler.dll` and `dxil.dll`, e.g. the Windows SDK's bin\x64) or
+/// `WGPU_DX12_COMPILER=dxc` selects the newer DXC.
+fn dx12_options() -> wgpu::BackendOptions {
+    let mut options = wgpu::BackendOptions::from_env_or_default();
+    if let Ok(dir) = std::env::var("ENGINE_DXC_DIR") {
+        let dir = std::path::Path::new(&dir);
+        options.dx12.shader_compiler = wgpu::Dx12Compiler::DynamicDxc {
+            dxc_path: dir.join("dxcompiler.dll").to_string_lossy().into_owned(),
+            dxil_path: dir.join("dxil.dll").to_string_lossy().into_owned(),
+            max_shader_model: wgpu::DxcShaderModel::V6_5,
+        };
+    }
+    options
 }
 
 fn create_depth(
