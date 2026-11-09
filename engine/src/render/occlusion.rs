@@ -54,7 +54,7 @@ struct Candidate {
     instance_count: u32,
     first_index: u32,
     base_vertex: i32,
-    _pad: u32,
+    first_instance: u32,
 }
 
 /// One mesh to test: its box, index counts, instances and where its
@@ -68,6 +68,8 @@ pub(crate) struct CandidateMesh {
     pub instance_count: u32,
     pub first_index: u32,
     pub base_vertex: i32,
+    /// Its first slot in the instance arena page, for the packed draws.
+    pub first_instance: u32,
 }
 
 #[repr(C)]
@@ -216,6 +218,7 @@ struct Candidate {
     instance_count: u32,
     first_index: u32,
     base_vertex: i32,
+    first_instance: u32,
 };
 
 struct DrawArgs {
@@ -242,6 +245,10 @@ fn cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     let show = may_show(c.lo, c.hi);
     let n = select(0u, c.instance_count, show);
     draws[2u * i] = DrawArgs(c.opaque_index_count, n, c.first_index, c.base_vertex, 0u);
+    // The packed copy after both per-candidate draws, for multi-draws that
+    // bind the whole instance page.
+    let packed = arrayLength(&draws) / 3u * 2u;
+    draws[packed + i] = DrawArgs(c.opaque_index_count, n, c.first_index, c.base_vertex, c.first_instance);
     draws[2u * i + 1u] = DrawArgs(
         c.index_count - c.opaque_index_count,
         n,
@@ -278,12 +285,21 @@ pub struct OcclusionFrame {
     pub slots: HashMap<EntityId, u32>,
     /// Candidates the prepass draws in phase 1 (seen lately).
     pub first: HashSet<EntityId>,
+    /// Candidates `args` has room for.
+    pub capacity: u32,
 }
 
 impl OcclusionFrame {
     /// Byte offset of a candidate's opaque (0) or translucent (`INDIRECT_STRIDE`) draw.
     pub fn offset(slot: u32, range_offset: u64) -> u64 {
         u64::from(slot) * ARGS_PER_CANDIDATE * INDIRECT_STRIDE + range_offset
+    }
+
+    /// Byte offset of a candidate's opaque draw in the packed rows: one
+    /// draw per candidate, tightly packed in slot order, with the instances
+    /// at their place in the arena page (for `multi_draw_indexed_indirect`).
+    pub fn packed_offset(&self, slot: u32) -> u64 {
+        (u64::from(self.capacity) * ARGS_PER_CANDIDATE + u64::from(slot)) * INDIRECT_STRIDE
     }
 }
 
@@ -727,7 +743,7 @@ impl Occlusion {
                 instance_count: c.instance_count,
                 first_index: c.first_index,
                 base_vertex: c.base_vertex,
-                _pad: 0,
+                first_instance: c.first_instance,
             });
             slots.insert(id, u32::try_from(i).expect("candidate index exceeds u32"));
             if self.seen.contains(&id) {
@@ -741,6 +757,7 @@ impl Occlusion {
             args: self.args.clone(),
             slots,
             first,
+            capacity: u32::try_from(self.capacity).expect("candidate capacity exceeds u32"),
         }
     }
 
@@ -1027,7 +1044,10 @@ fn candidate_buffers(
     });
     let args = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("occlusion-draws"),
-        size: capacity as u64 * ARGS_PER_CANDIDATE * std::mem::size_of::<DrawIndexedArgs>() as u64,
+        // Two draws per candidate, then the packed opaque rows.
+        size: capacity as u64
+            * (ARGS_PER_CANDIDATE + 1)
+            * std::mem::size_of::<DrawIndexedArgs>() as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
         mapped_at_creation: false,
     });

@@ -22,6 +22,8 @@ pub(crate) struct FrameClock {
     /// Slow average of the raw frame time (about the last second).
     long: Option<f32>,
     enabled: bool,
+    /// Every step this long, whatever the frame took (for tests).
+    fixed: Option<f32>,
 }
 
 impl FrameClock {
@@ -32,12 +34,22 @@ impl FrameClock {
             outliers: 0,
             long: None,
             enabled,
+            fixed: None,
         }
     }
 
-    /// From the environment: `ENGINE_SMOOTH_DT=0` hands out raw frame times.
+    /// From the environment: `ENGINE_SMOOTH_DT=0` hands out raw frame
+    /// times; `ENGINE_FIXED_DT=0.016` hands out that step every frame, so
+    /// two runs show the same frame (for picture comparisons).
     pub(crate) fn from_env() -> Self {
-        Self::new(std::env::var("ENGINE_SMOOTH_DT").map_or(true, |v| v.trim() != "0"))
+        let mut clock =
+            Self::new(std::env::var("ENGINE_SMOOTH_DT").map_or(true, |v| v.trim() != "0"));
+        clock.fixed = std::env::var("ENGINE_FIXED_DT")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|dt| dt.is_finite() && *dt > 0.0)
+            .map(|dt| dt.min(MAX_DT));
+        clock
     }
 
     /// The step for a frame that really took `raw` seconds.
@@ -46,6 +58,9 @@ impl FrameClock {
     /// refresh interval: the display shows frames evenly even when the
     /// moments the CPU gets through bunch up (held keys on Windows did that).
     pub(crate) fn tick(&mut self, raw: f32, refresh_hz: Option<f32>) -> f32 {
+        if let Some(dt) = self.fixed {
+            return dt;
+        }
         let raw = if raw.is_finite() { raw.max(0.0) } else { 0.0 };
         if !self.enabled {
             return raw.min(MAX_DT);
