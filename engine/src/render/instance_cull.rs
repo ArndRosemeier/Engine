@@ -26,12 +26,12 @@ pub struct DrawIndexedArgs {
 }
 
 impl DrawIndexedArgs {
-    pub fn empty_range(index_count: u32, first_index: u32) -> Self {
+    pub fn empty_range(index_count: u32, first_index: u32, base_vertex: i32) -> Self {
         Self {
             index_count,
             instance_count: 0,
             first_index,
-            base_vertex: 0,
+            base_vertex,
             first_instance: 0,
         }
     }

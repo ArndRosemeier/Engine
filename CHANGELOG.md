@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.020 (2026-11-09)
+
+- Meshes share GPU buffers: every mesh's vertices and indices now live in a few large pages (about 4 to 66 MB each) instead of two buffers per mesh, and each draw names its place in the page. Pictures are identical (occlusion_city and buildings checked pixel for pixel, a GPU byte check of every mesh is clean). It is the groundwork for drawing many meshes per draw call (next). ENGINE_FRAME_STATS counts the pages' size in the mesh memory.
+
 ## 0.019 (2026-11-09)
 
 - Shadows of things that don't move are cached: each sun cascade keeps a map of its static casters (unchanged for half a second, not swaying in the wind, voxel ground), copies it in and draws only moving things on top (shadow pass 8.1 to 1.9 ms in occlusion_city on lavapipe, pictures identical). World::set_shadow_cache(false) or ENGINE_SHADOW_CACHE=0 turns it off.

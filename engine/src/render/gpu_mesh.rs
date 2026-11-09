@@ -1,7 +1,10 @@
 use super::frustum::{Aabb, Bounds};
+use super::geometry::{GeometryArena, GpuGeometry};
 use super::instance_cull::{DrawIndexedArgs, InstanceCull};
 use crate::mesh::{BuiltMesh, InstanceRaw};
 use glam::Mat4;
+use std::ops::Range;
+use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 const INSTANCE_USAGES: wgpu::BufferUsages = wgpu::BufferUsages::VERTEX
@@ -12,10 +15,9 @@ const INDIRECT_USAGES: wgpu::BufferUsages = wgpu::BufferUsages::INDIRECT
     .union(wgpu::BufferUsages::STORAGE)
     .union(wgpu::BufferUsages::COPY_DST);
 
-/// Vertex/index buffers and counts one `GpuMesh` is built from.
+/// Geometry and counts one `GpuMesh` is built from.
 struct MeshGpuSource {
-    vertex_buf: wgpu::Buffer,
-    index_buf: wgpu::Buffer,
+    geometry: Arc<GpuGeometry>,
     index_count: usize,
     opaque_index_count: usize,
     vertex_count: usize,
@@ -31,8 +33,17 @@ pub(crate) fn vertex_sways(profile: f32) -> bool {
 }
 
 pub struct GpuMesh {
+    /// The arena page's vertex buffer: draw with [`Self::base_vertex`].
     pub vertex_buf: wgpu::Buffer,
+    /// The arena page's index buffer: draw with [`Self::indices`].
     pub index_buf: wgpu::Buffer,
+    /// Where this mesh's vertices start in `vertex_buf`.
+    pub base_vertex: i32,
+    /// Where this mesh's indices start in `index_buf`.
+    pub first_index: u32,
+    /// Its place in the shared geometry arena (shared by meshes made with
+    /// [`Self::share_vertices`]).
+    pub geometry: Arc<GpuGeometry>,
     pub instance_buf: wgpu::Buffer,
     pub compact_buf: wgpu::Buffer,
     pub indirect_buf: wgpu::Buffer,
@@ -59,21 +70,14 @@ pub struct GpuMesh {
 impl GpuMesh {
     pub fn upload(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        arena: &GeometryArena,
         mesh: &BuiltMesh,
         instances: &[InstanceRaw],
         cull: &InstanceCull,
     ) -> Self {
         let vertices = mesh.to_interleaved();
-        let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vertices"),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_SRC,
-        });
-        let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("indices"),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_SRC,
-        });
+        let geometry = arena.upload(device, queue, &vertices, &mesh.indices);
         let local_bounds = Bounds::around(&mesh.positions);
         let local_box = Aabb::around(&mesh.positions);
         let sways = vertices.iter().any(|v| vertex_sways(v.surface3[3]));
@@ -81,8 +85,7 @@ impl GpuMesh {
             device,
             cull,
             MeshGpuSource {
-                vertex_buf,
-                index_buf,
+                geometry,
                 index_count: mesh.indices.len(),
                 opaque_index_count: mesh.opaque_index_count.min(mesh.indices.len()),
                 vertex_count: mesh.positions.len(),
@@ -105,8 +108,7 @@ impl GpuMesh {
             device,
             cull,
             MeshGpuSource {
-                vertex_buf: src.vertex_buf.clone(),
-                index_buf: src.index_buf.clone(),
+                geometry: src.geometry.clone(),
                 index_count: src.index_count,
                 opaque_index_count: src.opaque_index_count,
                 vertex_count: src.vertex_count,
@@ -125,8 +127,7 @@ impl GpuMesh {
         instances: &[InstanceRaw],
     ) -> Self {
         let MeshGpuSource {
-            vertex_buf,
-            index_buf,
+            geometry,
             index_count,
             opaque_index_count,
             vertex_count,
@@ -136,11 +137,14 @@ impl GpuMesh {
         } = mesh;
         let instance_buf = instance_buffer(device, instances, "instances");
         let compact_buf = instance_buffer(device, instances, "instances-compact");
-        let indirect_buf = indirect_buffer(device, opaque_index_count, index_count);
+        let indirect_buf = indirect_buffer(device, &geometry, opaque_index_count, index_count);
         let cull_bind = cull.mesh_bind(device, &instance_buf, &compact_buf, &indirect_buf);
         Self {
-            vertex_buf,
-            index_buf,
+            vertex_buf: geometry.vertex_buf.clone(),
+            index_buf: geometry.index_buf.clone(),
+            base_vertex: geometry.base_vertex,
+            first_index: geometry.first_index,
+            geometry,
             instance_buf,
             compact_buf,
             indirect_buf,
@@ -157,6 +161,16 @@ impl GpuMesh {
             xform_rev: 0,
             sways,
         }
+    }
+
+    /// `range` of this mesh's own indices, as a range of `index_buf`.
+    pub fn indices(&self, range: Range<u32>) -> Range<u32> {
+        range.start + self.first_index..range.end + self.first_index
+    }
+
+    /// Its opaque indices in `index_buf`.
+    pub fn opaque_indices(&self) -> Range<u32> {
+        self.indices(0..self.opaque_index_count as u32)
     }
 
     pub fn local_sphere(&self) -> Option<Bounds> {
@@ -246,15 +260,17 @@ fn instance_buffer(device: &wgpu::Device, instances: &[InstanceRaw], label: &str
 
 fn indirect_buffer(
     device: &wgpu::Device,
+    geometry: &GpuGeometry,
     opaque_index_count: usize,
     index_count: usize,
 ) -> wgpu::Buffer {
     let opaque =
         u32::try_from(opaque_index_count).expect("opaque index count exceeds GPU u32 range");
     let total = u32::try_from(index_count).expect("index count exceeds GPU u32 range");
+    let (first, base) = (geometry.first_index, geometry.base_vertex);
     let empty = [
-        DrawIndexedArgs::empty_range(opaque, 0),
-        DrawIndexedArgs::empty_range(total - opaque, opaque),
+        DrawIndexedArgs::empty_range(opaque, first, base),
+        DrawIndexedArgs::empty_range(total - opaque, first + opaque, base),
     ];
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("instances-indirect"),

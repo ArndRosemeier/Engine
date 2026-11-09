@@ -188,14 +188,14 @@ impl Renderer {
 fn read_back(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    buffers: &[(&wgpu::Buffer, u64)],
+    buffers: &[(&wgpu::Buffer, u64, u64)],
 ) -> Vec<Vec<u8>> {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("gpu-check-copy"),
     });
     let staging: Vec<wgpu::Buffer> = buffers
         .iter()
-        .map(|&(src, len)| {
+        .map(|&(src, offset, len)| {
             let len = len.max(4).div_ceil(4) * 4;
             let dst = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("gpu-check-readback"),
@@ -203,7 +203,7 @@ fn read_back(
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            encoder.copy_buffer_to_buffer(src, 0, &dst, 0, len.min(src.size()));
+            encoder.copy_buffer_to_buffer(src, offset, &dst, 0, len.min(src.size() - offset));
             dst
         })
         .collect();
@@ -227,7 +227,7 @@ fn read_back(
         .iter()
         .zip(buffers)
         .zip(ok)
-        .map(|((b, &(_, len)), ok)| {
+        .map(|((b, &(_, _, len)), ok)| {
             if !ok {
                 return Vec::new();
             }
@@ -325,8 +325,17 @@ impl Renderer {
                     * std::mem::size_of::<crate::mesh::Vertex>())
                     as u64;
                 let ibytes = (e.mesh.indices.len() * 4) as u64;
-                bufs.push((&gpu.vertex_buf, vbytes.min(gpu.vertex_buf.size())));
-                bufs.push((&gpu.index_buf, ibytes.min(gpu.index_buf.size())));
+                // The mesh's own ranges of the shared arena pages.
+                let stride = std::mem::size_of::<crate::mesh::Vertex>() as u64;
+                let geo = &gpu.geometry;
+                let (voff, ioff) = (
+                    geo.base_vertex as u64 * stride,
+                    u64::from(geo.first_index) * 4,
+                );
+                let vbytes = vbytes.min(u64::from(geo.vertex_count) * stride);
+                let ibytes = ibytes.min(u64::from(geo.index_count) * 4);
+                bufs.push((&gpu.vertex_buf, voff, vbytes));
+                bufs.push((&gpu.index_buf, ioff, ibytes));
             }
             let data = read_back(&self.device, &self.queue, &bufs);
             for (k, id) in chunk.iter().enumerate() {

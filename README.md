@@ -519,6 +519,13 @@ shadows stay right, one frame old; it is drawn at once when the sun turns or
 the camera moves a tenth of its radius. `world.set_shadow_cascade_refresh([1, 1, 1])`
 draws all three every frame again.
 
+**Shared mesh buffers** (automatic): every mesh's vertices and indices live
+in a few large GPU buffers ("pages") instead of two small buffers each, as in
+Unreal or Frostbite. A draw names its place in the page, so neighbouring
+draws keep their bindings; it is also the groundwork for drawing many meshes
+with one multi-draw call. A mesh's room goes back to its page when the mesh
+is removed.
+
 Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_global_illumination`,
 `set_bloom`, `set_tone_map`, `set_haze`, `set_lod_bias`, `set_view_distance`.
 
