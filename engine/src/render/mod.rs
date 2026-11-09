@@ -3,6 +3,7 @@ mod clipmap;
 mod crowd;
 mod decals;
 pub(crate) mod frustum;
+mod geometry;
 mod gi;
 mod gpu_mesh;
 mod gpu_profile;
@@ -209,8 +210,8 @@ impl<'r> OpaqueDraw<'r> {
         match indirect {
             Some((args, offset)) => bundle.draw_indexed_indirect(args, offset),
             None => bundle.draw_indexed(
-                0..g.opaque_index_count as u32,
-                0,
+                g.opaque_indices(),
+                g.base_vertex,
                 0..g.instance_count as u32,
             ),
         }
@@ -224,6 +225,8 @@ struct OpaqueKey {
     albedo: wgpu::BindGroup,
     vertex: wgpu::Buffer,
     index: wgpu::Buffer,
+    /// Where the mesh starts in the arena page.
+    offsets: (u32, i32),
     instances: wgpu::Buffer,
     /// Indirect args and offset, or the direct index and instance counts.
     indirect: Option<(wgpu::Buffer, u64)>,
@@ -237,6 +240,7 @@ impl OpaqueKey {
         self.albedo == *d.albedo
             && self.vertex == g.vertex_buf
             && self.index == g.index_buf
+            && self.offsets == (g.first_index, g.base_vertex)
             && self.instances == *instances
             && match (&self.indirect, indirect) {
                 (Some((a, o)), Some((b, p))) => a == b && *o == p,
@@ -254,6 +258,7 @@ impl OpaqueKey {
             albedo: d.albedo.clone(),
             vertex: g.vertex_buf.clone(),
             index: g.index_buf.clone(),
+            offsets: (g.first_index, g.base_vertex),
             instances: instances.clone(),
             indirect: indirect.map(|(b, o)| (b.clone(), o)),
             counts: if indirect.is_some() {
@@ -636,6 +641,8 @@ pub struct Renderer {
     gi: gi::GiVolume,
     voxel: voxel_terrain::VoxelTerrainGpu,
     gpu_meshes: HashMap<EntityId, GpuMesh>,
+    /// Every mesh's vertices and indices, in shared pages.
+    geometry: geometry::GeometryArena,
     /// GPU-mode instance buffers, one per prototype instead of one per spatial bin.
     gpu_instance_batches: HashMap<EntityId, GpuInstanceBatch>,
     gpu_batch_sources: Vec<BatchSourceState>,
@@ -1029,6 +1036,7 @@ impl Renderer {
             gi,
             voxel,
             gpu_meshes: HashMap::new(),
+            geometry: geometry::GeometryArena::default(),
             gpu_instance_batches: HashMap::new(),
             gpu_batch_sources: Vec::new(),
             gpu_batch_source_scratch: Vec::new(),
@@ -1482,8 +1490,14 @@ impl Renderer {
                     gpu.xform_rev = entity.xform_rev;
                 }
             } else if entity.instance_of.is_none() {
-                let mut gpu =
-                    GpuMesh::upload(&self.device, entity.mesh(), &[], &self.instance_cull);
+                let mut gpu = GpuMesh::upload(
+                    &self.device,
+                    &self.queue,
+                    &self.geometry,
+                    entity.mesh(),
+                    &[],
+                    &self.instance_cull,
+                );
                 gpu.xform_rev = entity.xform_rev;
                 self.gpu_meshes.insert(id, gpu);
             }
@@ -1518,6 +1532,8 @@ impl Renderer {
                 {
                     *gpu = GpuMesh::upload(
                         &self.device,
+                        &self.queue,
+                        &self.geometry,
                         entity.mesh(),
                         &self.instance_scratch,
                         &self.instance_cull,
@@ -1551,6 +1567,8 @@ impl Renderer {
                 } else {
                     GpuMesh::upload(
                         &self.device,
+                        &self.queue,
+                        &self.geometry,
                         entity.mesh(),
                         &self.instance_scratch,
                         &self.instance_cull,
@@ -2068,10 +2086,10 @@ impl Renderer {
     /// Rough video memory held by meshes and textures (bytes): (mesh
     /// buffers, textures, mesh count, texture count). For diagnostics.
     pub fn mesh_and_texture_bytes(&self) -> (u64, u64, usize, usize) {
-        let mesh = |g: &gpu_mesh::GpuMesh| {
-            g.vertex_buf.size() + g.index_buf.size() + g.instance_buf.size() + g.compact_buf.size()
-        };
-        let meshes: u64 = self.gpu_meshes.values().map(mesh).sum::<u64>()
+        // Vertices and indices: the arena's pages, whatever share them.
+        let mesh = |g: &gpu_mesh::GpuMesh| g.instance_buf.size() + g.compact_buf.size();
+        let meshes: u64 = self.geometry.reserved_bytes()
+            + self.gpu_meshes.values().map(mesh).sum::<u64>()
             + self
                 .gpu_instance_batches
                 .values()
@@ -4316,13 +4334,17 @@ impl Renderer {
                     .gpu_meshes
                     .get(id)
                     .expect("occlusion candidate is synced");
-                (
-                    *id,
-                    gpu.world_box.expect("occlusion candidate has a box"),
-                    u32::try_from(gpu.opaque_index_count).expect("index count exceeds u32"),
-                    u32::try_from(gpu.index_count).expect("index count exceeds u32"),
-                    u32::try_from(gpu.instance_count).expect("instance count exceeds u32"),
-                )
+                occlusion::CandidateMesh {
+                    id: *id,
+                    aabb: gpu.world_box.expect("occlusion candidate has a box"),
+                    opaque_index_count: u32::try_from(gpu.opaque_index_count)
+                        .expect("index count exceeds u32"),
+                    index_count: u32::try_from(gpu.index_count).expect("index count exceeds u32"),
+                    instance_count: u32::try_from(gpu.instance_count)
+                        .expect("instance count exceeds u32"),
+                    first_index: gpu.first_index,
+                    base_vertex: gpu.base_vertex,
+                }
             })
             .collect();
         let counts = self.occlusion.counts();
@@ -4625,7 +4647,11 @@ impl Renderer {
             bundle.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
             bundle.set_vertex_buffer(1, gpu.instance_buf.slice(..));
             bundle.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-            bundle.draw_indexed(0..opaque_index_count, 0, 0..instance_count);
+            bundle.draw_indexed(
+                gpu.indices(0..opaque_index_count),
+                gpu.base_vertex,
+                0..instance_count,
+            );
         }
         self.terrain_bundle = Some(bundle.finish(&wgpu::RenderBundleDescriptor {
             label: Some("visible-terrain-bundle"),
@@ -5098,7 +5124,11 @@ fn encode_shadow_bundle_draw<'a>(
             let instance_count =
                 u32::try_from(gpu.instance_count).expect("shadow instance count exceeds u32");
             bundle.set_vertex_buffer(1, gpu.instance_buf.slice(..));
-            bundle.draw_indexed(0..opaque_index_count, 0, 0..instance_count);
+            bundle.draw_indexed(
+                gpu.indices(0..opaque_index_count),
+                gpu.base_vertex,
+                0..instance_count,
+            );
         }
     }
 }
@@ -5124,7 +5154,11 @@ fn submit_batch_draw(
             .checked_mul(stride)
             .expect("active instance range byte offset overflow");
         pass.set_vertex_buffer(1, gpu.instance_buf.slice(byte_start..));
-        pass.draw_indexed(indices.clone(), 0, 0..range.count);
+        pass.draw_indexed(
+            gpu.indices(indices.clone()),
+            gpu.base_vertex,
+            0..range.count,
+        );
     }
 }
 fn submit_mesh_draw(
@@ -5145,7 +5179,11 @@ fn submit_mesh_draw(
         }
         MeshSubmit::Direct => {
             pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
-            pass.draw_indexed(indices, 0, 0..gpu.instance_count as u32);
+            pass.draw_indexed(
+                gpu.indices(indices),
+                gpu.base_vertex,
+                0..gpu.instance_count as u32,
+            );
         }
     }
 }

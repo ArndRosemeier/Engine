@@ -13,6 +13,7 @@
 //! its regions are meshed, so the view never has holes while moving.
 
 use super::frustum::{Bounds, Frustum};
+use super::geometry::RangeAlloc;
 use crate::voxel_terrain::{FarTileKey, FarTileMesh, VoxelTerrain};
 use glam::{IVec2, IVec3, Mat4, Vec3};
 use rayon::prelude::*;
@@ -302,55 +303,6 @@ fn cs_indices(@builtin(global_invocation_id) gid: vec3<u32>,
     }
 }
 "#;
-
-/// First-fit range allocator with coalescing frees.
-#[derive(Debug, Default)]
-struct RangeAlloc {
-    capacity: u64,
-    free: Vec<Range<u64>>,
-}
-
-impl RangeAlloc {
-    fn new(capacity: u64) -> Self {
-        Self {
-            capacity,
-            free: std::iter::once(0..capacity).collect(),
-        }
-    }
-
-    fn alloc(&mut self, len: u64) -> Option<Range<u64>> {
-        let i = self.free.iter().position(|r| r.end - r.start >= len)?;
-        let start = self.free[i].start;
-        self.free[i].start += len;
-        if self.free[i].start == self.free[i].end {
-            self.free.remove(i);
-        }
-        Some(start..start + len)
-    }
-
-    fn release(&mut self, r: Range<u64>) {
-        if r.start == r.end {
-            return;
-        }
-        let i = self.free.partition_point(|f| f.start < r.start);
-        self.free.insert(i, r);
-        if i + 1 < self.free.len() && self.free[i].end == self.free[i + 1].start {
-            self.free[i].end = self.free[i + 1].end;
-            self.free.remove(i + 1);
-        }
-        if i > 0 && self.free[i - 1].end == self.free[i].start {
-            self.free[i - 1].end = self.free[i].end;
-            self.free.remove(i);
-        }
-    }
-
-    /// Add `extra` units at the end.
-    fn grow(&mut self, new_capacity: u64) {
-        let old = self.capacity;
-        self.capacity = new_capacity;
-        self.release(old..new_capacity);
-    }
-}
 
 /// A growable GPU buffer managed in element units.
 struct Arena {

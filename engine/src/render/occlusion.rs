@@ -52,7 +52,22 @@ struct Candidate {
     hi: [f32; 3],
     index_count: u32,
     instance_count: u32,
-    _pad: [u32; 3],
+    first_index: u32,
+    base_vertex: i32,
+    _pad: u32,
+}
+
+/// One mesh to test: its box, index counts, instances and where its
+/// indices and vertices start in the shared geometry arena.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CandidateMesh {
+    pub id: EntityId,
+    pub aabb: Aabb,
+    pub opaque_index_count: u32,
+    pub index_count: u32,
+    pub instance_count: u32,
+    pub first_index: u32,
+    pub base_vertex: i32,
 }
 
 #[repr(C)]
@@ -199,6 +214,8 @@ struct Candidate {
     hi: vec3<f32>,
     index_count: u32,
     instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
 };
 
 struct DrawArgs {
@@ -224,8 +241,14 @@ fn cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     let c = candidates[i];
     let show = may_show(c.lo, c.hi);
     let n = select(0u, c.instance_count, show);
-    draws[2u * i] = DrawArgs(c.opaque_index_count, n, 0u, 0, 0u);
-    draws[2u * i + 1u] = DrawArgs(c.index_count - c.opaque_index_count, n, c.opaque_index_count, 0, 0u);
+    draws[2u * i] = DrawArgs(c.opaque_index_count, n, c.first_index, c.base_vertex, 0u);
+    draws[2u * i + 1u] = DrawArgs(
+        c.index_count - c.opaque_index_count,
+        n,
+        c.first_index + c.opaque_index_count,
+        c.base_vertex,
+        0u,
+    );
     visible[i] = select(0u, 1u, show);
 }
 "#;
@@ -681,7 +704,7 @@ impl Occlusion {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        candidates: &[(EntityId, Aabb, u32, u32, u32)],
+        candidates: &[CandidateMesh],
     ) -> OcclusionFrame {
         if candidates.len() > self.capacity {
             self.capacity = candidates
@@ -694,14 +717,17 @@ impl Occlusion {
         self.scratch.clear();
         let mut slots = HashMap::with_capacity(candidates.len());
         let mut first = HashSet::new();
-        for (i, &(id, aabb, opaque, total, instances)) in candidates.iter().enumerate() {
+        for (i, c) in candidates.iter().enumerate() {
+            let id = c.id;
             self.scratch.push(Candidate {
-                lo: aabb.min.into(),
-                opaque_index_count: opaque,
-                hi: aabb.max.into(),
-                index_count: total,
-                instance_count: instances,
-                _pad: [0; 3],
+                lo: c.aabb.min.into(),
+                opaque_index_count: c.opaque_index_count,
+                hi: c.aabb.max.into(),
+                index_count: c.index_count,
+                instance_count: c.instance_count,
+                first_index: c.first_index,
+                base_vertex: c.base_vertex,
+                _pad: 0,
             });
             slots.insert(id, u32::try_from(i).expect("candidate index exceeds u32"));
             if self.seen.contains(&id) {
