@@ -371,9 +371,15 @@ says how fast the clips move (`.walk_speed(1.4).run_speed(3.2)`),
 `set_locomotion(id, Locomotion::Moving { speed_mps })` plays walk or run at the
 rate that matches the real speed and keeps the step phase when switching, so
 feet don't slide or skip. `set_foot_ik(id, Some(FootIk::default()))` makes feet
-stand on what is under them (slopes, steps, rocks, bodies): knees bend, hips
-drop for a lower foot. Legs are found by bone name (UE, Mixamo, Blender rigs).
-See `examples/characters`.
+stand on what is drawn under them (any mesh's upward faces, the terrain,
+bodies): each sole is set on the surface even when the character's origin is a
+few centimetres off (a game server's simpler floor) or the clip's soles sit
+under its own floor; knees bend, hips follow the lower foot, feet keep their
+tilt. Crowd characters close up get it too. `world.ground_below(p, depth)` asks
+the same question for anything else; `set_walkable(id, false)` leaves grass
+blades, glass or effects out; `sole_points(id)` says where both soles are, for
+checks. Legs are found by bone name (UE, Mixamo, Blender rigs). See
+`examples/characters`.
 
 **Navigation (AI walking):** `world.build_nav(min, max, NavSettings::default())?`
 works out where characters can walk: ground, floors, steps and bridges made of

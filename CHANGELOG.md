@@ -7,6 +7,11 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.009 (2026-11-09)
+
+- Feet stand on what is drawn: foot IK now sets each sole on the highest surface under it, any mesh's upward faces included (not only the terrain and physics bodies), so characters no longer sink into roads, floors or stairs that have no collider. It also corrects a character whose origin is a few centimetres off the ground (a game server's simpler floor) or whose clip has the soles under its own floor; the hips follow the lower foot up or down, and feet keep their tilt while knees bend, so toes and heels stay out of the ground.
+- World::ground_below(p, depth) gives the highest drawn surface under a point; World::set_walkable(id, false) leaves grass blades, glass or effects out; World::sole_points(id) gives both soles for checks. Crowd characters close to the camera get foot IK.
+
 ## 0.008 (2026-11-09)
 
 - The window stays hidden while the renderer compiles its pipelines at start and appears once it can answer, so it no longer shows up frozen (not responding, cannot be dragged) for the first seconds.

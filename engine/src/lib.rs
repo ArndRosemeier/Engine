@@ -56,6 +56,7 @@ mod frame_clock;
 pub mod gpu_field;
 pub mod gpu_info;
 pub mod grading;
+pub(crate) mod ground_probe;
 pub mod hierarchy;
 pub mod input;
 pub mod lamps;

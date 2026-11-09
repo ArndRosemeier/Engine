@@ -2507,6 +2507,12 @@ mod animation_blending {
             .spawn_animated_shared(model.clone(), Place::default())
             .unwrap();
         world.play_animation(id, "idle").unwrap();
+        // On flat ground first (the soles on it: this model's idle has
+        // them a few centimetres under its origin).
+        world.set_foot_ik(id, Some(FootIk::default())).unwrap();
+        for _ in 0..60 {
+            world.tick_animations(1.0 / 60.0);
+        }
         let flat_l = joint(&world, id, "foot_l");
         let flat_r = joint(&world, id, "foot_r");
         let flat_hips = joint(&world, id, "pelvis");
@@ -2586,6 +2592,68 @@ mod animation_blending {
         );
 
         world.set_foot_ik(id, None).unwrap();
+    }
+
+    /// The lowest sole of the two feet, and the highest, above `ground`.
+    fn soles_above(world: &World, id: EntityId, ground: f32) -> (f32, f32) {
+        let [l, r] = world.sole_points(id).unwrap();
+        let (a, b) = (l.y - ground, r.y - ground);
+        (a.min(b), a.max(b))
+    }
+
+    #[test]
+    fn feet_stand_on_drawn_meshes_even_when_the_origin_is_off() {
+        let Some(model) = character() else { return };
+        // No physics at all: a drawn slab is the only thing under the feet,
+        // its top at 0.3 m.
+        let mut world = World::default();
+        world
+            .set_physics_settings(PhysicsSettings {
+                ground: PhysicsGround::None,
+                ..Default::default()
+            })
+            .unwrap();
+        world.spawn(
+            Mesh::box_at(
+                Vec3::new(0.0, 0.15, 0.0),
+                Vec3::new(4.0, 0.3, 4.0),
+                rgb(90, 90, 90),
+            )
+            .unwrap(),
+        );
+        assert_eq!(world.ground_below(Vec3::new(0.5, 1.0, 0.5), 2.0), Some(0.3));
+        assert_eq!(world.ground_below(Vec3::new(0.5, 0.2, 0.5), 2.0), None);
+        // The character's origin 6 cm into the slab, and then 4 cm above it.
+        for origin in [0.24, 0.34] {
+            let id = world
+                .spawn_animated_shared(model.clone(), Place::new(0.0, origin, 0.0))
+                .unwrap();
+            world.play_animation(id, "idle").unwrap();
+            world.set_foot_ik(id, Some(FootIk::default())).unwrap();
+            for _ in 0..90 {
+                world.tick_animations(1.0 / 60.0);
+            }
+            let (low, high) = soles_above(&world, id, 0.3);
+            assert!(
+                low.abs() < 0.01 && high < 0.03,
+                "standing at {origin}: soles {low} and {high} above the slab"
+            );
+            world.despawn(id);
+        }
+        // Walking, no sole goes into the slab.
+        let id = world
+            .spawn_animated_shared(model, Place::new(0.0, 0.25, 0.0))
+            .unwrap();
+        world.play_animation(id, "walk").unwrap();
+        world.set_foot_ik(id, Some(FootIk::default())).unwrap();
+        for _ in 0..30 {
+            world.tick_animations(1.0 / 60.0);
+        }
+        for _ in 0..120 {
+            world.tick_animations(1.0 / 60.0);
+            let (low, _) = soles_above(&world, id, 0.3);
+            assert!(low > -0.01, "a sole {low} m into the slab");
+        }
     }
 }
 
