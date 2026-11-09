@@ -204,6 +204,14 @@ impl World {
         }
         let transform = place.to_matrix();
         let id = self.spawn_built(mesh, transform);
+        // Each texture is its own entity hanging on the building.
+        for layer in 0..plan.layers().len() {
+            let mesh = plan.extract_layer(layer, |local| base + local);
+            if mesh.indices.is_empty() {
+                continue;
+            }
+            self.spawn_building_layer(&plan, layer, mesh, transform, id)?;
+        }
         let owner = id.raw() | (1 << 62);
         let (_, rot, pos) = transform.to_scale_rotation_translation();
         for (i, e) in plan.elements().iter().enumerate() {
@@ -518,6 +526,18 @@ impl World {
             }
         });
         let entity = self.spawn_built(mesh, transform);
+        for layer in 0..plan.layers().len() {
+            let mesh = plan.extract_layer(layer, |local| {
+                if set.contains(&local) {
+                    base + local
+                } else {
+                    0
+                }
+            });
+            if !mesh.indices.is_empty() {
+                let _ = self.spawn_building_layer(plan, layer, mesh, transform, entity);
+            }
+        }
         let (lo, hi) = plan.footprint();
         let s = (hi - lo).max(glam::Vec2::splat(0.1));
         self.falling.push(FallingPart {
@@ -628,11 +648,35 @@ impl World {
     }
 
     fn write_falling(&mut self, id: EntityId, m: Mat4) {
-        if let Some(e) = self.entities.get_mut(&id) {
-            e.transform = m;
-            e.bump_xform();
-            self.bump_render_epoch();
+        // The falling mesh and its textured layers (children at its origin).
+        let children = self.hierarchy.children_of(id).to_vec();
+        for id in std::iter::once(id).chain(children) {
+            if let Some(e) = self.entities.get_mut(&id) {
+                e.transform = m;
+                e.bump_xform();
+                self.bump_render_epoch();
+            }
         }
+    }
+
+    /// One textured layer of a building (or of its falling part) as a child
+    /// entity of `parent`, sharing GPU textures between buildings that use
+    /// the same ones.
+    fn spawn_building_layer(
+        &mut self,
+        plan: &BuildingPlan,
+        layer: usize,
+        mesh: BuiltMesh,
+        transform: Mat4,
+        parent: EntityId,
+    ) -> EngineResult<EntityId> {
+        let l = &plan.layers()[layer];
+        let maps = l.maps.as_deref().cloned();
+        let albedo = (*l.albedo).clone();
+        let e = self.spawn_built(mesh, transform);
+        self.attach_albedo_by_content(e, (Some(albedo), maps), true)?;
+        self.attach(e, parent, crate::place::Place::default())?;
+        Ok(e)
     }
 
     /// Crush one storey of a falling part into debris.
@@ -813,15 +857,17 @@ impl World {
 
 /// Average colour of an element's vertices.
 fn element_color(plan: &BuildingPlan, element: u32) -> glam::Vec4 {
-    let m = plan.mesh();
     let mut sum = glam::Vec4::ZERO;
     let mut n = 0.0;
-    for (v, &e) in m.elements.iter().enumerate() {
-        if e == element + 1 {
-            sum += m.colors[v];
-            n += 1.0;
-            if n >= 24.0 {
-                break;
+    let meshes = std::iter::once(plan.mesh()).chain(plan.layers().iter().map(|l| &l.mesh));
+    'meshes: for m in meshes {
+        for (v, &e) in m.elements.iter().enumerate() {
+            if e == element + 1 {
+                sum += m.colors[v];
+                n += 1.0;
+                if n >= 24.0 {
+                    break 'meshes;
+                }
             }
         }
     }
@@ -842,6 +888,8 @@ pub(crate) fn element_base(world: &World, id: EntityId) -> u32 {
 mod tests {
     use super::*;
     use crate::building::TowerSpec;
+    use crate::color::Color;
+    use crate::mesh::Mesh;
 
     fn bits_of(world: &World, id: EntityId) -> Vec<bool> {
         let base = element_base(world, id);
@@ -855,6 +903,98 @@ mod tests {
             .iter()
             .map(|m| world.entity(*m).unwrap().transform())
             .collect()
+    }
+
+    /// A two-element plan: a brick-textured wall and a plain slab.
+    fn textured_plan() -> BuildingPlan {
+        use crate::building::{Element, ElementKind, Floor};
+        use crate::mesh::AlbedoMap;
+        let mut plan = BuildingPlan::new(vec![Floor { y0: 0.0, y1: 3.0 }], 7).unwrap();
+        let brick = plan
+            .add_texture(
+                AlbedoMap {
+                    width: 2,
+                    height: 2,
+                    rgba: vec![180, 90, 60, 255].repeat(4),
+                },
+                None,
+            )
+            .unwrap();
+        let wall = Mesh::box_at((0.0, 1.5, 0.0), (4.0, 3.0, 0.2), Color::WHITE).unwrap();
+        let slab = Mesh::box_at((0.0, 3.1, 1.0), (4.0, 0.2, 2.0), Color::WHITE).unwrap();
+        plan.add_all([
+            (
+                Element::new(
+                    ElementKind::Wall,
+                    0,
+                    Vec3::new(0.0, 1.5, 0.0),
+                    Vec3::new(2.0, 1.5, 0.1),
+                )
+                .with_outward(Vec3::Z),
+                vec![(&wall, Some(brick))],
+            ),
+            (
+                Element::new(
+                    ElementKind::Slab,
+                    1,
+                    Vec3::new(0.0, 3.1, 1.0),
+                    Vec3::new(2.0, 0.1, 1.0),
+                ),
+                vec![(&slab, None)],
+            ),
+        ])
+        .unwrap();
+        plan
+    }
+
+    #[test]
+    fn a_textured_plan_keeps_its_texture_and_breaks_the_same() {
+        let plan = textured_plan();
+        assert_eq!(plan.texture_count(), 1);
+        let layer = plan.textured_mesh(crate::building::PlanTexture(0)).unwrap();
+        assert!(!layer.indices.is_empty());
+        assert!(layer.elements.iter().all(|&e| e == 1), "wall faces only");
+        assert!(
+            plan.mesh().elements.iter().all(|&e| e == 2),
+            "slab faces only"
+        );
+
+        let plan = Arc::new(plan);
+        let mut world = World::new();
+        let a = world
+            .spawn_building(plan.clone(), Place::new(0.0, 0.0, 0.0))
+            .unwrap();
+        let b = world
+            .spawn_building(plan.clone(), Place::new(20.0, 0.0, 0.0))
+            .unwrap();
+        let layer_of = |w: &World, id: EntityId| {
+            let c = w.children(id);
+            assert_eq!(c.len(), 1, "one textured layer");
+            c[0]
+        };
+        let (la, lb) = (layer_of(&world, a), layer_of(&world, b));
+        let tex = |id| world.entity(id).unwrap().albedo;
+        assert!(tex(la).is_some(), "the layer carries the brick");
+        assert_eq!(tex(la), tex(lb), "buildings share the GPU texture");
+        // The layer's faces are the wall's global element.
+        let base = element_base(&world, a);
+        assert!(world
+            .entity(la)
+            .unwrap()
+            .mesh()
+            .elements
+            .iter()
+            .all(|&e| e == base));
+        world
+            .break_building_elements(a, &[crate::building::ElementId(0)])
+            .unwrap();
+        assert!(world.element_states.get(base), "the brick wall is hidden");
+        // Moving the building moves its layer; despawning removes it.
+        world.set_place(a, Place::new(5.0, 0.0, 0.0)).unwrap();
+        let at = world.world_transform(la).unwrap().w_axis;
+        assert!((at.x - 5.0).abs() < 1e-4);
+        world.despawn(a);
+        assert!(!world.contains_entity(la));
     }
 
     #[test]

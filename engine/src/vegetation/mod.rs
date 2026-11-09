@@ -130,6 +130,7 @@ fn surface(
         coverage_strength: 0.0,
         overlay_roughness: 0.0,
         overlay_metallic: 0.0,
+        glow_channel: 0,
     }
 }
 

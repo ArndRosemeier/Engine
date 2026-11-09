@@ -45,9 +45,13 @@ pub struct Uniforms {
     pub sky_down: [f32; 3],
     /// 0 summer green, 0.5 early autumn, 1 full autumn colours.
     pub season: f32,
+    /// Glow channels ([`crate::mesh::SurfaceMaterial::glow_channel`]):
+    /// rgb is the channel's glow colour (r below 0: the surface's own
+    /// colour), a its strength.
+    pub glow: [[f32; 4]; crate::mesh::GLOW_CHANNELS],
 }
 
-const _: () = assert!(std::mem::size_of::<Uniforms>() == 240);
+const _: () = assert!(std::mem::size_of::<Uniforms>() == 240 + 16 * crate::mesh::GLOW_CHANNELS);
 
 impl Uniforms {
     pub fn empty() -> Self {
@@ -76,6 +80,7 @@ impl Uniforms {
             dither_frame: 0.0,
             sky_down: [1.0, 1.0, 1.0],
             season: 0.0,
+            glow: [[-1.0, 0.0, 0.0, 1.0]; crate::mesh::GLOW_CHANNELS],
         }
     }
 }
@@ -111,6 +116,7 @@ struct Uniforms {
     dither_frame: f32,
     sky_down: vec3<f32>,
     season: f32,
+    glow: array<vec4<f32>, 16>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -220,6 +226,8 @@ fn haze(color: vec3<f32>, world_p: vec3<f32>) -> vec3<f32> {
 /// or metal surfaces reflect the sky instead of going black.
 pub const LIGHTING_WGSL: &str = r#"
 const PI: f32 = 3.14159265;
+// Brightest a sun highlight gets (times the sun's colour); see pbr_shade.
+const SUN_SPEC_MAX: f32 = 120.0;
 
 struct SceneLight {
     dir: vec3<f32>,
@@ -288,7 +296,11 @@ fn pbr_shade(
         let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
         let g = (nv / (nv * (1.0 - k) + k)) * (nl / (nl * (1.0 - k) + k));
         let f = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - lh, 5.0);
-        spec = d * g * f / (4.0 * nv) * PI;
+        // The sun is a disc, not a point, so its mirror image has a finite
+        // brightness. Without the cap, chrome seen from above (normal, sun
+        // and eye lined up) blew past half-float range: white glare
+        // speckled with NaN black.
+        spec = min(d * g * f / (4.0 * nv) * PI, vec3<f32>(SUN_SPEC_MAX));
     }
     let direct = diffuse_color * sun_diffuse * sun + spec * sun;
 
@@ -407,6 +419,8 @@ struct VsOut {
     @location(13) surface5: vec4<f32>,
     // Instance tint alpha: below 0 it is a LOD cross-fade code (crate::lod).
     @location(14) @interpolate(flat) lod_fade: f32,
+    // The vertex's glow channel: colour (r < 0: the surface's own) and strength.
+    @location(15) @interpolate(flat) glow: vec4<f32>,
 };
 
 fn hash31(p: vec3<f32>) -> f32 {
@@ -608,6 +622,7 @@ fn vs_main(v: VsIn) -> VsOut {
     out.surface3 = v.surface3;
     out.surface4 = v.surface4;
     out.surface5 = v.surface5;
+    out.glow = u.glow[v.element >> 28u];
     return out;
 }
 
@@ -890,7 +905,7 @@ fn shade_main(in: VsOut) -> vec4<f32> {
         let lit = shade_surface_occluded(base.rgb, n, in.world_p, in.surface.x * orm.y,
                 in.surface.y * orm.z, vis, wrap * wrap, orm.x)
             + base.rgb * torch_light(in.world_p, n)
-            + base.rgb * in.surface.z * 3.0
+            + select(in.glow.rgb, base.rgb, in.glow.r < 0.0) * (in.surface.z * 3.0 * in.glow.a)
             + material_emission(in.uv);
         return vec4<f32>(haze(lit, in.world_p), base.a);
     }

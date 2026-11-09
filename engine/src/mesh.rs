@@ -157,6 +157,12 @@ pub struct SurfaceMaterial {
     pub coverage_strength: f32,
     pub overlay_roughness: f32,
     pub overlay_metallic: f32,
+    /// Glow channel of the emission (0 = always on, 1 to 15 = switchable):
+    /// [`crate::world::World::set_glow_channel`] dims or brightens every
+    /// surface on a channel at once, and can give it its own glow colour.
+    /// Lit windows that come on at dusk, neon that flickers, a lamp bulb
+    /// that goes dark with its lamp.
+    pub glow_channel: u8,
 }
 
 impl Default for SurfaceMaterial {
@@ -187,6 +193,15 @@ impl SurfaceMaterial {
         Self {
             overlay_roughness: roughness,
             overlay_metallic: metallic,
+            ..self
+        }
+    }
+
+    /// The same material glowing on a switchable channel (1 to 15; 0 is
+    /// always on). See [`crate::world::World::set_glow_channel`].
+    pub const fn on_glow_channel(self, channel: u8) -> Self {
+        Self {
+            glow_channel: channel,
             ..self
         }
     }
@@ -234,6 +249,7 @@ impl SurfaceMaterial {
         coverage_strength: 0.0,
         overlay_roughness: 0.9,
         overlay_metallic: 0.0,
+        glow_channel: 0,
     };
 
     pub const STONE: Self = Self {
@@ -253,6 +269,7 @@ impl SurfaceMaterial {
         coverage_strength: 0.0,
         overlay_roughness: 0.9,
         overlay_metallic: 0.0,
+        glow_channel: 0,
     };
 
     pub const WET_STONE: Self = Self {
@@ -272,6 +289,7 @@ impl SurfaceMaterial {
         coverage_strength: 0.0,
         overlay_roughness: 0.9,
         overlay_metallic: 0.0,
+        glow_channel: 0,
     };
 
     pub const CALCITE: Self = Self {
@@ -291,6 +309,7 @@ impl SurfaceMaterial {
         coverage_strength: 0.0,
         overlay_roughness: 0.9,
         overlay_metallic: 0.0,
+        glow_channel: 0,
     };
 
     pub const METAL: Self = Self {
@@ -310,6 +329,7 @@ impl SurfaceMaterial {
         coverage_strength: 0.0,
         overlay_roughness: 0.9,
         overlay_metallic: 0.0,
+        glow_channel: 0,
     };
 
     /// Mottled soil profile with clumps, organic pockets, and fine grit.
@@ -330,6 +350,7 @@ impl SurfaceMaterial {
         coverage_strength: 0.0,
         overlay_roughness: 0.9,
         overlay_metallic: 0.0,
+        glow_channel: 0,
     };
 
     /// Cluster-aware leaf-card profile. The shader breaks crossed cards into
@@ -352,6 +373,7 @@ impl SurfaceMaterial {
         coverage_strength: 0.0,
         overlay_roughness: 0.94,
         overlay_metallic: 0.0,
+        glow_channel: 0,
     };
 
     /// Needled foliage profile. Needle silhouettes are authored by the mesh;
@@ -373,6 +395,7 @@ impl SurfaceMaterial {
         coverage_strength: 0.0,
         overlay_roughness: 0.96,
         overlay_metallic: 0.0,
+        glow_channel: 0,
     };
 
     /// Grass-surface profile. This shades a surface; foliage geometry remains
@@ -394,6 +417,7 @@ impl SurfaceMaterial {
         coverage_strength: 0.0,
         overlay_roughness: 0.9,
         overlay_metallic: 0.0,
+        glow_channel: 0,
     };
 
     /// Snow surface with directional accumulation and cool granular breakup.
@@ -414,6 +438,7 @@ impl SurfaceMaterial {
         coverage_strength: 1.0,
         overlay_roughness: 0.92,
         overlay_metallic: 0.0,
+        glow_channel: 0,
     };
 
     /// Layered dune-ripple profile. `orientation` is the surface normal.
@@ -434,6 +459,7 @@ impl SurfaceMaterial {
         coverage_strength: 0.0,
         overlay_roughness: 0.9,
         overlay_metallic: 0.0,
+        glow_channel: 0,
     };
 
     /// Directional wood grain profile. `orientation` is the grain axis.
@@ -454,6 +480,7 @@ impl SurfaceMaterial {
         coverage_strength: 0.0,
         overlay_roughness: 0.9,
         overlay_metallic: 0.0,
+        glow_channel: 0,
     };
 
     pub const GLOWING: Self = Self {
@@ -473,6 +500,7 @@ impl SurfaceMaterial {
         coverage_strength: 0.0,
         overlay_roughness: 0.9,
         overlay_metallic: 0.0,
+        glow_channel: 0,
     };
 }
 
@@ -953,6 +981,94 @@ impl Mesh {
     ///
     /// Meshes with authored normals (imported models) are built smooth and
     /// indexed instead, keeping those normals.
+    /// A copy with about `fraction` of the triangles (0 to 1), for a far
+    /// LOD level: meshoptimizer's edge collapse keeps the silhouette, and
+    /// colours, UVs, normals, materials and texture maps carry over. Small
+    /// meshes keep at least a few dozen triangles.
+    ///
+    /// ```no_run
+    /// # use engine::prelude::*;
+    /// # fn f(part: Mesh) -> EngineResult<Vec<LodLevel>> {
+    /// Ok(vec![
+    ///     LodLevel::new(part.clone(), 30.0),
+    ///     LodLevel::new(part.simplified(0.2), 120.0),
+    ///     LodLevel::new(part.simplified(0.04), 600.0),
+    /// ])
+    /// # }
+    /// ```
+    pub fn simplified(&self, fraction: f32) -> Mesh {
+        let built = self.build();
+        let tris = built.indices.len() / 3;
+        let fraction = if fraction.is_finite() {
+            fraction.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let target = ((tris as f32 * fraction) as usize).max(32);
+        if target >= tris || built.positions.is_empty() {
+            return self.clone();
+        }
+        let bytes: &[u8] = bytemuck::cast_slice(&built.positions);
+        let Ok(adapter) = meshopt::VertexDataAdapter::new(bytes, 12, 0) else {
+            return self.clone();
+        };
+        // Opaque and see-through triangles are simplified apart, so they
+        // stay in their own ranges.
+        let split = built.opaque_index_count.min(built.indices.len());
+        let mut indices = Vec::with_capacity(target * 3);
+        for range in [&built.indices[..split], &built.indices[split..]] {
+            if range.is_empty() {
+                continue;
+            }
+            let want = (range.len() as f32 * target as f32 / tris as f32) as usize / 3 * 3;
+            let want = want.max(3);
+            let mut part = meshopt::simplify(
+                range,
+                &adapter,
+                want,
+                0.02,
+                meshopt::SimplifyOptions::None,
+                None,
+            );
+            if part.len() > want * 2 {
+                part = meshopt::simplify_sloppy(&part, &adapter, want, 0.02, None);
+            }
+            if part.is_empty() {
+                part = range.to_vec();
+            }
+            indices.extend(part);
+        }
+        let mut remap = vec![u32::MAX; built.positions.len()];
+        let mut out = Mesh {
+            albedo: self.albedo.clone(),
+            maps: self.maps.clone(),
+            surface: self.surface,
+            ..Mesh::default()
+        };
+        let overrides = built.surface_overrides.len() == built.positions.len();
+        let mut face = Vec::with_capacity(3);
+        for &i in &indices {
+            let i = i as usize;
+            if remap[i] == u32::MAX {
+                remap[i] = out.points.len() as u32;
+                out.points.push(built.positions[i]);
+                out.colors.push(built.colors[i]);
+                out.uvs.push(built.uvs.get(i).copied().unwrap_or([0.0; 2]));
+                out.normals.push(built.normals[i]);
+                out.surface_overrides.push(if overrides {
+                    built.surface_overrides[i]
+                } else {
+                    built.surface
+                });
+            }
+            face.push(PointId(remap[i]));
+            if face.len() == 3 {
+                out.faces.push(std::mem::take(&mut face));
+            }
+        }
+        out
+    }
+
     pub fn build(&self) -> BuiltMesh {
         if self.has_normals() {
             return self.build_indexed_smooth();
@@ -1306,7 +1422,16 @@ impl BuiltMesh {
                         m.overlay_metallic,
                     ]
                 },
-                element: self.elements.get(i).copied().unwrap_or(0),
+                element: {
+                    let m = self
+                        .surface_overrides
+                        .get(i)
+                        .copied()
+                        .unwrap_or(self.surface);
+                    let channel =
+                        (m.glow_channel.min(GLOW_CHANNELS as u8 - 1) as u32) << ELEMENT_BITS;
+                    (self.elements.get(i).copied().unwrap_or(0) & ELEMENT_MASK) | channel
+                },
             })
             .collect()
     }
@@ -1401,6 +1526,13 @@ impl BuiltMesh {
     }
 }
 
+/// Number of glow channels ([`SurfaceMaterial::glow_channel`]).
+pub const GLOW_CHANNELS: usize = 16;
+/// The vertex's `element` word: breakable element in the low bits, glow
+/// channel in the top four.
+pub(crate) const ELEMENT_BITS: u32 = 28;
+pub(crate) const ELEMENT_MASK: u32 = (1 << ELEMENT_BITS) - 1;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct Vertex {
@@ -1413,7 +1545,8 @@ pub(crate) struct Vertex {
     pub surface3: [f32; 4],
     pub surface4: [f32; 4],
     pub surface5: [f32; 4],
-    /// Breakable element (1-based, 0 = none): hidden once its bit is set.
+    /// Breakable element (1-based, 0 = none) in the low 28 bits: hidden
+    /// once its bit is set. The top four bits are the glow channel.
     pub element: u32,
 }
 

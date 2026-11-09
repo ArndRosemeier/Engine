@@ -694,6 +694,9 @@ pub struct World {
     instance_epoch: u64,
     lods: std::collections::BTreeMap<LodId, LodSet>,
     next_lod: u64,
+    /// LOD sets that follow an entity ([`Self::attach_lod`]): the parent
+    /// and where on it.
+    lod_follow: std::collections::BTreeMap<LodId, (EntityId, Mat4)>,
     lod_bias: f32,
     lod_fade: f32,
     /// Applied to fully-opaque `set_chunk_built` uploads when set.
@@ -717,6 +720,8 @@ pub struct World {
     moons: Vec<crate::sky::MoonSpec>,
     wind: f32,
     season: f32,
+    /// Glow channels: colour (r < 0: the surface's own) and strength.
+    glow: [[f32; 4]; crate::mesh::GLOW_CHANNELS],
     /// Albedo textures by content, so meshes that share an atlas (every
     /// generated tree) share one GPU texture.
     texture_by_content: HashMap<u64, TextureId>,
@@ -854,6 +859,7 @@ impl Default for World {
             instance_epoch: 1,
             lods: std::collections::BTreeMap::new(),
             next_lod: 1,
+            lod_follow: std::collections::BTreeMap::new(),
             lod_bias: 1.0,
             lod_fade: 0.1,
             default_terrain_material: None,
@@ -868,6 +874,7 @@ impl Default for World {
             moons: Vec::new(),
             wind: 0.5,
             season: 0.0,
+            glow: [[-1.0, 0.0, 0.0, 1.0]; crate::mesh::GLOW_CHANNELS],
             texture_by_content: HashMap::new(),
             torch: None,
             lamps: std::collections::BTreeMap::new(),
@@ -1146,7 +1153,85 @@ impl World {
         Ok(set.levels.iter().map(|(e, _)| *e).collect())
     }
 
+    /// Hang a LOD set on an entity (a pivot, a part of a robot): it draws
+    /// once, at `local` on `parent`, follows it as it moves, and picks its
+    /// level by camera distance like any set. With [`Self::spawn_lod_like`]
+    /// every copy of a model shares one set of meshes and maps, so a robot
+    /// built of many moving parts costs one upload per part, however many
+    /// robots walk about, and carries LOD levels.
+    ///
+    /// The set goes when its parent is despawned.
+    ///
+    /// ```no_run
+    /// # use engine::prelude::*;
+    /// # fn f(world: &mut World, leg: Vec<LodLevel>) -> EngineResult<()> {
+    /// let model = world.spawn_lod(leg)?; // once: the shared meshes
+    /// let hip = world.spawn_pivot(Place::new(0.0, 4.0, 0.0));
+    /// let thigh = world.spawn_lod_like(model, &[])?; // per robot
+    /// world.attach_lod(thigh, hip, Place::default())?;
+    /// world.set_place(hip, Place::new(0.0, 4.0, 0.0).with_pitch_deg(20.0))?; // it swings
+    /// # Ok(()) }
+    /// ```
+    pub fn attach_lod(&mut self, id: LodId, parent: EntityId, local: Place) -> EngineResult<()> {
+        if !self.lods.contains_key(&id) {
+            return Err(EngineError::UnknownEntity);
+        }
+        let frame = self.world_transform(parent)?;
+        let local = local.to_matrix();
+        self.lod_follow.insert(id, (parent, local));
+        self.place_lod_on(id, frame * local);
+        Ok(())
+    }
+
+    /// Stop a LOD set following its parent; it stays where it is.
+    pub fn detach_lod(&mut self, id: LodId) {
+        self.lod_follow.remove(&id);
+    }
+
+    /// The entity a LOD set hangs on, if any.
+    pub fn lod_parent(&self, id: LodId) -> Option<EntityId> {
+        self.lod_follow.get(&id).map(|(p, _)| *p)
+    }
+
+    fn place_lod_on(&mut self, id: LodId, m: Mat4) {
+        let Some(set) = self.lods.get_mut(&id) else {
+            return;
+        };
+        if set.places.len() == 1
+            && crate::hierarchy::same_up_to_rounding(set.places[0].transform, m)
+        {
+            return;
+        }
+        set.places = vec![crate::place::MeshInstance::from_matrix(m)];
+        set.assigned_for = None;
+        set.assigned_zone = None;
+        set.update_bounds();
+    }
+
+    /// Move attached LOD sets with their parents; drop those whose parent
+    /// is gone.
+    fn follow_lods(&mut self) {
+        if self.lod_follow.is_empty() {
+            return;
+        }
+        let follow: Vec<(LodId, EntityId, Mat4)> = self
+            .lod_follow
+            .iter()
+            .map(|(id, (p, l))| (*id, *p, *l))
+            .collect();
+        for (id, parent, local) in follow {
+            match self.world_transform(parent) {
+                Ok(frame) if self.lods.contains_key(&id) => self.place_lod_on(id, frame * local),
+                _ => {
+                    self.lod_follow.remove(&id);
+                    self.despawn_lod(id);
+                }
+            }
+        }
+    }
+
     pub fn despawn_lod(&mut self, id: LodId) {
+        self.lod_follow.remove(&id);
         if let Some(set) = self.lods.remove(&id) {
             for (entity, _) in set.levels {
                 self.despawn(entity);
@@ -1291,6 +1376,7 @@ impl World {
     /// Reassign LOD levels for the current camera. Runs once per frame
     /// before rendering; cheap while the camera stands still.
     pub(crate) fn tick_lods(&mut self) {
+        self.follow_lods();
         if self.lods.is_empty() {
             return;
         }
@@ -1994,7 +2080,18 @@ impl World {
     fn attach_albedo(
         &mut self,
         id: EntityId,
+        textures: (Option<AlbedoMap>, Option<MaterialMaps>),
+    ) -> EngineResult<()> {
+        self.attach_albedo_by_content(id, textures, false)
+    }
+
+    /// [`Self::attach_albedo`]; `share` looks every map up by content (not
+    /// only large ones), for textures many entities reuse.
+    pub(crate) fn attach_albedo_by_content(
+        &mut self,
+        id: EntityId,
         (albedo, maps): (Option<AlbedoMap>, Option<MaterialMaps>),
+        share: bool,
     ) -> EngineResult<()> {
         let map = match (albedo, &maps) {
             (Some(map), _) => map,
@@ -2008,7 +2105,7 @@ impl World {
         };
         // Large maps are looked up by content first: generated assets (every
         // tree) carry the same atlas and should share one GPU texture.
-        let key = (map.rgba.len() >= 1 << 20).then(|| {
+        let key = (share || map.rgba.len() >= 1 << 20).then(|| {
             let mut h = content_hash(&map.rgba) ^ ((map.width as u64) << 32 | map.height as u64);
             let mut mix = |v: u64| h = (h ^ v).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
             if let Some(m) = &maps {
@@ -4021,6 +4118,68 @@ impl World {
 
     pub fn season(&self) -> f32 {
         self.season
+    }
+
+    /// Switch a glow channel (see [`crate::mesh::SurfaceMaterial::glow_channel`]):
+    /// every surface on `channel` (1 to 15) glows `strength` times its
+    /// emission (0 dark, 1 as authored, more brighter), in `color` or, with
+    /// `None`, in its own colour. Changing it costs nothing: the meshes stay
+    /// as they are, so windows can come on at dusk one channel at a time
+    /// and neon can flicker. Channel 0 is always on as authored.
+    ///
+    /// ```no_run
+    /// # use engine::prelude::*;
+    /// # fn f(world: &mut World, mut mesh: Mesh) -> EngineResult<()> {
+    /// // Panes that glow warm at night and look like glass by day.
+    /// mesh.set_surface_material(SurfaceMaterial { emission: 1.2, ..SurfaceMaterial::DEFAULT }
+    ///     .on_glow_channel(1));
+    /// world.set_glow_channel(1, 0.0, Some(Color::rgb(255, 210, 150)))?; // day: off
+    /// world.set_glow_channel(1, 1.0, Some(Color::rgb(255, 210, 150)))?; // night: on
+    /// # Ok(()) }
+    /// ```
+    pub fn set_glow_channel(
+        &mut self,
+        channel: u8,
+        strength: f32,
+        color: Option<crate::color::Color>,
+    ) -> EngineResult<()> {
+        if channel == 0 || channel as usize >= crate::mesh::GLOW_CHANNELS {
+            return Err(EngineError::InvalidValue(format!(
+                "glow channel {channel} must be within 1..={}",
+                crate::mesh::GLOW_CHANNELS - 1
+            )));
+        }
+        if !strength.is_finite() || strength < 0.0 {
+            return Err(EngineError::InvalidValue(format!(
+                "glow strength {strength} must be finite and not negative"
+            )));
+        }
+        if color.is_some_and(|c| !(c.r.is_finite() && c.g.is_finite() && c.b.is_finite())) {
+            return Err(EngineError::InvalidColor(
+                "glow colour must be finite".into(),
+            ));
+        }
+        let rgb = color.map_or([-1.0, 0.0, 0.0], |c| {
+            [c.r.max(0.0), c.g.max(0.0), c.b.max(0.0)]
+        });
+        self.glow[channel as usize] = [rgb[0], rgb[1], rgb[2], strength];
+        Ok(())
+    }
+
+    /// A glow channel's strength and colour (`None`: the surfaces' own).
+    pub fn glow_channel(&self, channel: u8) -> Option<(f32, Option<crate::color::Color>)> {
+        let g = self.glow.get(channel as usize)?;
+        let color = (g[0] >= 0.0).then_some(crate::color::Color {
+            r: g[0],
+            g: g[1],
+            b: g[2],
+            a: 1.0,
+        });
+        Some((g[3], color))
+    }
+
+    pub(crate) fn glow_table(&self) -> [[f32; 4]; crate::mesh::GLOW_CHANNELS] {
+        self.glow
     }
 
     /// Apply the physical sky's lighting to the world's light, sky, haze

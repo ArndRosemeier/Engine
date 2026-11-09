@@ -808,7 +808,9 @@ pub(crate) fn element_state_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 pub(crate) fn element_dead_wgsl(group: u32, binding: u32) -> String {
     format!(
         "@group({group}) @binding({binding}) var<storage, read> element_dead_bits: array<u32>;
-fn element_dead(e: u32) -> bool {{
+fn element_dead(word: u32) -> bool {{
+    // Low 28 bits: the element; the top four are the glow channel.
+    let e = word & 0x0FFFFFFFu;
     if e == 0u {{ return false; }}
     let w = e >> 5u;
     if w >= arrayLength(&element_dead_bits) {{ return false; }}

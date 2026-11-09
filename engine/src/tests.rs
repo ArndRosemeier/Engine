@@ -2829,3 +2829,111 @@ mod navigation {
         );
     }
 }
+
+#[test]
+fn glow_channels_ride_in_the_vertex_and_switch_without_rebuilding() {
+    use crate::mesh::{SurfaceMaterial, GLOW_CHANNELS};
+    let mut mesh = Mesh::box_at((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), Color::WHITE).unwrap();
+    mesh.set_surface_material(
+        SurfaceMaterial {
+            emission: 1.0,
+            ..SurfaceMaterial::DEFAULT
+        }
+        .on_glow_channel(3),
+    );
+    let mut built = mesh.build();
+    built.elements = vec![5; built.positions.len()];
+    let verts = built.to_interleaved();
+    assert!(
+        verts.iter().all(|v| v.element >> 28 == 3),
+        "channel in the top bits"
+    );
+    assert!(
+        verts.iter().all(|v| v.element & 0x0FFF_FFFF == 5),
+        "element kept"
+    );
+
+    let mut world = crate::world::World::new();
+    assert_eq!(world.glow_channel(3), Some((1.0, None)), "on as authored");
+    world
+        .set_glow_channel(3, 0.0, Some(Color::rgb(255, 200, 120)))
+        .unwrap();
+    let (strength, color) = world.glow_channel(3).unwrap();
+    assert_eq!(strength, 0.0);
+    assert!(color.is_some());
+    assert!(
+        world.set_glow_channel(0, 1.0, None).is_err(),
+        "channel 0 is fixed"
+    );
+    assert!(world
+        .set_glow_channel(GLOW_CHANNELS as u8, 1.0, None)
+        .is_err());
+    assert!(world.set_glow_channel(2, -1.0, None).is_err());
+    assert!(world.set_glow_channel(2, f32::NAN, None).is_err());
+}
+
+#[test]
+fn simplified_meshes_keep_their_look_with_fewer_triangles() {
+    let mut ball = Mesh::ball((0.0, 0.0, 0.0), 1.0, Color::rgb(200, 40, 40)).unwrap();
+    ball.set_albedo_rgba(1, 1, vec![255, 255, 255, 255])
+        .unwrap();
+    let full = ball.build().triangle_count();
+    let far = ball.simplified(0.25);
+    let n = far.build().triangle_count();
+    assert!(n < full / 2 && n >= 32, "{full} -> {n}");
+    assert!(far.albedo().is_some(), "the texture rides along");
+    assert!(far.has_normals(), "smooth normals kept");
+    assert_eq!(ball.simplified(1.0).build().triangle_count(), full);
+}
+
+#[test]
+fn an_attached_lod_set_follows_its_parent_and_goes_with_it() {
+    use crate::lod::LodLevel;
+    let mut world = crate::world::World::new();
+    let part = Mesh::ball((0.0, 0.0, 0.0), 0.5, Color::WHITE).unwrap();
+    let model = world
+        .spawn_lod(vec![
+            LodLevel::new(part.clone(), 30.0),
+            LodLevel::new(part.simplified(0.2), 400.0),
+        ])
+        .unwrap();
+    let hip = world.spawn_pivot(Place::new(0.0, 4.0, 0.0));
+    let leg = world.spawn_lod_like(model, &[]).unwrap();
+    world
+        .attach_lod(leg, hip, Place::new(0.0, -1.0, 0.0))
+        .unwrap();
+    assert_eq!(world.lod_parent(leg), Some(hip));
+    // Like-sets draw the model's meshes.
+    let levels = world.lod_levels(leg).unwrap();
+    let protos = world.lod_levels(model).unwrap();
+    for (l, p) in levels.iter().zip(&protos) {
+        assert_eq!(world.entity(*l).unwrap().instance_of(), Some(*p));
+    }
+    world.tick_lods();
+    let drawn = |w: &crate::world::World| -> Vec<Vec3> {
+        w.lod_levels(leg)
+            .unwrap()
+            .iter()
+            .flat_map(|e| w.entity(*e).unwrap().instances.clone())
+            .map(|i| i.transform.w_axis.truncate())
+            .collect()
+    };
+    let at = drawn(&world);
+    assert_eq!(at.len(), 1, "one copy, on one level");
+    assert!((at[0] - Vec3::new(0.0, 3.0, 0.0)).length() < 1e-4);
+    world.set_place(hip, Place::new(10.0, 4.0, 0.0)).unwrap();
+    world.tick_hierarchy();
+    world.tick_lods();
+    let at = drawn(&world);
+    assert!(
+        (at[0] - Vec3::new(10.0, 3.0, 0.0)).length() < 1e-4,
+        "{at:?}"
+    );
+    world.despawn(hip);
+    world.tick_lods();
+    assert!(
+        world.lod_levels(leg).is_err(),
+        "the set went with its parent"
+    );
+    assert!(world.lod_levels(model).is_ok(), "the model stays");
+}
