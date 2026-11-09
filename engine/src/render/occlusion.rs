@@ -102,7 +102,9 @@ struct CullParams {
     occlude: u32,
     /// Rows the args buffer has room for (its regions start at multiples).
     capacity: u32,
-    _pad: f32,
+    /// 1: the GPU scene's packed regions are compacted per group (see
+    /// `put` in the shader); 0: one row per candidate.
+    compact: u32,
 }
 
 const PYRAMID_FIRST: &str = r#"
@@ -168,6 +170,7 @@ struct Params {
     margin: f32,
     occlude: u32,
     capacity: u32,
+    compact: u32,
 };
 
 fn may_show(lo: vec3<f32>, hi: vec3<f32>) -> bool {
@@ -267,9 +270,30 @@ struct DrawArgs {
 @group(0) @binding(2) var<storage, read_write> draws: array<DrawArgs>;
 @group(0) @binding(3) var<storage, read_write> visible: array<u32>;
 @group(0) @binding(4) var pyramid: texture_2d<f32>;
+// GPU scene: each row's multi-draw group (index, first row) and the
+// per-region, per-group draw counts.
+@group(0) @binding(5) var<storage, read> row_groups: array<vec2<u32>>;
+@group(0) @binding(6) var<storage, read_write> draw_counts: array<atomic<u32>>;
 
 fn packed(c: Candidate, n: u32) -> DrawArgs {
     return DrawArgs(c.opaque_index_count, n, c.first_index, c.base_vertex, c.first_instance);
+}
+
+// Row `i`'s draw in a packed region (0 shown, 1 phase 1, 2 phase 2): at its
+// own row, or (compacted) only when it draws, after its group's other
+// drawn rows, counted for `multi_draw_indexed_indirect_count`.
+fn put(region: u32, i: u32, c: Candidate, n: u32) {
+    let base = occ.capacity * (2u + region);
+    if occ.compact == 0u {
+        draws[base + i] = packed(c, n);
+        return;
+    }
+    if n == 0u {
+        return;
+    }
+    let g = row_groups[i];
+    let at = atomicAdd(&draw_counts[region * occ.capacity + g.x], 1u);
+    draws[base + g.y + at] = packed(c, n);
 }
 
 // Phase 1 of the GPU scene (before the depth prepass): draw what was seen
@@ -281,7 +305,7 @@ fn seed(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let c = candidates[i];
-    draws[occ.capacity * 3u + i] = packed(c, select(0u, c.instance_count, visible[i] == 1u));
+    put(1u, i, c, select(0u, c.instance_count, visible[i] == 1u));
 }
 
 @compute @workgroup_size(64)
@@ -298,8 +322,8 @@ fn cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     // The packed copies after both per-candidate draws, for multi-draws that
     // bind the whole instance page: every draw, then (GPU scene) phase 2,
     // the ones not drawn in phase 1.
-    draws[occ.capacity * 2u + i] = packed(c, n);
-    draws[occ.capacity * 4u + i] = packed(c, select(0u, n, visible[i] != 1u));
+    put(0u, i, c, n);
+    put(2u, i, c, select(0u, n, visible[i] != 1u));
     draws[2u * i + 1u] = DrawArgs(
         c.index_count - c.opaque_index_count,
         n,
@@ -340,6 +364,9 @@ pub struct OcclusionFrame {
     pub first: HashSet<EntityId>,
     /// Candidates `args` has room for.
     pub capacity: u32,
+    /// GPU scene with compacted regions: each group's draw count per
+    /// region (see [`Self::count_offset`]).
+    pub draw_counts: Option<wgpu::Buffer>,
 }
 
 impl OcclusionFrame {
@@ -353,6 +380,16 @@ impl OcclusionFrame {
     /// at their place in the arena page (for `multi_draw_indexed_indirect`).
     pub fn packed_offset(&self, slot: u32) -> u64 {
         self.region_offset(ArgsRegion::Shown, slot)
+    }
+
+    /// Byte offset of group `group`'s draw count in a compacted region.
+    pub fn count_offset(&self, region: ArgsRegion, group: u32) -> u64 {
+        let r = match region {
+            ArgsRegion::Shown => 0,
+            ArgsRegion::Phase1 => 1,
+            ArgsRegion::Phase2 => 2,
+        };
+        (u64::from(self.capacity) * r + u64::from(group)) * 4
     }
 
     /// Byte offset of a candidate's row in one of the packed regions.
@@ -486,6 +523,14 @@ pub struct Occlusion {
     candidates: wgpu::Buffer,
     args: wgpu::Buffer,
     visible: wgpu::Buffer,
+    /// GPU scene: each row's (group, first row of its group).
+    row_groups: wgpu::Buffer,
+    /// GPU scene: draws per region and group, when compacting.
+    draw_counts: wgpu::Buffer,
+    /// GPU scene: compact the packed regions (draw-count multi-draws).
+    pub compact: bool,
+    /// GPU scene: the rows as last written (for `ENGINE_OCCLUSION_CHECK`).
+    resident: Vec<Candidate>,
     capacity: usize,
     cull_bind: Option<wgpu::BindGroup>,
     pyramid: Option<Pyramid>,
@@ -589,6 +634,8 @@ impl Occlusion {
                 storage(1, true),
                 storage(2, false),
                 storage(3, false),
+                storage(5, true),
+                storage(6, false),
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -645,7 +692,13 @@ impl Occlusion {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let (candidates, args, visible) = candidate_buffers(device, 1);
+        let RowBuffers {
+            candidates,
+            args,
+            visible,
+            row_groups,
+            draw_counts,
+        } = candidate_buffers(device, 1);
         Self {
             first_layout,
             down_layout,
@@ -658,6 +711,10 @@ impl Occlusion {
             candidates,
             args,
             visible,
+            row_groups,
+            draw_counts,
+            compact: false,
+            resident: Vec::new(),
             capacity: 1,
             cull_bind: None,
             pyramid: None,
@@ -805,7 +862,7 @@ impl Occlusion {
                 .len()
                 .checked_next_power_of_two()
                 .expect("occlusion candidate capacity overflow");
-            (self.candidates, self.args, self.visible) = candidate_buffers(device, self.capacity);
+            self.set_buffers(candidate_buffers(device, self.capacity));
             self.cull_bind = None;
         }
         self.scratch.clear();
@@ -827,6 +884,7 @@ impl Occlusion {
             slots: Arc::new(slots),
             first,
             capacity: u32::try_from(self.capacity).expect("candidate capacity exceeds u32"),
+            draw_counts: None,
         }
     }
 
@@ -841,7 +899,16 @@ impl Occlusion {
         ids: &[EntityId],
     ) {
         self.encode_pyramid(encoder);
-        self.encode_cull(device, queue, encoder, view_proj, ids, ids.len(), true);
+        self.encode_cull(
+            device,
+            queue,
+            encoder,
+            view_proj,
+            ids,
+            ids.len(),
+            true,
+            false,
+        );
     }
 
     fn encode_pyramid(&mut self, encoder: &mut wgpu::CommandEncoder) {
@@ -865,7 +932,14 @@ impl Occlusion {
         }
     }
 
-    fn write_params(&self, queue: &wgpu::Queue, view_proj: Mat4, rows: usize, occlude: bool) {
+    fn write_params(
+        &self,
+        queue: &wgpu::Queue,
+        view_proj: Mat4,
+        rows: usize,
+        occlude: bool,
+        compact: bool,
+    ) {
         let pyramid = self
             .pyramid
             .as_ref()
@@ -882,9 +956,25 @@ impl Occlusion {
             margin: DEPTH_MARGIN,
             occlude: u32::from(occlude),
             capacity: u32::try_from(self.capacity).expect("candidate capacity exceeds u32"),
-            _pad: 0.0,
+            compact: u32::from(compact),
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
+    }
+
+    fn set_buffers(&mut self, b: RowBuffers) {
+        self.candidates = b.candidates;
+        self.args = b.args;
+        self.visible = b.visible;
+        self.row_groups = b.row_groups;
+        self.draw_counts = b.draw_counts;
+        self.cull_bind = None;
+    }
+
+    /// GPU scene: each row's multi-draw group and that group's first row.
+    pub fn write_row_groups(&self, queue: &wgpu::Queue, groups: &[[u32; 2]]) {
+        if !groups.is_empty() {
+            queue.write_buffer(&self.row_groups, 0, bytemuck::cast_slice(groups));
+        }
     }
 
     fn ensure_cull_bind(&mut self, device: &wgpu::Device) {
@@ -917,6 +1007,14 @@ impl Occlusion {
                         binding: 4,
                         resource: wgpu::BindingResource::TextureView(&pyramid.full_view),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: self.row_groups.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.draw_counts.as_entire_binding(),
+                    },
                 ],
             }));
         }
@@ -934,13 +1032,19 @@ impl Occlusion {
         ids: &[EntityId],
         rows: usize,
         occlude: bool,
+        scene: bool,
     ) {
-        self.write_params(queue, view_proj, rows, occlude);
+        let compact = scene && self.compact;
+        self.write_params(queue, view_proj, rows, occlude, compact);
         // Written even with no candidates: the instance cull reads it too.
         if rows == 0 {
             return;
         }
         self.ensure_cull_bind(device);
+        if compact && !occlude {
+            // No seed pass ran this frame to clear the counts.
+            encoder.clear_buffer(&self.draw_counts, 0, None);
+        }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("occlusion-cull"),
             timestamp_writes: None,
@@ -953,7 +1057,7 @@ impl Occlusion {
         // collects the answer).
         if occlude {
             if check_enabled() {
-                self.copy_check(device, encoder, view_proj, rows);
+                self.copy_check(device, encoder, view_proj, rows, scene);
             }
             self.copy_answer(device, encoder, ids, rows);
         }
@@ -968,7 +1072,7 @@ impl Occlusion {
         self.capacity = rows
             .checked_next_power_of_two()
             .expect("occlusion candidate capacity overflow");
-        (self.candidates, self.args, self.visible) = candidate_buffers(device, self.capacity);
+        self.set_buffers(candidate_buffers(device, self.capacity));
         self.cull_bind = None;
         true
     }
@@ -985,13 +1089,18 @@ impl Occlusion {
         if rows.is_empty() {
             return;
         }
-        self.scratch.clear();
-        self.scratch.extend(rows.iter().map(Candidate::from));
+        let end = start + rows.len();
+        if self.resident.len() < end {
+            self.resident.resize(end, Candidate::zeroed());
+        }
+        for (to, row) in self.resident[start..end].iter_mut().zip(rows) {
+            *to = Candidate::from(row);
+        }
         let stride = std::mem::size_of::<Candidate>() as u64;
         queue.write_buffer(
             &self.candidates,
             start as u64 * stride,
-            bytemuck::cast_slice(&self.scratch),
+            bytemuck::cast_slice(&self.resident[start..end]),
         );
         if reset_seen {
             let ones = vec![1u32; rows.len()];
@@ -1006,6 +1115,7 @@ impl Occlusion {
             slots,
             first: HashSet::new(),
             capacity: u32::try_from(self.capacity).expect("candidate capacity exceeds u32"),
+            draw_counts: self.compact.then(|| self.draw_counts.clone()),
         }
     }
 
@@ -1019,11 +1129,14 @@ impl Occlusion {
         view_proj: Mat4,
         rows: usize,
     ) {
-        self.write_params(queue, view_proj, rows, true);
+        self.write_params(queue, view_proj, rows, true, self.compact);
         if rows == 0 {
             return;
         }
         self.ensure_cull_bind(device);
+        if self.compact {
+            encoder.clear_buffer(&self.draw_counts, 0, None);
+        }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("occlusion-seed"),
             timestamp_writes: None,
@@ -1048,7 +1161,7 @@ impl Occlusion {
         if occlude {
             self.encode_pyramid(encoder);
         }
-        self.encode_cull(device, queue, encoder, view_proj, &[], rows, occlude);
+        self.encode_cull(device, queue, encoder, view_proj, &[], rows, occlude, true);
     }
 
     fn copy_check(
@@ -1057,6 +1170,7 @@ impl Occlusion {
         encoder: &mut wgpu::CommandEncoder,
         view_proj: Mat4,
         count: usize,
+        scene: bool,
     ) {
         let pyramid = self.pyramid.as_ref().expect("pyramid exists");
         let mut levels = Vec::new();
@@ -1088,8 +1202,12 @@ impl Occlusion {
         }
         let visible = read_buffer(device, count);
         encoder.copy_buffer_to_buffer(&self.visible, 0, &visible, 0, flag_bytes(count));
-        let boxes = self
-            .scratch
+        let rows = if scene {
+            &self.resident[..count]
+        } else {
+            &self.scratch[..]
+        };
+        let boxes = rows
             .iter()
             .map(|c| Aabb {
                 min: c.lo.into(),
@@ -1237,10 +1355,15 @@ fn read_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
     })
 }
 
-fn candidate_buffers(
-    device: &wgpu::Device,
-    capacity: usize,
-) -> (wgpu::Buffer, wgpu::Buffer, wgpu::Buffer) {
+struct RowBuffers {
+    candidates: wgpu::Buffer,
+    args: wgpu::Buffer,
+    visible: wgpu::Buffer,
+    row_groups: wgpu::Buffer,
+    draw_counts: wgpu::Buffer,
+}
+
+fn candidate_buffers(device: &wgpu::Device, capacity: usize) -> RowBuffers {
     let candidates = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("occlusion-candidates"),
         size: (capacity * std::mem::size_of::<Candidate>()) as u64,
@@ -1262,7 +1385,27 @@ fn candidate_buffers(
             | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    (candidates, args, visible)
+    let row_groups = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("occlusion-row-groups"),
+        size: capacity as u64 * 8,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let draw_counts = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("occlusion-draw-counts"),
+        size: capacity as u64 * 3 * 4,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::INDIRECT
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    RowBuffers {
+        candidates,
+        args,
+        visible,
+        row_groups,
+        draw_counts,
+    }
 }
 
 /// Pyramid level sizes: level 0 is half the screen (rounded up, so every
