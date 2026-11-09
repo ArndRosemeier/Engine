@@ -531,7 +531,9 @@ meshes as one `multi_draw_indexed_indirect` per texture and buffer page, the
 per-mesh arguments in a GPU buffer. Meshes the occlusion test decides take
 their arguments straight from its output. In occlusion_city the 1,697 towers
 in view go out in 5 calls instead of 1,697, and the CPU spends about 2 ms less
-per frame on the world. GPU-culled instanced props keep their own draws.
+per frame on the world. Shadow maps (sun cascades, their static cache and
+lamps) draw their casters the same way. GPU-culled instanced props keep their
+own draws.
 
 Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_global_illumination`,
 `set_bloom`, `set_tone_map`, `set_haze`, `set_lod_bias`, `set_view_distance`.

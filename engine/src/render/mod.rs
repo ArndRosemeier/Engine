@@ -537,6 +537,74 @@ struct ShadowViewBundles {
     groups: Vec<ShadowGroupBundle>,
     batch_draws: Vec<ShadowDraw>,
     batches: Option<wgpu::RenderBundle>,
+    /// The mesh casters as multi-draws instead of `groups`, where the GPU
+    /// can.
+    multi: Option<ShadowMulti>,
+}
+
+/// Fewer mesh casters than this in a shadow view: bundles, not multi-draws.
+const SHADOW_MULTI_MIN_DRAWS: usize = 32;
+
+/// Casters that share a pipeline, texture and buffers: one multi-draw.
+struct ShadowMultiGroup {
+    /// Through the alpha-tested pipeline (textured casters).
+    cutout: bool,
+    albedo: Option<wgpu::BindGroup>,
+    vertex: wgpu::Buffer,
+    index: wgpu::Buffer,
+    instances: wgpu::Buffer,
+    offset: u64,
+    count: u32,
+}
+
+/// A shadow view's mesh casters as a few multi-draws (see `MultiDraw`).
+/// Kept while its casters are the same; GPU-culled ones stay in `rest`.
+struct ShadowMulti {
+    draws: Vec<ShadowDraw>,
+    groups: Vec<ShadowMultiGroup>,
+    args: wgpu::Buffer,
+    rest: Option<wgpu::RenderBundle>,
+}
+
+impl ShadowMulti {
+    /// Draw the casters; leaves `view_bind` bound at group 0.
+    fn encode(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        shadow: &ShadowGpu,
+        view_bind: &wgpu::BindGroup,
+    ) {
+        pass.set_bind_group(0, view_bind, &[]);
+        let mut bound: Option<&ShadowMultiGroup> = None;
+        for g in &self.groups {
+            if bound.is_none_or(|b| b.cutout != g.cutout) {
+                pass.set_pipeline(match (g.cutout, shadow.cutout_pipeline.as_ref()) {
+                    (true, Some(p)) => p,
+                    _ => &shadow.mesh_pipeline,
+                });
+            }
+            if let Some(albedo) = g.albedo.as_ref() {
+                if bound.is_none_or(|b| b.albedo.as_ref() != Some(albedo)) {
+                    pass.set_bind_group(1, albedo, &[]);
+                }
+            }
+            if bound.is_none_or(|b| b.vertex != g.vertex) {
+                pass.set_vertex_buffer(0, g.vertex.slice(..));
+            }
+            if bound.is_none_or(|b| b.instances != g.instances) {
+                pass.set_vertex_buffer(1, g.instances.slice(..));
+            }
+            if bound.is_none_or(|b| b.index != g.index) {
+                pass.set_index_buffer(g.index.slice(..), wgpu::IndexFormat::Uint32);
+            }
+            pass.multi_draw_indexed_indirect(&self.args, g.offset, g.count);
+            bound = Some(g);
+        }
+        if let Some(rest) = self.rest.as_ref() {
+            pass.execute_bundles(std::iter::once(rest));
+            pass.set_bind_group(0, view_bind, &[]);
+        }
+    }
 }
 
 struct ShadowGroupBundle {
@@ -4197,19 +4265,34 @@ impl Renderer {
         // view's new group list (unused for batches).
         let mut jobs: Vec<(usize, usize, &[ShadowDraw], bool)> = Vec::new();
         let mut kept: Vec<Vec<Option<ShadowGroupBundle>>> = Vec::new();
+        // Views whose mesh casters go out as multi-draws made anew.
+        let mut multi_jobs: Vec<(usize, &[ShadowDraw])> = Vec::new();
         for (&slot, selection) in slots.iter().zip(selections) {
+            let use_multi = self.multi_draw && selection.draws.len() >= SHADOW_MULTI_MIN_DRAWS;
             let view = &mut self.shadow_bundles[slot];
             let mut old: HashMap<u32, ShadowGroupBundle> = std::mem::take(&mut view.groups)
                 .into_iter()
                 .map(|g| (g.group, g))
                 .collect();
             let mut list = Vec::new();
-            for run in selection.draws.chunk_by(|a, b| a.group == b.group) {
-                let reuse = old.remove(&run[0].group).filter(|g| g.draws == run);
-                if reuse.is_none() {
-                    jobs.push((slot, list.len(), run, false));
+            if use_multi {
+                if view
+                    .multi
+                    .as_ref()
+                    .is_none_or(|m| m.draws != selection.draws)
+                {
+                    view.multi = None;
+                    multi_jobs.push((slot, &selection.draws));
                 }
-                list.push(reuse);
+            } else {
+                view.multi = None;
+                for run in selection.draws.chunk_by(|a, b| a.group == b.group) {
+                    let reuse = old.remove(&run[0].group).filter(|g| g.draws == run);
+                    if reuse.is_none() {
+                        jobs.push((slot, list.len(), run, false));
+                    }
+                    list.push(reuse);
+                }
             }
             kept.push(list);
             if view.batch_draws != selection.batch_draws {
@@ -4253,6 +4336,109 @@ impl Renderer {
                 .into_iter()
                 .map(|g| g.expect("every shadow group is kept or recorded"))
                 .collect();
+        }
+        let made: Vec<(usize, ShadowMulti)> = multi_jobs
+            .into_iter()
+            .map(|(slot, draws)| (slot, self.plan_shadow_multi(slot, draws)))
+            .collect();
+        for (slot, multi) in made {
+            self.shadow_bundles[slot].multi = Some(multi);
+        }
+    }
+
+    /// A shadow view's mesh casters as multi-draws: untextured casters
+    /// first, then the alpha-tested ones, each grouped by texture and
+    /// buffers in order of first appearance.
+    fn plan_shadow_multi(&self, slot: usize, draws: &[ShadowDraw]) -> ShadowMulti {
+        type Key = (
+            bool,
+            Option<wgpu::BindGroup>,
+            wgpu::Buffer,
+            wgpu::Buffer,
+            wgpu::Buffer,
+        );
+        // wgpu handles hash by their id, which never changes.
+        #[allow(clippy::mutable_key_type)]
+        let mut index: HashMap<Key, usize> = HashMap::new();
+        let mut keys: Vec<Key> = Vec::new();
+        let mut lists: Vec<Vec<DrawIndexedArgs>> = Vec::new();
+        let mut rest: Vec<ShadowDraw> = Vec::new();
+        for cutout in [false, true] {
+            for d in draws {
+                let albedo = d.albedo.and_then(|tid| self.gpu_mesh_albedo.get(&tid));
+                if albedo.is_some() != cutout {
+                    continue;
+                }
+                if d.submit == MeshSubmit::Compacted {
+                    rest.push(*d);
+                    continue;
+                }
+                let g = self
+                    .gpu_meshes
+                    .get(&d.id)
+                    .expect("shadow multi-draw caster is synced");
+                let key: Key = (
+                    cutout,
+                    albedo.cloned(),
+                    g.vertex_buf.clone(),
+                    g.index_buf.clone(),
+                    g.instance_buf.clone(),
+                );
+                let at = *index.entry(key.clone()).or_insert_with(|| {
+                    keys.push(key);
+                    lists.push(Vec::new());
+                    keys.len() - 1
+                });
+                lists[at].push(DrawIndexedArgs {
+                    index_count: g.opaque_index_count as u32,
+                    instance_count: g.instance_count as u32,
+                    first_index: g.first_index,
+                    base_vertex: g.base_vertex,
+                    first_instance: g.first_instance,
+                });
+            }
+        }
+        let stride = std::mem::size_of::<DrawIndexedArgs>() as u64;
+        let mut args: Vec<DrawIndexedArgs> = Vec::new();
+        let mut groups = Vec::new();
+        for ((cutout, albedo, vertex, index, instances), list) in keys.into_iter().zip(lists) {
+            groups.push(ShadowMultiGroup {
+                cutout,
+                albedo,
+                vertex,
+                index,
+                instances,
+                offset: args.len() as u64 * stride,
+                count: list.len() as u32,
+            });
+            args.extend(list);
+        }
+        if args.is_empty() {
+            args.push(DrawIndexedArgs::empty_range(0, 0, 0));
+        }
+        use wgpu::util::DeviceExt;
+        let args = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("shadow-multi-draw-args"),
+                contents: bytemuck::cast_slice(&args),
+                usage: wgpu::BufferUsages::INDIRECT,
+            });
+        let rest = (!rest.is_empty()).then(|| {
+            ShadowBundleCtx {
+                device: &self.device,
+                shadow: &self.shadow,
+                gpu_meshes: &self.gpu_meshes,
+                gpu_mesh_albedo: &self.gpu_mesh_albedo,
+                gpu_instance_batches: &self.gpu_instance_batches,
+            }
+            .record(slot, &rest, false)
+        });
+        ShadowMulti {
+            draws: draws.to_vec(),
+            groups,
+            args,
+            rest,
         }
     }
 
@@ -4498,6 +4684,9 @@ impl Renderer {
                         "shadow-csm-static",
                     );
                     let view = &this.shadow_bundles[STATIC_SHADOW_SLOT + slot];
+                    if let Some(multi) = view.multi.as_ref() {
+                        multi.encode(&mut pass, &this.shadow, view_bind);
+                    }
                     pass.execute_bundles(
                         view.groups
                             .iter()
@@ -4526,6 +4715,9 @@ impl Renderer {
                 },
             );
             let view = &this.shadow_bundles[slot];
+            if let Some(multi) = view.multi.as_ref() {
+                multi.encode(&mut pass, &this.shadow, view_bind);
+            }
             pass.execute_bundles(
                 view.groups
                     .iter()
