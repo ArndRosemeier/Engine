@@ -571,7 +571,7 @@ impl Reflect {
                 mip_level_count: 1,
                 sample_count: samples,
                 dimension: wgpu::TextureDimension::D2,
-                format: super::stencil::DEPTH_FORMAT,
+                format: super::stencil::depth_format(),
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             })

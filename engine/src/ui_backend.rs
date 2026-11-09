@@ -30,6 +30,11 @@ pub struct UiBackend {
     renderer: EguiRenderer,
     textures: Rc<RefCell<HashMap<String, TextureHandle>>>,
     escape_pressed: bool,
+    /// Textures egui let go of in the last painted frame. They are freed at
+    /// the next paint: freeing destroys the GPU texture at once, and the
+    /// frame that still drew it was not submitted yet ("Texture ... has been
+    /// destroyed" in `Queue::submit`).
+    free_next: Vec<egui::TextureId>,
 }
 
 impl UiBackend {
@@ -54,6 +59,7 @@ impl UiBackend {
             renderer,
             textures: Rc::new(RefCell::new(HashMap::new())),
             escape_pressed: false,
+            free_next: Vec::new(),
         }
     }
 
@@ -131,6 +137,11 @@ impl UiBackend {
 
         let tris = self.ctx.tessellate(full_output.shapes, pixels_per_point);
 
+        // The frame that last drew these has been submitted by now.
+        for id in self.free_next.drain(..) {
+            self.renderer.free_texture(&id);
+        }
+
         for (id, image_delta) in &full_output.textures_delta.set {
             self.renderer
                 .update_texture(device, queue, *id, image_delta);
@@ -164,8 +175,8 @@ impl UiBackend {
                 .render(&mut rpass.forget_lifetime(), &tris, &screen);
         }
 
-        for id in &full_output.textures_delta.free {
-            self.renderer.free_texture(id);
-        }
+        // Freed at the next paint, after this frame is submitted.
+        self.free_next
+            .extend(full_output.textures_delta.free.iter().copied());
     }
 }

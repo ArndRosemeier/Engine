@@ -1,3 +1,4 @@
+mod audit;
 mod clipmap;
 mod crowd;
 mod decals;
@@ -36,6 +37,7 @@ use crate::portal::{
 };
 use crate::texture::{MaterialId, TextureId, WaterMaterialId};
 use crate::world::{Entity, EntityId, InstanceSubmit, ShadowSettings, SurfaceMaterialRef, World};
+use audit::audit_note;
 use clipmap::ClipmapRenderer;
 use frustum::{Bounds, Frustum, Visibility};
 use gpu_mesh::GpuMesh;
@@ -325,7 +327,8 @@ struct BatchSourceState {
 pub(crate) const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::GreaterEqual;
 pub(crate) const DEPTH_CLEAR: f32 = 0.0;
 pub(crate) use shadow::ELEMENT_STATE_WORDS;
-pub(crate) use stencil::DEPTH_FORMAT;
+
+pub(crate) use stencil::depth_format;
 
 enum SceneUniformTarget {
     /// The live camera's view: the one the depth prepass and SSAO see.
@@ -394,6 +397,11 @@ pub struct Renderer {
     gpu_skinned_meshes: HashMap<usize, (Vec<GpuSkinnedMesh>, wgpu::Buffer)>,
     gpu_textures: HashMap<TextureId, GpuTexture>,
     gpu_mesh_albedo: HashMap<TextureId, wgpu::BindGroup>,
+    audit_frame: u64,
+    /// The world's re-upload requests already carried out.
+    reupload_seen: (u64, u64),
+    gpu_check_seen: u64,
+    rebuild_seen: (u64, u64),
     gpu_materials: HashMap<MaterialId, GpuTerrainMaterial>,
     gpu_water_materials: HashMap<WaterMaterialId, GpuWaterMaterial>,
     synced_render_epoch: u64,
@@ -457,7 +465,9 @@ impl Renderer {
     pub async fn new(window: std::sync::Arc<winit::window::Window>) -> Self {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
+            // `WGPU_BACKEND=dx12|vulkan|metal` picks one (a driver test).
+            backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY),
+            backend_options: dx12_options(),
             ..Default::default()
         });
         let surface = instance
@@ -590,6 +600,15 @@ impl Renderer {
             })
         };
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
+        audit_note(&format!(
+            "renderer starts at {}x{}, {:?}, {}x MSAA, depth {:?}, {:?}",
+            config.width,
+            config.height,
+            config.present_mode,
+            stencil::scene_samples(),
+            depth_format(),
+            adapter.get_info()
+        ));
         // Independent parts compile on worker threads at once: startup
         // costs about the slowest part instead of the sum of all of them.
         let (ssao, reflect, gi, voxel, sky, instance_cull, postprocess, taa) =
@@ -739,6 +758,10 @@ impl Renderer {
             gpu_skinned_meshes: HashMap::new(),
             gpu_textures: HashMap::new(),
             gpu_mesh_albedo: HashMap::new(),
+            audit_frame: 0,
+            reupload_seen: (0, 0),
+            gpu_check_seen: 0,
+            rebuild_seen: (0, 0),
             gpu_materials: HashMap::new(),
             gpu_water_materials: HashMap::new(),
             synced_render_epoch: 0,
@@ -826,7 +849,36 @@ impl Renderer {
         self.size = new_size;
         self.config.width = new_size.width;
         self.config.height = new_size.height;
+        audit_note(&format!(
+            "resize to {}x{} (frame {})",
+            new_size.width, new_size.height, self.audit_frame
+        ));
         self.surface.configure(&self.device, &self.config);
+        self.rebuild_screen_targets();
+    }
+
+    /// Debugging aid (see `World::request_renderer_rebuild`).
+    pub(crate) fn rebuild_if_asked(&mut self, world: &World) {
+        let asked = world.renderer_rebuild;
+        if asked.0 != self.rebuild_seen.0 {
+            audit_note(&format!(
+                "surface reconfigured (frame {})",
+                self.audit_frame
+            ));
+            self.surface.configure(&self.device, &self.config);
+        }
+        if asked.1 != self.rebuild_seen.1 {
+            audit_note(&format!(
+                "screen buffers rebuilt (frame {})",
+                self.audit_frame
+            ));
+            self.rebuild_screen_targets();
+        }
+        self.rebuild_seen = asked;
+    }
+
+    /// Everything sized to the window: depth, AO, reflections, post, TAA.
+    fn rebuild_screen_targets(&mut self) {
         let (depth_texture, depth_view) =
             create_depth(&self.device, self.config.width, self.config.height);
         self.depth_texture = depth_texture;
@@ -865,12 +917,26 @@ impl Renderer {
         self.water_gpu.resize();
     }
 
+    /// The adapter and driver this renderer runs on.
+    pub fn gpu_info(&self) -> crate::gpu_info::GpuInfo {
+        let i = self.adapter.get_info();
+        crate::gpu_info::GpuInfo {
+            name: i.name,
+            vendor: i.vendor,
+            driver: i.driver,
+            driver_info: i.driver_info,
+            backend: format!("{:?}", i.backend),
+        }
+    }
+
     pub fn take_gpu_stats(&mut self) -> GpuFrameStats {
         std::mem::take(&mut self.gpu_stats)
     }
 
     pub fn sync_world(&mut self, world: &mut World) {
         let mut t = std::time::Instant::now();
+        self.reupload_if_asked(world);
+        self.rebuild_if_asked(world);
         self.apply_present_mode(world.vsync());
         if let Some((start, words)) = world.take_element_upload() {
             let words = &words[..words.len().min(ELEMENT_STATE_WORDS.saturating_sub(start))];
@@ -1465,6 +1531,8 @@ impl Renderer {
         };
         let (scene_view, scene_resolve) = self.postprocess.scene_attachment();
         self.encode_world(&mut encoder, &scene_view, scene_resolve.as_ref(), world);
+        self.write_audit(world);
+        self.gpu_check_if_asked(world);
         self.mark_gpu(&mut encoder, Mark::SceneDone);
         self.cpu_spans.mark("render.world", &mut t);
         if let Some(water) = world.water() {
@@ -1597,6 +1665,31 @@ impl Renderer {
         if let Some(profiler) = self.gpu_profiler.as_ref() {
             profiler.timestamp(encoder, mark);
         }
+    }
+
+    /// Rough video memory held by meshes and textures (bytes): (mesh
+    /// buffers, textures, mesh count, texture count). For diagnostics.
+    pub fn mesh_and_texture_bytes(&self) -> (u64, u64, usize, usize) {
+        let mesh = |g: &gpu_mesh::GpuMesh| {
+            g.vertex_buf.size() + g.index_buf.size() + g.instance_buf.size() + g.compact_buf.size()
+        };
+        let meshes: u64 = self.gpu_meshes.values().map(mesh).sum::<u64>()
+            + self
+                .gpu_instance_batches
+                .values()
+                .map(|b| mesh(&b.gpu))
+                .sum::<u64>();
+        let textures: u64 = self
+            .gpu_textures
+            .values()
+            .map(|t| t.width as u64 * t.height as u64 * 4)
+            .sum();
+        (
+            meshes,
+            textures,
+            self.gpu_meshes.len() + self.gpu_instance_batches.len(),
+            self.gpu_textures.len() + self.gpu_mesh_albedo.len(),
+        )
     }
 
     pub fn device(&self) -> &wgpu::Device {
@@ -1820,9 +1913,9 @@ impl Renderer {
             torch_color: torch
                 .map(|t| {
                     let c = t.color.to_vec3();
-                    [c.x, c.y, c.z, 0.0]
+                    [c.x, c.y, c.z, world.debug_shading as f32]
                 })
-                .unwrap_or([0.0, 0.0, 0.0, 0.0]),
+                .unwrap_or([0.0, 0.0, 0.0, world.debug_shading as f32]),
             camera_right: right.into(),
             ao_strength,
             camera_up: up.into(),
@@ -2001,7 +2094,8 @@ impl Renderer {
         self.cpu_spans.mark("world.prepass_ao", &mut t);
         // With a prepass the world pass keeps its depth: hidden fragments
         // then fail the depth test before any shading runs.
-        let (depth_load, stencil_load) = if self.ao_active {
+        let own_depth = world.debug_shading & 65536 != 0;
+        let (depth_load, stencil_load) = if self.ao_active && !own_depth {
             (wgpu::LoadOp::Load, wgpu::LoadOp::Load)
         } else {
             (wgpu::LoadOp::Clear(DEPTH_CLEAR), wgpu::LoadOp::Clear(0))
@@ -2029,7 +2123,7 @@ impl Renderer {
                     load: depth_load,
                     store: wgpu::StoreOp::Store,
                 }),
-                stencil_ops: Some(wgpu::Operations {
+                stencil_ops: stencil::has_stencil().then_some(wgpu::Operations {
                     load: stencil_load,
                     store: wgpu::StoreOp::Store,
                 }),
@@ -2111,7 +2205,7 @@ impl Renderer {
                             load: wgpu::LoadOp::Clear(DEPTH_CLEAR),
                             store: wgpu::StoreOp::Discard,
                         }),
-                        stencil_ops: Some(wgpu::Operations {
+                        stencil_ops: stencil::has_stencil().then_some(wgpu::Operations {
                             load: wgpu::LoadOp::Clear(0),
                             store: wgpu::StoreOp::Discard,
                         }),
@@ -2462,7 +2556,7 @@ impl Renderer {
                     load: wgpu::LoadOp::Clear(DEPTH_CLEAR),
                     store: wgpu::StoreOp::Store,
                 }),
-                stencil_ops: Some(wgpu::Operations {
+                stencil_ops: stencil::has_stencil().then_some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(0),
                     store: wgpu::StoreOp::Store,
                 }),
@@ -2630,7 +2724,7 @@ impl Renderer {
         // depth testing and shade every hidden fragment (2.4 -> 1.2 ms for
         // lod_forest on an RTX 5070). Leaf edges the prepass left out still
         // draw, they just don't occlude each other.
-        let nowrite = stamp && self.ao_active;
+        let nowrite = stamp && self.ao_active && world.debug_shading & (16384 | 65536) == 0;
         self.mark_scene(pass, stamp, SceneMark::Begin);
         pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
 
@@ -3406,7 +3500,7 @@ impl Renderer {
                     label: Some("visible-terrain-bundle"),
                     color_formats: &[Some(HDR_FORMAT)],
                     depth_stencil: Some(wgpu::RenderBundleDepthStencil {
-                        format: DEPTH_FORMAT,
+                        format: depth_format(),
                         depth_read_only: false,
                         stencil_read_only: true,
                     }),
@@ -3912,6 +4006,23 @@ fn taa_env_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("ENGINE_TAA").map_or(true, |v| v.trim() != "0"))
 }
 
+/// DirectX 12 compiles shaders with FXC unless told otherwise, and FXC
+/// cannot build every Engine shader. `ENGINE_DXC_DIR=<folder>` (holding
+/// `dxcompiler.dll` and `dxil.dll`, e.g. the Windows SDK's bin\x64) or
+/// `WGPU_DX12_COMPILER=dxc` selects the newer DXC.
+fn dx12_options() -> wgpu::BackendOptions {
+    let mut options = wgpu::BackendOptions::from_env_or_default();
+    if let Ok(dir) = std::env::var("ENGINE_DXC_DIR") {
+        let dir = std::path::Path::new(&dir);
+        options.dx12.shader_compiler = wgpu::Dx12Compiler::DynamicDxc {
+            dxc_path: dir.join("dxcompiler.dll").to_string_lossy().into_owned(),
+            dxil_path: dir.join("dxil.dll").to_string_lossy().into_owned(),
+            max_shader_model: wgpu::DxcShaderModel::V6_5,
+        };
+    }
+    options
+}
+
 fn create_depth(
     device: &wgpu::Device,
     width: u32,
@@ -3927,7 +4038,7 @@ fn create_depth(
         mip_level_count: 1,
         sample_count: stencil::scene_samples(),
         dimension: wgpu::TextureDimension::D2,
-        format: DEPTH_FORMAT,
+        format: depth_format(),
         // Sampled by the SSAO pass after the depth prepass.
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
@@ -4049,7 +4160,7 @@ fn choose_scene_samples(adapter: &wgpu::Adapter) -> u32 {
         Err(std::env::VarError::NotUnicode(_)) => panic!("ENGINE_MSAA must be valid Unicode"),
     };
     let color = adapter.get_texture_format_features(HDR_FORMAT).flags;
-    let depth = adapter.get_texture_format_features(DEPTH_FORMAT).flags;
+    let depth = adapter.get_texture_format_features(depth_format()).flags;
     if requested == 4 && color.sample_count_supported(4) && depth.sample_count_supported(4) {
         4
     } else {

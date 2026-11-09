@@ -76,7 +76,7 @@ impl RibbonGpu {
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: super::DEPTH_FORMAT,
+                format: super::depth_format(),
                 depth_write_enabled: false,
                 depth_compare: super::DEPTH_COMPARE,
                 stencil: Default::default(),

@@ -196,6 +196,27 @@ fn content_hash(bytes: &[u8]) -> u64 {
     h ^ (h >> 32)
 }
 
+/// [`crate::world::World::set_debug_shading`] flags: what each bit does.
+pub const DEBUG_SHADING_FLAGS: [(u32, &str); 17] = [
+    (1, "keep LOD-faded pixels"),
+    (2, "keep broken elements"),
+    (4, "depth prepass keeps every pixel"),
+    (8, "textured surfaces magenta"),
+    (16, "untextured surfaces cyan"),
+    (32, "every pixel opaque"),
+    (64, "invalid colours green"),
+    (128, "no reflections"),
+    (256, "no lamp light"),
+    (512, "no decals"),
+    (1024, "no bounce light (GI)"),
+    (2048, "textures without normal/ORM maps"),
+    (4096, "colour by depth value"),
+    (8192, "hide things farther than 60 m"),
+    (16384, "world pass writes depth too"),
+    (32768, "red where depth does not match position"),
+    (65536, "world pass clears its own depth"),
+];
+
 /// The curve that turns the HDR scene into screen colours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToneMap {
@@ -689,6 +710,15 @@ pub struct World {
     pub(crate) water_materials: HashMap<WaterMaterialId, WaterMaterial>,
     /// Changes whenever textures or material resources are added.
     resource_epoch: u64,
+    /// Bumped by [`Self::request_gpu_reupload`]: (meshes, textures).
+    pub(crate) reupload: (u64, u64),
+    /// Bumped by [`Self::request_gpu_check`].
+    pub(crate) gpu_check: u64,
+    gpu_info: Option<crate::gpu_info::GpuInfo>,
+    /// Bumped by [`Self::request_renderer_rebuild`]: (surface, screen buffers).
+    pub(crate) renderer_rebuild: (u64, u64),
+    /// [`Self::set_debug_shading`] flags.
+    pub(crate) debug_shading: u32,
     /// Changes when only instance lists changed (LOD swaps): the renderer
     /// re-uploads instances without rebuilding GI or shadow sources.
     instance_epoch: u64,
@@ -856,6 +886,11 @@ impl Default for World {
             next_material_id: 1,
             water_materials: HashMap::new(),
             resource_epoch: 1,
+            reupload: (0, 0),
+            gpu_check: 0,
+            gpu_info: None,
+            renderer_rebuild: (0, 0),
+            debug_shading: 0,
             instance_epoch: 1,
             lods: std::collections::BTreeMap::new(),
             next_lod: 1,
@@ -1453,6 +1488,63 @@ impl World {
                 .instance_epoch
                 .checked_add(1)
                 .expect("world instance epoch overflow");
+        }
+    }
+
+    /// Debugging aid: switches off the places where the mesh shader drops
+    /// triangles or pixels, or paints what passes one of them (bit flags,
+    /// see [`DEBUG_SHADING_FLAGS`]). 0 is normal drawing.
+    pub fn set_debug_shading(&mut self, flags: u32) {
+        self.debug_shading = flags;
+    }
+
+    pub fn debug_shading(&self) -> u32 {
+        self.debug_shading
+    }
+
+    /// Debugging aid: the renderer throws away its GPU copies of every mesh
+    /// and/or every texture and uploads them again from the world before the
+    /// next frame. If something looks wrong and comes back right after this,
+    /// the GPU copy was damaged, not the world's data.
+    /// Debugging aid: before the next frame the renderer reads every mesh
+    /// back from the GPU, compares it byte by byte with the world's mesh and
+    /// checks the world's meshes themselves (indices in range, finite
+    /// positions). Findings go to `ENGINE_AUDIT_LOG` (or `gpu_check.log`).
+    /// Stalls for a moment.
+    /// Debugging aid: before the next frame the renderer configures the
+    /// window surface again (`surface`) and/or makes every window-sized
+    /// buffer anew (`buffers`: depth, AO, reflections, post, TAA), as a
+    /// window resize does.
+    pub fn request_renderer_rebuild(&mut self, surface: bool, buffers: bool) {
+        if surface {
+            self.renderer_rebuild.0 += 1;
+        }
+        if buffers {
+            self.renderer_rebuild.1 += 1;
+        }
+    }
+
+    /// The graphics card and driver, once the window's renderer exists
+    /// (None headless). [`crate::gpu_info::GpuInfo::driver_warning`] says
+    /// when the driver is known to draw wrongly.
+    pub fn gpu_info(&self) -> Option<&crate::gpu_info::GpuInfo> {
+        self.gpu_info.as_ref()
+    }
+
+    pub(crate) fn set_gpu_info(&mut self, info: crate::gpu_info::GpuInfo) {
+        self.gpu_info = Some(info);
+    }
+
+    pub fn request_gpu_check(&mut self) {
+        self.gpu_check += 1;
+    }
+
+    pub fn request_gpu_reupload(&mut self, meshes: bool, textures: bool) {
+        if meshes {
+            self.reupload.0 += 1;
+        }
+        if textures {
+            self.reupload.1 += 1;
         }
     }
 

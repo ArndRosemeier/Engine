@@ -2,7 +2,31 @@
 
 use wgpu::{CompareFunction, DepthStencilState, StencilFaceState, StencilOperation, StencilState};
 
-pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32FloatStencil8;
+/// The world's depth format: depth with a stencil for portal masks.
+/// `ENGINE_DEPTH_FORMAT=d32` picks plain 32-bit depth (portals then draw
+/// without their stencil mask); a test of driver trouble with the
+/// combined format.
+pub(crate) fn depth_format() -> wgpu::TextureFormat {
+    static FORMAT: std::sync::OnceLock<wgpu::TextureFormat> = std::sync::OnceLock::new();
+    *FORMAT.get_or_init(|| match std::env::var("ENGINE_DEPTH_FORMAT").as_deref() {
+        Ok("d32") => wgpu::TextureFormat::Depth32Float,
+        _ => wgpu::TextureFormat::Depth32FloatStencil8,
+    })
+}
+
+/// Whether [`depth_format`] has a stencil.
+pub(crate) fn has_stencil() -> bool {
+    depth_format().has_stencil_aspect()
+}
+
+/// A stencil state, or none when the depth format has no stencil.
+fn gate(state: StencilState) -> StencilState {
+    if has_stencil() {
+        state
+    } else {
+        StencilState::default()
+    }
+}
 
 /// MSAA sample count of the world pass, fixed once when the renderer starts.
 static SCENE_SAMPLES: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
@@ -55,15 +79,15 @@ fn face_equal_keep() -> StencilFaceState {
 /// Level-0 scene draws ignore the portal stencil mask.
 pub(crate) fn scene_depth_stencil_unmasked_write(depth_write: bool) -> DepthStencilState {
     DepthStencilState {
-        format: DEPTH_FORMAT,
+        format: depth_format(),
         depth_write_enabled: depth_write,
         depth_compare: super::DEPTH_COMPARE,
-        stencil: StencilState {
+        stencil: gate(StencilState {
             front: face_always_keep(),
             back: face_always_keep(),
             read_mask: 0xff,
             write_mask: 0x00,
-        },
+        }),
         bias: Default::default(),
     }
 }
@@ -75,15 +99,15 @@ pub(crate) fn scene_depth_stencil_unmasked() -> DepthStencilState {
 /// Recursive portal views only draw where stencil == the pass reference.
 pub(crate) fn scene_depth_stencil_masked_write(depth_write: bool) -> DepthStencilState {
     DepthStencilState {
-        format: DEPTH_FORMAT,
+        format: depth_format(),
         depth_write_enabled: depth_write,
         depth_compare: super::DEPTH_COMPARE,
-        stencil: StencilState {
+        stencil: gate(StencilState {
             front: face_equal_keep(),
             back: face_equal_keep(),
             read_mask: 0xff,
             write_mask: 0x00,
-        },
+        }),
         bias: Default::default(),
     }
 }
@@ -94,15 +118,15 @@ pub(crate) fn scene_depth_stencil_masked() -> DepthStencilState {
 
 pub(crate) fn sky_depth_stencil_unmasked() -> DepthStencilState {
     DepthStencilState {
-        format: DEPTH_FORMAT,
+        format: depth_format(),
         depth_write_enabled: false,
         depth_compare: CompareFunction::Always,
-        stencil: StencilState {
+        stencil: gate(StencilState {
             front: face_always_keep(),
             back: face_always_keep(),
             read_mask: 0xff,
             write_mask: 0x00,
-        },
+        }),
         bias: Default::default(),
     }
 }
@@ -110,15 +134,15 @@ pub(crate) fn sky_depth_stencil_unmasked() -> DepthStencilState {
 /// Sky pass inside a recursive portal view.
 pub(crate) fn sky_depth_stencil_masked() -> DepthStencilState {
     DepthStencilState {
-        format: DEPTH_FORMAT,
+        format: depth_format(),
         depth_write_enabled: false,
         depth_compare: CompareFunction::Always,
-        stencil: StencilState {
+        stencil: gate(StencilState {
             front: face_equal_keep(),
             back: face_equal_keep(),
             read_mask: 0xff,
             write_mask: 0x00,
-        },
+        }),
         bias: Default::default(),
     }
 }
@@ -146,15 +170,15 @@ const PORTAL_STENCIL_DEPTH_BIAS: i32 = 4;
 /// nudge in the portal mesh shader keeps coplanar doorway floors working.
 pub(crate) fn stencil_incr_depth_stencil() -> DepthStencilState {
     DepthStencilState {
-        format: DEPTH_FORMAT,
+        format: depth_format(),
         depth_write_enabled: true,
         depth_compare: super::DEPTH_COMPARE,
-        stencil: StencilState {
+        stencil: gate(StencilState {
             front: face_incr_on_pass(),
             back: face_incr_on_pass(),
             read_mask: 0xff,
             write_mask: 0xff,
-        },
+        }),
         bias: wgpu::DepthBiasState {
             constant: PORTAL_STENCIL_DEPTH_BIAS,
             slope_scale: 1.0,
@@ -175,15 +199,15 @@ fn face_decr_on_pass() -> StencilFaceState {
 /// Restore stencil after a recursive portal sub-pass.
 pub(crate) fn stencil_decr_depth_stencil() -> DepthStencilState {
     DepthStencilState {
-        format: DEPTH_FORMAT,
+        format: depth_format(),
         depth_write_enabled: false,
         depth_compare: CompareFunction::Always,
-        stencil: StencilState {
+        stencil: gate(StencilState {
             front: face_decr_on_pass(),
             back: face_decr_on_pass(),
             read_mask: 0xff,
             write_mask: 0xff,
-        },
+        }),
         bias: Default::default(),
     }
 }
@@ -191,15 +215,15 @@ pub(crate) fn stencil_decr_depth_stencil() -> DepthStencilState {
 /// Clear depth inside a portal mask (reversed-Z far plane).
 pub(crate) fn depth_clear_depth_stencil() -> DepthStencilState {
     DepthStencilState {
-        format: DEPTH_FORMAT,
+        format: depth_format(),
         depth_write_enabled: true,
         depth_compare: CompareFunction::Always,
-        stencil: StencilState {
+        stencil: gate(StencilState {
             front: face_equal_keep(),
             back: face_equal_keep(),
             read_mask: 0xff,
             write_mask: 0x00,
-        },
+        }),
         bias: Default::default(),
     }
 }
