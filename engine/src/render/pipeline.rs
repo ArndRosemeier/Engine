@@ -909,6 +909,12 @@ fn shade_main(in: VsOut) -> vec4<f32> {
     if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) && !dbg(1u) {
         discard;
     }
+    if dbg(4096u) {
+        // Depth bands: each doubling of the stored depth value is one band.
+        let z = max(in.clip.z, 1e-12);
+        let band = fract(log2(z) * 0.5);
+        return vec4<f32>(band, fract(band * 3.0), 1.0 - band, 1.0);
+    }
     if dbg(8u) && in.surface3.w < 0.001 && mat.triplanar.x > 0.0 {
         return vec4<f32>(1.0, 0.0, 1.0, 1.0);
     }
