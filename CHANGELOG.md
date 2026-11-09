@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.008 (2026-11-09)
+
+- The window stays hidden while the renderer compiles its pipelines at start and appears once it can answer, so it no longer shows up frozen (not responding, cannot be dragged) for the first seconds.
+
 ## 0.007 (2026-11-09)
 
 - Spawning big textured meshes no longer stalls a frame: Mesh::prepare does the slow part of a spawn (triangulating, normals, the texture's sharing key) on any thread, and World::spawn_prepared / place_prepared take the result in at once. A town block of 40 facade-textured meshes went from about 60 ms on the main thread to almost nothing.
