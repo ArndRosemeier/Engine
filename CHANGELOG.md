@@ -7,6 +7,11 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.007 (2026-11-09)
+
+- Spawning big textured meshes no longer stalls a frame: Mesh::prepare does the slow part of a spawn (triangulating, normals, the texture's sharing key) on any thread, and World::spawn_prepared / place_prepared take the result in at once. A town block of 40 facade-textured meshes went from about 60 ms on the main thread to almost nothing.
+- Hitch logs say where Engine's own time went: a hitch block now lists the engine steps over a millisecond (stream, LODs, crowds, physics, mesh sync, shadows, world, water, post, present...), slowest first, so a game's hitch log shows whether its stutter was its own update, an upload or drawing.
+
 ## 0.006 (2026-11-09)
 
 - Fixed: egui textures are freed only after the frame that drew them is submitted, and ENGINE_FRAME_STATS shows video memory.

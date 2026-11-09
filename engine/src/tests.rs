@@ -1412,6 +1412,29 @@ fn trees_share_one_atlas_texture() {
     assert_eq!(tex(&world, a), tex(&world, b));
 }
 
+#[test]
+fn a_mesh_prepared_on_another_thread_spawns_like_any_other() {
+    use crate::color::rgb;
+    use crate::mesh::Mesh;
+    let textured = || {
+        let mut m = Mesh::box_at(glam::Vec3::ZERO, glam::Vec3::ONE, rgb(200, 200, 200)).unwrap();
+        // A facade-sized map (shared by content, as big maps are).
+        m.set_albedo_rgba(512, 512, vec![90; 512 * 512 * 4])
+            .unwrap();
+        m
+    };
+    let mut world = crate::world::World::new();
+    let ready = std::thread::spawn(move || textured().prepare())
+        .join()
+        .expect("worker");
+    assert_eq!(ready.triangle_count(), 12);
+    let a = world.spawn_prepared(ready);
+    let b = world.spawn(textured());
+    let tex = |id| world.entity(id).expect("entity").albedo;
+    assert!(tex(a).is_some());
+    assert_eq!(tex(a), tex(b), "the same map is one texture either way");
+}
+
 mod physics_world {
     use crate::color::rgb;
     use crate::mesh::Mesh;

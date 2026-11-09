@@ -525,6 +525,26 @@ pub struct Mesh {
     surface_overrides: Vec<SurfaceMaterial>,
 }
 
+/// A mesh made ready to spawn ([`Mesh::prepare`]): triangulated, with
+/// normals, and its maps' sharing key worked out. Making one is the slow
+/// part of a spawn (tens of milliseconds for a big textured mesh), and it
+/// runs on any thread; [`crate::World::spawn_prepared`] then takes it in at
+/// once.
+#[derive(Clone, Debug)]
+pub struct PreparedMesh {
+    pub(crate) built: BuiltMesh,
+    pub(crate) albedo: Option<AlbedoMap>,
+    pub(crate) maps: Option<MaterialMaps>,
+    pub(crate) key: Option<u64>,
+}
+
+impl PreparedMesh {
+    /// Triangles, as built.
+    pub fn triangle_count(&self) -> usize {
+        self.built.indices.len() / 3
+    }
+}
+
 /// Friendly alias — same type as [`Mesh`].
 pub type Shape = Mesh;
 
@@ -1067,6 +1087,20 @@ impl Mesh {
             }
         }
         out
+    }
+
+    /// Does the slow part of a spawn now, on this thread (build it on a
+    /// worker, spawn it with [`crate::World::spawn_prepared`]).
+    pub fn prepare(mut self) -> PreparedMesh {
+        let built = self.build();
+        let (albedo, maps) = (self.albedo.take(), self.maps.take());
+        let key = crate::world::texture_key(albedo.as_ref(), maps.as_ref(), false);
+        PreparedMesh {
+            built,
+            albedo,
+            maps,
+            key,
+        }
     }
 
     pub fn build(&self) -> BuiltMesh {
