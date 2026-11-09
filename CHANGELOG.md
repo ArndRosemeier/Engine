@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.022 (2026-11-09)
+
+- Many meshes per draw call: where the GPU supports multi-draw (every Vulkan and DX12 card), the world pass and the depth prepass send their opaque meshes as one call per texture and buffer page, with the per-mesh arguments in a GPU buffer; meshes the occlusion test decides take theirs straight from its output. occlusion_city: 1,697 towers in 5 calls instead of 1,697, about 2 ms less CPU per frame (lavapipe), picture identical. ENGINE_MULTI_DRAW=0 turns it off. ENGINE_FIXED_DT=0.016 steps every frame by the same time, so two runs can be compared picture for picture.
+
 ## 0.021 (2026-11-09)
 
 - Instance transforms share GPU buffers too: every mesh's placements live in a few shared pages instead of a buffer per mesh (the next step towards drawing many meshes per draw call). Pictures identical (occlusion_city pixel for pixel, GPU byte check clean). Fixed: the terrain bundle is recorded anew when a terrain mesh's buffers change.

@@ -522,9 +522,16 @@ draws all three every frame again.
 **Shared mesh buffers** (automatic): every mesh's vertices and indices live
 in a few large GPU buffers ("pages") instead of two small buffers each, as in
 Unreal or Frostbite, and so do their instance transforms. A draw names its place in the page, so neighbouring
-draws keep their bindings; it is also the groundwork for drawing many meshes
-with one multi-draw call. A mesh's room goes back to its page when the mesh
+draws keep their bindings. A mesh's room goes back to its page when the mesh
 is removed.
+
+**Multi-draw** (automatic where the GPU supports it, which every Vulkan and
+DX12 card does): the world pass and the depth prepass send their opaque
+meshes as one `multi_draw_indexed_indirect` per texture and buffer page, the
+per-mesh arguments in a GPU buffer. Meshes the occlusion test decides take
+their arguments straight from its output. In occlusion_city the 1,697 towers
+in view go out in 5 calls instead of 1,697, and the CPU spends about 2 ms less
+per frame on the world. GPU-culled instanced props keep their own draws.
 
 Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_global_illumination`,
 `set_bloom`, `set_tone_map`, `set_haze`, `set_lod_bias`, `set_view_distance`.
@@ -615,6 +622,7 @@ Every program built on the engine understands these:
 | `ENGINE_TONEMAP=aces` | Tone-map with ACES instead of AgX (`world.set_tone_map(ToneMap::Aces)` in code) |
 | `ENGINE_OCCLUSION=0`, `=1` or `=auto` | Occlusion culling off, on or automatic whatever the game set (`world.set_occlusion_mode`), to compare frame times |
 | `ENGINE_RENDER_SCALE=0.75` | Draw the scene at that share of the window and upscale (0.5 to 1.0), whatever `world.set_render_scale` says |
+| `ENGINE_MULTI_DRAW=0` | Draw every opaque mesh with its own draw call instead of multi-draws, to compare |
 | `ENGINE_SHADOW_CACHE=0` | Draw every sun shadow caster every frame (no static cache), to compare frame times |
 | `ENGINE_SHADOW_REFRESH=1` | Draw every sun cascade every frame, whatever `world.set_shadow_cascade_refresh` says, to compare frame times |
 | `ENGINE_OCCLUSION_CHECK=1` | Read every frame's occlusion answers back and compare them with the CPU copy of the test; prints mismatches (slow, for driver trouble) |
@@ -623,6 +631,7 @@ Every program built on the engine understands these:
 | `ENGINE_PRESENT_MODE` | `fifo` (default, vsync), `fifo-relaxed`, `mailbox` or `immediate` (uncapped, to see the real frame rate) |
 | `ENGINE_FRAME_STATS=1` | Print frame-time statistics every 2 s (average, worst, spread: judges smoothness) |
 | `ENGINE_SMOOTH_DT=0` | Hand the raw frame time to `frame.dt` (by default it is smoothed so motion does not shake) |
+| `ENGINE_FIXED_DT=0.016` | Every frame steps exactly this long, so two runs show the same frame (for picture comparisons) |
 | `ENGINE_AUTOFLY=1` | `FlyCamera` flies ahead in a slow curve by itself (for smoothness and speed checks) |
 | `ENGINE_GPU_PROFILE_EVERY=N` | Print GPU timings every N frames: shadow, AO, scene, water, TAA, post; plus a split of the scene pass (sky, land, grass, voxel, meshes, ...) where the GPU supports it |
 | `ENGINE_HITCH_MS` | Log frames whose work is slower than this (default 33) to the file set with `World::set_hitch_log`: phases, game spans, Engine's slow steps, GPU uploads |

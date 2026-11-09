@@ -45,7 +45,7 @@ use frustum::{Bounds, Frustum, Visibility};
 use gpu_mesh::GpuMesh;
 use gpu_profile::{GpuProfiler, Mark, SceneMark};
 use instance_cull::{
-    ActiveInstanceRange, CullDraws, CullJob, InstanceCull, OPAQUE_INDIRECT_OFFSET,
+    ActiveInstanceRange, CullDraws, CullJob, DrawIndexedArgs, InstanceCull, OPAQUE_INDIRECT_OFFSET,
     TRANSLUCENT_INDIRECT_OFFSET, WORKGROUP,
 };
 use particles_gpu::ParticleGpu;
@@ -105,6 +105,9 @@ pub struct GpuFrameStats {
     pub shadow_cascades_drawn: u32,
     /// Of those, how many reused their cached static casters.
     pub shadow_cache_hits: u32,
+    /// Multi-draw calls the world pass sent its opaque meshes in (0 when
+    /// it drew them one by one).
+    pub multi_draws: u32,
 }
 
 impl GpuFrameStats {
@@ -127,7 +130,7 @@ impl GpuFrameStats {
 
     pub fn draw_line(&self) -> String {
         format!(
-            "shadow_atlas={} cascades={} cache_hits={} horizon={} submit={} inside={} boundary={} tested={} groups={} indirect={} occlusion_tested={} occlusion_hidden={}",
+            "shadow_atlas={} cascades={} cache_hits={} horizon={} submit={} inside={} boundary={} tested={} groups={} indirect={} occlusion_tested={} occlusion_hidden={} multi_draws={}",
             self.shadow_atlas,
             self.shadow_cascades_drawn,
             self.shadow_cache_hits,
@@ -140,6 +143,7 @@ impl GpuFrameStats {
             self.indirect_draws,
             self.occlusion_tested,
             self.occlusion_hidden,
+            self.multi_draws,
         )
     }
 }
@@ -287,6 +291,92 @@ impl OpaqueKey {
     }
 }
 
+/// Below this many opaque draws a pass draws them one by one, not with
+/// multi-draws.
+const OPAQUE_MULTI_MIN_DRAWS: usize = 64;
+
+/// Draws that share a texture and buffers, sent as one
+/// `multi_draw_indexed_indirect`.
+struct MultiGroup {
+    albedo: wgpu::BindGroup,
+    vertex: wgpu::Buffer,
+    index: wgpu::Buffer,
+    instances: wgpu::Buffer,
+    /// Its arguments are the occlusion pass's packed rows (else the
+    /// target's own buffer).
+    occluded: bool,
+    offset: u64,
+    count: u32,
+}
+
+/// A pass's opaque meshes as a few multi-draws, as professional engines
+/// draw them: meshes and their instances live in shared buffers (see
+/// `geometry.rs`), so every mesh with the same texture in the same pages
+/// goes out in one call whose per-mesh arguments sit in a buffer. Meshes
+/// the occlusion test decides take theirs from its packed rows; GPU-culled
+/// instanced props keep their own draws (in `rest`).
+#[derive(Default)]
+struct MultiDraw {
+    pipeline: Option<wgpu::RenderPipeline>,
+    groups: Vec<MultiGroup>,
+    /// The direct draws' arguments, as last written.
+    args: Option<wgpu::Buffer>,
+    written: Vec<DrawIndexedArgs>,
+    occlusion_args: Option<wgpu::Buffer>,
+    rest: Option<wgpu::RenderBundle>,
+}
+
+impl MultiDraw {
+    /// Draw it: the pipeline, then each group, then the rest; leaves the
+    /// scene bind group bound.
+    fn encode(&self, pass: &mut wgpu::RenderPass<'_>, scene_bind: &wgpu::BindGroup) -> u32 {
+        let Some(pipeline) = self.pipeline.as_ref() else {
+            return 0;
+        };
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, scene_bind, &[]);
+        let mut bound: Option<&MultiGroup> = None;
+        for g in &self.groups {
+            let args = if g.occluded {
+                self.occlusion_args.as_ref()
+            } else {
+                self.args.as_ref()
+            };
+            let Some(args) = args else {
+                continue;
+            };
+            if bound.is_none_or(|b| b.albedo != g.albedo) {
+                pass.set_bind_group(1, &g.albedo, &[]);
+            }
+            if bound.is_none_or(|b| b.vertex != g.vertex) {
+                pass.set_vertex_buffer(0, g.vertex.slice(..));
+            }
+            if bound.is_none_or(|b| b.instances != g.instances) {
+                pass.set_vertex_buffer(1, g.instances.slice(..));
+            }
+            if bound.is_none_or(|b| b.index != g.index) {
+                pass.set_index_buffer(g.index.slice(..), wgpu::IndexFormat::Uint32);
+            }
+            pass.multi_draw_indexed_indirect(args, g.offset, g.count);
+            bound = Some(g);
+        }
+        if let Some(rest) = self.rest.as_ref() {
+            pass.execute_bundles(std::iter::once(rest));
+            pass.set_bind_group(0, scene_bind, &[]);
+        }
+        self.groups.len() as u32
+    }
+}
+
+/// What `plan_multi_draw` worked out for a pass.
+struct MultiPlan {
+    groups: Vec<MultiGroup>,
+    args: Vec<DrawIndexedArgs>,
+    occlusion_args: Option<wgpu::Buffer>,
+    rest: Option<wgpu::RenderBundle>,
+    indirect_draws: u32,
+}
+
 /// One chunk of recorded opaque draws: its keys and its bundle.
 struct OpaqueChunk {
     keys: Vec<OpaqueKey>,
@@ -312,6 +402,8 @@ struct OpaqueBundles {
     /// it changes every chunk is recorded anew.
     shared: Option<(wgpu::BindGroup, wgpu::RenderPipeline, u32)>,
     chunks: Vec<OpaqueChunk>,
+    /// The same draws as multi-draws, where the GPU can.
+    multi: MultiDraw,
     /// This frame's use: what the chunks were checked for, and how many.
     frame: Option<OpaqueFrame>,
 }
@@ -322,6 +414,8 @@ struct OpaqueFrame {
     uniform_slot: usize,
     chunks: usize,
     indirect_draws: u32,
+    /// Drawn with `multi` instead of the chunks.
+    multi: bool,
 }
 
 struct MainCullSelection {
@@ -660,6 +754,8 @@ pub struct Renderer {
     gpu_meshes: HashMap<EntityId, GpuMesh>,
     /// Every mesh's vertices and indices, in shared pages.
     arenas: geometry::MeshArenas,
+    /// The GPU draws many meshes per call (`MultiDraw`).
+    multi_draw: bool,
     /// GPU-mode instance buffers, one per prototype instead of one per spatial bin.
     gpu_instance_batches: HashMap<EntityId, GpuInstanceBatch>,
     gpu_batch_sources: Vec<BatchSourceState>,
@@ -781,6 +877,14 @@ impl Renderer {
             panic!("GPU adapter does not support DEPTH32FLOAT_STENCIL8 (required for portals)");
         }
         let mut required_features = portal_depth | pipeline_cache::wanted_features(&adapter);
+        // Many meshes per draw call (see `MultiDraw`), where the GPU can.
+        let multi_draw_features =
+            wgpu::Features::MULTI_DRAW_INDIRECT | wgpu::Features::INDIRECT_FIRST_INSTANCE;
+        let multi_draw =
+            adapter.features().contains(multi_draw_features) && multi_draw_env() != Some(false);
+        if multi_draw {
+            required_features |= multi_draw_features;
+        }
         if gpu_profile_interval.is_some() {
             let timestamp_features =
                 wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
@@ -1054,6 +1158,7 @@ impl Renderer {
             voxel,
             gpu_meshes: HashMap::new(),
             arenas: geometry::MeshArenas::default(),
+            multi_draw,
             gpu_instance_batches: HashMap::new(),
             gpu_batch_sources: Vec::new(),
             gpu_batch_source_scratch: Vec::new(),
@@ -3151,7 +3256,8 @@ impl Renderer {
             OpaqueTarget::Prepass(_) => &self.opaque_prepass,
             OpaqueTarget::World => &self.opaque_world,
         };
-        if draws.len() < OPAQUE_BUNDLE_MIN_DRAWS {
+        let use_multi = self.multi_draw && draws.len() >= OPAQUE_MULTI_MIN_DRAWS;
+        if draws.len() < OPAQUE_BUNDLE_MIN_DRAWS && !use_multi {
             let empty = OpaqueBundles::default();
             match target {
                 OpaqueTarget::Prepass(_) => self.opaque_prepass = empty,
@@ -3168,6 +3274,53 @@ impl Renderer {
         };
         let world_pass = target == OpaqueTarget::World;
         let samples = stencil::scene_samples();
+        if use_multi {
+            let plan =
+                self.plan_multi_draw(&draws, main_cull, scene_bind, pipeline, world_pass, samples);
+            let pipeline = pipeline.clone();
+            drop(draws);
+            let cache = match target {
+                OpaqueTarget::Prepass(_) => &mut self.opaque_prepass,
+                OpaqueTarget::World => &mut self.opaque_world,
+            };
+            // Bundled chunks are not kept alongside.
+            cache.chunks.clear();
+            cache.shared = None;
+            let multi = &mut cache.multi;
+            if multi.written != plan.args {
+                let bytes =
+                    (plan.args.len().max(1) * std::mem::size_of::<DrawIndexedArgs>()) as u64;
+                if multi.args.as_ref().is_none_or(|b| b.size() < bytes) {
+                    multi.args = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("opaque-multi-draw-args"),
+                        size: bytes.next_power_of_two(),
+                        usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+                }
+                if !plan.args.is_empty() {
+                    self.queue.write_buffer(
+                        multi.args.as_ref().expect("made above"),
+                        0,
+                        bytemuck::cast_slice(&plan.args),
+                    );
+                }
+                multi.written = plan.args;
+            }
+            multi.pipeline = Some(pipeline);
+            multi.groups = plan.groups;
+            multi.occlusion_args = plan.occlusion_args;
+            multi.rest = plan.rest;
+            cache.frame = Some(OpaqueFrame {
+                target,
+                space,
+                uniform_slot,
+                chunks: 0,
+                indirect_draws: plan.indirect_draws,
+                multi: true,
+            });
+            return;
+        }
         let shared_same = cache
             .shared
             .as_ref()
@@ -3248,7 +3401,119 @@ impl Renderer {
             uniform_slot,
             chunks: n,
             indirect_draws,
+            multi: false,
         });
+        cache.multi = MultiDraw::default();
+    }
+
+    /// Sort a pass's opaque draws into multi-draws: groups by texture and
+    /// buffers in order of first appearance, each group's direct draws in
+    /// one call and its occlusion-tested draws in runs of their packed rows.
+    fn plan_multi_draw(
+        &self,
+        draws: &[OpaqueDraw<'_>],
+        main_cull: &MainCullSelection,
+        scene_bind: &wgpu::BindGroup,
+        pipeline: &wgpu::RenderPipeline,
+        world_pass: bool,
+        samples: u32,
+    ) -> MultiPlan {
+        type Key = (wgpu::BindGroup, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer);
+        // wgpu handles hash by their id, which never changes.
+        #[allow(clippy::mutable_key_type)]
+        let mut index: HashMap<Key, usize> = HashMap::new();
+        let mut keys: Vec<Key> = Vec::new();
+        let mut direct: Vec<Vec<DrawIndexedArgs>> = Vec::new();
+        let mut occluded: Vec<Vec<u32>> = Vec::new();
+        let mut rest: Vec<&OpaqueDraw<'_>> = Vec::new();
+        for d in draws {
+            if matches!(d.submit, OpaqueSubmit::Mesh(MeshSubmit::Compacted)) {
+                rest.push(d);
+                continue;
+            }
+            let g = d.gpu;
+            let key: Key = (
+                d.albedo.clone(),
+                g.vertex_buf.clone(),
+                g.index_buf.clone(),
+                g.instance_buf.clone(),
+            );
+            let at = *index.entry(key.clone()).or_insert_with(|| {
+                keys.push(key);
+                direct.push(Vec::new());
+                occluded.push(Vec::new());
+                keys.len() - 1
+            });
+            match d.submit {
+                OpaqueSubmit::Occluded(_, slot) => occluded[at].push(slot),
+                _ => direct[at].push(DrawIndexedArgs {
+                    index_count: g.opaque_index_count as u32,
+                    instance_count: g.instance_count as u32,
+                    first_index: g.first_index,
+                    base_vertex: g.base_vertex,
+                    first_instance: g.first_instance,
+                }),
+            }
+        }
+        let occlusion = main_cull.occlusion.as_ref();
+        let stride = std::mem::size_of::<DrawIndexedArgs>() as u64;
+        let mut args = Vec::new();
+        let mut groups = Vec::new();
+        for (((albedo, vertex, index, instances), own), mut slots) in
+            keys.into_iter().zip(direct).zip(occluded)
+        {
+            let group = |occluded, offset, count| MultiGroup {
+                albedo: albedo.clone(),
+                vertex: vertex.clone(),
+                index: index.clone(),
+                instances: instances.clone(),
+                occluded,
+                offset,
+                count,
+            };
+            if !own.is_empty() {
+                groups.push(group(false, args.len() as u64 * stride, own.len() as u32));
+                args.extend(own);
+            }
+            if let Some(frame) = occlusion.filter(|_| !slots.is_empty()) {
+                slots.sort_unstable();
+                for run in slots.chunk_by(|a, b| b == &(a + 1)) {
+                    groups.push(group(true, frame.packed_offset(run[0]), run.len() as u32));
+                }
+            }
+        }
+        let indirect_draws = rest.len() as u32;
+        let rest = (!rest.is_empty()).then(|| {
+            let color = [Some(HDR_FORMAT)];
+            let mut bundle =
+                self.device
+                    .create_render_bundle_encoder(&wgpu::RenderBundleEncoderDescriptor {
+                        label: Some("opaque-multi-rest"),
+                        color_formats: if world_pass { &color } else { &[] },
+                        depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                            format: depth_format(),
+                            depth_read_only: false,
+                            stencil_read_only: true,
+                        }),
+                        sample_count: samples,
+                        multiview: None,
+                    });
+            bundle.set_bind_group(0, scene_bind, &[]);
+            bundle.set_pipeline(pipeline);
+            for d in &rest {
+                d.record(&mut bundle);
+            }
+            bundle.finish(&wgpu::RenderBundleDescriptor {
+                label: Some("opaque-multi-rest"),
+            })
+        });
+        MultiPlan {
+            groups,
+            args,
+            occlusion_args: occlusion.map(|f| f.args.clone()),
+            rest,
+            indirect_draws,
+        }
     }
 
     /// Lay the live view's opaque depth before shading, for SSAO and so the
@@ -3381,11 +3646,15 @@ impl Renderer {
             f.target == OpaqueTarget::Prepass(phase) && f.space == space && f.uniform_slot == slot
         });
         if let Some(frame) = bundles {
-            pass.execute_bundles(
-                self.opaque_prepass.chunks[..frame.chunks]
-                    .iter()
-                    .map(|c| &c.bundle),
-            );
+            if frame.multi {
+                self.opaque_prepass.multi.encode(&mut pass, scene_bind);
+            } else {
+                pass.execute_bundles(
+                    self.opaque_prepass.chunks[..frame.chunks]
+                        .iter()
+                        .map(|c| &c.bundle),
+                );
+            }
             // Bundles leave the pass with nothing bound.
             pass.set_bind_group(0, scene_bind, &[]);
         }
@@ -3605,15 +3874,23 @@ impl Renderer {
                     && f.target == OpaqueTarget::World
                     && f.space == space
                     && f.uniform_slot == uniform_slot
-                    && self
-                        .opaque_world
-                        .shared
-                        .as_ref()
-                        .is_some_and(|(_, p, _)| p == pipeline)
+                    && if f.multi {
+                        self.opaque_world.multi.pipeline.as_ref() == Some(pipeline)
+                    } else {
+                        self.opaque_world
+                            .shared
+                            .as_ref()
+                            .is_some_and(|(_, p, _)| p == pipeline)
+                    }
             })
-            .map(|f| (f.chunks, f.indirect_draws));
-        if let Some((chunks, indirect_draws)) = bundles {
-            pass.execute_bundles(self.opaque_world.chunks[..chunks].iter().map(|c| &c.bundle));
+            .map(|f| (f.chunks, f.indirect_draws, f.multi));
+        if let Some((chunks, indirect_draws, multi)) = bundles {
+            if multi {
+                let scene_bind = self.pipelines.scene_bind_group(uniform_slot);
+                self.gpu_stats.multi_draws += self.opaque_world.multi.encode(pass, scene_bind);
+            } else {
+                pass.execute_bundles(self.opaque_world.chunks[..chunks].iter().map(|c| &c.bundle));
+            }
             self.gpu_stats.indirect_draws += indirect_draws;
             pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
         }
@@ -4339,8 +4616,12 @@ impl Renderer {
     }
 
     /// This frame's occlusion candidates: single meshes the main view draws.
+    /// The meshes the occlusion test runs for, ordered by what a
+    /// multi-draw shares (texture, geometry page, instance page) so each
+    /// such group's packed draws sit side by side.
     fn occlusion_candidates(&self, world: &World, space: SpaceId) -> Vec<EntityId> {
-        self.draw_opaque
+        let mut ids: Vec<EntityId> = self
+            .draw_opaque
             .iter()
             .copied()
             .filter(|&id| {
@@ -4350,7 +4631,20 @@ impl Renderer {
                         .get(&id)
                         .is_some_and(|gpu| gpu.world_box.is_some() && gpu.instance_count > 0)
             })
-            .collect()
+            .collect();
+        if self.multi_draw {
+            ids.sort_by_cached_key(|id| {
+                let gpu = &self.gpu_meshes[id];
+                let albedo = world
+                    .entity(*id)
+                    .ok()
+                    .and_then(|e| e.albedo)
+                    .filter(|t| self.gpu_mesh_albedo.contains_key(t))
+                    .map(|t| t.0);
+                (albedo, gpu.geometry.page, gpu.instance_page())
+            });
+        }
+        ids
     }
 
     fn begin_occlusion(&mut self, ids: &[EntityId]) -> occlusion::OcclusionFrame {
@@ -4371,6 +4665,7 @@ impl Renderer {
                         .expect("instance count exceeds u32"),
                     first_index: gpu.first_index,
                     base_vertex: gpu.base_vertex,
+                    first_instance: gpu.first_instance,
                 }
             })
             .collect();
@@ -5268,6 +5563,13 @@ fn render_scale_env() -> Option<f32> {
 }
 
 /// `ENGINE_SHADOW_CACHE=0` draws every shadow caster every frame.
+/// `ENGINE_MULTI_DRAW=0` draws every opaque mesh on its own.
+fn multi_draw_env() -> Option<bool> {
+    std::env::var("ENGINE_MULTI_DRAW")
+        .ok()
+        .map(|v| v.trim() != "0")
+}
+
 fn shadow_cache_env() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("ENGINE_SHADOW_CACHE").map_or(true, |v| v.trim() != "0"))

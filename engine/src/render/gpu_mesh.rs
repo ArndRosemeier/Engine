@@ -182,6 +182,11 @@ impl GpuMesh {
         }
     }
 
+    /// Which instance arena page its instances are in.
+    pub fn instance_page(&self) -> u32 {
+        self.instance_slots.page
+    }
+
     /// This mesh's own instance slots, to bind for a draw of its own.
     pub fn instance_slice(&self) -> wgpu::BufferSlice<'_> {
         self.instance_slots.slice()

@@ -16,7 +16,7 @@ pub const TRANSLUCENT_INDIRECT_OFFSET: u64 = INDIRECT_STRIDE;
 const INSTANCE_COUNT_OFFSET: u64 = std::mem::size_of::<u32>() as u64;
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
 pub struct DrawIndexedArgs {
     pub index_count: u32,
     pub instance_count: u32,
