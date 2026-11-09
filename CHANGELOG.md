@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.016 (2026-11-09)
+
+- Far sun shadows are drawn on alternate frames: the near cascade every frame, the middle and far ones taking turns, so each frame draws two shadow maps instead of three (shadow pass about 40% cheaper, pictures unchanged). World::set_shadow_cascade_refresh sets the intervals; [1, 1, 1] or ENGINE_SHADOW_REFRESH=1 draws all three every frame.
+
 ## 0.015 (2026-11-09)
 
 - Occlusion culling without ambient occlusion draws only the meshes it needs before the test, not a full depth prepass (example: OCCLUSION_CITY_AO=0)
