@@ -34,6 +34,9 @@ const GROUP: u32 = 64;
 const PYRAMID_GROUP: u32 = 8;
 /// Two draws per candidate: its opaque range, then its translucent range.
 pub const ARGS_PER_CANDIDATE: u64 = 2;
+/// Then three packed regions of one draw per candidate: every shown draw,
+/// phase 1 (seen last frame) and phase 2 (shown, not drawn in phase 1).
+const ARGS_ROWS: u64 = ARGS_PER_CANDIDATE + 3;
 /// A box must lie this far (relative depth) behind the pyramid to be dropped,
 /// so rounding in the depth buffer can never hide a mesh standing right at a wall.
 const DEPTH_MARGIN: f32 = 1.0 - 1.0 / 2048.0;
@@ -57,9 +60,24 @@ struct Candidate {
     first_instance: u32,
 }
 
+impl From<&CandidateMesh> for Candidate {
+    fn from(c: &CandidateMesh) -> Self {
+        Self {
+            lo: c.aabb.min.into(),
+            opaque_index_count: c.opaque_index_count,
+            hi: c.aabb.max.into(),
+            index_count: c.index_count,
+            instance_count: c.instance_count,
+            first_index: c.first_index,
+            base_vertex: c.base_vertex,
+            first_instance: c.first_instance,
+        }
+    }
+}
+
 /// One mesh to test: its box, index counts, instances and where its
 /// indices and vertices start in the shared geometry arena.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct CandidateMesh {
     pub id: EntityId,
     pub aabb: Aabb,
@@ -80,7 +98,11 @@ struct CullParams {
     levels: u32,
     count: u32,
     margin: f32,
-    _pad: [f32; 3],
+    /// 0: frustum only (no pyramid test).
+    occlude: u32,
+    /// Rows the args buffer has room for (its regions start at multiples).
+    capacity: u32,
+    _pad: f32,
 }
 
 const PYRAMID_FIRST: &str = r#"
@@ -144,10 +166,18 @@ struct Params {
     levels: u32,
     count: u32,
     margin: f32,
+    occlude: u32,
+    capacity: u32,
 };
 
-// Same test as `box_may_show` in occlusion.rs (the CPU copy the tests run).
 fn may_show(lo: vec3<f32>, hi: vec3<f32>) -> bool {
+    return box_class(lo, hi) == 1u;
+}
+
+// Same test as `box_may_show` in occlusion.rs (the CPU copy the tests run):
+// 1 when the box may show, 0 when it is hidden behind the pyramid, 2 when
+// it is outside the view.
+fn box_class(lo: vec3<f32>, hi: vec3<f32>) -> u32 {
     var mn = vec2<f32>(1e30);
     var mx = vec2<f32>(-1e30);
     var nearest = 0.0;
@@ -160,7 +190,7 @@ fn may_show(lo: vec3<f32>, hi: vec3<f32>) -> bool {
         let clip = occ.view_proj * vec4<f32>(corner, 1.0);
         // A corner at or behind the eye: the box reaches the camera.
         if clip.w <= 1e-5 {
-            return true;
+            return 1u;
         }
         let ndc = clip.xyz / clip.w;
         mn = min(mn, ndc.xy);
@@ -168,11 +198,14 @@ fn may_show(lo: vec3<f32>, hi: vec3<f32>) -> bool {
         nearest = max(nearest, ndc.z);
     }
     if nearest >= 1.0 {
-        return true;
+        return 1u;
     }
     // Wholly beyond the far plane or beside the screen: nothing can show.
     if nearest <= 0.0 || mx.x < -1.0 || mn.x > 1.0 || mx.y < -1.0 || mn.y > 1.0 {
-        return false;
+        return 2u;
+    }
+    if occ.occlude == 0u {
+        return 1u;
     }
     // Pixel rectangle (y down), one pixel wider all round.
     let a = clamp(vec2<f32>(mn.x, -mx.y) * 0.5 + 0.5, vec2<f32>(0.0), vec2<f32>(1.0));
@@ -203,7 +236,7 @@ fn may_show(lo: vec3<f32>, hi: vec3<f32>) -> bool {
             far = min(far, textureLoad(pyramid, vec2<i32>(x, y), i32(level)).r);
         }
     }
-    return nearest >= far * occ.margin;
+    return select(0u, 1u, nearest >= far * occ.margin);
 }
 
 "#;
@@ -235,6 +268,22 @@ struct DrawArgs {
 @group(0) @binding(3) var<storage, read_write> visible: array<u32>;
 @group(0) @binding(4) var pyramid: texture_2d<f32>;
 
+fn packed(c: Candidate, n: u32) -> DrawArgs {
+    return DrawArgs(c.opaque_index_count, n, c.first_index, c.base_vertex, c.first_instance);
+}
+
+// Phase 1 of the GPU scene (before the depth prepass): draw what was seen
+// last frame. Its region holds one row per candidate, after the main rows.
+@compute @workgroup_size(64)
+fn seed(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if i >= occ.count {
+        return;
+    }
+    let c = candidates[i];
+    draws[occ.capacity * 3u + i] = packed(c, select(0u, c.instance_count, visible[i] == 1u));
+}
+
 @compute @workgroup_size(64)
 fn cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
@@ -242,13 +291,15 @@ fn cull(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let c = candidates[i];
-    let show = may_show(c.lo, c.hi);
+    let kind = box_class(c.lo, c.hi);
+    let show = kind == 1u;
     let n = select(0u, c.instance_count, show);
     draws[2u * i] = DrawArgs(c.opaque_index_count, n, c.first_index, c.base_vertex, 0u);
-    // The packed copy after both per-candidate draws, for multi-draws that
-    // bind the whole instance page.
-    let packed = arrayLength(&draws) / 3u * 2u;
-    draws[packed + i] = DrawArgs(c.opaque_index_count, n, c.first_index, c.base_vertex, c.first_instance);
+    // The packed copies after both per-candidate draws, for multi-draws that
+    // bind the whole instance page: every draw, then (GPU scene) phase 2,
+    // the ones not drawn in phase 1.
+    draws[occ.capacity * 2u + i] = packed(c, n);
+    draws[occ.capacity * 4u + i] = packed(c, select(0u, n, visible[i] != 1u));
     draws[2u * i + 1u] = DrawArgs(
         c.index_count - c.opaque_index_count,
         n,
@@ -256,7 +307,7 @@ fn cull(@builtin(global_invocation_id) gid: vec3<u32>) {
         c.base_vertex,
         0u,
     );
-    visible[i] = select(0u, 1u, show);
+    visible[i] = kind;
 }
 "#;
 
@@ -271,7 +322,9 @@ struct Pyramid {
 struct Readback {
     buffer: wgpu::Buffer,
     capacity: usize,
+    /// The candidates in row order; empty when only counting (GPU scene).
     ids: Vec<EntityId>,
+    rows: usize,
     /// Frame number the answer belongs to: the newest mapped one wins.
     frame: u64,
     state: Arc<AtomicU8>,
@@ -282,7 +335,7 @@ pub struct OcclusionFrame {
     /// Draw arguments, [`ARGS_PER_CANDIDATE`] per candidate.
     pub args: wgpu::Buffer,
     /// Candidate -> its index in `args`.
-    pub slots: HashMap<EntityId, u32>,
+    pub slots: Arc<HashMap<EntityId, u32>>,
     /// Candidates the prepass draws in phase 1 (seen lately).
     pub first: HashSet<EntityId>,
     /// Candidates `args` has room for.
@@ -299,8 +352,30 @@ impl OcclusionFrame {
     /// draw per candidate, tightly packed in slot order, with the instances
     /// at their place in the arena page (for `multi_draw_indexed_indirect`).
     pub fn packed_offset(&self, slot: u32) -> u64 {
-        (u64::from(self.capacity) * ARGS_PER_CANDIDATE + u64::from(slot)) * INDIRECT_STRIDE
+        self.region_offset(ArgsRegion::Shown, slot)
     }
+
+    /// Byte offset of a candidate's row in one of the packed regions.
+    pub fn region_offset(&self, region: ArgsRegion, slot: u32) -> u64 {
+        let base = match region {
+            ArgsRegion::Shown => ARGS_PER_CANDIDATE,
+            ArgsRegion::Phase1 => ARGS_PER_CANDIDATE + 1,
+            ArgsRegion::Phase2 => ARGS_PER_CANDIDATE + 2,
+        };
+        (u64::from(self.capacity) * base + u64::from(slot)) * INDIRECT_STRIDE
+    }
+}
+
+/// The packed draw regions (one row per candidate, instances at their place
+/// in the arena page).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArgsRegion {
+    /// Every candidate that may show (frustum, and the pyramid when culling).
+    Shown,
+    /// GPU scene phase 1: the candidates seen last frame.
+    Phase1,
+    /// GPU scene phase 2: shown now but not drawn in phase 1.
+    Phase2,
 }
 
 /// Fewer opaque meshes in view than this: nothing worth testing.
@@ -406,6 +481,7 @@ pub struct Occlusion {
     first_pipeline: wgpu::ComputePipeline,
     down_pipeline: wgpu::ComputePipeline,
     cull_pipeline: wgpu::ComputePipeline,
+    seed_pipeline: wgpu::ComputePipeline,
     params: wgpu::Buffer,
     candidates: wgpu::Buffer,
     args: wgpu::Buffer,
@@ -562,6 +638,7 @@ impl Occlusion {
         let down_pipeline = pipeline("occlusion-pyramid-down", &down_layout, PYRAMID_DOWN, "main");
         let cull_src = format!("{BOX_TEST_WGSL}{CULL}");
         let cull_pipeline = pipeline("occlusion-cull", &cull_layout, &cull_src, "cull");
+        let seed_pipeline = pipeline("occlusion-seed", &cull_layout, &cull_src, "seed");
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("occlusion-params"),
             size: std::mem::size_of::<CullParams>() as u64,
@@ -576,6 +653,7 @@ impl Occlusion {
             first_pipeline,
             down_pipeline,
             cull_pipeline,
+            seed_pipeline,
             params,
             candidates,
             args,
@@ -680,18 +758,18 @@ impl Occlusion {
             if entry.frame > self.seen_frame {
                 self.seen_frame = entry.frame;
                 let mapped = entry.buffer.slice(..).get_mapped_range();
-                let flags: &[u32] = bytemuck::cast_slice(&mapped);
+                let flags: &[u32] = &bytemuck::cast_slice(&mapped)[..entry.rows];
                 self.seen.clear();
-                let mut hidden = 0u32;
                 for (id, flag) in entry.ids.iter().zip(flags) {
-                    if *flag != 0 {
+                    if *flag == 1 {
                         self.seen.insert(*id);
-                    } else {
-                        hidden += 1;
                     }
                 }
+                // Outside the view (2) is not the pyramid's doing.
+                let count = |want: u32| flags.iter().filter(|f| **f == want).count() as u32;
+                let hidden = count(0);
                 self.counts = OcclusionCounts {
-                    tested: u32::try_from(entry.ids.len()).expect("candidate count exceeds u32"),
+                    tested: hidden + count(1),
                     hidden,
                 };
             }
@@ -735,16 +813,7 @@ impl Occlusion {
         let mut first = HashSet::new();
         for (i, c) in candidates.iter().enumerate() {
             let id = c.id;
-            self.scratch.push(Candidate {
-                lo: c.aabb.min.into(),
-                opaque_index_count: c.opaque_index_count,
-                hi: c.aabb.max.into(),
-                index_count: c.index_count,
-                instance_count: c.instance_count,
-                first_index: c.first_index,
-                base_vertex: c.base_vertex,
-                first_instance: c.first_instance,
-            });
+            self.scratch.push(Candidate::from(c));
             slots.insert(id, u32::try_from(i).expect("candidate index exceeds u32"));
             if self.seen.contains(&id) {
                 first.insert(id);
@@ -755,7 +824,7 @@ impl Occlusion {
         }
         OcclusionFrame {
             args: self.args.clone(),
-            slots,
+            slots: Arc::new(slots),
             first,
             capacity: u32::try_from(self.capacity).expect("candidate capacity exceeds u32"),
         }
@@ -771,6 +840,11 @@ impl Occlusion {
         view_proj: Mat4,
         ids: &[EntityId],
     ) {
+        self.encode_pyramid(encoder);
+        self.encode_cull(device, queue, encoder, view_proj, ids, ids.len(), true);
+    }
+
+    fn encode_pyramid(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let pyramid = self
             .pyramid
             .as_ref()
@@ -789,7 +863,14 @@ impl Occlusion {
             let (w, h) = pyramid.sizes[l];
             pass.dispatch_workgroups(w.div_ceil(PYRAMID_GROUP), h.div_ceil(PYRAMID_GROUP), 1);
         }
-        let count = u32::try_from(ids.len()).expect("candidate count exceeds u32");
+    }
+
+    fn write_params(&self, queue: &wgpu::Queue, view_proj: Mat4, rows: usize, occlude: bool) {
+        let pyramid = self
+            .pyramid
+            .as_ref()
+            .expect("occlusion pyramid follows the depth texture from the start");
+        let count = u32::try_from(rows).expect("candidate count exceeds u32");
         let params = CullParams {
             view_proj: view_proj.to_cols_array_2d(),
             screen: [
@@ -799,13 +880,18 @@ impl Occlusion {
             levels: pyramid.sizes.len() as u32,
             count,
             margin: DEPTH_MARGIN,
-            _pad: [0.0; 3],
+            occlude: u32::from(occlude),
+            capacity: u32::try_from(self.capacity).expect("candidate capacity exceeds u32"),
+            _pad: 0.0,
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
-        // Written even with no candidates: the instance cull reads it too.
-        if ids.is_empty() {
-            return;
-        }
+    }
+
+    fn ensure_cull_bind(&mut self, device: &wgpu::Device) {
+        let pyramid = self
+            .pyramid
+            .as_ref()
+            .expect("occlusion pyramid follows the depth texture from the start");
         if self.cull_bind.is_none() {
             self.cull_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("occlusion-cull"),
@@ -834,18 +920,135 @@ impl Occlusion {
                 ],
             }));
         }
+    }
+
+    /// Test `rows` candidates (frustum, and the pyramid when `occlude`) and
+    /// write their draws; read the answer back (`ids` empty: counts only).
+    #[allow(clippy::too_many_arguments)]
+    fn encode_cull(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view_proj: Mat4,
+        ids: &[EntityId],
+        rows: usize,
+        occlude: bool,
+    ) {
+        self.write_params(queue, view_proj, rows, occlude);
+        // Written even with no candidates: the instance cull reads it too.
+        if rows == 0 {
+            return;
+        }
+        self.ensure_cull_bind(device);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("occlusion-cull"),
             timestamp_writes: None,
         });
         pass.set_pipeline(&self.cull_pipeline);
         pass.set_bind_group(0, self.cull_bind.as_ref(), &[]);
-        pass.dispatch_workgroups(count.div_ceil(GROUP), 1, 1);
+        pass.dispatch_workgroups((rows as u32).div_ceil(GROUP), 1, 1);
         drop(pass);
-        if check_enabled() {
-            self.copy_check(device, encoder, view_proj, ids.len());
+        // Without the pyramid nothing is learnt about hiding (and nobody
+        // collects the answer).
+        if occlude {
+            if check_enabled() {
+                self.copy_check(device, encoder, view_proj, rows);
+            }
+            self.copy_answer(device, encoder, ids, rows);
         }
-        self.copy_answer(device, encoder, ids);
+    }
+
+    /// GPU scene: make room for `rows` candidates. True when the buffers
+    /// were made anew (every row and its visibility must be written again).
+    pub fn reserve_rows(&mut self, device: &wgpu::Device, rows: usize) -> bool {
+        if rows <= self.capacity {
+            return false;
+        }
+        self.capacity = rows
+            .checked_next_power_of_two()
+            .expect("occlusion candidate capacity overflow");
+        (self.candidates, self.args, self.visible) = candidate_buffers(device, self.capacity);
+        self.cull_bind = None;
+        true
+    }
+
+    /// GPU scene: write candidate rows from `start`, and mark them seen so
+    /// the next phase 1 draws them (their old answers belong to other rows).
+    pub fn write_rows(
+        &mut self,
+        queue: &wgpu::Queue,
+        start: usize,
+        rows: &[CandidateMesh],
+        reset_seen: bool,
+    ) {
+        if rows.is_empty() {
+            return;
+        }
+        self.scratch.clear();
+        self.scratch.extend(rows.iter().map(Candidate::from));
+        let stride = std::mem::size_of::<Candidate>() as u64;
+        queue.write_buffer(
+            &self.candidates,
+            start as u64 * stride,
+            bytemuck::cast_slice(&self.scratch),
+        );
+        if reset_seen {
+            let ones = vec![1u32; rows.len()];
+            queue.write_buffer(&self.visible, start as u64 * 4, bytemuck::cast_slice(&ones));
+        }
+    }
+
+    /// GPU scene: this frame's draw set-up over the resident rows.
+    pub fn scene_frame(&self, slots: Arc<HashMap<EntityId, u32>>) -> OcclusionFrame {
+        OcclusionFrame {
+            args: self.args.clone(),
+            slots,
+            first: HashSet::new(),
+            capacity: u32::try_from(self.capacity).expect("candidate capacity exceeds u32"),
+        }
+    }
+
+    /// GPU scene phase 1: write the draws of the rows seen last frame
+    /// (before the depth prepass).
+    pub fn encode_seed(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view_proj: Mat4,
+        rows: usize,
+    ) {
+        self.write_params(queue, view_proj, rows, true);
+        if rows == 0 {
+            return;
+        }
+        self.ensure_cull_bind(device);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("occlusion-seed"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.seed_pipeline);
+        pass.set_bind_group(0, self.cull_bind.as_ref(), &[]);
+        pass.dispatch_workgroups((rows as u32).div_ceil(GROUP), 1, 1);
+    }
+
+    /// GPU scene: test every resident row and write its draws; with
+    /// `occlude` after building the pyramid from the phase-1 depth, else
+    /// against the view only.
+    pub fn encode_scene(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view_proj: Mat4,
+        rows: usize,
+        occlude: bool,
+    ) {
+        if occlude {
+            self.encode_pyramid(encoder);
+        }
+        self.encode_cull(device, queue, encoder, view_proj, &[], rows, occlude);
     }
 
     fn copy_check(
@@ -936,7 +1139,7 @@ impl Occlusion {
         let mut wrong = 0;
         for (i, aabb) in check.boxes.iter().enumerate() {
             let want = cpu.box_may_show(check.view_proj, *aabb);
-            if want != (flags[i] != 0) {
+            if want != (flags[i] == 1) {
                 wrong += 1;
                 if wrong <= 5 {
                     eprintln!(
@@ -962,6 +1165,7 @@ impl Occlusion {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         ids: &[EntityId],
+        rows: usize,
     ) {
         let slot = match self
             .ring
@@ -971,9 +1175,10 @@ impl Occlusion {
             Some(slot) => slot,
             None if self.ring.len() < READBACK_RING => {
                 self.ring.push(Readback {
-                    buffer: read_buffer(device, ids.len()),
-                    capacity: ids.len(),
+                    buffer: read_buffer(device, rows),
+                    capacity: rows,
                     ids: Vec::new(),
+                    rows: 0,
                     frame: 0,
                     state: Arc::new(AtomicU8::new(IDLE)),
                 });
@@ -983,9 +1188,8 @@ impl Occlusion {
             None => return,
         };
         let entry = &mut self.ring[slot];
-        if entry.capacity < ids.len() {
-            let capacity = ids
-                .len()
+        if entry.capacity < rows {
+            let capacity = rows
                 .checked_next_power_of_two()
                 .expect("occlusion read-back capacity overflow");
             entry.buffer = read_buffer(device, capacity);
@@ -995,7 +1199,8 @@ impl Occlusion {
         entry.frame = self.frame;
         entry.ids.clear();
         entry.ids.extend_from_slice(ids);
-        encoder.copy_buffer_to_buffer(&self.visible, 0, &entry.buffer, 0, flag_bytes(ids.len()));
+        entry.rows = rows;
+        encoder.copy_buffer_to_buffer(&self.visible, 0, &entry.buffer, 0, flag_bytes(rows));
         self.pending = Some(slot);
     }
 
@@ -1008,7 +1213,7 @@ impl Occlusion {
         let entry = &self.ring[slot];
         entry.state.store(MAPPING, Ordering::Release);
         let state = entry.state.clone();
-        let bytes = flag_bytes(entry.ids.len());
+        let bytes = flag_bytes(entry.rows);
         entry
             .buffer
             .slice(..bytes)
@@ -1045,16 +1250,16 @@ fn candidate_buffers(
     let args = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("occlusion-draws"),
         // Two draws per candidate, then the packed opaque rows.
-        size: capacity as u64
-            * (ARGS_PER_CANDIDATE + 1)
-            * std::mem::size_of::<DrawIndexedArgs>() as u64,
+        size: capacity as u64 * ARGS_ROWS * std::mem::size_of::<DrawIndexedArgs>() as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
         mapped_at_creation: false,
     });
     let visible = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("occlusion-visible"),
         size: flag_bytes(capacity),
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     (candidates, args, visible)

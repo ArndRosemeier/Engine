@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.026 (2026-11-09)
+
+- GPU scene: opaque meshes stay on the GPU as rows; the GPU culls them (view and depth pyramid) and writes their draws, the CPU writes only changed rows. ENGINE_GPU_SCENE=0 turns it off.
+
 ## 0.025 (2026-11-09)
 
 - Texture arrays: every mesh texture set sits in one material table, so meshes with different textures share one multi-draw call. occlusion_city with 16 facade textures (OCCLUSION_CITY_TEXTURES=16) draws its towers in 5 calls instead of 1,696, with the same picture. ENGINE_TEXTURE_ARRAYS=0 turns it off.
