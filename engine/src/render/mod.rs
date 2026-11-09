@@ -326,6 +326,9 @@ enum PrepassPhase {
     All,
     /// Everything but the occlusion candidates not seen lately.
     Seen,
+    /// Only the candidates seen lately: without AO nothing else needs the
+    /// prepass, and the world pass then keeps writing depth.
+    SeenOccluders,
     /// Only those candidates, through the occlusion draws.
     Unseen,
 }
@@ -2391,21 +2394,27 @@ impl Renderer {
         self.cpu_spans.mark("world.cull", &mut t);
         let depth = self.depth_view.clone();
         let occluding = main_cull.occlusion.is_some();
-        self.prepass_done = ao.is_some() || occluding;
-        if self.prepass_done {
-            let phase = if occluding {
-                PrepassPhase::Seen
-            } else {
-                PrepassPhase::All
-            };
-            self.prepare_opaque_bundles(
-                OpaqueTarget::Prepass(phase),
-                world,
-                live,
-                &main_cull,
-                main_uniform_slot,
-            );
-            self.cpu_spans.mark("world.record_opaque", &mut t);
+        // A full prepass (the world pass then only tests depth) for AO; for
+        // occlusion alone just the meshes it needs, which is far cheaper
+        // than drawing voxel ground and props twice.
+        self.prepass_done = ao.is_some();
+        let phase = match (self.prepass_done, occluding) {
+            (true, true) => Some(PrepassPhase::Seen),
+            (true, false) => Some(PrepassPhase::All),
+            (false, true) => Some(PrepassPhase::SeenOccluders),
+            (false, false) => None,
+        };
+        if let Some(phase) = phase {
+            if phase != PrepassPhase::SeenOccluders {
+                self.prepare_opaque_bundles(
+                    OpaqueTarget::Prepass(phase),
+                    world,
+                    live,
+                    &main_cull,
+                    main_uniform_slot,
+                );
+                self.cpu_spans.mark("world.record_opaque", &mut t);
+            }
             self.encode_depth_prepass(encoder, world, live, &main_cull, main_uniform_slot, phase);
         }
         if occluding {
@@ -2476,7 +2485,7 @@ impl Renderer {
         // With a prepass the world pass keeps its depth: hidden fragments
         // then fail the depth test before any shading runs.
         let own_depth = world.debug_shading & 65536 != 0;
-        let (depth_load, stencil_load) = if self.prepass_done && !own_depth {
+        let (depth_load, stencil_load) = if (self.prepass_done || occluding) && !own_depth {
             (wgpu::LoadOp::Load, wgpu::LoadOp::Load)
         } else {
             (wgpu::LoadOp::Clear(DEPTH_CLEAR), wgpu::LoadOp::Clear(0))
@@ -3155,6 +3164,34 @@ impl Renderer {
                     .unwrap_or(&self.pipelines.white_albedo);
                 pass.set_bind_group(1, albedo, &[]);
                 submit_occluded_draw(&mut pass, gpu, &frame.args, cslot, OPAQUE_INDIRECT_OFFSET);
+            }
+            return;
+        }
+        if phase == PrepassPhase::SeenOccluders {
+            let frame = main_cull
+                .occlusion
+                .as_ref()
+                .expect("the occluder prepass runs only with occlusion culling");
+            pass.set_pipeline(&self.pipelines.depth_prepass);
+            for &id in &self.draw_opaque {
+                if !frame.first.contains(&id) {
+                    continue;
+                }
+                let entity = world.entity(id).expect("draw list is live");
+                let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
+                let albedo = entity
+                    .albedo
+                    .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
+                    .unwrap_or(&self.pipelines.white_albedo);
+                pass.set_bind_group(1, albedo, &[]);
+                submit_mesh_draw(
+                    &mut pass,
+                    gpu,
+                    MeshSubmit::Direct,
+                    0..gpu.opaque_index_count as u32,
+                    OPAQUE_INDIRECT_OFFSET,
+                    &mut indirect_draws,
+                );
             }
             return;
         }
