@@ -3,6 +3,8 @@
 //! walls; the title bar and the console show how many the GPU skipped.
 //!
 //! - `OCCLUSION_CITY_VIEW=street` (default), `roof` or `air` picks the camera.
+//! - `OCCLUSION_CITY_AO=0` turns ambient occlusion off (occlusion culling then
+//!   draws only its own short depth prepass).
 //! - `ENGINE_OCCLUSION=0` turns occlusion culling off to compare frame times;
 //!   screenshots with it on and off must match pixel for pixel.
 //! - `ENGINE_SCREENSHOT=out.png` holds the camera still for a picture.
@@ -101,6 +103,9 @@ fn main() -> EngineResult<()> {
             world.set_sun((0.5, 1.0, -0.3), 0.25);
             world.set_shadows(Some(ShadowSettings::default()));
             world.set_occlusion_culling(true);
+            if std::env::var("OCCLUSION_CITY_AO").is_ok_and(|v| v == "0") {
+                world.set_ambient_occlusion(None);
+            }
             build(world)?;
         }
         if !still {

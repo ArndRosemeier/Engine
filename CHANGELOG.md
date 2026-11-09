@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.015 (2026-11-09)
+
+- Occlusion culling without ambient occlusion draws only the meshes it needs before the test, not a full depth prepass (example: OCCLUSION_CITY_AO=0)
+
 ## 0.014 (2026-11-09)
 
 - Crowd poses: a crowd's profile can name extra clips (.poses(["drive", "ride"])) and world.set_crowd_agent_pose(crowd, agent, Some("drive")) holds an agent in one while it moves with its place, far (baked with idle and walk, nothing extra per agent) and near (its full character plays the pose, with foot IK off). For people sitting in cars or on benches without a second crowd, and a second copy of the model, per look.
