@@ -197,7 +197,7 @@ fn content_hash(bytes: &[u8]) -> u64 {
 }
 
 /// [`crate::world::World::set_debug_shading`] flags: what each bit does.
-pub const DEBUG_SHADING_FLAGS: [(u32, &str); 15] = [
+pub const DEBUG_SHADING_FLAGS: [(u32, &str); 16] = [
     (1, "keep LOD-faded pixels"),
     (2, "keep broken elements"),
     (4, "depth prepass keeps every pixel"),
@@ -213,6 +213,7 @@ pub const DEBUG_SHADING_FLAGS: [(u32, &str); 15] = [
     (4096, "colour by depth value"),
     (8192, "hide things farther than 60 m"),
     (16384, "world pass writes depth too"),
+    (32768, "red where depth does not match position"),
 ];
 
 /// The curve that turns the HDR scene into screen colours.

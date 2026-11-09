@@ -915,6 +915,17 @@ fn shade_main(in: VsOut) -> vec4<f32> {
     if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) && !dbg(1u) {
         discard;
     }
+    if dbg(32768u) {
+        // The depth this pixel was given, against the depth its own position
+        // has under the frame's camera: green where they agree, red where not.
+        let c = u.view_proj * vec4<f32>(in.world_p, 1.0);
+        let want = c.z / c.w;
+        let off = abs(want - in.clip.z) / max(abs(want), 1e-7);
+        if off > 0.02 || c.w <= 0.0 {
+            return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+        }
+        return vec4<f32>(0.1, 0.6 + 0.4 * fract(log2(max(in.clip.z, 1e-12)) * 0.5), 0.1, 1.0);
+    }
     if dbg(4096u) {
         // Depth bands: each doubling of the stored depth value is one band.
         let z = max(in.clip.z, 1e-12);
