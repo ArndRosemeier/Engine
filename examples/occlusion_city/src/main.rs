@@ -8,6 +8,10 @@
 //! - `ENGINE_OCCLUSION=0` turns occlusion culling off to compare frame times;
 //!   screenshots with it on and off must match pixel for pixel.
 //! - `ENGINE_SCREENSHOT=out.png` holds the camera still for a picture.
+//! - `OCCLUSION_CITY_TEXTURES=16` gives the towers that many different
+//!   facade textures (default 0: plain colours). With texture arrays the
+//!   towers still go out in a handful of multi-draws;
+//!   `ENGINE_TEXTURE_ARRAYS=0` compares one group per texture.
 use engine::prelude::*;
 use glam::Vec3;
 
@@ -29,6 +33,31 @@ fn unit(seed: u32) -> f32 {
     (hash(seed) & 0xffff) as f32 / 65_535.0
 }
 
+/// A facade texture: a grid of windows, lit or dark, over a tinted wall.
+fn facade(variant: u32) -> (u32, u32, Vec<u8>) {
+    const SIZE: u32 = 64;
+    let tint = [
+        200 + (hash(variant * 3 + 1) % 56) as u8,
+        190 + (hash(variant * 3 + 2) % 56) as u8,
+        170 + (hash(variant * 3 + 3) % 70) as u8,
+    ];
+    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let (cx, cy) = (x / 8, y / 8);
+            let window = (2..7).contains(&(x % 8)) && (2..6).contains(&(y % 8));
+            let lit = hash(variant * 7919 + cx * 31 + cy * 977) % 3 == 0;
+            let c = match (window, lit) {
+                (true, true) => [255, 230, 160],
+                (true, false) => [60, 75, 95],
+                _ => tint,
+            };
+            rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+    }
+    (SIZE, SIZE, rgba)
+}
+
 fn tower(x: f32, z: f32, w: f32, d: f32, h: f32, seed: u32) -> EngineResult<Mesh> {
     let shade = 150 + (hash(seed) % 70) as u8;
     let wall = rgb(shade, shade - 12, shade - 30);
@@ -44,6 +73,10 @@ fn tower(x: f32, z: f32, w: f32, d: f32, h: f32, seed: u32) -> EngineResult<Mesh
 }
 
 fn build(world: &mut World) -> EngineResult<()> {
+    let textures: u32 = std::env::var("OCCLUSION_CITY_TEXTURES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let half = BLOCKS as f32 * PITCH_M * 0.5;
     world.spawn(Shape::box_at(
         (0.0, -0.05, 0.0),
@@ -61,7 +94,12 @@ fn build(world: &mut World) -> EngineResult<()> {
             {
                 let seed = ((bx * BLOCKS + bz) * 4 + i as i32) as u32;
                 let h = 12.0 + 60.0 * unit(seed).powi(2);
-                world.spawn(tower(cx + ox * 15.0, cz + oz * 15.0, 26.0, 26.0, h, seed)?);
+                let mut mesh = tower(cx + ox * 15.0, cz + oz * 15.0, 26.0, 26.0, h, seed)?;
+                if textures > 0 {
+                    let (w, h, rgba) = facade(hash(seed) % textures);
+                    mesh.set_albedo_rgba(w, h, rgba)?;
+                }
+                world.spawn(mesh);
             }
         }
     }

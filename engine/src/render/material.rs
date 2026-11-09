@@ -342,6 +342,10 @@ impl NeutralMaps {
 /// GPU copy of one texture set. The bind group holds the textures alive.
 pub struct GpuMaterial {
     pub bind: wgpu::BindGroup,
+    /// Albedo, normal, ORM and emissive as bound (neutral texels filled
+    /// in), for the material table.
+    pub views: [wgpu::TextureView; 4],
+    pub params: MaterialParams,
 }
 
 impl GpuMaterial {
@@ -410,10 +414,10 @@ impl GpuMaterial {
         [albedo, normal, orm, emissive]: [Option<&wgpu::TextureView>; 4],
         maps: Option<&MaterialMaps>,
     ) -> Self {
-        let params = maps.map_or_else(MaterialParams::neutral, MaterialParams::from_maps);
+        let factors = maps.map_or_else(MaterialParams::neutral, MaterialParams::from_maps);
         let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh-material-params"),
-            contents: bytemuck::bytes_of(&params),
+            contents: bytemuck::bytes_of(&factors),
             usage: wgpu::BufferUsages::UNIFORM,
         });
         fn view<'a>(
@@ -452,7 +456,17 @@ impl GpuMaterial {
                 },
             ],
         });
-        Self { bind }
+        let views = [
+            albedo.unwrap_or(&neutral.white_srgb).clone(),
+            normal.unwrap_or(&neutral.flat_normal).clone(),
+            orm.unwrap_or(&neutral.white_linear).clone(),
+            emissive.unwrap_or(&neutral.white_srgb).clone(),
+        ];
+        Self {
+            bind,
+            views,
+            params: factors,
+        }
     }
 }
 

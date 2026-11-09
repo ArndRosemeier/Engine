@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.025 (2026-11-09)
+
+- Texture arrays: every mesh texture set sits in one material table, so meshes with different textures share one multi-draw call. occlusion_city with 16 facade textures (OCCLUSION_CITY_TEXTURES=16) draws its towers in 5 calls instead of 1,696, with the same picture. ENGINE_TEXTURE_ARRAYS=0 turns it off.
+
 ## 0.024 (2026-11-09)
 
 - Fixed a memory leak that slowed scenes down the longer they ran: wgpu 25 never freed render bundles, so every re-recorded batch of draws stayed in memory (occlusion_city on an RTX 5070 fell from 244 to 74 FPS in 25 s with multi-draw and occlusion off). The engine now uses a patched copy of wgpu (third_party/).

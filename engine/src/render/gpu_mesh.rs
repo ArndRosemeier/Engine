@@ -70,6 +70,9 @@ pub struct GpuMesh {
     pub xform_rev: u64,
     /// Some vertices sway in the wind: its shadow changes every frame.
     pub sways: bool,
+    /// The material-table slot its instances carry (texture arrays), if
+    /// they were written with one.
+    pub material: Option<u32>,
 }
 
 impl GpuMesh {
@@ -179,6 +182,7 @@ impl GpuMesh {
             world_box: box_over(local_box, instances),
             xform_rev: 0,
             sways,
+            material: None,
         }
     }
 
