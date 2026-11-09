@@ -377,3 +377,18 @@ impl Renderer {
         }
     }
 }
+
+/// One line in `ENGINE_AUDIT_LOG`, if set.
+pub(crate) fn audit_note(line: &str) {
+    let Ok(path) = std::env::var("ENGINE_AUDIT_LOG") else {
+        return;
+    };
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}

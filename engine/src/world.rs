@@ -713,6 +713,8 @@ pub struct World {
     pub(crate) reupload: (u64, u64),
     /// Bumped by [`Self::request_gpu_check`].
     pub(crate) gpu_check: u64,
+    /// Bumped by [`Self::request_renderer_rebuild`]: (surface, screen buffers).
+    pub(crate) renderer_rebuild: (u64, u64),
     /// [`Self::set_debug_shading`] flags.
     pub(crate) debug_shading: u32,
     /// Changes when only instance lists changed (LOD swaps): the renderer
@@ -884,6 +886,7 @@ impl Default for World {
             resource_epoch: 1,
             reupload: (0, 0),
             gpu_check: 0,
+            renderer_rebuild: (0, 0),
             debug_shading: 0,
             instance_epoch: 1,
             lods: std::collections::BTreeMap::new(),
@@ -1515,6 +1518,19 @@ impl World {
     /// checks the world's meshes themselves (indices in range, finite
     /// positions). Findings go to `ENGINE_AUDIT_LOG` (or `gpu_check.log`).
     /// Stalls for a moment.
+    /// Debugging aid: before the next frame the renderer configures the
+    /// window surface again (`surface`) and/or makes every window-sized
+    /// buffer anew (`buffers`: depth, AO, reflections, post, TAA), as a
+    /// window resize does.
+    pub fn request_renderer_rebuild(&mut self, surface: bool, buffers: bool) {
+        if surface {
+            self.renderer_rebuild.0 += 1;
+        }
+        if buffers {
+            self.renderer_rebuild.1 += 1;
+        }
+    }
+
     pub fn request_gpu_check(&mut self) {
         self.gpu_check += 1;
     }

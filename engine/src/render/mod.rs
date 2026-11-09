@@ -37,6 +37,7 @@ use crate::portal::{
 };
 use crate::texture::{MaterialId, TextureId, WaterMaterialId};
 use crate::world::{Entity, EntityId, InstanceSubmit, ShadowSettings, SurfaceMaterialRef, World};
+use audit::audit_note;
 use clipmap::ClipmapRenderer;
 use frustum::{Bounds, Frustum, Visibility};
 use gpu_mesh::GpuMesh;
@@ -400,6 +401,7 @@ pub struct Renderer {
     /// The world's re-upload requests already carried out.
     reupload_seen: (u64, u64),
     gpu_check_seen: u64,
+    rebuild_seen: (u64, u64),
     gpu_materials: HashMap<MaterialId, GpuTerrainMaterial>,
     gpu_water_materials: HashMap<WaterMaterialId, GpuWaterMaterial>,
     synced_render_epoch: u64,
@@ -596,6 +598,13 @@ impl Renderer {
             })
         };
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
+        audit_note(&format!(
+            "renderer starts at {}x{}, {:?}, {}x MSAA",
+            config.width,
+            config.height,
+            config.present_mode,
+            stencil::scene_samples()
+        ));
         // Independent parts compile on worker threads at once: startup
         // costs about the slowest part instead of the sum of all of them.
         let (ssao, reflect, gi, voxel, sky, instance_cull, postprocess, taa) =
@@ -748,6 +757,7 @@ impl Renderer {
             audit_frame: 0,
             reupload_seen: (0, 0),
             gpu_check_seen: 0,
+            rebuild_seen: (0, 0),
             gpu_materials: HashMap::new(),
             gpu_water_materials: HashMap::new(),
             synced_render_epoch: 0,
@@ -835,7 +845,36 @@ impl Renderer {
         self.size = new_size;
         self.config.width = new_size.width;
         self.config.height = new_size.height;
+        audit_note(&format!(
+            "resize to {}x{} (frame {})",
+            new_size.width, new_size.height, self.audit_frame
+        ));
         self.surface.configure(&self.device, &self.config);
+        self.rebuild_screen_targets();
+    }
+
+    /// Debugging aid (see `World::request_renderer_rebuild`).
+    pub(crate) fn rebuild_if_asked(&mut self, world: &World) {
+        let asked = world.renderer_rebuild;
+        if asked.0 != self.rebuild_seen.0 {
+            audit_note(&format!(
+                "surface reconfigured (frame {})",
+                self.audit_frame
+            ));
+            self.surface.configure(&self.device, &self.config);
+        }
+        if asked.1 != self.rebuild_seen.1 {
+            audit_note(&format!(
+                "screen buffers rebuilt (frame {})",
+                self.audit_frame
+            ));
+            self.rebuild_screen_targets();
+        }
+        self.rebuild_seen = asked;
+    }
+
+    /// Everything sized to the window: depth, AO, reflections, post, TAA.
+    fn rebuild_screen_targets(&mut self) {
         let (depth_texture, depth_view) =
             create_depth(&self.device, self.config.width, self.config.height);
         self.depth_texture = depth_texture;
@@ -881,6 +920,7 @@ impl Renderer {
     pub fn sync_world(&mut self, world: &mut World) {
         let mut t = std::time::Instant::now();
         self.reupload_if_asked(world);
+        self.rebuild_if_asked(world);
         self.apply_present_mode(world.vsync());
         if let Some((start, words)) = world.take_element_upload() {
             let words = &words[..words.len().min(ELEMENT_STATE_WORDS.saturating_sub(start))];
