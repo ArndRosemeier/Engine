@@ -55,6 +55,9 @@ pub struct CrowdProfile {
     /// A ready-made far model (Actors' "Crowd" level exported, say) with the
     /// same skeleton; replaces the automatic simplification.
     pub far_model: Option<Arc<AnimatedModel>>,
+    /// Extra clips an agent can hold instead of idle and walk (sitting,
+    /// hands up, ...): see [`crate::world::World::set_crowd_agent_pose`].
+    pub poses: Vec<String>,
 }
 
 impl CrowdProfile {
@@ -70,7 +73,17 @@ impl CrowdProfile {
             blend_s: 0.2,
             far_detail: 0.05,
             far_model: None,
+            poses: Vec::new(),
         }
+    }
+
+    /// Clips agents can be put in by name with
+    /// [`crate::world::World::set_crowd_agent_pose`] (looping; they still
+    /// move with their place). Baked with idle and walk, so a pose costs
+    /// its clip's frames and nothing per agent.
+    pub fn poses<S: Into<String>>(mut self, names: impl IntoIterator<Item = S>) -> Self {
+        self.poses = names.into_iter().map(Into::into).collect();
+        self
     }
 
     /// Keep this share of the triangles far away (0.01..=1, 0.05 default).
@@ -108,7 +121,8 @@ impl CrowdProfile {
         self
     }
 
-    pub fn validate(&self, model: &AnimatedModel) -> EngineResult<[usize; 2]> {
+    /// The model's clip index for idle, walk, then each pose.
+    pub fn validate(&self, model: &AnimatedModel) -> EngineResult<Vec<usize>> {
         let bad = |m: String| Err(EngineError::InvalidValue(m));
         let ok = |v: f32| v.is_finite() && v >= 0.0;
         if !ok(self.near_m) || !ok(self.far_m) || !ok(self.shadow_m) || !ok(self.blend_s) {
@@ -129,15 +143,17 @@ impl CrowdProfile {
             return bad(format!("crowd model has more than {MAX_JOINTS} joints"));
         }
         let find = |name: &str| model.clips.iter().position(|c| c.name == name);
-        match (find(&self.idle), find(&self.walk)) {
-            (Some(i), Some(w)) => Ok([i, w]),
-            _ => bad(format!(
-                "crowd model needs clips {:?} and {:?} (it has {:?})",
-                self.idle,
-                self.walk,
-                model.clip_names().collect::<Vec<_>>()
-            )),
-        }
+        let names = [&self.idle, &self.walk].into_iter().chain(&self.poses);
+        names
+            .map(|name| {
+                find(name).ok_or_else(|| {
+                    EngineError::InvalidValue(format!(
+                        "crowd model needs clip {name:?} (it has {:?})",
+                        model.clip_names().collect::<Vec<_>>()
+                    ))
+                })
+            })
+            .collect()
     }
 }
 
@@ -147,9 +163,10 @@ pub struct CrowdId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CrowdAgentId(pub u32);
 
-/// Which of the crowd's clips: 0 idle, 1 walk.
+/// Which of the crowd's clips: 0 idle, 1 walk, then the poses.
 pub(crate) const IDLE: usize = 0;
 pub(crate) const WALK: usize = 1;
+pub(crate) const POSES: usize = 2;
 
 /// The clip being faded out.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -169,9 +186,21 @@ pub(crate) struct CrowdAgent {
     pub fade: Option<AgentFade>,
     /// The full character standing in while near.
     pub near: Option<EntityId>,
+    /// Held in this clip (an index into the crowd's clips, from
+    /// [`POSES`]) instead of idle or walk.
+    pub pose: Option<usize>,
 }
 
 impl CrowdAgent {
+    /// The clip it should play: its pose, else walk or idle by its speed.
+    pub fn wanted_clip(&self) -> usize {
+        match self.pose {
+            Some(p) => p,
+            None if self.speed > 0.05 => WALK,
+            None => IDLE,
+        }
+    }
+
     pub fn rate(&self, walk_mps: f32) -> f32 {
         if self.clip == WALK {
             (self.speed / walk_mps).clamp(0.5, 2.0)
@@ -185,8 +214,8 @@ impl CrowdAgent {
 pub(crate) struct Crowd {
     pub model: Arc<AnimatedModel>,
     pub profile: CrowdProfile,
-    /// Model clip index for idle and walk.
-    pub clips: [usize; 2],
+    /// Model clip index for idle, walk and each pose (see [`POSES`]).
+    pub clips: Vec<usize>,
     /// The simplified (or given) model drawn far away.
     pub far: Option<Arc<AnimatedModel>>,
     /// For each mesh of a simplified `far` model, the mesh of `model` whose
@@ -203,20 +232,21 @@ impl Crowd {
     /// Advance a far agent's clips by `dt`.
     #[cfg(test)]
     pub fn advance(&self, a: &mut CrowdAgent, dt: f32) {
-        advance(&self.profile, &self.model, self.clips, a, dt);
+        advance(&self.profile, &self.model, &self.clips, a, dt);
     }
 }
 
-/// Advance a far agent: walk or idle by its speed, cross-fading on a change.
+/// Advance a far agent: its pose, else walk or idle by its speed,
+/// cross-fading on a change.
 pub(crate) fn advance(
     p: &CrowdProfile,
     model: &AnimatedModel,
-    clips: [usize; 2],
+    clips: &[usize],
     a: &mut CrowdAgent,
     dt: f32,
 ) {
     let duration = |clip: usize| model.clips[clips[clip]].duration.max(1e-3);
-    let want = if a.speed > 0.05 { WALK } else { IDLE };
+    let want = a.wanted_clip();
     if want != a.clip {
         a.fade = (p.blend_s > 0.0).then_some(AgentFade {
             clip: a.clip,
@@ -439,6 +469,7 @@ mod tests {
             time: 0.3,
             fade: None,
             near: None,
+            pose: None,
         };
         crowd.advance(&mut a, 0.1);
         assert_eq!(a.clip, IDLE);

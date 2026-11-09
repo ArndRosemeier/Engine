@@ -1,4 +1,4 @@
-//! Crowds on the GPU: each crowd's idle and walk clips baked into a texture
+//! Crowds on the GPU: each crowd's idle, walk and pose clips baked into a texture
 //! of joint matrices (30 frames a second, blended in the vertex shader), and
 //! every far agent one instance: one draw per mesh for the whole crowd.
 
@@ -177,14 +177,14 @@ pub(crate) struct Bake {
     pub width: u32,
     pub rows: Vec<[f32; 4]>,
     /// First row and frame count of idle and walk.
-    pub clips: [(u32, u32); 2],
+    pub clips: Vec<(u32, u32)>,
 }
 
-pub(crate) fn bake(model: &AnimatedModel, clips: [usize; 2]) -> Bake {
+pub(crate) fn bake(model: &AnimatedModel, clips: &[usize]) -> Bake {
     let joints = model.skeleton.joint_names.len().max(1);
     let width = (joints * 3) as u32;
     let mut rows = Vec::new();
-    let mut out = [(0u32, 0u32); 2];
+    let mut out = vec![(0u32, 0u32); clips.len()];
     for (k, &clip) in clips.iter().enumerate() {
         let duration = model.clips[clip].duration.max(1e-3);
         let frames = ((duration * CROWD_BAKE_FPS).ceil() as u32).max(2);
@@ -232,7 +232,7 @@ impl Bake {
 }
 
 struct CrowdDraw {
-    key: (usize, usize),
+    key: (usize, usize, Vec<usize>),
     meshes: Vec<GpuSkinnedMesh>,
     bake: Bake,
     _anim: wgpu::Texture,
@@ -402,12 +402,14 @@ impl CrowdGpu {
         self.draws.retain(|id, _| live.contains(id));
         for (id, crowd) in world.crowds() {
             let drawn: &Arc<AnimatedModel> = crowd.far.as_ref().unwrap_or(&crowd.model);
-            let key = (
+            let models = (
                 Arc::as_ptr(&crowd.model) as usize,
                 Arc::as_ptr(drawn) as usize,
             );
-            if self.draws.get(&id.0).is_none_or(|d| d.key != key) {
-                let bake = bake(&crowd.model, crowd.clips);
+            let same = |d: &CrowdDraw| (d.key.0, d.key.1) == models && d.key.2 == crowd.clips;
+            if !self.draws.get(&id.0).is_some_and(same) {
+                let key = (models.0, models.1, crowd.clips.clone());
+                let bake = bake(&crowd.model, &crowd.clips);
                 let height = (bake.rows.len() / bake.width as usize).max(1) as u32;
                 let anim = device.create_texture_with_data(
                     queue,
@@ -568,7 +570,7 @@ mod tests {
                 .unwrap();
         let walk = model.clips.iter().position(|c| c.name == "walk").unwrap();
         let idle = model.clips.iter().position(|c| c.name == "idle").unwrap();
-        let b = bake(&model, [idle, walk]);
+        let b = bake(&model, &[idle, walk]);
         let joints = model.skeleton.joint_names.len();
         let (start, frames) = b.clips[WALK];
         let d = model.clips[walk].duration;
