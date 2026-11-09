@@ -3,7 +3,7 @@
 use super::{EntityId, World};
 use crate::anim::{AnimatedModel, AnimationProfile, Locomotion};
 use crate::crowd::{
-    far_model, spread, Crowd, CrowdAgent, CrowdAgentId, CrowdId, CrowdProfile, IDLE, WALK,
+    far_model, spread, Crowd, CrowdAgent, CrowdAgentId, CrowdId, CrowdProfile, IDLE, POSES, WALK,
 };
 use crate::error::{EngineError, EngineResult};
 use crate::place::Place;
@@ -91,6 +91,7 @@ impl World {
             time: spread(slot as u32) * c.duration(IDLE),
             fade: None,
             near: None,
+            pose: None,
         };
         if slot == c.agents.len() {
             c.agents.push(Some(agent));
@@ -121,6 +122,44 @@ impl World {
             .ok_or(no_agent(agent))?;
         a.place = place;
         a.speed = speed_mps;
+        Ok(())
+    }
+
+    /// Holds an agent in one of the profile's poses (by name; see
+    /// [`CrowdProfile::poses`]), or back to idle and walk with `None`. It
+    /// still moves with its place; a full character standing in for it
+    /// plays the pose too, without foot IK (a seated rider's feet are not
+    /// on the ground).
+    pub fn set_crowd_agent_pose(
+        &mut self,
+        crowd: CrowdId,
+        agent: CrowdAgentId,
+        pose: Option<&str>,
+    ) -> EngineResult<()> {
+        let c = self.crowd_mut(crowd)?;
+        let pose = match pose {
+            None => None,
+            Some(name) => {
+                let k = c
+                    .profile
+                    .poses
+                    .iter()
+                    .position(|p| p == name)
+                    .ok_or_else(|| {
+                        EngineError::InvalidValue(format!(
+                            "crowd has no pose {name:?} (it has {:?})",
+                            c.profile.poses
+                        ))
+                    })?;
+                Some(POSES + k)
+            }
+        };
+        let a = c
+            .agents
+            .get_mut(agent.0 as usize)
+            .and_then(|a| a.as_mut())
+            .ok_or(no_agent(agent))?;
+        a.pose = pose;
         Ok(())
     }
 
@@ -213,6 +252,12 @@ impl World {
         for (_, i) in &want {
             wanted[*i] = true;
         }
+        // A clip's name, and the clip a full character plays as its idle.
+        let names: Vec<String> = (crowd.clips.iter())
+            .map(|&c| crowd.model.clips[c].name.clone())
+            .collect();
+        let name = |clip: usize| names[clip].clone();
+        let idle_of = |a: &CrowdAgent| a.pose.map_or_else(|| p.idle.clone(), name);
         let state = |a: &CrowdAgent| {
             if a.clip == WALK {
                 Locomotion::Moving {
@@ -231,8 +276,12 @@ impl World {
                 }
                 // Back into the crowd, at the step the character was on.
                 if let Some(anim) = self.animated.get(&e) {
-                    let walking = anim.animator.clip_name() == p.walk;
-                    a.clip = if walking { WALK } else { IDLE };
+                    let playing = anim.animator.clip_name();
+                    a.clip = match a.pose {
+                        Some(k) if name(k) == playing => k,
+                        _ if playing == p.walk => WALK,
+                        _ => IDLE,
+                    };
                     a.time = anim.animator.time();
                     a.fade = None;
                 }
@@ -242,7 +291,7 @@ impl World {
                 }
             } else if wanted[i] {
                 // Out of the crowd as a full character with the same pose.
-                let want_clip = if a.speed > 0.05 { WALK } else { IDLE };
+                let want_clip = a.wanted_clip();
                 if want_clip != a.clip {
                     a.clip = want_clip;
                     a.time = 0.0;
@@ -251,7 +300,7 @@ impl World {
                     continue;
                 };
                 let setup = AnimationProfile::new()
-                    .idle(p.idle.clone())
+                    .idle(idle_of(a))
                     .walk(p.walk.clone())
                     .walk_speed(p.walk_mps);
                 let ok = self.configure_animation(e, setup).is_ok()
@@ -265,24 +314,41 @@ impl World {
                     anim.animator.snap_to(a.time);
                 }
                 // Up close, feet stand on what is drawn (a rig without
-                // legs we can find just goes without).
-                let _ = self.set_foot_ik(e, Some(crate::anim::FootIk::default()));
+                // legs we can find just goes without); not in a pose.
+                if a.pose.is_none() {
+                    let _ = self.set_foot_ik(e, Some(crate::anim::FootIk::default()));
+                }
                 a.fade = None;
                 a.near = Some(e);
             }
         }
         let model = crowd.model.clone();
-        let clips = crowd.clips;
+        let clips = crowd.clips.clone();
         for a in crowd.agents.iter_mut().flatten() {
             match a.near {
                 Some(e) => {
-                    a.clip = if a.speed > 0.05 { WALK } else { IDLE };
+                    let want = a.wanted_clip();
+                    let posed_before = a.clip >= POSES;
+                    let changed = want != a.clip && (want >= POSES || posed_before);
+                    a.clip = want;
+                    if changed {
+                        // Into a pose or out of one: the character's idle
+                        // becomes that clip, and feet stand only when not
+                        // posed.
+                        let setup = AnimationProfile::new()
+                            .idle(idle_of(a))
+                            .walk(p.walk.clone())
+                            .walk_speed(p.walk_mps);
+                        let _ = self.configure_animation(e, setup);
+                        let ik = a.pose.is_none().then(crate::anim::FootIk::default);
+                        let _ = self.set_foot_ik(e, ik);
+                    }
                     if let Some(anim) = self.animated.get_mut(&e) {
                         anim.transform = a.place.to_matrix();
                         let _ = anim.animator.set_locomotion(state(a));
                     }
                 }
-                None => crate::crowd::advance(&p, &model, clips, a, dt),
+                None => crate::crowd::advance(&p, &model, &clips, a, dt),
             }
         }
     }
@@ -354,5 +420,50 @@ mod tests {
         );
         assert_eq!(world.crowd_agent_count(crowd), 5);
         assert!(world.remove_crowd(crowd));
+    }
+
+    #[test]
+    fn posed_agents_hold_their_pose_far_and_near() {
+        let mut world = World::new();
+        let crowd = world
+            .add_crowd(
+                character(),
+                CrowdProfile::new("idle", "walk")
+                    .near(16.0, 4)
+                    .poses(["walk"]),
+            )
+            .unwrap();
+        // An unknown pose is refused, a known one taken.
+        let a = world
+            .add_crowd_agent(crowd, Place::new(60.0, 0.0, 0.0))
+            .unwrap();
+        assert!(world.set_crowd_agent_pose(crowd, a, Some("sit")).is_err());
+        world.set_crowd_agent_pose(crowd, a, Some("walk")).unwrap();
+        world.look_first_person((0.0, 1.7, 0.0), 90.0, 0.0);
+        let dt = 1.0 / 60.0;
+        // Standing still, far: it plays its pose, not idle.
+        for _ in 0..30 {
+            world.tick_crowds(dt);
+        }
+        let agent = |w: &World| w.crowds().next().unwrap().1.agents[0].clone().unwrap();
+        assert_eq!(agent(&world).clip, crate::crowd::POSES);
+        // Near: a character playing the pose, with no foot IK.
+        world
+            .set_crowd_agent(crowd, a, Place::new(5.0, 0.0, 0.0), 0.0)
+            .unwrap();
+        world.tick_crowds(dt);
+        world.tick_animations(dt);
+        let e = world.crowd_agent_character(crowd, a).unwrap();
+        let anim = world.animated_entity(e).unwrap().animator();
+        assert_eq!(anim.clip_name(), "walk");
+        assert!(anim.ik.is_none());
+        // Let go: back to idle, feet on the ground again.
+        world.set_crowd_agent_pose(crowd, a, None).unwrap();
+        world.tick_crowds(dt);
+        world.tick_animations(1.0);
+        let anim = world.animated_entity(e).unwrap().animator();
+        assert_eq!(anim.clip_name(), "idle");
+        assert!(anim.ik.is_some());
+        assert_eq!(world.crowds().next().unwrap().1.clips.len(), 3);
     }
 }

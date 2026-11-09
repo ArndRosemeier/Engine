@@ -315,7 +315,10 @@ its triangles (`.far_detail(f)`, or `.far_model(m)` for a ready-made one such
 as Actors' "Crowd" level). The nearest (`.near(metres, max)`, 18 m and 24 by
 default) become full characters at the same pose and step and go back the
 same way; `crowd_agent_character` gives the stand-in to hit or decorate.
-See `examples/crowds`.
+Extra clips named in `.poses(["sit", ...])` are baked too, and
+`set_crowd_agent_pose(crowd, agent, Some("sit"))?` holds an agent in one
+while it still moves with its place (people in cars, on benches); its
+stand-in plays it too, without foot IK. See `examples/crowds`.
 
 **Colour grading and fog by zone:** `world.set_color_grade(ColorGrade::warm())?`
 sets the look of the image (exposure, contrast, saturation, white balance,

@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.014 (2026-11-09)
+
+- Crowd poses: a crowd's profile can name extra clips (.poses(["drive", "ride"])) and world.set_crowd_agent_pose(crowd, agent, Some("drive")) holds an agent in one while it moves with its place, far (baked with idle and walk, nothing extra per agent) and near (its full character plays the pose, with foot IK off). For people sitting in cars or on benches without a second crowd, and a second copy of the model, per look.
+
 ## 0.013 (2026-11-09)
 
 - Engine's frame work runs on all cores: animation (clip sampling, foot IK and its ground search), recording the shadow maps (one command buffer per light view) and recording the world's opaque meshes (render bundles in chunks of 128, recorded side by side) run on a frame-only thread pool that background jobs never use, so frame work never waits behind them. Each step finishes completely before the next starts, and command buffers are submitted in a fixed order, so the picture is the same as before.
