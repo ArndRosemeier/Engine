@@ -313,7 +313,10 @@ struct MultiGroup {
     /// target's own buffer).
     occluded: bool,
     offset: u64,
+    /// At most this many draws; the GPU says how many (GPU scene).
     count: u32,
+    /// Where in `MultiDraw::draw_counts` the GPU wrote the draw count.
+    draw_count: Option<u64>,
 }
 
 /// A pass's opaque meshes as a few multi-draws, as professional engines
@@ -332,6 +335,8 @@ struct MultiDraw {
     args: Option<wgpu::Buffer>,
     written: Vec<DrawIndexedArgs>,
     occlusion_args: Option<wgpu::Buffer>,
+    /// The GPU scene's draw counts.
+    draw_counts: Option<wgpu::Buffer>,
     rest: Option<wgpu::RenderBundle>,
 }
 
@@ -372,7 +377,12 @@ impl MultiDraw {
             if bound.is_none_or(|b| b.index != g.index) {
                 pass.set_index_buffer(g.index.slice(..), wgpu::IndexFormat::Uint32);
             }
-            pass.multi_draw_indexed_indirect(args, g.offset, g.count);
+            match (g.draw_count, self.draw_counts.as_ref()) {
+                (Some(at), Some(counts)) => {
+                    pass.multi_draw_indexed_indirect_count(args, g.offset, counts, at, g.count);
+                }
+                _ => pass.multi_draw_indexed_indirect(args, g.offset, g.count),
+            }
             bound = Some(g);
         }
         if let Some(rest) = self.rest.as_ref() {
@@ -390,6 +400,7 @@ struct MultiPlan {
     groups: Vec<MultiGroup>,
     args: Vec<DrawIndexedArgs>,
     occlusion_args: Option<wgpu::Buffer>,
+    draw_counts: Option<wgpu::Buffer>,
     rest: Option<wgpu::RenderBundle>,
     indirect_draws: u32,
 }
@@ -979,6 +990,16 @@ impl Renderer {
         if multi_draw {
             required_features |= multi_draw_features;
         }
+        // The GPU scene's multi-draws read their draw counts from the GPU.
+        let gpu_scene_on = multi_draw && !gpu_scene::disabled_by_env();
+        let draw_count = gpu_scene_on
+            && adapter
+                .features()
+                .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT)
+            && !gpu_scene::draw_count_disabled_by_env();
+        if draw_count {
+            required_features |= wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;
+        }
         let mut required_limits = wgpu::Limits::default();
         let texture_arrays = multi_draw
             && adapter
@@ -1286,8 +1307,7 @@ impl Renderer {
             gpu_meshes: HashMap::new(),
             arenas: geometry::MeshArenas::default(),
             multi_draw,
-            gpu_scene: (multi_draw && !gpu_scene::disabled_by_env())
-                .then(gpu_scene::GpuScene::default),
+            gpu_scene: gpu_scene_on.then(gpu_scene::GpuScene::default),
             materials_synced: 0,
             bindless,
             gpu_instance_batches: HashMap::new(),
@@ -1342,7 +1362,11 @@ impl Renderer {
             next_scene_uniform_slot: 0,
             gpu_profiler,
             instance_cull,
-            occlusion,
+            occlusion: {
+                let mut o = occlusion;
+                o.compact = draw_count;
+                o
+            },
             occlusion_auto: Default::default(),
             occlusion_active: false,
             occlusion_view_proj: glam::Mat4::IDENTITY,
@@ -3526,6 +3550,7 @@ impl Renderer {
             });
             multi.groups = plan.groups;
             multi.occlusion_args = plan.occlusion_args;
+            multi.draw_counts = plan.draw_counts;
             multi.rest = plan.rest;
             cache.frame = Some(OpaqueFrame {
                 target,
@@ -3701,6 +3726,7 @@ impl Renderer {
                 occluded,
                 offset,
                 count,
+                draw_count: None,
             };
             if !own.is_empty() {
                 groups.push(group(false, args.len() as u64 * stride, own.len() as u32));
@@ -3750,6 +3776,9 @@ impl Renderer {
             groups,
             args,
             occlusion_args: occlusion.map(|f| f.args.clone()),
+            draw_counts: occlusion
+                .filter(|_| scene_region.is_some())
+                .and_then(|f| f.draw_counts.clone()),
             rest,
             indirect_draws,
         }
@@ -5001,7 +5030,12 @@ impl Renderer {
         if scene.stamp != Some(stamp) || world.rooms_culling() {
             let rows = self.scene_rows(world, space);
             let all = self.occlusion.reserve_rows(&self.device, rows.len());
-            for w in scene.apply(rows, all) {
+            let writes = scene.apply(rows, all);
+            if scene.regrouped {
+                self.occlusion
+                    .write_row_groups(&self.queue, &scene.row_groups());
+            }
+            for w in writes {
                 self.occlusion.write_rows(
                     &self.queue,
                     w.start,
@@ -5093,6 +5127,7 @@ impl Renderer {
                 .map(|b| b.pipes.depth_prepass.clone()),
             groups: scene_groups(scene, frame, region).collect(),
             occlusion_args: Some(frame.args.clone()),
+            draw_counts: frame.draw_counts.clone(),
             ..MultiDraw::default()
         })
     }
@@ -6032,16 +6067,24 @@ fn scene_groups<'a>(
     frame: &'a occlusion::OcclusionFrame,
     region: occlusion::ArgsRegion,
 ) -> impl Iterator<Item = MultiGroup> + 'a {
-    scene.groups.iter().map(move |g| MultiGroup {
-        albedo: g.key.bind.clone(),
-        bindless: g.key.bindless,
-        vertex: g.key.vertex.clone(),
-        index: g.key.index.clone(),
-        instances: g.key.instances.clone(),
-        occluded: true,
-        offset: frame.region_offset(region, g.start),
-        count: g.len,
-    })
+    scene
+        .groups
+        .iter()
+        .zip(0u32..)
+        .map(move |(g, i)| MultiGroup {
+            albedo: g.key.bind.clone(),
+            bindless: g.key.bindless,
+            vertex: g.key.vertex.clone(),
+            index: g.key.index.clone(),
+            instances: g.key.instances.clone(),
+            occluded: true,
+            offset: frame.region_offset(region, g.start),
+            count: g.len,
+            draw_count: frame
+                .draw_counts
+                .is_some()
+                .then(|| frame.count_offset(region, i)),
+        })
 }
 
 fn mesh_submit(compacted: &HashSet<EntityId>, id: EntityId) -> MeshSubmit {

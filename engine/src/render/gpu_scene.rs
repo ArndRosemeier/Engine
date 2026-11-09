@@ -19,6 +19,13 @@ pub fn disabled_by_env() -> bool {
     std::env::var("ENGINE_GPU_SCENE").is_ok_and(|v| v.trim() == "0")
 }
 
+/// Whether multi-draws take their count from the GPU is switched off
+/// (`ENGINE_DRAW_COUNT=0`: every row is drawn, hidden ones with no
+/// instances).
+pub fn draw_count_disabled_by_env() -> bool {
+    std::env::var("ENGINE_DRAW_COUNT").is_ok_and(|v| v.trim() == "0")
+}
+
 /// What one multi-draw shares.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct GroupKey {
@@ -78,6 +85,8 @@ pub struct GpuScene {
     pub groups: Vec<SceneGroup>,
     /// Rows written last sync (for the frame stats).
     pub written: usize,
+    /// The last sync changed which rows form which group.
+    pub regrouped: bool,
 }
 
 impl GpuScene {
@@ -120,6 +129,7 @@ impl GpuScene {
         }
         let writes = runs(&dirty);
         self.written = dirty.len();
+        self.regrouped = !same_order;
         if !same_order {
             self.ids = rows.iter().map(|r| r.id).collect();
             self.slots = Arc::new(
@@ -144,6 +154,17 @@ impl GpuScene {
         }
         self.rows = rows.into_iter().map(|r| r.mesh).collect();
         writes
+    }
+
+    /// Each row's group index and that group's first row (for the GPU's
+    /// per-group compaction).
+    pub fn row_groups(&self) -> Vec<[u32; 2]> {
+        let mut out = Vec::with_capacity(self.ids.len());
+        for (i, g) in self.groups.iter().enumerate() {
+            let at = [u32::try_from(i).expect("group count exceeds u32"), g.start];
+            out.extend(std::iter::repeat_n(at, g.len as usize));
+        }
+        out
     }
 }
 

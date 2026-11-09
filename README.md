@@ -552,7 +552,12 @@ tests every row against the view, and against the depth pyramid when
 occlusion culling is on, and writes the draw arguments itself: what was seen
 last frame draws first, then the rest that turns out visible. The CPU no
 longer sorts, uploads or reads back the candidates, and no longer walks
-every mesh for the second depth pass. `ENGINE_GPU_SCENE=0` turns it off.
+every mesh for the second depth pass. Where the GPU can (Vulkan and DX12
+cards), it also decides how many draws each multi-draw issues: it packs the
+visible meshes of each group together and counts them, so hidden meshes cost
+no draw at all (`multi_draw_indexed_indirect_count`; `ENGINE_DRAW_COUNT=0`
+draws every row, hidden ones with no instances). `ENGINE_GPU_SCENE=0` turns
+the GPU scene off.
 
 Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_global_illumination`,
 `set_bloom`, `set_tone_map`, `set_haze`, `set_lod_bias`, `set_view_distance`.
@@ -646,6 +651,7 @@ Every program built on the engine understands these:
 | `ENGINE_MULTI_DRAW=0` | Draw every opaque mesh with its own draw call instead of multi-draws, to compare |
 | `ENGINE_TEXTURE_ARRAYS=0` | Split multi-draws by texture instead of reading every texture through the material table, to compare |
 | `ENGINE_GPU_SCENE=0` | Build the opaque mesh draws on the CPU each frame instead of keeping them on the GPU, to compare |
+| `ENGINE_DRAW_COUNT=0` | GPU scene: draw every row (hidden ones with no instances) instead of letting the GPU count the visible ones, to compare |
 | `ENGINE_SHADOW_CACHE=0` | Draw every sun shadow caster every frame (no static cache), to compare frame times |
 | `ENGINE_SHADOW_REFRESH=1` | Draw every sun cascade every frame, whatever `world.set_shadow_cascade_refresh` says, to compare frame times |
 | `ENGINE_OCCLUSION_CHECK=1` | Read every frame's occlusion answers back and compare them with the CPU copy of the test; prints mismatches (slow, for driver trouble) |
