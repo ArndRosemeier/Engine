@@ -659,6 +659,10 @@ pub struct Renderer {
     instance_cull: InstanceCull,
     /// Skips meshes hidden behind others (see `occlusion.rs`).
     occlusion: occlusion::Occlusion,
+    /// Picks the frames `OcclusionMode::Auto` culls in.
+    occlusion_auto: occlusion::OcclusionAuto,
+    /// Whether this frame culls by occlusion (decided as it starts).
+    occlusion_active: bool,
     /// The main view's (jittered) view-projection this frame.
     occlusion_view_proj: glam::Mat4,
     /// This frame filled depth before the world pass (for AO or occlusion).
@@ -1035,6 +1039,8 @@ impl Renderer {
             gpu_profiler,
             instance_cull,
             occlusion,
+            occlusion_auto: Default::default(),
+            occlusion_active: false,
             occlusion_view_proj: glam::Mat4::IDENTITY,
             prepass_done: false,
             poses: Vec::new(),
@@ -1787,6 +1793,13 @@ impl Renderer {
         after: impl FnOnce(&wgpu::Device, &wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView),
     ) -> Result<(), wgpu::SurfaceError> {
         self.follow_render_scale(world);
+        self.occlusion_active = match world.occlusion_mode() {
+            crate::world::OcclusionMode::Off => false,
+            crate::world::OcclusionMode::On => true,
+            crate::world::OcclusionMode::Auto => self
+                .occlusion_auto
+                .decide(self.draw_opaque.len(), self.occlusion.counts()),
+        };
         let mut t = std::time::Instant::now();
         // The scene draws into Engine's own targets, and only the last
         // steps (post-processing, the UI) into the window's image. So the
@@ -1800,7 +1813,7 @@ impl Renderer {
                 label: Some("frame-encoder"),
             });
         self.mark_gpu(&mut encoder, Mark::Start);
-        if world.occlusion_culling() {
+        if self.occlusion_active {
             self.occlusion.collect(&self.device);
         }
         let taa_on = world.taa() && taa_env_enabled();
@@ -2420,7 +2433,7 @@ impl Renderer {
         } else {
             MainCullSelection::none()
         };
-        let occlusion_ids = if world.occlusion_culling() {
+        let occlusion_ids = if self.occlusion_active {
             let ids = self.occlusion_candidates(world, live);
             main_cull.occlusion = Some(self.begin_occlusion(&ids));
             ids
@@ -3209,6 +3222,20 @@ impl Renderer {
                 .occlusion
                 .as_ref()
                 .expect("the occluder prepass runs only with occlusion culling");
+            // Ground hides things too (hills, voxel cliffs): its depth goes
+            // into the pyramid with the meshes seen lately.
+            if world.space_draws_environment(space) {
+                if let Some(clip) = self.clipmap.as_ref() {
+                    clip.draw_land_depth(&mut pass, &self.shadow.resource_bind);
+                    pass.set_bind_group(0, scene_bind, &[]);
+                }
+            }
+            if space == SpaceId::DEFAULT && self.voxel.is_drawing() {
+                let draws = self.voxel.visible_in(&self.frustum);
+                pass.set_pipeline(&self.pipelines.voxel_depth_prepass);
+                pass.set_bind_group(1, &self.pipelines.white_albedo, &[]);
+                self.voxel.draw(&mut pass, &draws);
+            }
             pass.set_pipeline(&self.pipelines.depth_prepass);
             for &id in &self.draw_opaque {
                 if !frame.first.contains(&id) {
@@ -4300,7 +4327,7 @@ impl Renderer {
         }
         let sun = if world.shadows().is_some() { 3 } else { 0 };
         // The main view culls twice with occlusion on: frustum, then depth.
-        let main = if world.occlusion_culling() { 2 } else { 1 };
+        let main = if self.occlusion_active { 2 } else { 1 };
         let views = main + sun + self.shadow.lamps.frame_views.len();
         let active_ranges = self
             .gpu_instance_batches

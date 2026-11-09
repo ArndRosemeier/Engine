@@ -937,7 +937,7 @@ pub struct World {
     taa: bool,
     /// Share of the window the scene is drawn at (1 = full size).
     render_scale: f32,
-    occlusion_culling: bool,
+    occlusion_mode: OcclusionMode,
     occlusion_stats: OcclusionStats,
     tone_map: ToneMap,
     grass: f32,
@@ -1064,7 +1064,7 @@ impl Default for World {
             quality: crate::quality::Quality::High,
             taa: true,
             render_scale: 1.0,
-            occlusion_culling: false,
+            occlusion_mode: OcclusionMode::Auto,
             occlusion_stats: OcclusionStats::default(),
             tone_map: ToneMap::default(),
             grass: 1.0,
@@ -1460,15 +1460,33 @@ impl World {
         self.render_scale
     }
 
-    /// Occlusion culling (off by default): skip meshes hidden behind other
-    /// things, such as the blocks behind a street wall. The GPU tests each
-    /// mesh's box against this frame's depth, so nothing pops in; what it
-    /// saves is the vertex and pixel work of everything out of sight. It pays
-    /// in dense scenes (cities, interiors, forests seen from inside) and costs
-    /// a little in open ones. `ENGINE_OCCLUSION=0` or `=1` overrides this for
-    /// comparisons. Only plain (non-instanced) meshes are tested.
+    /// Occlusion culling: skip meshes hidden behind other things, such as
+    /// the blocks behind a street wall. The GPU tests each mesh's box against
+    /// this frame's depth, so nothing pops in; what it saves is the vertex
+    /// and pixel work of everything out of sight. `true` runs it always,
+    /// `false` never; see [`World::set_occlusion_mode`] for the default,
+    /// [`OcclusionMode::Auto`], which runs it only where it pays.
     pub fn set_occlusion_culling(&mut self, on: bool) {
-        self.occlusion_culling = on;
+        self.occlusion_mode = if on {
+            OcclusionMode::On
+        } else {
+            OcclusionMode::Off
+        };
+    }
+
+    /// How occlusion culling is chosen. The default, [`OcclusionMode::Auto`],
+    /// tries it for a moment whenever enough meshes are in view, keeps it
+    /// while it hides a good share of them (cities, interiors, hills) and
+    /// switches it off again where it doesn't (open fields), trying again
+    /// later, less often each time it didn't pay. `ENGINE_OCCLUSION=0`, `=1`
+    /// or `=auto` overrides this for comparisons.
+    pub fn set_occlusion_mode(&mut self, mode: OcclusionMode) {
+        self.occlusion_mode = mode;
+    }
+
+    /// The occlusion mode in effect (the setting, or `ENGINE_OCCLUSION`).
+    pub fn occlusion_mode(&self) -> OcclusionMode {
+        occlusion_env().unwrap_or(self.occlusion_mode)
     }
 
     /// What occlusion culling found in a recent frame (zeros while it is off).
@@ -1480,9 +1498,11 @@ impl World {
         self.occlusion_stats = stats;
     }
 
-    /// Whether occlusion culling runs (the setting, or `ENGINE_OCCLUSION`).
+    /// Whether occlusion culling may run: on, or chosen automatically (the
+    /// setting, or `ENGINE_OCCLUSION`). [`World::occlusion_stats`] says
+    /// whether it ran lately.
     pub fn occlusion_culling(&self) -> bool {
-        occlusion_env().unwrap_or(self.occlusion_culling)
+        self.occlusion_mode() != OcclusionMode::Off
     }
 
     /// The last preset given to [`Self::set_quality`].
@@ -5099,13 +5119,27 @@ pub struct OcclusionStats {
     pub hidden: u32,
 }
 
-/// `ENGINE_OCCLUSION=0|1` overrides [`World::set_occlusion_culling`].
-fn occlusion_env() -> Option<bool> {
-    static ENV: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+/// When occlusion culling runs ([`World::set_occlusion_mode`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OcclusionMode {
+    /// Never.
+    Off,
+    /// Every frame.
+    On,
+    /// Where it pays: tried whenever enough meshes are in view, kept while
+    /// it hides a good share of them.
+    #[default]
+    Auto,
+}
+
+/// `ENGINE_OCCLUSION=0|1|auto` overrides [`World::set_occlusion_mode`].
+fn occlusion_env() -> Option<OcclusionMode> {
+    static ENV: std::sync::OnceLock<Option<OcclusionMode>> = std::sync::OnceLock::new();
     *ENV.get_or_init(|| match std::env::var("ENGINE_OCCLUSION").as_deref() {
-        Ok("0") => Some(false),
-        Ok("1") => Some(true),
-        Ok(other) => panic!("ENGINE_OCCLUSION must be 0 or 1, got {other:?}"),
+        Ok("0") => Some(OcclusionMode::Off),
+        Ok("1") => Some(OcclusionMode::On),
+        Ok("auto") => Some(OcclusionMode::Auto),
+        Ok(other) => panic!("ENGINE_OCCLUSION must be 0, 1 or auto, got {other:?}"),
         Err(_) => None,
     })
 }

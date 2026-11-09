@@ -484,9 +484,14 @@ world.set_target_fps(Some(60.0))?;    // keep 60 FPS: pull LOD and grass in, the
 world.set_vsync(false);               // uncapped frame rate (the title bar always shows FPS)
 ```
 
-**Occlusion culling** (off by default; worth it in cities and other dense
-scenes): `world.set_occlusion_culling(true)` stops drawing meshes and
-instances hidden behind others, such as the blocks behind a street wall. The
+**Occlusion culling** (automatic by default): meshes and instances hidden
+behind others, such as the blocks behind a street wall, are not drawn. In
+`OcclusionMode::Auto` Engine tries it whenever 32 or more meshes are in view,
+keeps it while it hides at least 15% of them, and switches it off where it
+doesn't (open fields), trying again later and less often each time.
+`world.set_occlusion_culling(true / false)` forces it on or off;
+`world.set_occlusion_mode(...)` picks any of the three. Hills and voxel ground
+count as occluders too. The
 depth prepass draws what was visible a frame ago, a depth pyramid is built
 from it, and the GPU tests every other mesh's box against this frame's depth,
 so nothing pops in: a stale answer only costs speed. Shadow maps still draw
@@ -595,7 +600,7 @@ Every program built on the engine understands these:
 | `ENGINE_SCREENSHOT_WAIT=1` | Wait for `world.mark_ready()` before counting screenshot frames |
 | `ENGINE_MSAA=4` | 4x MSAA on top of TAA (default 1 while TAA is on: TAA smooths edges and costs 10-15% less at 4K; 4 when `ENGINE_TAA=0`) |
 | `ENGINE_TONEMAP=aces` | Tone-map with ACES instead of AgX (`world.set_tone_map(ToneMap::Aces)` in code) |
-| `ENGINE_OCCLUSION=0` or `=1` | Switch occlusion culling off or on whatever the game set (`world.set_occlusion_culling`), to compare frame times |
+| `ENGINE_OCCLUSION=0`, `=1` or `=auto` | Occlusion culling off, on or automatic whatever the game set (`world.set_occlusion_mode`), to compare frame times |
 | `ENGINE_RENDER_SCALE=0.75` | Draw the scene at that share of the window and upscale (0.5 to 1.0), whatever `world.set_render_scale` says |
 | `ENGINE_SHADOW_REFRESH=1` | Draw every sun cascade every frame, whatever `world.set_shadow_cascade_refresh` says, to compare frame times |
 | `ENGINE_OCCLUSION_CHECK=1` | Read every frame's occlusion answers back and compare them with the CPU copy of the test; prints mismatches (slow, for driver trouble) |

@@ -264,6 +264,95 @@ impl OcclusionFrame {
     }
 }
 
+/// Fewer opaque meshes in view than this: nothing worth testing.
+const AUTO_MIN_CANDIDATES: usize = 32;
+/// Frames a try lasts (and between re-checks while on).
+const AUTO_WINDOW: u32 = 30;
+/// The first frames of a try are skipped: their answers come back late.
+const AUTO_SETTLE: u32 = 4;
+/// Kept on while at least this share of the tested meshes is hidden.
+const AUTO_KEEP_SHARE: f32 = 0.15;
+/// Frames before the first retry after a try that didn't pay; doubles up to
+/// `AUTO_MAX_WAIT` with every try that doesn't.
+const AUTO_FIRST_WAIT: u32 = 120;
+const AUTO_MAX_WAIT: u32 = 1920;
+
+/// Chooses, frame by frame, whether `OcclusionMode::Auto` culls: it tries,
+/// measures the share of tested meshes found hidden, and keeps culling only
+/// while that share is worth the test.
+#[derive(Debug, Clone)]
+pub(crate) struct OcclusionAuto {
+    active: bool,
+    /// Frames in the current state.
+    frames: u32,
+    /// Frames to wait (off) before the next try.
+    wait: u32,
+    tested: u64,
+    hidden: u64,
+}
+
+impl Default for OcclusionAuto {
+    fn default() -> Self {
+        Self {
+            active: false,
+            frames: 0,
+            wait: 0,
+            tested: 0,
+            hidden: 0,
+        }
+    }
+}
+
+impl OcclusionAuto {
+    /// Whether to cull this frame. `candidates` is how many opaque meshes
+    /// the last frame drew; `counts` the newest answer read back.
+    pub(crate) fn decide(&mut self, candidates: usize, counts: OcclusionCounts) -> bool {
+        if candidates < AUTO_MIN_CANDIDATES {
+            // Nothing to gain; try as soon as there is.
+            *self = Self {
+                wait: self.wait,
+                ..Self::default()
+            };
+            return false;
+        }
+        self.frames += 1;
+        if !self.active {
+            if self.frames > self.wait {
+                self.active = true;
+                self.frames = 0;
+                self.tested = 0;
+                self.hidden = 0;
+            }
+            return self.active;
+        }
+        if self.frames > AUTO_SETTLE {
+            self.tested += u64::from(counts.tested);
+            self.hidden += u64::from(counts.hidden);
+        }
+        if self.frames >= AUTO_WINDOW {
+            let share = if self.tested == 0 {
+                0.0
+            } else {
+                self.hidden as f32 / self.tested as f32
+            };
+            self.frames = 0;
+            self.tested = 0;
+            self.hidden = 0;
+            if share < AUTO_KEEP_SHARE {
+                self.active = false;
+                self.wait = if self.wait == 0 {
+                    AUTO_FIRST_WAIT
+                } else {
+                    (self.wait * 2).min(AUTO_MAX_WAIT)
+                };
+            } else {
+                self.wait = 0;
+            }
+        }
+        self.active
+    }
+}
+
 /// Numbers from the newest read-back frame, for frame stats.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct OcclusionCounts {
@@ -1100,6 +1189,41 @@ mod tests {
             min: centre - half,
             max: centre + half,
         }
+    }
+
+    #[test]
+    fn auto_keeps_culling_where_it_hides_and_backs_off_where_it_does_not() {
+        let mut auto = OcclusionAuto::default();
+        let counts = |tested, hidden| OcclusionCounts { tested, hidden };
+        // Too few meshes: never.
+        assert!(!auto.decide(10, counts(0, 0)));
+        // A city: tried at once and kept.
+        let mut on = 0;
+        for _ in 0..300 {
+            on += usize::from(auto.decide(500, counts(500, 400)));
+        }
+        assert!(on >= 299, "kept on in a city: {on}");
+        // An open field: switched off after one window, retried later,
+        // less often each time.
+        let mut runs = Vec::new();
+        let mut was = true;
+        for frame in 0..4000 {
+            let now = auto.decide(500, counts(500, 10));
+            if now && !was {
+                runs.push(frame);
+            }
+            was = now;
+        }
+        assert!(runs.len() >= 2 && runs.len() < 8, "retries: {runs:?}");
+        let gaps: Vec<_> = runs.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps.windows(2).all(|g| g[1] >= g[0]), "backs off: {gaps:?}");
+        // Back in the city: kept on again after the next try.
+        let mut on_late = 0;
+        for _ in 0..2500 {
+            on_late += usize::from(auto.decide(500, counts(500, 400)));
+        }
+        assert!(on_late > 0);
+        assert!(auto.decide(500, counts(500, 400)));
     }
 
     #[test]
