@@ -847,6 +847,7 @@ pub struct World {
     shadows: Option<ShadowSettings>,
     /// Every how many frames each sun cascade is drawn anew.
     shadow_cascade_refresh: [u32; 3],
+    shadow_cache: bool,
     /// Instanced mesh submit path. Default stays CPU so Engine demos match today.
     instance_submit: InstanceSubmit,
     bloom: BloomSettings,
@@ -1006,6 +1007,7 @@ impl Default for World {
             nav: Default::default(),
             shadows: Some(ShadowSettings::default()),
             shadow_cascade_refresh: DEFAULT_SHADOW_CASCADE_REFRESH,
+            shadow_cache: true,
             instance_submit: InstanceSubmit::from_env(),
             bloom: BloomSettings::default(),
             ambient_occlusion: Some(AmbientOcclusion::default()),
@@ -3804,6 +3806,23 @@ impl World {
     /// clamped to 1..=8.
     pub fn set_shadow_cascade_refresh(&mut self, every: [u32; 3]) {
         self.shadow_cascade_refresh = every.map(|n| n.clamp(1, 8));
+    }
+
+    /// Cache the sun shadows of things that don't move (on by default).
+    /// Each cascade keeps a second map holding only its static casters:
+    /// meshes and instance batches unchanged for half a second that don't
+    /// sway in the wind, and voxel ground. While none of them changes and
+    /// the cascade stays put, that map is copied in and only moving things
+    /// (characters, crowds, vehicles, swaying plants) are drawn on top. A
+    /// caster that moves leaves the cache at once and comes back once it has
+    /// rested. `ENGINE_SHADOW_CACHE=0` turns it off for comparisons.
+    pub fn set_shadow_cache(&mut self, on: bool) {
+        self.shadow_cache = on;
+    }
+
+    /// See [`World::set_shadow_cache`].
+    pub fn shadow_cache(&self) -> bool {
+        self.shadow_cache
     }
 
     /// See [`World::set_shadow_cascade_refresh`].

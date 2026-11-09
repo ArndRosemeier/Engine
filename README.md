@@ -505,6 +505,12 @@ works. Depth, AO, reflections and occlusion shrink with it; bloom, tone
 mapping and the UI stay at full size. A still view gathers nearly full detail
 over a few frames. Worth it at 4K, where the GPU time per pixel dominates.
 
+**Cached static shadows** (on by default): each sun cascade keeps a second
+map with only the casters that don't move (meshes and instance batches
+unchanged for half a second that don't sway in the wind, and voxel ground).
+While none of them changes and the cascade stays put, it is copied in and only
+moving things are drawn on top. `world.set_shadow_cache(false)` turns it off.
+
 **Far shadows on alternate frames** (on by default): the near sun cascade is
 drawn every frame, the middle and far ones take turns, so each frame draws two
 shadow maps instead of three (about 40% less shadow work). A cascade not
@@ -602,6 +608,7 @@ Every program built on the engine understands these:
 | `ENGINE_TONEMAP=aces` | Tone-map with ACES instead of AgX (`world.set_tone_map(ToneMap::Aces)` in code) |
 | `ENGINE_OCCLUSION=0`, `=1` or `=auto` | Occlusion culling off, on or automatic whatever the game set (`world.set_occlusion_mode`), to compare frame times |
 | `ENGINE_RENDER_SCALE=0.75` | Draw the scene at that share of the window and upscale (0.5 to 1.0), whatever `world.set_render_scale` says |
+| `ENGINE_SHADOW_CACHE=0` | Draw every sun shadow caster every frame (no static cache), to compare frame times |
 | `ENGINE_SHADOW_REFRESH=1` | Draw every sun cascade every frame, whatever `world.set_shadow_cascade_refresh` says, to compare frame times |
 | `ENGINE_OCCLUSION_CHECK=1` | Read every frame's occlusion answers back and compare them with the CPU copy of the test; prints mismatches (slow, for driver trouble) |
 | `ENGINE_INSTANCE_SUBMIT=cpu` | Draw every instance from the CPU instead of culling instances per view and shadow cascade on the GPU (default `gpu`) |
