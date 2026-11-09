@@ -41,6 +41,8 @@ pub struct MaterialTable {
     free: Vec<u32>,
     /// Clamped-sampler and repeating-sampler groups, rebuilt on change.
     binds: Option<[wgpu::BindGroup; 2]>,
+    /// Goes up whenever the bind groups are made anew.
+    version: u64,
 }
 
 pub fn table_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -95,6 +97,7 @@ impl MaterialTable {
             entries: Vec::new(),
             free: Vec::new(),
             binds: None,
+            version: 0,
         }
     }
 
@@ -221,6 +224,12 @@ impl MaterialTable {
             })
         };
         self.binds = Some([bind(samplers[0]), bind(samplers[1])]);
+        self.version += 1;
+    }
+
+    /// Changes whenever the groups [`Self::bind_for`] gives change.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// The group for `slot`'s sampler (after [`Self::flush`]).

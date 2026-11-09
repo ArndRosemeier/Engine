@@ -7,6 +7,7 @@ mod geometry;
 mod gi;
 mod gpu_mesh;
 mod gpu_profile;
+mod gpu_scene;
 mod grass;
 mod instance_cull;
 mod lights;
@@ -840,6 +841,12 @@ pub struct Renderer {
     arenas: geometry::MeshArenas,
     /// The GPU draws many meshes per call (`MultiDraw`).
     multi_draw: bool,
+    /// Opaque meshes kept on the GPU as rows the GPU culls and draws from
+    /// (see `gpu_scene.rs`); with multi-draws unless `ENGINE_GPU_SCENE=0`.
+    gpu_scene: Option<gpu_scene::GpuScene>,
+    /// Goes up whenever textures and materials are synced (their bind
+    /// groups may be new).
+    materials_synced: u64,
     /// Texture arrays: the material table and the opaque pipelines that
     /// read it, so multi-draws need not split by texture.
     bindless: Option<Bindless>,
@@ -1279,6 +1286,9 @@ impl Renderer {
             gpu_meshes: HashMap::new(),
             arenas: geometry::MeshArenas::default(),
             multi_draw,
+            gpu_scene: (multi_draw && !gpu_scene::disabled_by_env())
+                .then(gpu_scene::GpuScene::default),
+            materials_synced: 0,
             bindless,
             gpu_instance_batches: HashMap::new(),
             gpu_batch_sources: Vec::new(),
@@ -1526,6 +1536,7 @@ impl Renderer {
         {
             self.sync_textures_and_materials(world);
             self.synced_resource_epoch = world.resource_epoch();
+            self.materials_synced += 1;
         }
 
         if let Some(proc) = world.proc_terrain() {
@@ -2782,7 +2793,25 @@ impl Renderer {
         } else {
             MainCullSelection::none()
         };
-        let occlusion_ids = if self.occlusion_active {
+        let scene_rows = self.sync_gpu_scene(world, live);
+        let occlusion_ids = if let Some(rows) = scene_rows {
+            // The GPU scene: phase 1 draws what was seen last frame; without
+            // occlusion culling the view test alone decides, right away.
+            let slots = self.gpu_scene.as_ref().expect("synced above").slots.clone();
+            main_cull.occlusion = Some(self.occlusion.scene_frame(slots));
+            let vp = self.occlusion_view_proj;
+            let (device, queue) = (&self.device, &self.queue);
+            if self.occlusion_active {
+                let counts = self.occlusion.counts();
+                self.gpu_stats.occlusion_tested = counts.tested;
+                self.gpu_stats.occlusion_hidden = counts.hidden;
+                self.occlusion.encode_seed(device, queue, encoder, vp, rows);
+            } else {
+                self.occlusion
+                    .encode_scene(device, queue, encoder, vp, rows, false);
+            }
+            Vec::new()
+        } else if self.occlusion_active {
             let ids = self.occlusion_candidates(world, live);
             main_cull.occlusion = Some(self.begin_occlusion(&ids));
             ids
@@ -2792,7 +2821,7 @@ impl Renderer {
 
         self.cpu_spans.mark("world.cull", &mut t);
         let depth = self.depth_view.clone();
-        let occluding = main_cull.occlusion.is_some();
+        let occluding = self.occlusion_active;
         // A full prepass (the world pass then only tests depth) for AO; for
         // occlusion alone just the meshes it needs, which is far cheaper
         // than drawing voxel ground and props twice.
@@ -2817,13 +2846,23 @@ impl Renderer {
             self.encode_depth_prepass(encoder, world, live, &main_cull, main_uniform_slot, phase);
         }
         if occluding {
-            self.occlusion.encode(
-                &self.device,
-                &self.queue,
-                encoder,
-                self.occlusion_view_proj,
-                &occlusion_ids,
-            );
+            match scene_rows {
+                Some(rows) => self.occlusion.encode_scene(
+                    &self.device,
+                    &self.queue,
+                    encoder,
+                    self.occlusion_view_proj,
+                    rows,
+                    true,
+                ),
+                None => self.occlusion.encode(
+                    &self.device,
+                    &self.queue,
+                    encoder,
+                    self.occlusion_view_proj,
+                    &occlusion_ids,
+                ),
+            }
             self.encode_depth_prepass(
                 encoder,
                 world,
@@ -3345,12 +3384,28 @@ impl Renderer {
                 .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
                 .unwrap_or(&self.pipelines.white_albedo)
         };
+        // The GPU scene's rows go out as whole groups of its draw regions.
+        let scene_region = self
+            .gpu_scene
+            .as_ref()
+            .is_some_and(|s| !s.groups.is_empty() && main_cull.occlusion.is_some())
+            .then_some(target)
+            .and_then(|target| match target {
+                OpaqueTarget::Prepass(PrepassPhase::Seen) => Some(occlusion::ArgsRegion::Phase1),
+                OpaqueTarget::Prepass(PrepassPhase::All) | OpaqueTarget::World => {
+                    Some(occlusion::ArgsRegion::Shown)
+                }
+                OpaqueTarget::Prepass(_) => None,
+            });
         let mut draws: Vec<OpaqueDraw<'_>> = Vec::new();
         for &id in &self.draw_opaque {
             if !entity_in_space(world, id, space) {
                 continue;
             }
             let occlusion = main_cull.occlusion_slot(id);
+            if scene_region.is_some() && occlusion.is_some() {
+                continue;
+            }
             let submit = match target {
                 // Candidates not seen lately wait for the occlusion test.
                 OpaqueTarget::Prepass(PrepassPhase::Seen)
@@ -3401,7 +3456,8 @@ impl Renderer {
             OpaqueTarget::Prepass(_) => &self.opaque_prepass,
             OpaqueTarget::World => &self.opaque_world,
         };
-        let use_multi = self.multi_draw && draws.len() >= OPAQUE_MULTI_MIN_DRAWS;
+        let use_multi =
+            self.multi_draw && (draws.len() >= OPAQUE_MULTI_MIN_DRAWS || scene_region.is_some());
         if draws.len() < OPAQUE_BUNDLE_MIN_DRAWS && !use_multi {
             let empty = OpaqueBundles::default();
             match target {
@@ -3420,8 +3476,15 @@ impl Renderer {
         let world_pass = target == OpaqueTarget::World;
         let samples = stencil::scene_samples();
         if use_multi {
-            let plan =
-                self.plan_multi_draw(&draws, main_cull, scene_bind, pipeline, world_pass, samples);
+            let plan = self.plan_multi_draw(
+                &draws,
+                main_cull,
+                scene_region,
+                scene_bind,
+                pipeline,
+                world_pass,
+                samples,
+            );
             let pipeline = pipeline.clone();
             drop(draws);
             let cache = match target {
@@ -3562,10 +3625,12 @@ impl Renderer {
     /// Sort a pass's opaque draws into multi-draws: groups by texture and
     /// buffers in order of first appearance, each group's direct draws in
     /// one call and its occlusion-tested draws in runs of their packed rows.
+    #[allow(clippy::too_many_arguments)]
     fn plan_multi_draw(
         &self,
         draws: &[OpaqueDraw<'_>],
         main_cull: &MainCullSelection,
+        scene_region: Option<occlusion::ArgsRegion>,
         scene_bind: &wgpu::BindGroup,
         pipeline: &wgpu::RenderPipeline,
         world_pass: bool,
@@ -3647,6 +3712,11 @@ impl Renderer {
                     groups.push(group(true, frame.packed_offset(run[0]), run.len() as u32));
                 }
             }
+        }
+        if let (Some(region), Some(scene), Some(frame)) =
+            (scene_region, self.gpu_scene.as_ref(), occlusion)
+        {
+            groups.extend(scene_groups(scene, frame, region));
         }
         // Plain groups first, then the texture-array ones: one pipeline
         // switch.
@@ -3732,6 +3802,10 @@ impl Renderer {
         if unseen {
             // Phase 2: candidates not drawn in phase 1, each through its
             // occlusion draw (zero instances when hidden).
+            if let Some(multi) = self.scene_prepass(main_cull, occlusion::ArgsRegion::Phase2) {
+                multi.encode(&mut pass, scene_bind);
+                return;
+            }
             let frame = main_cull
                 .occlusion
                 .as_ref()
@@ -3773,6 +3847,10 @@ impl Renderer {
                 pass.set_pipeline(&self.pipelines.voxel_depth_prepass);
                 pass.set_bind_group(1, &self.pipelines.white_albedo, &[]);
                 self.voxel.draw(&mut pass, &draws);
+            }
+            if let Some(multi) = self.scene_prepass(main_cull, occlusion::ArgsRegion::Phase1) {
+                multi.encode(&mut pass, scene_bind);
+                return;
             }
             pass.set_pipeline(&self.pipelines.depth_prepass);
             for &id in &self.draw_opaque {
@@ -4908,6 +4986,117 @@ impl Renderer {
         self.size
     }
 
+    /// Bring the GPU scene's rows up to date with the live space; its row
+    /// count, or `None` without a GPU scene.
+    fn sync_gpu_scene(&mut self, world: &World, space: SpaceId) -> Option<usize> {
+        let mut scene = self.gpu_scene.take()?;
+        let stamp = gpu_scene::SceneStamp {
+            render: world.render_epoch(),
+            instance: world.instance_epoch(),
+            resource: self.materials_synced,
+            table: self.bindless.as_ref().map_or(0, |b| b.table.version()),
+            space,
+        };
+        // Rooms hide and show meshes from frame to frame.
+        if scene.stamp != Some(stamp) || world.rooms_culling() {
+            let rows = self.scene_rows(world, space);
+            let all = self.occlusion.reserve_rows(&self.device, rows.len());
+            for w in scene.apply(rows, all) {
+                self.occlusion.write_rows(
+                    &self.queue,
+                    w.start,
+                    &scene.rows[w.start..w.start + w.len],
+                    w.reset_seen,
+                );
+            }
+            scene.stamp = Some(stamp);
+        } else {
+            scene.written = 0;
+        }
+        let rows = scene.ids.len();
+        self.gpu_scene = Some(scene);
+        Some(rows)
+    }
+
+    /// Every opaque single mesh of `space` as a GPU scene row (a mesh a
+    /// room hides draws no instances).
+    fn scene_rows(&self, world: &World, space: SpaceId) -> Vec<gpu_scene::SceneRow> {
+        let table = self.bindless.as_ref().map(|b| &b.table);
+        self.source_opaque
+            .iter()
+            .enumerate()
+            .filter_map(|(order, &id)| {
+                let entity = world.entity(id).ok()?;
+                if entity.space() != space {
+                    return None;
+                }
+                let gpu = self.gpu_meshes.get(&id)?;
+                let aabb = gpu.world_box?;
+                if gpu.instance_count == 0 {
+                    return None;
+                }
+                let table_bind = gpu
+                    .material
+                    .filter(|&m| Some(m) == self.material_slot(entity.albedo))
+                    .and_then(|slot| table.and_then(|t| t.bind_for(slot)));
+                let bind = table_bind.unwrap_or_else(|| {
+                    entity
+                        .albedo
+                        .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
+                        .unwrap_or(&self.pipelines.white_albedo)
+                });
+                let instance_count = if world.room_hidden(id) {
+                    0
+                } else {
+                    u32::try_from(gpu.instance_count).expect("instance count exceeds u32")
+                };
+                Some(gpu_scene::SceneRow {
+                    id,
+                    order: u32::try_from(order).expect("scene row exceeds u32"),
+                    key: gpu_scene::GroupKey {
+                        bindless: table_bind.is_some(),
+                        bind: bind.clone(),
+                        vertex: gpu.vertex_buf.clone(),
+                        index: gpu.index_buf.clone(),
+                        instances: gpu.instance_buf.clone(),
+                    },
+                    mesh: occlusion::CandidateMesh {
+                        id,
+                        aabb,
+                        opaque_index_count: u32::try_from(gpu.opaque_index_count)
+                            .expect("index count exceeds u32"),
+                        index_count: u32::try_from(gpu.index_count)
+                            .expect("index count exceeds u32"),
+                        instance_count,
+                        first_index: gpu.first_index,
+                        base_vertex: gpu.base_vertex,
+                        first_instance: gpu.first_instance,
+                    },
+                })
+            })
+            .collect()
+    }
+
+    /// The GPU scene's groups as depth-prepass multi-draws over `region`.
+    fn scene_prepass(
+        &self,
+        main_cull: &MainCullSelection,
+        region: occlusion::ArgsRegion,
+    ) -> Option<MultiDraw> {
+        let scene = self.gpu_scene.as_ref()?;
+        let frame = main_cull.occlusion.as_ref()?;
+        Some(MultiDraw {
+            pipeline: Some(self.pipelines.depth_prepass.clone()),
+            bindless_pipeline: self
+                .bindless
+                .as_ref()
+                .map(|b| b.pipes.depth_prepass.clone()),
+            groups: scene_groups(scene, frame, region).collect(),
+            occlusion_args: Some(frame.args.clone()),
+            ..MultiDraw::default()
+        })
+    }
+
     /// This frame's occlusion candidates: single meshes the main view draws.
     /// The meshes the occlusion test runs for, ordered by what a
     /// multi-draw shares (texture, geometry page, instance page) so each
@@ -5834,6 +6023,25 @@ fn submit_occluded_draw(
 
 fn entity_in_space(world: &World, id: EntityId, space: SpaceId) -> bool {
     world.entity(id).expect("draw source is live").space() == space && !world.room_hidden(id)
+}
+
+/// The GPU scene's groups as multi-draws over one of `frame`'s packed
+/// regions (plain groups come first).
+fn scene_groups<'a>(
+    scene: &'a gpu_scene::GpuScene,
+    frame: &'a occlusion::OcclusionFrame,
+    region: occlusion::ArgsRegion,
+) -> impl Iterator<Item = MultiGroup> + 'a {
+    scene.groups.iter().map(move |g| MultiGroup {
+        albedo: g.key.bind.clone(),
+        bindless: g.key.bindless,
+        vertex: g.key.vertex.clone(),
+        index: g.key.index.clone(),
+        instances: g.key.instances.clone(),
+        occluded: true,
+        offset: frame.region_offset(region, g.start),
+        count: g.len,
+    })
 }
 
 fn mesh_submit(compacted: &HashSet<EntityId>, id: EntityId) -> MeshSubmit {

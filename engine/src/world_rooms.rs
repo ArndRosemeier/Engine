@@ -124,6 +124,14 @@ impl World {
             .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Whether rooms hide anything this frame ([`Self::room_hidden`] can
+    /// say yes).
+    pub(crate) fn rooms_culling(&self) -> bool {
+        self.rooms.enabled
+            && self.rooms.computed
+            && !self.rooms.bypass.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub(crate) fn room_hidden(&self, id: EntityId) -> bool {
         if !self.rooms.enabled
             || !self.rooms.computed
