@@ -432,6 +432,8 @@ pub struct Renderer {
     /// Vertex/index buffers keyed by `Arc::as_ptr` of the shared [`AnimatedModel`].
     /// Per model: its uploaded meshes and morph table, shared by every entity of it.
     gpu_skinned_meshes: HashMap<usize, (Vec<GpuSkinnedMesh>, wgpu::Buffer)>,
+    /// Characters' maps, one GPU copy per content (see [`material::MapCache`]).
+    skinned_maps: material::MapCache,
     gpu_textures: HashMap<TextureId, GpuTexture>,
     gpu_mesh_albedo: HashMap<TextureId, wgpu::BindGroup>,
     audit_frame: u64,
@@ -805,6 +807,7 @@ impl Renderer {
             gpu_batch_source_scratch: Vec::new(),
             gpu_skinned: HashMap::new(),
             gpu_skinned_meshes: HashMap::new(),
+            skinned_maps: material::MapCache::default(),
             gpu_textures: HashMap::new(),
             gpu_mesh_albedo: HashMap::new(),
             audit_frame: 0,
@@ -1156,6 +1159,8 @@ impl Renderer {
                                     &self.pipelines.albedo_layout,
                                     &self.pipelines.material_sampler,
                                     &self.pipelines.neutral_maps,
+                                    &mut self.skinned_maps,
+                                    m,
                                     m,
                                     Some(rows),
                                 )
@@ -1754,6 +1759,21 @@ impl Renderer {
         )
     }
 
+    /// Rough video memory held by characters (bytes): (vertex and index
+    /// buffers of animated models and crowds, maps, map count). Maps are
+    /// shared by content, so a garment worn by many counts once.
+    pub fn character_bytes(&self) -> (u64, u64, usize) {
+        let buffers: u64 = self
+            .gpu_skinned_meshes
+            .values()
+            .flat_map(|(m, _)| m)
+            .map(GpuSkinnedMesh::buffer_bytes)
+            .sum::<u64>()
+            + self.crowd.buffer_bytes();
+        let (n, maps) = self.skinned_maps.usage();
+        (buffers, maps, n)
+    }
+
     pub fn device(&self) -> &wgpu::Device {
         &self.device
     }
@@ -2058,20 +2078,23 @@ impl Renderer {
         self.main_uniform_slot = main_uniform_slot;
         {
             let (device, queue, p) = (&self.device, &self.queue, &self.pipelines);
+            let maps = &mut self.skinned_maps;
             self.crowd.prepare(
                 device,
                 queue,
                 world,
                 &self.frustum,
                 scene_camera.eye(),
-                |m| {
+                |m, material| {
                     GpuSkinnedMesh::upload(
                         device,
                         queue,
                         &p.albedo_layout,
                         &p.material_sampler,
                         &p.neutral_maps,
+                        maps,
                         m,
+                        material,
                         None,
                     )
                 },
@@ -3997,7 +4020,7 @@ impl Renderer {
                     &crate::mesh::AlbedoMap {
                         width: cpu.width,
                         height: cpu.height,
-                        rgba: cpu.rgba.clone(),
+                        rgba: cpu.rgba.clone().into(),
                     },
                     material::MapKind::Color,
                 )

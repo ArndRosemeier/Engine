@@ -2,9 +2,10 @@
 
 use crate::anim::{AnimatedModel, SkinMesh, MAX_JOINTS, MAX_MORPH_TARGETS};
 use crate::mesh::InstanceRaw;
-use crate::render::material::{upload_map, GpuMaterial, MapKind, NeutralMaps};
+use crate::render::material::{GpuMaterial, MapCache, NeutralMaps, SharedMap};
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
+use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
@@ -440,16 +441,25 @@ pub struct GpuSkinnedMesh {
     pub index_buf: wgpu::Buffer,
     pub index_count: u32,
     pub albedo_bind: wgpu::BindGroup,
+    /// The shared maps the bind group uses, kept alive with it.
+    _maps: Vec<Arc<SharedMap>>,
 }
 
 impl GpuSkinnedMesh {
+    /// Uploads `mesh`'s vertices and indices, textured with `material`'s
+    /// maps (the mesh itself, or for a crowd's simplified far mesh the
+    /// mesh it was made from). Maps come from `cache`, so characters that
+    /// share a texture share one GPU copy.
+    #[allow(clippy::too_many_arguments)]
     pub fn upload(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         albedo_layout: &wgpu::BindGroupLayout,
         material_sampler: &wgpu::Sampler,
         neutral: &NeutralMaps,
+        cache: &mut MapCache,
         mesh: &SkinMesh,
+        material: &SkinMesh,
         morph_rows: Option<&[u32]>,
     ) -> Self {
         let mut vertices = Vec::with_capacity(mesh.positions.len());
@@ -477,25 +487,28 @@ impl GpuSkinnedMesh {
             contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let albedo = mesh.albedo.as_ref().map(|map| {
-            upload_map(device, queue, map, MapKind::Color).create_view(&Default::default())
-        });
-        let albedo_bind = GpuMaterial::new(
+        let (material, maps) = GpuMaterial::shared(
             device,
             queue,
             albedo_layout,
             material_sampler,
             neutral,
-            albedo.as_ref(),
-            Some(&mesh.maps),
-        )
-        .bind;
+            cache,
+            material.albedo.as_ref(),
+            &material.maps,
+        );
         Self {
             vertex_buf,
             index_buf,
             index_count: mesh.indices.len() as u32,
-            albedo_bind,
+            albedo_bind: material.bind,
+            _maps: maps,
         }
+    }
+
+    /// Video memory of the vertex and index buffers (bytes).
+    pub fn buffer_bytes(&self) -> u64 {
+        self.vertex_buf.size() + self.index_buf.size()
     }
 }
 

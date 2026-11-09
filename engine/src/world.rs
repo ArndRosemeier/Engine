@@ -185,7 +185,7 @@ fn white_texel() -> AlbedoMap {
     AlbedoMap {
         width: 1,
         height: 1,
-        rgba: vec![255; 4],
+        rgba: vec![255; 4].into(),
     }
 }
 
@@ -222,7 +222,7 @@ pub(crate) fn texture_key(
     })
 }
 
-fn content_hash(bytes: &[u8]) -> u64 {
+pub(crate) fn content_hash(bytes: &[u8]) -> u64 {
     const K: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut lanes = [K, K ^ 1, K ^ 2, K ^ 3];
     let mut blocks = bytes.chunks_exact(32);
@@ -2348,7 +2348,7 @@ impl World {
         let tid = match shared {
             Some(tid) => tid,
             None => {
-                let tid = self.create_texture_rgba(map.width, map.height, map.rgba)?;
+                let tid = self.create_texture_rgba(map.width, map.height, map.rgba.into_vec())?;
                 if let Some(maps) = maps {
                     self.surface_maps.insert(tid, std::sync::Arc::new(maps));
                 }

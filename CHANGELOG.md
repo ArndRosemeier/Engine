@@ -7,6 +7,13 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.012 (2026-11-09)
+
+- Characters share their textures. On the GPU, maps with the same texels (a garment, eyes, teeth or hair worn by many characters) are one texture, and a crowd's far model is drawn with its near model's maps instead of holding its own copy, on the CPU and the GPU.
+- AlbedoMap's texels are now MapBytes: cloning a map shares its bytes, and writing to a shared copy copies it first. It reads like a `[u8]`; make one from a `Vec<u8>` with `.into()`, and get the `Vec` back with `into_vec()`. `is_shared` and `content_hash` help a game share maps it makes from shared ones. This is an API change for code that builds maps.
+- ENGINE_FRAME_STATS' gpu memory line shows characters' buffers and maps.
+- Measured on HeroWorld's 41 start-up characters: their maps took 492 MB, of which 239 MB were distinct. The crowds' far models held another ~330 MB of copies.
+
 ## 0.011 (2026-11-09)
 
 - Occlusion culling: world.set_occlusion_culling(true) stops drawing meshes and instanced props hidden behind others, such as every block behind a street wall. The GPU tests each mesh's box against this frame's own depth, so nothing pops in; in the new occlusion_city example 93% of 2 000 towers are skipped at street level and the GPU frame drops by about 30%. world.occlusion_stats() tells how many were tested and hidden; ENGINE_OCCLUSION=0/1 overrides the setting, ENGINE_OCCLUSION_CHECK=1 checks the GPU's answers against a CPU copy. Shadow maps still draw every caster.

@@ -25,18 +25,20 @@ impl World {
         profile: CrowdProfile,
     ) -> EngineResult<CrowdId> {
         let clips = profile.validate(&model)?;
-        let far = match &profile.far_model {
-            Some(m) => Some(m.clone()),
+        let (far, far_source) = match &profile.far_model {
+            Some(m) => (Some(m.clone()), Vec::new()),
             None if profile.far_detail < 1.0 => {
-                Some(Arc::new(far_model(&model, profile.far_detail)))
+                let (far, source) = far_model(&model, profile.far_detail);
+                (Some(Arc::new(far)), source)
             }
-            None => None,
+            None => (None, Vec::new()),
         };
         let crowd = Crowd {
             model,
             profile,
             clips,
             far,
+            far_source,
             agents: Vec::new(),
         };
         if let Some(i) = self.crowds.iter().position(|c| c.is_none()) {

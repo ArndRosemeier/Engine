@@ -4,6 +4,8 @@
 
 use crate::mesh::{AlbedoMap, MaterialMaps};
 use bytemuck::{Pod, Zeroable};
+use std::collections::HashMap;
+use std::sync::{Arc, Weak};
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
@@ -173,7 +175,7 @@ pub fn material_sampler(device: &wgpu::Device) -> wgpu::Sampler {
     })
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MapKind {
     /// sRGB colour (albedo, emissive).
     Color,
@@ -255,7 +257,7 @@ fn linear_to_srgb(c: f32) -> u8 {
 /// Box-filtered mip levels, level 0 first. Colour is averaged in linear
 /// light, normals are renormalised so distant bumps flatten correctly.
 pub(crate) fn mip_chain(map: &AlbedoMap, kind: MapKind) -> Vec<(u32, u32, Vec<u8>)> {
-    let mut levels = vec![(map.width, map.height, map.rgba.clone())];
+    let mut levels = vec![(map.width, map.height, map.rgba.to_vec())];
     let to_lin: Vec<f32> = (0..=255u8).map(srgb_to_linear).collect();
     loop {
         let (w, h, src) = levels.last().expect("level 0");
@@ -325,7 +327,7 @@ impl NeutralMaps {
             let map = AlbedoMap {
                 width: 1,
                 height: 1,
-                rgba: rgba.to_vec(),
+                rgba: rgba.to_vec().into(),
             };
             upload_map(device, queue, &map, kind).create_view(&Default::default())
         };
@@ -360,6 +362,54 @@ impl GpuMaterial {
         let normal = maps.and_then(|m| up(&m.normal, MapKind::Normal));
         let orm = maps.and_then(|m| up(&m.orm, MapKind::Data));
         let emissive = maps.and_then(|m| up(&m.emissive, MapKind::Color));
+        Self::from_views(
+            device,
+            layout,
+            sampler,
+            neutral,
+            [albedo, normal.as_ref(), orm.as_ref(), emissive.as_ref()],
+            maps,
+        )
+    }
+
+    /// A texture set whose maps come from `cache`: maps with the same
+    /// texels (the same garment on many characters, the near and far
+    /// models of a crowd) are one GPU texture. The returned handles keep
+    /// the cache's entries alive as long as the material is used.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shared(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        neutral: &NeutralMaps,
+        cache: &mut MapCache,
+        albedo: Option<&AlbedoMap>,
+        maps: &MaterialMaps,
+    ) -> (Self, Vec<Arc<SharedMap>>) {
+        let mut get =
+            |map: Option<&AlbedoMap>, kind| map.map(|m| cache.get(device, queue, m, kind));
+        let held: [Option<Arc<SharedMap>>; 4] = [
+            get(albedo, MapKind::Color),
+            get(maps.normal.as_ref(), MapKind::Normal),
+            get(maps.orm.as_ref(), MapKind::Data),
+            get(maps.emissive.as_ref(), MapKind::Color),
+        ];
+        let views = [0, 1, 2, 3].map(|i| held[i].as_ref().map(|m| &m.view));
+        let material = Self::from_views(device, layout, sampler, neutral, views, Some(maps));
+        (material, held.into_iter().flatten().collect())
+    }
+
+    /// The bind group over uploaded views: albedo, normal, ORM, emissive
+    /// (`None`: the neutral texel).
+    fn from_views(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        neutral: &NeutralMaps,
+        [albedo, normal, orm, emissive]: [Option<&wgpu::TextureView>; 4],
+        maps: Option<&MaterialMaps>,
+    ) -> Self {
         let params = maps.map_or_else(MaterialParams::neutral, MaterialParams::from_maps);
         let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh-material-params"),
@@ -386,15 +436,15 @@ impl GpuMaterial {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: view(normal.as_ref(), &neutral.flat_normal),
+                    resource: view(normal, &neutral.flat_normal),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: view(orm.as_ref(), &neutral.white_linear),
+                    resource: view(orm, &neutral.white_linear),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: view(emissive.as_ref(), &neutral.white_srgb),
+                    resource: view(emissive, &neutral.white_srgb),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -403,6 +453,75 @@ impl GpuMaterial {
             ],
         });
         Self { bind }
+    }
+}
+
+/// One uploaded map that several materials share (see [`MapCache`]).
+pub struct SharedMap {
+    pub view: wgpu::TextureView,
+    /// Video memory of the texture with its mips (bytes).
+    pub bytes: u64,
+}
+
+/// Maps uploaded once per content: characters built from the same pack
+/// textures (a garment, eyes, teeth, a hair card) carry byte-identical maps,
+/// and each would otherwise be its own GPU texture. Entries live while a
+/// material holds them.
+#[derive(Default)]
+pub struct MapCache {
+    maps: HashMap<(u64, u32, u32, MapKind), Weak<SharedMap>>,
+    inserts: usize,
+}
+
+impl MapCache {
+    /// The GPU copy of `map`, uploaded now unless one with the same texels
+    /// is still in use.
+    pub fn get(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        map: &AlbedoMap,
+        kind: MapKind,
+    ) -> Arc<SharedMap> {
+        let key = (
+            crate::world::content_hash(&map.rgba),
+            map.width,
+            map.height,
+            kind,
+        );
+        if let Some(m) = self.maps.get(&key).and_then(Weak::upgrade) {
+            return m;
+        }
+        let bytes = mip_chain_bytes(map.width, map.height);
+        let view = upload_map(device, queue, map, kind).create_view(&Default::default());
+        let m = Arc::new(SharedMap { view, bytes });
+        self.inserts += 1;
+        if self.inserts.is_multiple_of(64) {
+            self.maps.retain(|_, w| w.strong_count() > 0);
+        }
+        self.maps.insert(key, Arc::downgrade(&m));
+        m
+    }
+
+    /// Maps in use and their video memory (bytes).
+    pub fn usage(&self) -> (usize, u64) {
+        self.maps
+            .values()
+            .filter_map(Weak::upgrade)
+            .fold((0, 0), |(n, b), m| (n + 1, b + m.bytes))
+    }
+}
+
+/// Bytes of an RGBA8 map of this size with its full mip chain.
+fn mip_chain_bytes(width: u32, height: u32) -> u64 {
+    let (mut w, mut h, mut sum) = (width as u64, height as u64, 0);
+    loop {
+        sum += w * h * 4;
+        if w == 1 && h == 1 {
+            return sum;
+        }
+        w = (w / 2).max(1);
+        h = (h / 2).max(1);
     }
 }
 
@@ -421,7 +540,7 @@ mod tests {
         let map = AlbedoMap {
             width: 6,
             height: 3,
-            rgba,
+            rgba: rgba.into(),
         };
         let levels = mip_chain(&map, MapKind::Normal);
         let sizes: Vec<(u32, u32)> = levels.iter().map(|l| (l.0, l.1)).collect();
@@ -439,7 +558,7 @@ mod tests {
         let map = AlbedoMap {
             width: 2,
             height: 1,
-            rgba: vec![0, 0, 0, 255, 255, 255, 255, 255],
+            rgba: vec![0, 0, 0, 255, 255, 255, 255, 255].into(),
         };
         let levels = mip_chain(&map, MapKind::Color);
         let px = &levels[1].2;

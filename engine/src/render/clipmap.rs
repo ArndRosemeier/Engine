@@ -703,14 +703,14 @@ fn build_layer_bind(
                 vec![AlbedoMap {
                     width: 1,
                     height: 1,
-                    rgba: flat.to_vec(),
+                    rgba: flat.to_vec().into(),
                 }]
             } else {
                 sets.iter()
                     .map(|t| AlbedoMap {
                         width: size,
                         height: size,
-                        rgba: pick(t),
+                        rgba: pick(t).into(),
                     })
                     .collect()
             };

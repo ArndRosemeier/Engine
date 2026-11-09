@@ -195,7 +195,7 @@ fn textured_mesh(
         normal: Some(AlbedoMap {
             width: atlas::ATLAS_W,
             height: atlas::ATLAS_H,
-            rgba: a.normal.clone(),
+            rgba: a.normal.clone().into(),
         }),
         normal_scale: 1.1,
         roughness: 0.9,

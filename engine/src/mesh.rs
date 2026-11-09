@@ -25,7 +25,73 @@ impl PointId {
 pub struct AlbedoMap {
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    pub rgba: MapBytes,
+}
+
+/// The texels of a map, shared by its copies: cloning a map (a garment's
+/// texture on every character that wears it) shares the bytes instead of
+/// copying megabytes, and writing to a shared copy copies it first (so a
+/// change never shows through another map). Reads like a `[u8]`; make one
+/// from a `Vec<u8>` with `.into()`.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct MapBytes(std::sync::Arc<Vec<u8>>);
+
+impl MapBytes {
+    /// The bytes as a `Vec`, copied only if another map shares them.
+    pub fn into_vec(self) -> Vec<u8> {
+        std::sync::Arc::try_unwrap(self.0).unwrap_or_else(|shared| (*shared).clone())
+    }
+
+    /// A fast 64-bit hash of the bytes (several GB/s), to find maps with
+    /// the same texels; not for security.
+    pub fn content_hash(&self) -> u64 {
+        crate::world::content_hash(&self.0)
+    }
+
+    /// Does another map hold these bytes too (a clone of this one, or the
+    /// one this was cloned from)?
+    pub fn is_shared(&self) -> bool {
+        std::sync::Arc::strong_count(&self.0) > 1
+    }
+
+    /// Are these the very same bytes as `other`'s (one is a clone of the
+    /// other), not only equal ones?
+    pub fn shares(&self, other: &MapBytes) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl From<Vec<u8>> for MapBytes {
+    fn from(v: Vec<u8>) -> Self {
+        Self(std::sync::Arc::new(v))
+    }
+}
+
+impl FromIterator<u8> for MapBytes {
+    fn from_iter<I: IntoIterator<Item = u8>>(iter: I) -> Self {
+        Vec::from_iter(iter).into()
+    }
+}
+
+impl std::ops::Deref for MapBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for MapBytes {
+    /// Copies the bytes first if another map shares them.
+    fn deref_mut(&mut self) -> &mut [u8] {
+        let bytes: &mut Vec<u8> = std::sync::Arc::make_mut(&mut self.0);
+        bytes
+    }
+}
+
+impl std::fmt::Debug for MapBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MapBytes({} bytes)", self.0.len())
+    }
 }
 
 /// Texture maps that go with an albedo, in glTF's metallic-roughness model.
@@ -801,7 +867,7 @@ impl Mesh {
         self.albedo = Some(AlbedoMap {
             width,
             height,
-            rgba,
+            rgba: rgba.into(),
         });
         Ok(())
     }
@@ -1634,4 +1700,31 @@ impl InstanceRaw {
             10 => Float32x4,
         ],
     };
+}
+
+#[cfg(test)]
+mod map_bytes_tests {
+    use super::*;
+
+    #[test]
+    fn copies_of_a_map_share_bytes_until_one_is_written() {
+        let a = AlbedoMap {
+            width: 1,
+            height: 2,
+            rgba: vec![1, 2, 3, 4, 5, 6, 7, 8].into(),
+        };
+        assert!(!a.rgba.is_shared());
+        let mut b = a.clone();
+        assert!(b.rgba.shares(&a.rgba), "a clone shares the texels");
+        assert!(a.rgba.is_shared() && b.rgba.is_shared());
+        b.rgba[0] = 9;
+        assert!(!b.rgba.shares(&a.rgba), "writing copies them first");
+        assert_eq!(a.rgba[0], 1, "the original is unchanged");
+        assert_ne!(a.rgba.content_hash(), b.rgba.content_hash());
+        b.rgba[0] = 1;
+        assert_eq!(a.rgba.content_hash(), b.rgba.content_hash());
+        assert_eq!(&b.rgba[..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(b.rgba.clone().into_vec().len(), 8);
+        assert_eq!(format!("{:?}", a.rgba), "MapBytes(8 bytes)");
+    }
 }

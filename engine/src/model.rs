@@ -85,7 +85,7 @@ impl Model {
         let built = load_gltf_document(&document, &buffers, &images, limits)?;
         let mut mesh = built_to_mesh(&built)?;
         if let Some(map) = first_base_color_albedo(&document, &images)? {
-            mesh.set_albedo_rgba(map.width, map.height, map.rgba)?;
+            mesh.set_albedo_rgba(map.width, map.height, map.rgba.into_vec())?;
         }
         mesh.set_surface_overrides(built.surface_overrides);
         Ok(mesh)
@@ -409,7 +409,7 @@ pub(crate) fn image_to_albedo(image: &gltf::image::Data) -> EngineResult<AlbedoM
     Ok(AlbedoMap {
         width: image.width,
         height: image.height,
-        rgba,
+        rgba: rgba.into(),
     })
 }
 
@@ -860,7 +860,7 @@ fn part_to_mesh(
     }
     mesh.set_surface_material(surface);
     if let Some(map) = albedo {
-        mesh.set_albedo_rgba(map.width, map.height, map.rgba)?;
+        mesh.set_albedo_rgba(map.width, map.height, map.rgba.into_vec())?;
     }
     // Neutral sets are dropped, so plain models stay on the cheap path.
     mesh.set_material_maps(material_maps(material, images)?)?;
@@ -944,7 +944,7 @@ pub(crate) fn material_maps(
             let mut orm = AlbedoMap {
                 width: occ_map.width,
                 height: occ_map.height,
-                rgba: vec![255; occ_map.rgba.len()],
+                rgba: vec![255; occ_map.rgba.len()].into(),
             };
             put_red(&mut orm, Some(&occ_map));
             maps.orm = Some(orm);

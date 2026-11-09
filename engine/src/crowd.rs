@@ -23,6 +23,7 @@
 
 use crate::anim::{AnimatedModel, SkinMesh, MAX_JOINTS};
 use crate::error::{EngineError, EngineResult};
+use crate::mesh::MaterialMaps;
 use crate::place::Place;
 use crate::world::EntityId;
 use glam::Vec3;
@@ -188,6 +189,9 @@ pub(crate) struct Crowd {
     pub clips: [usize; 2],
     /// The simplified (or given) model drawn far away.
     pub far: Option<Arc<AnimatedModel>>,
+    /// For each mesh of a simplified `far` model, the mesh of `model` whose
+    /// maps it is drawn with (empty: a given far model carries its own).
+    pub far_source: Vec<usize>,
     pub agents: Vec<Option<CrowdAgent>>,
 }
 
@@ -328,28 +332,45 @@ pub(crate) fn simplify_skin_mesh(
         weights: take(&order, &mesh.weights),
         indices: indices.iter().map(|i| remap[*i as usize]).collect(),
         double_sided: mesh.double_sided,
-        albedo: mesh.albedo.clone(),
-        maps: mesh.maps.clone(),
+        // No copy of the maps: the far mesh is drawn with its source mesh's
+        // (see `Crowd::far_source`), on the GPU too.
+        albedo: None,
+        maps: MaterialMaps {
+            normal: None,
+            orm: None,
+            emissive: None,
+            normal_scale: mesh.maps.normal_scale,
+            normal_uv: mesh.maps.normal_uv,
+            occlusion_strength: mesh.maps.occlusion_strength,
+            emissive_factor: mesh.maps.emissive_factor,
+            roughness: mesh.maps.roughness,
+            metallic: mesh.maps.metallic,
+            triplanar: mesh.maps.triplanar,
+        },
         // Too far to see a face move.
         morphs: Vec::new(),
     })
 }
 
-/// A copy of `model` simplified for crowd distance (see [`simplify_skin_mesh`]).
-pub(crate) fn far_model(model: &AnimatedModel, fraction: f32) -> AnimatedModel {
+/// A copy of `model` simplified for crowd distance (see
+/// [`simplify_skin_mesh`]), and for each of its meshes the index of the
+/// mesh of `model` it was made from (whose maps it is drawn with).
+pub(crate) fn far_model(model: &AnimatedModel, fraction: f32) -> (AnimatedModel, Vec<usize>) {
     // Parts smaller than 6 cm (eyes, teeth, lashes) can't be seen from afar.
-    let meshes: Vec<SkinMesh> = model
+    let (meshes, source): (Vec<SkinMesh>, Vec<usize>) = model
         .meshes
         .iter()
-        .filter_map(|m| simplify_skin_mesh(m, fraction, 0.06))
-        .collect();
-    AnimatedModel {
+        .enumerate()
+        .filter_map(|(i, m)| simplify_skin_mesh(m, fraction, 0.06).map(|f| (f, i)))
+        .unzip();
+    let far = AnimatedModel {
         skeleton: model.skeleton.clone(),
         meshes,
         clips: Vec::new(),
         bind_local: model.bind_local.clone(),
         morph_targets: Vec::new(),
-    }
+    };
+    (far, source)
 }
 
 #[cfg(test)]
@@ -370,7 +391,7 @@ mod tests {
         let model = character();
         let verts = |m: &AnimatedModel| m.meshes.iter().map(|m| m.positions.len()).sum::<usize>();
         let tris = |m: &AnimatedModel| m.meshes.iter().map(|m| m.indices.len() / 3).sum::<usize>();
-        let far = far_model(&model, 0.05);
+        let (far, source) = far_model(&model, 0.05);
         println!(
             "full {} verts {} tris {} meshes; far {} verts {} tris {} meshes",
             verts(&model),
@@ -385,6 +406,17 @@ mod tests {
         for m in &far.meshes {
             assert!(m.indices.iter().all(|i| (*i as usize) < m.positions.len()));
         }
+        // The far meshes hold no maps of their own: each is drawn with the
+        // maps of the mesh it was made from.
+        assert_eq!(source.len(), far.meshes.len());
+        for (m, &s) in far.meshes.iter().zip(&source) {
+            assert!(m.albedo.is_none() && m.maps.normal.is_none() && m.maps.orm.is_none());
+            assert!(s < model.meshes.len());
+        }
+        assert!(
+            source.iter().any(|&s| model.meshes[s].albedo.is_some()),
+            "the test character is textured"
+        );
     }
 
     #[test]
@@ -397,6 +429,7 @@ mod tests {
             profile,
             clips,
             far: None,
+            far_source: Vec::new(),
             agents: Vec::new(),
         };
         let mut a = CrowdAgent {

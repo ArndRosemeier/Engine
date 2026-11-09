@@ -69,7 +69,7 @@ impl TextureLayer {
         AlbedoMap {
             width: self.size,
             height: self.size,
-            rgba: rgba.to_vec(),
+            rgba: rgba.to_vec().into(),
         }
     }
 
