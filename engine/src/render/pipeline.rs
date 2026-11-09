@@ -807,11 +807,14 @@ fn vegetation_shade(in: VsOut) -> vec4<f32> {
 // Depth prepass: only texels the shaded pass will cover on every sample.
 @fragment
 fn fs_depth(in: VsOut) {
-    if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) && !dbg(1u) {
+    if dbg(8192u) && distance(in.world_p, u.eye) > 60.0 {
         discard;
     }
-    if dbg(4u) && in.surface3.w < 0.001 {
+    if dbg(4u) {
         return;
+    }
+    if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) && !dbg(1u) {
+        discard;
     }
     if in.surface3.w > 7.5 {
         if in.surface3.w < 8.5 {
@@ -906,6 +909,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 
 fn shade_main(in: VsOut) -> vec4<f32> {
+    if dbg(8192u) && distance(in.world_p, u.eye) > 60.0 {
+        discard;
+    }
     if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) && !dbg(1u) {
         discard;
     }

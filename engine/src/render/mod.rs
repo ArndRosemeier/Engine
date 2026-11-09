@@ -399,6 +399,7 @@ pub struct Renderer {
     audit_frame: u64,
     /// The world's re-upload requests already carried out.
     reupload_seen: (u64, u64),
+    gpu_check_seen: u64,
     gpu_materials: HashMap<MaterialId, GpuTerrainMaterial>,
     gpu_water_materials: HashMap<WaterMaterialId, GpuWaterMaterial>,
     synced_render_epoch: u64,
@@ -746,6 +747,7 @@ impl Renderer {
             gpu_mesh_albedo: HashMap::new(),
             audit_frame: 0,
             reupload_seen: (0, 0),
+            gpu_check_seen: 0,
             gpu_materials: HashMap::new(),
             gpu_water_materials: HashMap::new(),
             synced_render_epoch: 0,
@@ -1474,6 +1476,7 @@ impl Renderer {
         let (scene_view, scene_resolve) = self.postprocess.scene_attachment();
         self.encode_world(&mut encoder, &scene_view, scene_resolve.as_ref(), world);
         self.write_audit(world);
+        self.gpu_check_if_asked(world);
         self.mark_gpu(&mut encoder, Mark::SceneDone);
         self.cpu_spans.mark("render.world", &mut t);
         if let Some(water) = world.water() {
@@ -2664,7 +2667,7 @@ impl Renderer {
         // depth testing and shade every hidden fragment (2.4 -> 1.2 ms for
         // lod_forest on an RTX 5070). Leaf edges the prepass left out still
         // draw, they just don't occlude each other.
-        let nowrite = stamp && self.ao_active;
+        let nowrite = stamp && self.ao_active && world.debug_shading & 16384 == 0;
         self.mark_scene(pass, stamp, SceneMark::Begin);
         pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
 

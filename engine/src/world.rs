@@ -197,10 +197,10 @@ fn content_hash(bytes: &[u8]) -> u64 {
 }
 
 /// [`crate::world::World::set_debug_shading`] flags: what each bit does.
-pub const DEBUG_SHADING_FLAGS: [(u32, &str); 13] = [
+pub const DEBUG_SHADING_FLAGS: [(u32, &str); 15] = [
     (1, "keep LOD-faded pixels"),
     (2, "keep broken elements"),
-    (4, "depth prepass ignores texture alpha"),
+    (4, "depth prepass keeps every pixel"),
     (8, "textured surfaces magenta"),
     (16, "untextured surfaces cyan"),
     (32, "every pixel opaque"),
@@ -211,6 +211,8 @@ pub const DEBUG_SHADING_FLAGS: [(u32, &str); 13] = [
     (1024, "no bounce light (GI)"),
     (2048, "textures without normal/ORM maps"),
     (4096, "colour by depth value"),
+    (8192, "hide things farther than 60 m"),
+    (16384, "world pass writes depth too"),
 ];
 
 /// The curve that turns the HDR scene into screen colours.
@@ -708,6 +710,8 @@ pub struct World {
     resource_epoch: u64,
     /// Bumped by [`Self::request_gpu_reupload`]: (meshes, textures).
     pub(crate) reupload: (u64, u64),
+    /// Bumped by [`Self::request_gpu_check`].
+    pub(crate) gpu_check: u64,
     /// [`Self::set_debug_shading`] flags.
     pub(crate) debug_shading: u32,
     /// Changes when only instance lists changed (LOD swaps): the renderer
@@ -878,6 +882,7 @@ impl Default for World {
             water_materials: HashMap::new(),
             resource_epoch: 1,
             reupload: (0, 0),
+            gpu_check: 0,
             debug_shading: 0,
             instance_epoch: 1,
             lods: std::collections::BTreeMap::new(),
@@ -1504,6 +1509,15 @@ impl World {
     /// and/or every texture and uploads them again from the world before the
     /// next frame. If something looks wrong and comes back right after this,
     /// the GPU copy was damaged, not the world's data.
+    /// Debugging aid: before the next frame the renderer reads every mesh
+    /// back from the GPU, compares it byte by byte with the world's mesh and
+    /// checks the world's meshes themselves (indices in range, finite
+    /// positions). Findings go to `ENGINE_AUDIT_LOG` (or `gpu_check.log`).
+    /// Stalls for a moment.
+    pub fn request_gpu_check(&mut self) {
+        self.gpu_check += 1;
+    }
+
     pub fn request_gpu_reupload(&mut self, meshes: bool, textures: bool) {
         if meshes {
             self.reupload.0 += 1;

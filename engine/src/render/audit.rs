@@ -181,3 +181,199 @@ impl Renderer {
         self.reupload_seen = asked;
     }
 }
+
+/// Reads `buffers` (GPU buffer, byte length) back from the GPU.
+fn read_back(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    buffers: &[(&wgpu::Buffer, u64)],
+) -> Vec<Vec<u8>> {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("gpu-check-copy"),
+    });
+    let staging: Vec<wgpu::Buffer> = buffers
+        .iter()
+        .map(|&(src, len)| {
+            let len = len.max(4).div_ceil(4) * 4;
+            let dst = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("gpu-check-readback"),
+                size: len,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(src, 0, &dst, 0, len.min(src.size()));
+            dst
+        })
+        .collect();
+    queue.submit(std::iter::once(encoder.finish()));
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (i, b) in staging.iter().enumerate() {
+        let tx = tx.clone();
+        b.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send((i, r.is_ok()));
+        });
+    }
+    drop(tx);
+    device
+        .poll(wgpu::PollType::Wait)
+        .expect("device poll failed");
+    let mut ok = vec![false; staging.len()];
+    for (i, r) in rx.iter() {
+        ok[i] = r;
+    }
+    staging
+        .iter()
+        .zip(buffers)
+        .zip(ok)
+        .map(|((b, &(_, len)), ok)| {
+            if !ok {
+                return Vec::new();
+            }
+            let data = b.slice(..).get_mapped_range()[..len as usize].to_vec();
+            b.unmap();
+            data
+        })
+        .collect()
+}
+
+/// First differing byte and how many differ.
+fn diff(gpu: &[u8], cpu: &[u8]) -> Option<(usize, usize)> {
+    let mut first = None;
+    let mut count = 0;
+    for (i, (a, b)) in gpu.iter().zip(cpu).enumerate() {
+        if a != b {
+            first.get_or_insert(i);
+            count += 1;
+        }
+    }
+    if gpu.len() != cpu.len() {
+        first.get_or_insert(gpu.len().min(cpu.len()));
+        count += gpu.len().abs_diff(cpu.len());
+    }
+    first.map(|f| (f, count))
+}
+
+impl Renderer {
+    /// Carries out [`World::request_gpu_check`].
+    pub(crate) fn gpu_check_if_asked(&mut self, world: &World) {
+        if world.gpu_check == self.gpu_check_seen {
+            return;
+        }
+        self.gpu_check_seen = world.gpu_check;
+        let started = std::time::Instant::now();
+        let mut out = Vec::new();
+        let name = |id: EntityId| {
+            world
+                .name(id)
+                .map_or_else(|| format!("{id}"), |n| format!("{id} ({n})"))
+        };
+        // The world's own meshes first: what the GPU is given.
+        let mut meshes = 0usize;
+        for (id, e) in world.entities() {
+            let m = &e.mesh;
+            if m.index_count() == 0 {
+                continue;
+            }
+            meshes += 1;
+            let n = m.vertex_count();
+            let lens = [("normals", m.normals.len()), ("colours", m.colors.len())];
+            for (what, len) in lens {
+                if len != n {
+                    out.push(format!("{}: {n} positions but {len} {what}", name(id)));
+                }
+            }
+            if let Some(&big) = m.indices.iter().max() {
+                if big as usize >= n {
+                    let bad = m.indices.iter().filter(|&&i| i as usize >= n).count();
+                    out.push(format!(
+                        "{}: {bad} indices point past the {n} vertices (largest {big})",
+                        name(id)
+                    ));
+                }
+            }
+            if m.indices.len() % 3 != 0 {
+                out.push(format!(
+                    "{}: {} indices, not whole triangles",
+                    name(id),
+                    m.indices.len()
+                ));
+            }
+            if let Some(p) = m.positions.iter().find(|p| !p.is_finite()) {
+                out.push(format!("{}: vertex position {p:?} is not finite", name(id)));
+            }
+        }
+        // Then the GPU copies, compared byte by byte, a few at a time.
+        let ids: Vec<EntityId> = self
+            .gpu_meshes
+            .keys()
+            .copied()
+            .filter(|id| world.entity(*id).is_ok_and(|e| e.instance_of.is_none()))
+            .collect();
+        let (mut compared, mut bytes) = (0usize, 0u64);
+        for chunk in ids.chunks(64) {
+            let mut bufs = Vec::new();
+            for id in chunk {
+                let gpu = &self.gpu_meshes[id];
+                let e = world.entity(*id).expect("filtered above");
+                let vbytes = (e.mesh.to_interleaved().len()
+                    * std::mem::size_of::<crate::mesh::Vertex>())
+                    as u64;
+                let ibytes = (e.mesh.indices.len() * 4) as u64;
+                bufs.push((&gpu.vertex_buf, vbytes.min(gpu.vertex_buf.size())));
+                bufs.push((&gpu.index_buf, ibytes.min(gpu.index_buf.size())));
+            }
+            let data = read_back(&self.device, &self.queue, &bufs);
+            for (k, id) in chunk.iter().enumerate() {
+                let e = world.entity(*id).expect("filtered above");
+                let verts = e.mesh.to_interleaved();
+                let vcpu: &[u8] = bytemuck::cast_slice(&verts);
+                let icpu: &[u8] = bytemuck::cast_slice(&e.mesh.indices);
+                let (vg, ig) = (&data[2 * k], &data[2 * k + 1]);
+                bytes += (vg.len() + ig.len()) as u64;
+                compared += 1;
+                if vg.is_empty() || ig.is_empty() {
+                    out.push(format!("{}: could not read back", name(*id)));
+                    continue;
+                }
+                let stride = std::mem::size_of::<crate::mesh::Vertex>();
+                if let Some((at, count)) = diff(vg, vcpu) {
+                    out.push(format!(
+                        "{}: VERTICES differ on the GPU: {count} bytes, first at vertex {} byte {} (of {} vertices)",
+                        name(*id),
+                        at / stride,
+                        at % stride,
+                        verts.len()
+                    ));
+                }
+                if let Some((at, count)) = diff(ig, icpu) {
+                    out.push(format!(
+                        "{}: INDICES differ on the GPU: {count} bytes, first at index {} (of {})",
+                        name(*id),
+                        at / 4,
+                        e.mesh.indices.len()
+                    ));
+                }
+            }
+        }
+        use std::io::Write;
+        let path = std::env::var("ENGINE_AUDIT_LOG").unwrap_or_else(|_| "gpu_check.log".into());
+        let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        else {
+            return;
+        };
+        let _ = writeln!(
+            f,
+            "GPU CHECK frame {}: {meshes} world meshes checked, {compared} GPU meshes compared ({:.1} MB) in {:.1} s, {} problems",
+            self.audit_frame,
+            bytes as f64 / 1e6,
+            started.elapsed().as_secs_f32(),
+            out.len()
+        );
+        for line in out.iter().take(200) {
+            let _ = writeln!(f, "  {line}");
+        }
+    }
+}
