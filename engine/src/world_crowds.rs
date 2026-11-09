@@ -262,6 +262,9 @@ impl World {
                 if let Some(anim) = self.animated.get_mut(&e) {
                     anim.animator.snap_to(a.time);
                 }
+                // Up close, feet stand on what is drawn (a rig without
+                // legs we can find just goes without).
+                let _ = self.set_foot_ik(e, Some(crate::anim::FootIk::default()));
                 a.fade = None;
                 a.near = Some(e);
             }

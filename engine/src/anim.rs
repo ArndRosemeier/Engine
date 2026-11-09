@@ -288,9 +288,14 @@ struct Fade {
     duration: f32,
 }
 
-/// Feet that find the ground: on slopes and steps the legs bend so each
-/// foot stands on what is under it instead of floating or sinking, and the
-/// hips drop when one foot needs to reach lower. Turn on with
+/// Feet that find the ground: each sole stands on what is drawn under it
+/// (any mesh's upward faces, the terrain, physics bodies; see
+/// [`crate::world::World::ground_below`]) instead of floating or sinking.
+/// On slopes and steps the legs bend; where the character's origin is a
+/// little off the ground (a game server's simpler floor) or a clip has its
+/// soles under its own floor, the feet and hips are set right; the hips
+/// drop when one foot needs to reach lower. Feet keep the clip's turn, so
+/// toes and heels stay out of the ground. Turn on with
 /// [`crate::world::World::set_foot_ik`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FootIk {
@@ -299,7 +304,8 @@ pub struct FootIk {
     /// How quickly feet follow changes in the ground (per second; higher is
     /// snappier, lower is smoother).
     pub response: f32,
-    /// Lower the hips so the lower foot can reach.
+    /// Move the hips with the lower foot: down so it can reach, up when
+    /// both feet stand higher than the origin.
     pub drop_hips: bool,
 }
 
@@ -330,6 +336,13 @@ pub(crate) struct IkState {
     /// Model-space offsets each foot is moved by, and the hips' drop.
     pub feet: [Vec3; 2],
     pub drop: Vec3,
+    /// Heel and toe of each sole, in its foot joint's space (see
+    /// [`AnimatedModel::sole_points`]).
+    pub soles: [[Vec3; 2]; 2],
+    /// How far the ground under each foot, and under the lower one, lies
+    /// above the character's origin (world metres), eased over time.
+    pub ground: [f32; 2],
+    pub ground_drop: f32,
 }
 
 impl Skeleton {
@@ -366,6 +379,79 @@ impl Skeleton {
             "rightankle",
         ])?;
         (left.foot != right.foot).then_some([left, right])
+    }
+}
+
+impl AnimatedModel {
+    /// The heel and toe of a foot's sole, in the foot joint's space: the
+    /// lowest skin of the foot (and the toes below it) in the bind pose, at
+    /// its back and front. A foot without skin weights gets the point
+    /// straight under its ankle at the model's floor.
+    pub(crate) fn sole_points(&self, foot: usize) -> [Vec3; 2] {
+        let sk = &self.skeleton;
+        let below_foot = |mut j: usize| loop {
+            if j == foot {
+                return true;
+            }
+            match sk.parents.get(j).copied().flatten() {
+                Some(p) => j = p,
+                None => return false,
+            }
+        };
+        // The rest pose in the model's own space (y up): a mesh's vertices
+        // may sit in another frame (round the hips, say).
+        let mut rest = Vec::new();
+        globals_from_locals(sk, &self.bind_local, &mut rest);
+        let skin: Vec<Mat4> = rest
+            .iter()
+            .zip(&sk.inverse_bind)
+            .map(|(g, ib)| *g * *ib)
+            .collect();
+        let mut pts: Vec<Vec3> = Vec::new();
+        for m in &self.meshes {
+            for (k, p) in m.positions.iter().enumerate() {
+                let (Some(js), Some(ws)) = (m.joints.get(k), m.weights.get(k)) else {
+                    continue;
+                };
+                let w: f32 = (0..4)
+                    .filter(|&i| below_foot(js[i] as usize))
+                    .map(|i| ws[i])
+                    .sum();
+                if w <= 0.5 {
+                    continue;
+                }
+                let mut q = Vec3::ZERO;
+                for i in 0..4 {
+                    if let Some(s) = skin.get(js[i] as usize) {
+                        q += s.transform_point3(*p) * ws[i];
+                    }
+                }
+                pts.push(q);
+            }
+        }
+        let rest_foot = rest.get(foot).copied().unwrap_or(Mat4::IDENTITY);
+        let to_local = rest_foot.inverse();
+        let Some(low) = pts.iter().map(|p| p.y).min_by(|a, b| a.total_cmp(b)) else {
+            let ankle = rest_foot.w_axis.truncate();
+            let p = to_local.transform_point3(Vec3::new(ankle.x, 0.0, ankle.z));
+            return [p, p];
+        };
+        // The flat of the sole: within a centimetre of the lowest point.
+        let flat: Vec<Vec3> = pts.into_iter().filter(|p| p.y <= low + 0.01).collect();
+        let back = flat
+            .iter()
+            .copied()
+            .min_by(|a, b| a.z.total_cmp(&b.z))
+            .unwrap_or(Vec3::ZERO);
+        let front = flat
+            .iter()
+            .copied()
+            .max_by(|a, b| a.z.total_cmp(&b.z))
+            .unwrap_or(Vec3::ZERO);
+        [
+            to_local.transform_point3(back),
+            to_local.transform_point3(front),
+        ]
     }
 }
 
@@ -939,6 +1025,8 @@ fn apply_foot_ik(
     global: &mut [Mat4],
 ) {
     let feet: [Vec3; 2] = [0, 1].map(|i| global[ik.legs[i].foot].w_axis.truncate() + ik.feet[i]);
+    let turned: [Quat; 2] =
+        [0, 1].map(|i| global[ik.legs[i].foot].to_scale_rotation_translation().1);
     if let Some(hips) = ik.hips.filter(|_| ik.drop.length_squared() > 1e-10) {
         // Move the hips in their parent's frame.
         let parent = skeleton.parents[hips].map_or_else(
@@ -954,8 +1042,13 @@ fn apply_foot_ik(
         locals[hips].0 += parent.inverse().transform_vector3(ik.drop);
         refresh_below(skeleton, locals, global, hips);
     }
-    for (leg, target) in ik.legs.iter().zip(feet) {
+    for (leg, (target, keep)) in ik.legs.iter().zip(feet.into_iter().zip(turned)) {
         two_bone_ik(skeleton, *leg, target, locals, global);
+        // The foot keeps the clip's turn in the world: bending the knee
+        // must not tip the toes or heel into the ground.
+        let (_, calf, _) = global[leg.calf].to_scale_rotation_translation();
+        locals[leg.foot].1 = (calf.inverse() * keep).normalize();
+        refresh_below(skeleton, locals, global, leg.foot);
     }
 }
 

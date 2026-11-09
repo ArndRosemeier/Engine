@@ -48,6 +48,8 @@ mod world_decals;
 pub mod world_effects;
 #[path = "world_grading.rs"]
 mod world_grading;
+#[path = "world_ground.rs"]
+mod world_ground;
 #[path = "world_ragdolls.rs"]
 mod world_ragdolls;
 #[path = "world_rooms.rs"]
@@ -854,6 +856,8 @@ pub struct World {
     entity_rooms: HashMap<EntityId, crate::rooms::RoomId>,
     /// Z-fighting markers and the `ENGINE_ZFIGHT` watcher.
     zfight: world_zfight::ZFightState,
+    /// What feet stand on: see [`World::ground_below`].
+    ground: world_ground::GroundState,
     /// Debug names (see [`World::set_name`]).
     entity_names: HashMap<EntityId, String>,
     /// Surface presentation sync. Engine default stays on so demos never tear;
@@ -989,6 +993,7 @@ impl Default for World {
             ssr: Some(Default::default()),
             entity_rooms: HashMap::new(),
             zfight: Default::default(),
+            ground: Default::default(),
             entity_names: HashMap::new(),
             vsync: true,
             whats_new_button: true,
@@ -2289,6 +2294,7 @@ impl World {
     /// Remove an entity, its children (and theirs) and the lamps riding on
     /// them. [`Self::detach`] a child first to keep it.
     pub fn despawn(&mut self, id: EntityId) {
+        self.forget_ground(id);
         self.sim_poses.remove(&id);
         self.entity_names.remove(&id);
         self.forget_ragdoll(id);
@@ -2954,67 +2960,146 @@ impl World {
         let hips = (skeleton.parents[legs[0].thigh] == skeleton.parents[legs[1].thigh])
             .then_some(skeleton.parents[legs[0].thigh])
             .flatten();
-        let (feet, drop) = e
+        let (feet, drop, ground, ground_drop) = e
             .animator
             .ik
             .as_ref()
-            .map_or(([Vec3::ZERO; 2], Vec3::ZERO), |old| (old.feet, old.drop));
+            .map_or(([Vec3::ZERO; 2], Vec3::ZERO, [0.0; 2], 0.0), |old| {
+                (old.feet, old.drop, old.ground, old.ground_drop)
+            });
+        let model = e.animator.model();
+        let soles = legs.map(|l| model.sole_points(l.foot));
         e.animator.ik = Some(crate::anim::IkState {
             settings,
             legs,
             hips,
             feet,
             drop,
+            soles,
+            ground,
+            ground_drop,
         });
         Ok(())
     }
 
+    /// Feet on what is drawn: each sole is set on the highest surface
+    /// under it (a mesh's upward faces, the terrain, a physics body) as
+    /// high above it as the clip lifts it above the character's floor, so
+    /// a planted foot stands on the ground even where the character's
+    /// origin is a little off (a server's rougher ground, a step). The hips
+    /// follow the lower foot, down or up.
     fn tick_foot_ik(&mut self, dt: f32) {
-        let mut updates = Vec::new();
+        // Below this lift a foot counts as planted, and is eased onto the
+        // ground (a clip's sole a centimetre into its floor stands on it).
+        const PLANT: f32 = 0.03;
+        let mut legs = Vec::new();
         for (id, e) in &self.animated {
             let Some(ik) = e.animator.ik.as_ref() else {
                 continue;
             };
             let t = e.transform;
-            let to_model = t.inverse();
             let globals = e.animator.fk_globals();
             let root = t.w_axis.truncate();
-            let ground = |x: f32, z: f32, from: f32| {
-                self.cast_ray(Vec3::new(x, from + 1.0, z), Vec3::NEG_Y, 3.0)
-                    .map(|h| h.point.y)
-            };
-            let base = ground(root.x, root.z, root.y);
-            let max = ik.settings.max_step;
-            let dy = ik.legs.map(|leg| {
-                let foot = t.transform_point3(globals[leg.foot].w_axis.truncate());
-                match (base, ground(foot.x, foot.z, root.y.max(foot.y))) {
-                    (Some(b), Some(g)) => (g - b).clamp(-max, max),
-                    _ => 0.0,
+            let soles = [0, 1].map(|i| {
+                let g = t * globals[ik.legs[i].foot];
+                let [heel, toe] = ik.soles[i].map(|p| g.transform_point3(p));
+                if heel.y <= toe.y {
+                    heel
+                } else {
+                    toe
                 }
             });
-            let drop = if ik.settings.drop_hips {
-                dy[0].min(dy[1]).min(0.0)
-            } else {
-                0.0
-            };
-            let k = 1.0 - (-ik.settings.response * dt.max(0.0)).exp();
-            let feet = [0, 1].map(|i| {
-                let want = to_model.transform_vector3(Vec3::Y * dy[i]);
-                ik.feet[i] + (want - ik.feet[i]) * k
-            });
-            let want = to_model.transform_vector3(Vec3::Y * drop);
-            updates.push((*id, feet, ik.drop + (want - ik.drop) * k));
+            legs.push((*id, root, soles, ik.settings, t.inverse()));
         }
-        for (id, feet, drop) in updates {
-            if let Some(ik) = self
+        if legs.is_empty() {
+            return;
+        }
+        let discs: Vec<(Vec3, f32)> = legs.iter().map(|l| (l.1, 1.5)).collect();
+        let patches = self.ground_patches(&discs);
+        let mut updates = Vec::new();
+        for ((id, root, soles, settings, to_model), patch) in legs.into_iter().zip(patches) {
+            let max = settings.max_step;
+            // Per foot: the ground's height over the origin (eased: steps
+            // and slopes), and what the clip's own sole needs to stand
+            // on its floor (at once: it changes every frame of a walk).
+            let parts = soles.map(|sole| {
+                let from = Vec3::new(sole.x, root.y.max(sole.y) + max, sole.z);
+                let lift = sole.y - root.y;
+                let want = if lift <= 0.0 {
+                    0.0
+                } else if lift < PLANT {
+                    lift * lift / PLANT
+                } else {
+                    lift
+                };
+                self.ground_below_in(&patch, from, 2.0 * max + 0.5)
+                    .map(|g| ((g - root.y).clamp(-max, max), want - lift))
+            });
+            updates.push((id, parts, settings, to_model));
+        }
+        for (id, parts, settings, to_model) in updates {
+            let Some(ik) = self
                 .animated
                 .get_mut(&id)
                 .and_then(|e| e.animator.ik.as_mut())
-            {
-                ik.feet = feet;
-                ik.drop = drop;
+            else {
+                continue;
+            };
+            let k = 1.0 - (-settings.response * dt.max(0.0)).exp();
+            let max = settings.max_step;
+            let fix = parts.map(|p| p.map_or(0.0, |(_, f)| f));
+            // Up at once (a foot never stays inside a kerb or a step it
+            // walked onto), down eased (no snapping off ledges).
+            let follow = |now: &mut f32, to: f32| {
+                *now = if to > *now {
+                    to
+                } else {
+                    *now + (to - *now) * k
+                };
+            };
+            for (now, p) in ik.ground.iter_mut().zip(parts) {
+                follow(now, p.map_or(0.0, |(g, _)| g));
             }
+            let lower = match parts {
+                [Some(a), Some(b)] => a.0.min(b.0),
+                [Some(a), None] | [None, Some(a)] => a.0.min(0.0),
+                [None, None] => 0.0,
+            };
+            follow(&mut ik.ground_drop, lower);
+            for ((foot, g), f) in ik.feet.iter_mut().zip(ik.ground).zip(fix) {
+                *foot = to_model.transform_vector3(Vec3::Y * (g + f).clamp(-max, max));
+            }
+            let drop = if settings.drop_hips {
+                (ik.ground_drop + fix[0].min(fix[1])).clamp(-max, max)
+            } else {
+                0.0
+            };
+            ik.drop = to_model.transform_vector3(Vec3::Y * drop);
         }
+    }
+
+    /// Each foot's lowest sole point in the world as drawn now (after foot
+    /// IK), for checks that feet stand on the ground. `None` without legs.
+    pub fn sole_points(&self, id: EntityId) -> Option<[Vec3; 2]> {
+        let e = self.animated.get(&id)?;
+        let model = e.animator.model();
+        let (legs, soles) = match e.animator.ik.as_ref() {
+            Some(ik) => (ik.legs, ik.soles),
+            None => {
+                let legs = model.skeleton.find_legs()?;
+                (legs, legs.map(|l| model.sole_points(l.foot)))
+            }
+        };
+        let globals = e.animator.joint_globals();
+        Some([0, 1].map(|i| {
+            let g = e.transform * globals[legs[i].foot];
+            let [heel, toe] = soles[i].map(|p| g.transform_point3(p));
+            if heel.y <= toe.y {
+                heel
+            } else {
+                toe
+            }
+        }))
     }
 
     /// Look up one skinned/animated entity by its typed render identity.
