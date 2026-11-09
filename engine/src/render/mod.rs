@@ -917,6 +917,18 @@ impl Renderer {
         self.water_gpu.resize();
     }
 
+    /// The adapter and driver this renderer runs on.
+    pub fn gpu_info(&self) -> crate::gpu_info::GpuInfo {
+        let i = self.adapter.get_info();
+        crate::gpu_info::GpuInfo {
+            name: i.name,
+            vendor: i.vendor,
+            driver: i.driver,
+            driver_info: i.driver_info,
+            backend: format!("{:?}", i.backend),
+        }
+    }
+
     pub fn take_gpu_stats(&mut self) -> GpuFrameStats {
         std::mem::take(&mut self.gpu_stats)
     }

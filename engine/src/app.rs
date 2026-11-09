@@ -495,6 +495,11 @@ impl ApplicationHandler for App {
             self._audio_out = crate::audio::scene::AudioOutput::start(self.world.audio());
         }
         let renderer = pollster::block_on(Renderer::new(window.clone()));
+        let gpu = renderer.gpu_info();
+        if let Some(warning) = gpu.driver_warning() {
+            eprintln!("[engine] {warning}");
+        }
+        self.world.set_gpu_info(gpu);
         let ui_backend = UiBackend::new(&window, renderer.device(), renderer.surface_format());
         self.window = Some(window);
         self.renderer = Some(renderer);

@@ -714,6 +714,7 @@ pub struct World {
     pub(crate) reupload: (u64, u64),
     /// Bumped by [`Self::request_gpu_check`].
     pub(crate) gpu_check: u64,
+    gpu_info: Option<crate::gpu_info::GpuInfo>,
     /// Bumped by [`Self::request_renderer_rebuild`]: (surface, screen buffers).
     pub(crate) renderer_rebuild: (u64, u64),
     /// [`Self::set_debug_shading`] flags.
@@ -887,6 +888,7 @@ impl Default for World {
             resource_epoch: 1,
             reupload: (0, 0),
             gpu_check: 0,
+            gpu_info: None,
             renderer_rebuild: (0, 0),
             debug_shading: 0,
             instance_epoch: 1,
@@ -1382,21 +1384,11 @@ impl World {
         let Some(t) = &mut self.auto_tune else {
             return;
         };
-        // TEMP diagnosis (test branch only): `ENGINE_TUNE_ONLY=bias` never
-        // drops features, `=features` never moves the bias.
-        let only = std::env::var("ENGINE_TUNE_ONLY").unwrap_or_default();
-        let seen_bias = if only == "features" {
-            crate::quality::MIN_TUNED_BIAS
-        } else {
-            self.lod_bias
-        };
-        match t.tick(dt, seen_bias, gi, ao) {
+        match t.tick(dt, self.lod_bias, gi, ao) {
             TuneStep::Hold => {}
-            TuneStep::Bias(b) if only != "features" => self.lod_bias = b,
-            TuneStep::Bias(_) => {}
-            TuneStep::DropGi if only != "bias" => self.global_illumination = None,
-            TuneStep::DropAo if only != "bias" => self.ambient_occlusion = None,
-            TuneStep::DropGi | TuneStep::DropAo => {}
+            TuneStep::Bias(b) => self.lod_bias = b,
+            TuneStep::DropGi => self.global_illumination = None,
+            TuneStep::DropAo => self.ambient_occlusion = None,
         }
     }
 
@@ -1530,6 +1522,17 @@ impl World {
         if buffers {
             self.renderer_rebuild.1 += 1;
         }
+    }
+
+    /// The graphics card and driver, once the window's renderer exists
+    /// (None headless). [`crate::gpu_info::GpuInfo::driver_warning`] says
+    /// when the driver is known to draw wrongly.
+    pub fn gpu_info(&self) -> Option<&crate::gpu_info::GpuInfo> {
+        self.gpu_info.as_ref()
+    }
+
+    pub(crate) fn set_gpu_info(&mut self, info: crate::gpu_info::GpuInfo) {
+        self.gpu_info = Some(info);
     }
 
     pub fn request_gpu_check(&mut self) {

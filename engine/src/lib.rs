@@ -54,6 +54,7 @@ pub mod fly;
 pub mod fracture;
 mod frame_clock;
 pub mod gpu_field;
+pub mod gpu_info;
 pub mod grading;
 pub mod hierarchy;
 pub mod input;
