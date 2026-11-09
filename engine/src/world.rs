@@ -689,6 +689,8 @@ pub struct World {
     pub(crate) water_materials: HashMap<WaterMaterialId, WaterMaterial>,
     /// Changes whenever textures or material resources are added.
     resource_epoch: u64,
+    /// Bumped by [`Self::request_gpu_reupload`]: (meshes, textures).
+    pub(crate) reupload: (u64, u64),
     /// Changes when only instance lists changed (LOD swaps): the renderer
     /// re-uploads instances without rebuilding GI or shadow sources.
     instance_epoch: u64,
@@ -856,6 +858,7 @@ impl Default for World {
             next_material_id: 1,
             water_materials: HashMap::new(),
             resource_epoch: 1,
+            reupload: (0, 0),
             instance_epoch: 1,
             lods: std::collections::BTreeMap::new(),
             next_lod: 1,
@@ -1463,6 +1466,19 @@ impl World {
                 .instance_epoch
                 .checked_add(1)
                 .expect("world instance epoch overflow");
+        }
+    }
+
+    /// Debugging aid: the renderer throws away its GPU copies of every mesh
+    /// and/or every texture and uploads them again from the world before the
+    /// next frame. If something looks wrong and comes back right after this,
+    /// the GPU copy was damaged, not the world's data.
+    pub fn request_gpu_reupload(&mut self, meshes: bool, textures: bool) {
+        if meshes {
+            self.reupload.0 += 1;
+        }
+        if textures {
+            self.reupload.1 += 1;
         }
     }
 

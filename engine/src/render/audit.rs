@@ -154,3 +154,30 @@ impl Renderer {
         }
     }
 }
+
+impl Renderer {
+    /// Carries out [`World::request_gpu_reupload`]: drops the GPU copies so
+    /// the next sync uploads everything again.
+    pub(crate) fn reupload_if_asked(&mut self, world: &World) {
+        let asked = world.reupload;
+        if asked.0 != self.reupload_seen.0 {
+            self.gpu_meshes.clear();
+            self.gpu_instance_batches.clear();
+            self.synced_render_epoch = u64::MAX;
+            self.draw_source_epoch = u64::MAX;
+            self.terrain_bundle_ids.clear();
+            self.terrain_bundle = None;
+            self.invalidate_shadow_bundles();
+        }
+        if asked.1 != self.reupload_seen.1 {
+            self.gpu_textures.clear();
+            self.gpu_mesh_albedo.clear();
+            self.gpu_materials.clear();
+            self.synced_resource_epoch = u64::MAX;
+            self.terrain_bundle_ids.clear();
+            self.terrain_bundle = None;
+            self.invalidate_shadow_bundles();
+        }
+        self.reupload_seen = asked;
+    }
+}

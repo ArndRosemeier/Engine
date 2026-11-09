@@ -396,6 +396,8 @@ pub struct Renderer {
     gpu_textures: HashMap<TextureId, GpuTexture>,
     gpu_mesh_albedo: HashMap<TextureId, wgpu::BindGroup>,
     audit_frame: u64,
+    /// The world's re-upload requests already carried out.
+    reupload_seen: (u64, u64),
     gpu_materials: HashMap<MaterialId, GpuTerrainMaterial>,
     gpu_water_materials: HashMap<WaterMaterialId, GpuWaterMaterial>,
     synced_render_epoch: u64,
@@ -742,6 +744,7 @@ impl Renderer {
             gpu_textures: HashMap::new(),
             gpu_mesh_albedo: HashMap::new(),
             audit_frame: 0,
+            reupload_seen: (0, 0),
             gpu_materials: HashMap::new(),
             gpu_water_materials: HashMap::new(),
             synced_render_epoch: 0,
@@ -874,6 +877,7 @@ impl Renderer {
 
     pub fn sync_world(&mut self, world: &mut World) {
         let mut t = std::time::Instant::now();
+        self.reupload_if_asked(world);
         self.apply_present_mode(world.vsync());
         if let Some((start, words)) = world.take_element_upload() {
             let words = &words[..words.len().min(ELEMENT_STATE_WORDS.saturating_sub(start))];
