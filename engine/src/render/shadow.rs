@@ -1051,7 +1051,10 @@ pub struct ShadowGpu {
     pub skinned_pipeline: wgpu::RenderPipeline,
     pub layer_views: [wgpu::TextureView; CASCADE_COUNT],
     #[allow(dead_code)]
-    depth_texture: wgpu::Texture,
+    pub(crate) depth_texture: wgpu::Texture,
+    /// The sun cascades' static casters, drawn once and copied into the
+    /// live maps while nothing static changes (made on first use).
+    pub(crate) static_cache: Option<StaticShadowCache>,
     #[allow(dead_code)]
     cascade_bufs: [wgpu::Buffer; CASCADE_COUNT],
     map_array_view: wgpu::TextureView,
@@ -1082,6 +1085,88 @@ pub struct ShadowGpu {
     cascade_frame: u64,
     /// What each sun cascade's map was last drawn with.
     cascade_drawn: [Option<DrawnCascade>; CASCADE_COUNT],
+}
+
+/// What a cached static layer was drawn from: equal keys mean the layer
+/// still holds exactly what drawing its static casters would give.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StaticShadowKey {
+    /// The cascade's view-projection, bit for bit.
+    pub vp: [u32; 16],
+    /// Renderer-side changes to static content (building elements, ...).
+    pub epoch: u64,
+    pub voxel_epoch: u64,
+    /// Which casters are static, and how they are drawn.
+    pub casters: u64,
+}
+
+/// One depth layer per sun cascade, holding only its static casters.
+pub(crate) struct StaticShadowCache {
+    pub texture: wgpu::Texture,
+    pub views: [wgpu::TextureView; CASCADE_COUNT],
+    pub keys: [Option<(StaticShadowKey, u64)>; CASCADE_COUNT],
+}
+
+impl StaticShadowCache {
+    pub fn new(device: &wgpu::Device, map_size: u32) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow-static-array"),
+            size: wgpu::Extent3d {
+                width: map_size,
+                height: map_size,
+                depth_or_array_layers: CASCADE_COUNT as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let views = std::array::from_fn(|i| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("shadow-static-layer"),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: i as u32,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        });
+        Self {
+            texture,
+            views,
+            keys: [None; CASCADE_COUNT],
+        }
+    }
+}
+
+/// Copy cascade `layer` of `src` into the same layer of `dst` (whole
+/// depth layers of equal size).
+pub(crate) fn copy_layer(
+    encoder: &mut wgpu::CommandEncoder,
+    src: &wgpu::Texture,
+    dst: &wgpu::Texture,
+    layer: u32,
+) {
+    let at = |texture| wgpu::TexelCopyTextureInfo {
+        texture,
+        mip_level: 0,
+        origin: wgpu::Origin3d {
+            x: 0,
+            y: 0,
+            z: layer,
+        },
+        aspect: wgpu::TextureAspect::All,
+    };
+    encoder.copy_texture_to_texture(
+        at(src),
+        at(dst),
+        wgpu::Extent3d {
+            width: dst.width(),
+            height: dst.height(),
+            depth_or_array_layers: 1,
+        },
+    );
 }
 
 /// The view one sun cascade's map holds.
@@ -1159,7 +1244,10 @@ impl ShadowGpu {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // Copy destination: cached static casters are copied in.
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let map_array_view = depth_texture.create_view(&wgpu::TextureViewDescriptor {
@@ -1487,6 +1575,7 @@ impl ShadowGpu {
             skinned_pipeline,
             layer_views,
             depth_texture,
+            static_cache: None,
             cascade_bufs,
             map_array_view,
             horizon,

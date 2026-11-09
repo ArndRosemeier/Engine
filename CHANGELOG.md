@@ -7,6 +7,11 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.019 (2026-11-09)
+
+- Shadows of things that don't move are cached: each sun cascade keeps a map of its static casters (unchanged for half a second, not swaying in the wind, voxel ground), copies it in and draws only moving things on top (shadow pass 8.1 to 1.9 ms in occlusion_city on lavapipe, pictures identical). World::set_shadow_cache(false) or ENGINE_SHADOW_CACHE=0 turns it off.
+- Fixed: lamp shadows were skipped on frames where no sun cascade was drawn (since 0.016).
+
 ## 0.018 (2026-11-09)
 
 - Occlusion culling turns itself on where it pays: OcclusionMode::Auto (the new default) tries it whenever 32 or more meshes are in view, keeps it while it hides at least 15% of them and switches it off elsewhere, retrying less often each time. set_occlusion_culling(true/false) still forces it; set_occlusion_mode picks any mode; ENGINE_OCCLUSION=auto too. Without AO, hills and voxel ground now go into the depth pyramid, so they hide things as well.

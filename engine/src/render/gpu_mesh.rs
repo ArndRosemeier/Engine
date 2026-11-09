@@ -21,6 +21,13 @@ struct MeshGpuSource {
     vertex_count: usize,
     local_bounds: Option<Bounds>,
     local_box: Option<Aabb>,
+    sways: bool,
+}
+
+/// Whether a vertex sways in the wind (vegetation profiles 8 to 10, as the
+/// scene and shadow vertex shaders test `surface3.w`).
+pub(crate) fn vertex_sways(profile: f32) -> bool {
+    profile > 7.5 && profile < 10.5
 }
 
 pub struct GpuMesh {
@@ -45,6 +52,8 @@ pub struct GpuMesh {
     pub world_box: Option<Aabb>,
     /// `Entity::xform_rev` at the last instance upload.
     pub xform_rev: u64,
+    /// Some vertices sway in the wind: its shadow changes every frame.
+    pub sways: bool,
 }
 
 impl GpuMesh {
@@ -67,6 +76,7 @@ impl GpuMesh {
         });
         let local_bounds = Bounds::around(&mesh.positions);
         let local_box = Aabb::around(&mesh.positions);
+        let sways = vertices.iter().any(|v| vertex_sways(v.surface3[3]));
         Self::with_buffers(
             device,
             cull,
@@ -78,6 +88,7 @@ impl GpuMesh {
                 vertex_count: mesh.positions.len(),
                 local_bounds,
                 local_box,
+                sways,
             },
             instances,
         )
@@ -101,6 +112,7 @@ impl GpuMesh {
                 vertex_count: src.vertex_count,
                 local_bounds: src.local_bounds,
                 local_box: src.local_box,
+                sways: src.sways,
             },
             instances,
         )
@@ -120,6 +132,7 @@ impl GpuMesh {
             vertex_count,
             local_bounds,
             local_box,
+            sways,
         } = mesh;
         let instance_buf = instance_buffer(device, instances, "instances");
         let compact_buf = instance_buffer(device, instances, "instances-compact");
@@ -142,6 +155,7 @@ impl GpuMesh {
             local_box,
             world_box: box_over(local_box, instances),
             xform_rev: 0,
+            sways,
         }
     }
 

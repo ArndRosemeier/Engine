@@ -102,6 +102,8 @@ pub struct GpuFrameStats {
     pub occlusion_hidden: u32,
     /// Sun cascades drawn anew this frame (0 to 3).
     pub shadow_cascades_drawn: u32,
+    /// Of those, how many reused their cached static casters.
+    pub shadow_cache_hits: u32,
 }
 
 impl GpuFrameStats {
@@ -124,9 +126,10 @@ impl GpuFrameStats {
 
     pub fn draw_line(&self) -> String {
         format!(
-            "shadow_atlas={} cascades={} horizon={} submit={} inside={} boundary={} tested={} groups={} indirect={} occlusion_tested={} occlusion_hidden={}",
+            "shadow_atlas={} cascades={} cache_hits={} horizon={} submit={} inside={} boundary={} tested={} groups={} indirect={} occlusion_tested={} occlusion_hidden={}",
             self.shadow_atlas,
             self.shadow_cascades_drawn,
+            self.shadow_cache_hits,
             self.terrain_horizon_rebuilds,
             self.instance_submit,
             self.direct_inside_batches,
@@ -372,6 +375,7 @@ struct ShadowDraw {
     albedo: Option<TextureId>,
 }
 
+#[derive(Clone)]
 struct ShadowCullSelection {
     draws: Vec<ShadowDraw>,
     batch_draws: Vec<ShadowDraw>,
@@ -381,6 +385,34 @@ struct ShadowCullSelection {
 /// Shadow mesh sources per bundle group: one changed caster re-records
 /// only its group's bundle, not the whole view's.
 const SHADOW_GROUP: usize = 128;
+
+/// Bundle slots of the sun cascades' static casters (cascade `c` at
+/// `STATIC_SHADOW_SLOT + c`), after the live views' slots.
+const STATIC_SHADOW_SLOT: usize = 3 + lights::SHADOW_LAYERS;
+/// A caster counts as static once it has not changed for this many frames.
+const STATIC_SHADOW_SETTLE: u64 = 30;
+/// A cached static layer is drawn anew after this many frames regardless.
+const STATIC_SHADOW_MAX_AGE: u64 = 900;
+
+/// The bundle slot's light view: its cascade or lamp layer.
+fn shadow_view_of(slot: usize) -> usize {
+    if slot >= STATIC_SHADOW_SLOT {
+        slot - STATIC_SHADOW_SLOT
+    } else {
+        slot
+    }
+}
+
+/// How a sun cascade's map is drawn this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShadowCacheUse {
+    /// Every caster straight into the map (no cache).
+    Plain,
+    /// The cached static layer is copied in; only moving casters are drawn.
+    Hit,
+    /// The static layer is drawn anew, copied in, then moving casters.
+    Miss,
+}
 
 /// One shadow view's recorded casters: mesh bundles per source group, and
 /// one bundle of instance batches (which change more often).
@@ -572,6 +604,14 @@ pub struct Renderer {
     /// Which sun cascades are drawn anew this frame (the others keep their
     /// maps; see `World::set_shadow_cascade_refresh`).
     shadow_draw: [bool; 3],
+    /// Frames synced so far.
+    frame_no: u64,
+    /// When each mesh entity or batch prototype last changed on the GPU
+    /// (`frame_no`); casters changed lately are not cached as static.
+    moved_at: HashMap<EntityId, u64>,
+    /// Bumped by changes to static shadow content not tied to one caster
+    /// (building elements, rebuilt bundles).
+    static_shadow_epoch: u64,
     clipmap: Option<ClipmapRenderer>,
     /// Ground pipelines, built on a worker thread at startup.
     clipmap_pipelines: pipeline_cache::Prewarm<std::sync::Arc<clipmap::ClipmapPipelines>>,
@@ -973,6 +1013,9 @@ impl Renderer {
             shadow,
             shadow_vp: [glam::Mat4::IDENTITY; 3],
             shadow_draw: [true; 3],
+            frame_no: 0,
+            moved_at: HashMap::new(),
+            static_shadow_epoch: 0,
             clipmap: None,
             portal,
             depth_view,
@@ -1021,7 +1064,7 @@ impl Renderer {
             shadow_source_epoch: 0,
             shadow_mesh_sources: Vec::new(),
             shadow_batch_sources: Vec::new(),
-            shadow_bundles: (0..3 + lights::SHADOW_LAYERS)
+            shadow_bundles: (0..STATIC_SHADOW_SLOT + 3)
                 .map(|_| ShadowViewBundles::default())
                 .collect(),
             opaque_prepass: OpaqueBundles::default(),
@@ -1197,7 +1240,16 @@ impl Renderer {
         self.reupload_if_asked(world);
         self.rebuild_if_asked(world);
         self.apply_present_mode(world.vsync());
+        self.frame_no += 1;
+        if self.frame_no % 512 == 0 {
+            // Forget moves long settled (the entries only matter for a while).
+            let frame = self.frame_no;
+            self.moved_at
+                .retain(|_, at| frame - *at <= STATIC_SHADOW_SETTLE);
+        }
         if let Some((start, words)) = world.take_element_upload() {
+            // Building elements fell: static shadows change.
+            self.static_shadow_epoch += 1;
             let words = &words[..words.len().min(ELEMENT_STATE_WORDS.saturating_sub(start))];
             if !words.is_empty() {
                 self.queue.write_buffer(
@@ -1510,6 +1562,7 @@ impl Renderer {
                 false
             }
         };
+        self.moved_at.insert(id, self.frame_no);
         if shadow_buffers_changed {
             self.invalidate_shadow_bundles();
         }
@@ -1519,6 +1572,7 @@ impl Renderer {
         for view in &mut self.shadow_bundles {
             *view = ShadowViewBundles::default();
         }
+        self.static_shadow_epoch += 1;
     }
 
     /// Bring a batch up to date without a new buffer: keep the slots that
@@ -1702,11 +1756,16 @@ impl Renderer {
         let mut shadow_buffers_changed = self.gpu_instance_batches.len() != batch_count_before;
         for (prototype, build) in builds {
             if let Some(mut batch) = self.gpu_instance_batches.remove(&prototype) {
+                let (writes, slots) = (self.gpu_stats.batch_partial_writes, batch.slots.len());
                 if self.update_batch_in_place(world, &mut batch, &build) {
+                    if writes != self.gpu_stats.batch_partial_writes || slots != batch.slots.len() {
+                        self.moved_at.insert(prototype, self.frame_no);
+                    }
                     self.gpu_instance_batches.insert(prototype, batch);
                     continue;
                 }
             }
+            self.moved_at.insert(prototype, self.frame_no);
 
             let prototype_gpu = self.gpu_meshes.get(&prototype).unwrap_or_else(|| {
                 panic!("instance batch has no GPU mesh for prototype {prototype}")
@@ -3910,33 +3969,105 @@ impl Renderer {
         }
         self.gpu_stats.shadow_cascades_drawn =
             self.shadow_draw.iter().filter(|d| **d).count() as u32 * u32::from(sun);
-        if frustums.is_empty() {
-            return;
-        }
         for (i, vp) in lamp_views.iter().enumerate() {
             frustums.push(Frustum::from_view_projection(*vp));
             slots.push(3 + i);
         }
+        if frustums.is_empty() {
+            return;
+        }
         let mut t = std::time::Instant::now();
-        let selections = self.select_shadow_culls(world, &frustums);
+        let mut selections = self.select_shadow_culls(world, &frustums);
         self.cpu_spans.mark("shadows.select", &mut t);
-        self.prepare_shadow_bundles(&slots, &selections);
+        let default_space = world.living_in() == SpaceId::DEFAULT;
+        let voxel_on = default_space && self.voxel.is_drawing();
+        // Sun cascades with the static cache: static casters (not changed
+        // lately, not swaying) go to their own selection, drawn into the
+        // cache layer only when it is out of date.
+        let caching = sun && world.shadow_cache() && shadow_cache_env();
+        let mut uses = vec![ShadowCacheUse::Plain; slots.len()];
+        let mut statics: Vec<(usize, ShadowCullSelection)> = Vec::new();
+        if caching {
+            if self.shadow.static_cache.is_none() {
+                let size = self.shadow.depth_texture.width();
+                self.shadow.static_cache = Some(shadow::StaticShadowCache::new(&self.device, size));
+            }
+            for (i, &slot) in slots.iter().enumerate() {
+                if slot >= 3 {
+                    continue;
+                }
+                let (fixed, moving) = self.split_static_casters(&selections[i]);
+                selections[i] = moving;
+                let key = shadow::StaticShadowKey {
+                    vp: self.shadow_vp[slot].to_cols_array().map(f32::to_bits),
+                    epoch: self.static_shadow_epoch,
+                    voxel_epoch: if voxel_on {
+                        self.voxel.epoch()
+                    } else {
+                        u64::MAX
+                    },
+                    casters: caster_hash(&fixed, world.living_in()),
+                };
+                let cache = self
+                    .shadow
+                    .static_cache
+                    .as_mut()
+                    .expect("static shadow cache made above");
+                let fresh = cache.keys[slot].is_some_and(|(k, at)| {
+                    k == key && self.frame_no.saturating_sub(at) < STATIC_SHADOW_MAX_AGE
+                });
+                if fresh {
+                    uses[i] = ShadowCacheUse::Hit;
+                    self.gpu_stats.shadow_cache_hits += 1;
+                } else {
+                    uses[i] = ShadowCacheUse::Miss;
+                    cache.keys[slot] = Some((key, self.frame_no));
+                    statics.push((i, fixed));
+                }
+            }
+        } else {
+            self.shadow.static_cache = None;
+        }
+        // Bundles: every view's (moving) casters, and the static casters of
+        // the cascades drawn into the cache this frame.
+        let mut bundle_slots = slots.clone();
+        let mut bundle_selections: Vec<ShadowCullSelection> = Vec::new();
+        bundle_selections.append(&mut selections);
+        let mut static_compact: HashMap<usize, Vec<EntityId>> = HashMap::new();
+        for (i, fixed) in statics {
+            bundle_slots.push(STATIC_SHADOW_SLOT + slots[i]);
+            static_compact.insert(i, fixed.compact_batches.clone());
+            self.gpu_stats.indirect_draws += fixed
+                .batch_draws
+                .iter()
+                .filter(|draw| draw.submit == MeshSubmit::Compacted)
+                .count() as u32;
+            bundle_selections.push(fixed);
+        }
+        self.prepare_shadow_bundles(&bundle_slots, &bundle_selections);
         self.cpu_spans.mark("shadows.bundles", &mut t);
+        let selections = &bundle_selections[..slots.len()];
 
         let new_encoder = |device: &wgpu::Device, label| {
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) })
         };
         let before = std::mem::replace(encoder, new_encoder(&self.device, "after-shadows"));
         recorded.push(before.finish());
-        let default_space = world.living_in() == SpaceId::DEFAULT;
         let mut views = Vec::new();
-        for ((frustum, selection), &slot) in frustums.iter().zip(&selections).zip(&slots) {
+        for (i, ((frustum, selection), &slot)) in
+            frustums.iter().zip(selections).zip(&slots).enumerate()
+        {
             let mut view_encoder = new_encoder(&self.device, "shadow-view");
             if submit == InstanceSubmit::GpuIndirect {
+                // A cache miss also draws the static batches: cull them too.
+                let mut compact = selection.compact_batches.clone();
+                if let Some(more) = static_compact.get(&i) {
+                    compact.extend_from_slice(more);
+                }
                 self.dispatch_instance_cull(
                     &mut view_encoder,
                     frustum,
-                    &selection.compact_batches,
+                    &compact,
                     CullView::Shadow,
                     None,
                 );
@@ -3962,15 +4093,18 @@ impl Renderer {
                 })
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>();
-            let voxel =
-                (default_space && self.voxel.is_drawing()).then(|| self.voxel.visible_in(frustum));
-            views.push((slot, view_encoder, skinned, voxel));
+            // Voxel ground is static: drawn with the static casters when the
+            // cache is used, so not again on a hit.
+            let voxel = (voxel_on && uses[i] != ShadowCacheUse::Hit)
+                .then(|| self.voxel.visible_in(frustum));
+            views.push((slot, uses[i], view_encoder, skinned, voxel));
         }
         let this = &*self;
         let views: Vec<ShadowViewWork<'_>> = views
             .into_iter()
-            .map(|(slot, encoder, skinned, voxel)| ShadowViewWork {
+            .map(|(slot, cache, encoder, skinned, voxel)| ShadowViewWork {
                 slot,
+                cache,
                 encoder,
                 skinned: skinned
                     .iter()
@@ -3982,6 +4116,7 @@ impl Renderer {
         let record = |work: ShadowViewWork<'_>| -> wgpu::CommandBuffer {
             let ShadowViewWork {
                 slot,
+                cache,
                 mut encoder,
                 skinned,
                 voxel,
@@ -3997,24 +4132,77 @@ impl Renderer {
                     &this.shadow.lamps.layer_binds[slot - 3],
                 )
             };
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some(if slot < 3 {
+            let draw_voxel = |pass: &mut wgpu::RenderPass<'_>| {
+                if let Some(draws) = voxel.as_ref() {
+                    pass.set_pipeline(&this.shadow.voxel_pipeline);
+                    pass.set_bind_group(0, view_bind, &[]);
+                    this.voxel.draw(pass, draws);
+                }
+            };
+            let depth_pass = |encoder: &'_ mut wgpu::CommandEncoder,
+                              view: &wgpu::TextureView,
+                              load: wgpu::LoadOp<f32>,
+                              label: &'static str| {
+                encoder
+                    .begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some(label),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view,
+                            depth_ops: Some(wgpu::Operations {
+                                load,
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                    })
+                    .forget_lifetime()
+            };
+            let mut load = wgpu::LoadOp::Clear(1.0);
+            if cache != ShadowCacheUse::Plain {
+                let cached = this
+                    .shadow
+                    .static_cache
+                    .as_ref()
+                    .expect("static shadow cache in use");
+                if cache == ShadowCacheUse::Miss {
+                    // The static casters into the cache layer first.
+                    let mut pass = depth_pass(
+                        &mut encoder,
+                        &cached.views[slot],
+                        wgpu::LoadOp::Clear(1.0),
+                        "shadow-csm-static",
+                    );
+                    let view = &this.shadow_bundles[STATIC_SHADOW_SLOT + slot];
+                    pass.execute_bundles(
+                        view.groups
+                            .iter()
+                            .map(|g| &g.bundle)
+                            .chain(view.batches.as_ref()),
+                    );
+                    draw_voxel(&mut pass);
+                    drop(pass);
+                }
+                shadow::copy_layer(
+                    &mut encoder,
+                    &cached.texture,
+                    &this.shadow.depth_texture,
+                    slot as u32,
+                );
+                load = wgpu::LoadOp::Load;
+            }
+            let mut pass = depth_pass(
+                &mut encoder,
+                target,
+                load,
+                if slot < 3 {
                     "shadow-csm"
                 } else {
                     "shadow-lamp"
-                }),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: target,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
+                },
+            );
             let view = &this.shadow_bundles[slot];
             pass.execute_bundles(
                 view.groups
@@ -4022,10 +4210,8 @@ impl Renderer {
                     .map(|g| &g.bundle)
                     .chain(view.batches.as_ref()),
             );
-            if let Some(draws) = voxel {
-                pass.set_pipeline(&this.shadow.voxel_pipeline);
-                pass.set_bind_group(0, view_bind, &[]);
-                this.voxel.draw(&mut pass, &draws);
+            if cache == ShadowCacheUse::Plain {
+                draw_voxel(&mut pass);
             }
             pass.set_pipeline(&this.shadow.skinned_pipeline);
             pass.set_bind_group(0, view_bind, &[]);
@@ -4050,6 +4236,57 @@ impl Renderer {
         };
         // `collect` keeps the views' order whatever thread finished first.
         recorded.extend(buffers);
+    }
+
+    /// Split a cascade's casters into static ones (unchanged for
+    /// `STATIC_SHADOW_SETTLE` frames, not swaying in the wind) and moving
+    /// ones. Order within each part is kept.
+    fn split_static_casters(
+        &self,
+        selection: &ShadowCullSelection,
+    ) -> (ShadowCullSelection, ShadowCullSelection) {
+        let settled = |id: &EntityId| {
+            self.moved_at
+                .get(id)
+                .is_none_or(|&at| self.frame_no.saturating_sub(at) > STATIC_SHADOW_SETTLE)
+        };
+        let mesh_static =
+            |d: &ShadowDraw| settled(&d.id) && self.gpu_meshes.get(&d.id).is_some_and(|g| !g.sways);
+        let batch_static = |id: &EntityId| {
+            settled(id)
+                && self
+                    .gpu_instance_batches
+                    .get(id)
+                    .is_some_and(|b| !b.gpu.sways)
+        };
+        let empty = || ShadowCullSelection {
+            draws: Vec::new(),
+            batch_draws: Vec::new(),
+            compact_batches: Vec::new(),
+        };
+        let (mut fixed, mut moving) = (empty(), empty());
+        for d in &selection.draws {
+            if mesh_static(d) {
+                fixed.draws.push(*d);
+            } else {
+                moving.draws.push(*d);
+            }
+        }
+        for d in &selection.batch_draws {
+            if batch_static(&d.id) {
+                fixed.batch_draws.push(*d);
+            } else {
+                moving.batch_draws.push(*d);
+            }
+        }
+        for id in &selection.compact_batches {
+            if batch_static(id) {
+                fixed.compact_batches.push(*id);
+            } else {
+                moving.compact_batches.push(*id);
+            }
+        }
+        (fixed, moving)
     }
 
     pub fn size(&self) -> PhysicalSize<u32> {
@@ -4761,6 +4998,7 @@ fn batch_slot_capacity(instance_count: usize) -> usize {
 /// its instance cull already) and what it draws besides its bundles.
 struct ShadowViewWork<'r> {
     slot: usize,
+    cache: ShadowCacheUse,
     encoder: wgpu::CommandEncoder,
     skinned: Vec<&'r GpuSkinnedEntity>,
     voxel: Option<Vec<(std::ops::Range<u32>, i32, u32)>>,
@@ -4793,10 +5031,11 @@ impl ShadowBundleCtx<'_> {
                     sample_count: 1,
                     multiview: None,
                 });
-        let view_bind = if cascade < 3 {
-            &self.shadow.cascade_binds[cascade]
+        let view = shadow_view_of(cascade);
+        let view_bind = if view < 3 {
+            &self.shadow.cascade_binds[view]
         } else {
-            &self.shadow.lamps.layer_binds[cascade - 3]
+            &self.shadow.lamps.layer_binds[view - 3]
         };
         bundle.set_bind_group(0, view_bind, &[]);
         // Untextured casters first on the cheap depth-only pipeline, then the
@@ -4965,6 +5204,26 @@ fn render_scale_env() -> Option<f32> {
             .and_then(|v| v.trim().parse::<f32>().ok())
             .filter(|v| v.is_finite())
     })
+}
+
+/// `ENGINE_SHADOW_CACHE=0` draws every shadow caster every frame.
+fn shadow_cache_env() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ENGINE_SHADOW_CACHE").map_or(true, |v| v.trim() != "0"))
+}
+
+/// Which static casters a cache layer holds, and how they are drawn.
+fn caster_hash(selection: &ShadowCullSelection, space: SpaceId) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    space.hash(&mut h);
+    for d in selection.draws.iter().chain(&selection.batch_draws) {
+        d.id.hash(&mut h);
+        (d.submit == MeshSubmit::Compacted).hash(&mut h);
+        d.albedo.hash(&mut h);
+    }
+    selection.draws.len().hash(&mut h);
+    h.finish()
 }
 
 fn taa_env_enabled() -> bool {
