@@ -1070,6 +1070,12 @@ impl Default for World {
 /// Below this many instances to reassign, LOD assignment runs on the
 /// calling thread instead of all cores.
 const LOD_PARALLEL_PLACES: usize = 8192;
+/// From this many animated characters their clocks tick on the frame's
+/// threads (a clock alone is a few nanoseconds).
+const ANIM_PARALLEL_CLOCKS: usize = 512;
+/// From this many characters their poses are sampled on the frame's
+/// threads (one pose is tens of microseconds; waking threads costs a few).
+pub(crate) const ANIM_PARALLEL_POSES: usize = 4;
 
 impl World {
     pub fn new() -> Self {
@@ -1564,14 +1570,15 @@ impl World {
                 .zip(lists)
                 .collect::<Vec<_>>()
         };
-        // Sets are independent: many are assigned on all cores. A few are
-        // quicker here than waking the worker threads (which may be busy).
+        // Sets are independent: many are assigned on the frame's threads. A
+        // few are quicker here than waking them.
         let places: usize = stale_sets.iter().map(|s| s.places.len()).sum();
         let updates: Vec<(EntityId, Vec<MeshInstance>)> = if places < LOD_PARALLEL_PLACES {
             stale_sets.iter().flat_map(assign_set).collect()
         } else {
             use rayon::prelude::*;
-            stale_sets.par_iter().flat_map_iter(assign_set).collect()
+            crate::parallel::frame_pool()
+                .install(|| stale_sets.par_iter().flat_map_iter(assign_set).collect())
         };
         for (entity, list) in updates {
             self.replace_instances(entity, list);
@@ -2981,8 +2988,16 @@ impl World {
 
     /// Advance all skinned clip clocks (call once per frame before render sync).
     pub fn tick_animations(&mut self, dt: f32) {
-        for e in self.animated.values_mut() {
-            e.animator.tick(dt);
+        use rayon::prelude::*;
+        // Each clock is its own: on the frame's threads when there are many.
+        let mut all: Vec<&mut AnimatedEntity> = self.animated.values_mut().collect();
+        if all.len() >= ANIM_PARALLEL_CLOCKS {
+            crate::parallel::frame_pool()
+                .install(|| all.par_iter_mut().for_each(|e| e.animator.tick(dt)));
+        } else {
+            for e in all {
+                e.animator.tick(dt);
+            }
         }
         self.tick_foot_ik(dt);
     }
@@ -3068,11 +3083,16 @@ impl World {
         // Below this lift a foot counts as planted, and is eased onto the
         // ground (a clip's sole a centimetre into its floor stands on it).
         const PLANT: f32 = 0.03;
-        let mut legs = Vec::new();
-        for (id, e) in &self.animated {
-            let Some(ik) = e.animator.ik.as_ref() else {
-                continue;
-            };
+        // Sampling the clips is the slow part: every character at once on
+        // the frame's threads (each reads only its own animator).
+        let with_ik: Vec<(EntityId, &AnimatedEntity)> = self
+            .animated
+            .iter()
+            .filter(|(_, e)| e.animator.ik.is_some())
+            .map(|(id, e)| (*id, e))
+            .collect();
+        let leg_of = |&(id, e): &(EntityId, &AnimatedEntity)| {
+            let ik = e.animator.ik.as_ref().expect("filtered on foot IK");
             let t = e.transform;
             let globals = e.animator.fk_globals();
             let root = t.w_axis.truncate();
@@ -3085,15 +3105,25 @@ impl World {
                     toe
                 }
             });
-            legs.push((*id, root, soles, ik.settings, t.inverse()));
-        }
+            (id, root, soles, ik.settings, t.inverse())
+        };
+        let legs: Vec<_> = if with_ik.len() >= ANIM_PARALLEL_POSES {
+            use rayon::prelude::*;
+            crate::parallel::frame_pool().install(|| with_ik.par_iter().map(leg_of).collect())
+        } else {
+            with_ik.iter().map(leg_of).collect()
+        };
         if legs.is_empty() {
             return;
         }
         let discs: Vec<(Vec3, f32)> = legs.iter().map(|l| (l.1, 1.5)).collect();
         let patches = self.ground_patches(&discs);
-        let mut updates = Vec::new();
-        for ((id, root, soles, settings, to_model), patch) in legs.into_iter().zip(patches) {
+        // Probing the ground under every foot reads the world only: on the
+        // frame's threads, results in the characters' order.
+        let probe = |((id, root, soles, settings, to_model), patch): (
+            (EntityId, Vec3, [Vec3; 2], crate::anim::FootIk, Mat4),
+            crate::ground_probe::GroundPatch,
+        )| {
             let max = settings.max_step;
             // Per foot: the ground's height over the origin (eased: steps
             // and slopes), and what the clip's own sole needs to stand
@@ -3111,8 +3141,15 @@ impl World {
                 self.ground_below_in(&patch, from, 2.0 * max + 0.5)
                     .map(|g| ((g - root.y).clamp(-max, max), want - lift))
             });
-            updates.push((id, parts, settings, to_model));
-        }
+            (id, parts, settings, to_model)
+        };
+        let updates: Vec<_> = if legs.len() >= ANIM_PARALLEL_POSES {
+            use rayon::prelude::*;
+            crate::parallel::frame_pool()
+                .install(|| legs.into_par_iter().zip(patches).map(probe).collect())
+        } else {
+            legs.into_iter().zip(patches).map(probe).collect()
+        };
         for (id, parts, settings, to_model) in updates {
             let Some(ik) = self
                 .animated

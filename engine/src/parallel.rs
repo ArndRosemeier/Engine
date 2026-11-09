@@ -26,6 +26,26 @@ where
     items.par_iter().map(make).collect()
 }
 
+/// The threads that share out a frame's own work (animation, recording
+/// draws, LOD assignment). Background jobs (world streaming, chunk builds,
+/// the game's own workers) never run here, so frame work cannot queue
+/// behind them: rayon's global pool may be full of slow builds while the
+/// frame waits. Every call joins before it returns (`install`, `par_iter`),
+/// so a frame step finishes completely before the next one starts.
+pub(crate) fn frame_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        // The calling thread waits while these work. Background workers
+        // run at a lower priority, so these win the cores they need.
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(cores.clamp(1, 8))
+            .thread_name(|i| format!("engine-frame-{i}"))
+            .build()
+            .expect("build the frame thread pool")
+    })
+}
+
 /// Lower the calling thread's priority, for background workers (world
 /// streaming). Frame work then always wins the cores: on a busy machine
 /// the OS would otherwise let a streaming job hold a core for a whole time

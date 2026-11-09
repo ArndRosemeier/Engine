@@ -7,6 +7,15 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.013 (2026-11-09)
+
+- Engine's frame work runs on all cores: animation (clip sampling, foot IK and its ground search), recording the shadow maps (one command buffer per light view) and recording the world's opaque meshes (render bundles in chunks of 128, recorded side by side) run on a frame-only thread pool that background jobs never use, so frame work never waits behind them. Each step finishes completely before the next starts, and command buffers are submitted in a fixed order, so the picture is the same as before.
+- Bundles that would come out the same are kept from frame to frame: a shadow view re-records only the group of 128 casters that changed, and the world pass only the chunks whose meshes, buffers or textures changed.
+- The scene goes to the GPU before Engine waits for the window's next image, so the GPU starts on it while the display is still busy.
+- Foot IK no longer copies every placement of the town each frame, and turns far placements away with one box test (its ground search went from about 3 ms to 1.4 ms for nine characters in HeroWorld's town).
+- ENGINE_CPU_TRACE shows the new steps: sync.poses, shadows.select, shadows.bundles, world.record_opaque.
+
+
 ## 0.012 (2026-11-09)
 
 - Characters share their textures. On the GPU, maps with the same texels (a garment, eyes, teeth or hair worn by many characters) are one texture, and a crowd's far model is drawn with its near model's maps instead of holding its own copy, on the CPU and the GPU.
