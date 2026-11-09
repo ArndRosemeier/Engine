@@ -468,7 +468,11 @@ impl ApplicationHandler for App {
                 self.title,
                 crate::version::version()
             ))
-            .with_inner_size(Self::window_inner_size().expect("validated window size"));
+            .with_inner_size(Self::window_inner_size().expect("validated window size"))
+            // Hidden while the renderer compiles its pipelines: this callback
+            // holds the event loop, and a shown window that cannot answer
+            // stands still and cannot be dragged. Shown once it can.
+            .with_visible(false);
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -482,6 +486,8 @@ impl ApplicationHandler for App {
         }
         let renderer = pollster::block_on(Renderer::new(window.clone()));
         let ui_backend = UiBackend::new(&window, renderer.device(), renderer.surface_format());
+        window.set_visible(true);
+        window.request_redraw();
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.ui_backend = Some(ui_backend);
