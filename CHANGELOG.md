@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.024 (2026-11-09)
+
+- Fixed a memory leak that slowed scenes down the longer they ran: wgpu 25 never freed render bundles, so every re-recorded batch of draws stayed in memory (occlusion_city on an RTX 5070 fell from 244 to 74 FPS in 25 s with multi-draw and occlusion off). The engine now uses a patched copy of wgpu (third_party/).
+
 ## 0.023 (2026-11-09)
 
 - Shadow maps draw many casters per call too: sun cascades, their static cache layers and lamp shadows send their mesh casters as one multi-draw per pipeline, texture and buffer page (kept while the casters stay the same). occlusion_city: the CPU's shadow setup went from 1.7 to 0.3 ms and the whole world from 9.9 to 7.1 ms per frame (lavapipe), picture identical. ENGINE_MULTI_DRAW=0 turns it off with the rest.
