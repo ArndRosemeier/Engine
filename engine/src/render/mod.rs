@@ -1,3 +1,4 @@
+mod audit;
 mod clipmap;
 mod crowd;
 mod decals;
@@ -394,6 +395,7 @@ pub struct Renderer {
     gpu_skinned_meshes: HashMap<usize, (Vec<GpuSkinnedMesh>, wgpu::Buffer)>,
     gpu_textures: HashMap<TextureId, GpuTexture>,
     gpu_mesh_albedo: HashMap<TextureId, wgpu::BindGroup>,
+    audit_frame: u64,
     gpu_materials: HashMap<MaterialId, GpuTerrainMaterial>,
     gpu_water_materials: HashMap<WaterMaterialId, GpuWaterMaterial>,
     synced_render_epoch: u64,
@@ -739,6 +741,7 @@ impl Renderer {
             gpu_skinned_meshes: HashMap::new(),
             gpu_textures: HashMap::new(),
             gpu_mesh_albedo: HashMap::new(),
+            audit_frame: 0,
             gpu_materials: HashMap::new(),
             gpu_water_materials: HashMap::new(),
             synced_render_epoch: 0,
@@ -1465,6 +1468,7 @@ impl Renderer {
         };
         let (scene_view, scene_resolve) = self.postprocess.scene_attachment();
         self.encode_world(&mut encoder, &scene_view, scene_resolve.as_ref(), world);
+        self.write_audit(world);
         self.mark_gpu(&mut encoder, Mark::SceneDone);
         self.cpu_spans.mark("render.world", &mut t);
         if let Some(water) = world.water() {
@@ -1606,7 +1610,11 @@ impl Renderer {
             g.vertex_buf.size() + g.index_buf.size() + g.instance_buf.size() + g.compact_buf.size()
         };
         let meshes: u64 = self.gpu_meshes.values().map(mesh).sum::<u64>()
-            + self.gpu_instance_batches.values().map(|b| mesh(&b.gpu)).sum::<u64>();
+            + self
+                .gpu_instance_batches
+                .values()
+                .map(|b| mesh(&b.gpu))
+                .sum::<u64>();
         let textures: u64 = self
             .gpu_textures
             .values()
