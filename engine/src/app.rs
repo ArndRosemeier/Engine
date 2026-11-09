@@ -167,7 +167,21 @@ impl App {
         let vsynced = self.world.vsync() && !self.no_pacing;
         let dt = self.clock.tick(raw_dt, self.refresh_hz.filter(|_| vsynced));
         if let Some(stats) = self.frame_stats.as_mut() {
-            stats.add(raw_dt);
+            if stats.add(raw_dt) {
+                // Video memory, to see a GPU running short.
+                if let Some(r) = self.renderer.as_ref() {
+                    let (meshes, textures, n_meshes, n_textures) = r.mesh_and_texture_bytes();
+                    eprintln!(
+                        "gpu memory: meshes {} MiB ({n_meshes}), textures {} MiB ({n_textures}){}",
+                        meshes >> 20,
+                        textures >> 20,
+                        r.device()
+                            .generate_allocator_report()
+                            .map(|a| format!(", {} MiB allocated", a.total_allocated_bytes >> 20))
+                            .unwrap_or_default()
+                    );
+                }
+            }
         }
 
         self.fps_accum_s += raw_dt.max(0.0);

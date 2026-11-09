@@ -109,11 +109,12 @@ impl FrameStats {
             })
     }
 
-    pub(crate) fn add(&mut self, raw: f32) {
+    /// Returns whether it printed a line just now.
+    pub(crate) fn add(&mut self, raw: f32) -> bool {
         self.samples.push(raw);
         self.since += raw;
         if self.since < 2.0 {
-            return;
+            return false;
         }
         let n = self.samples.len() as f32;
         let mean = self.samples.iter().sum::<f32>() / n;
@@ -133,6 +134,7 @@ impl FrameStats {
         );
         self.samples.clear();
         self.since = 0.0;
+        true
     }
 }
 

@@ -1599,6 +1599,27 @@ impl Renderer {
         }
     }
 
+    /// Rough video memory held by meshes and textures (bytes): (mesh
+    /// buffers, textures, mesh count, texture count). For diagnostics.
+    pub fn mesh_and_texture_bytes(&self) -> (u64, u64, usize, usize) {
+        let mesh = |g: &gpu_mesh::GpuMesh| {
+            g.vertex_buf.size() + g.index_buf.size() + g.instance_buf.size() + g.compact_buf.size()
+        };
+        let meshes: u64 = self.gpu_meshes.values().map(mesh).sum::<u64>()
+            + self.gpu_instance_batches.values().map(|b| mesh(&b.gpu)).sum::<u64>();
+        let textures: u64 = self
+            .gpu_textures
+            .values()
+            .map(|t| t.width as u64 * t.height as u64 * 4)
+            .sum();
+        (
+            meshes,
+            textures,
+            self.gpu_meshes.len() + self.gpu_instance_batches.len(),
+            self.gpu_textures.len() + self.gpu_mesh_albedo.len(),
+        )
+    }
+
     pub fn device(&self) -> &wgpu::Device {
         &self.device
     }
