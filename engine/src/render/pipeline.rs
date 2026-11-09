@@ -595,7 +595,7 @@ fn grass_profile(p: vec3<f32>, seed: f32, gain: f32) -> vec3<f32> {
 @vertex
 fn vs_main(v: VsIn) -> VsOut {
     var out: VsOut;
-    if element_dead(v.element) {
+    if element_dead(v.element) && !dbg(2u) {
         // A broken element: every corner outside the view, so nothing draws.
         out.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
         return out;
@@ -781,8 +781,11 @@ fn vegetation_shade(in: VsOut) -> vec4<f32> {
 // Depth prepass: only texels the shaded pass will cover on every sample.
 @fragment
 fn fs_depth(in: VsOut) {
-    if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) {
+    if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) && !dbg(1u) {
         discard;
+    }
+    if dbg(4u) && in.surface3.w < 0.001 {
+        return;
     }
     if in.surface3.w > 7.5 {
         if in.surface3.w < 8.5 {
@@ -799,6 +802,11 @@ fn fs_depth(in: VsOut) {
     if foliage || in.color.a * texel.a < 0.999 {
         discard;
     }
+}
+
+// ---- Debug shading (World::set_debug_shading), flags in torch_color.w ----
+fn dbg(bit: u32) -> bool {
+    return (u32(u.torch_color.w + 0.5) & bit) != 0u;
 }
 
 // ---- Triplanar texturing (MaterialMaps::triplanar) ----
@@ -859,6 +867,9 @@ override SCENE_ALPHA_DITHER: f32 = 0.0;
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var c = shade_main(in);
+    if dbg(32u) {
+        c.a = 1.0;
+    }
     if SCENE_ALPHA_DITHER > 0.5 {
         let q = floor(in.clip.xy) + vec2<f32>(5.588238 * u.dither_frame);
         let h = fract(52.9829189 * fract(dot(q, vec2<f32>(0.06711056, 0.00583715))));
@@ -871,8 +882,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 
 fn shade_main(in: VsOut) -> vec4<f32> {
-    if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) {
+    if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) && !dbg(1u) {
         discard;
+    }
+    if dbg(8u) && in.surface3.w < 0.001 && mat.triplanar.x > 0.0 {
+        return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+    }
+    if dbg(16u) && in.surface3.w < 0.001 && mat.triplanar.x <= 0.0 {
+        return vec4<f32>(0.0, 1.0, 1.0, 1.0);
     }
     if in.surface3.w > 7.5 {
         return vegetation_shade(in);

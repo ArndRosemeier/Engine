@@ -326,6 +326,7 @@ struct BatchSourceState {
 pub(crate) const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::GreaterEqual;
 pub(crate) const DEPTH_CLEAR: f32 = 0.0;
 pub(crate) use shadow::ELEMENT_STATE_WORDS;
+
 pub(crate) use stencil::DEPTH_FORMAT;
 
 enum SceneUniformTarget {
@@ -1853,9 +1854,9 @@ impl Renderer {
             torch_color: torch
                 .map(|t| {
                     let c = t.color.to_vec3();
-                    [c.x, c.y, c.z, 0.0]
+                    [c.x, c.y, c.z, world.debug_shading as f32]
                 })
-                .unwrap_or([0.0, 0.0, 0.0, 0.0]),
+                .unwrap_or([0.0, 0.0, 0.0, world.debug_shading as f32]),
             camera_right: right.into(),
             ao_strength,
             camera_up: up.into(),

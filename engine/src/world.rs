@@ -196,6 +196,16 @@ fn content_hash(bytes: &[u8]) -> u64 {
     h ^ (h >> 32)
 }
 
+/// [`crate::world::World::set_debug_shading`] flags: what each bit does.
+pub const DEBUG_SHADING_FLAGS: [(u32, &str); 6] = [
+    (1, "keep LOD-faded pixels"),
+    (2, "keep broken elements"),
+    (4, "depth prepass ignores texture alpha"),
+    (8, "textured surfaces magenta"),
+    (16, "untextured surfaces cyan"),
+    (32, "every pixel opaque"),
+];
+
 /// The curve that turns the HDR scene into screen colours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToneMap {
@@ -691,6 +701,8 @@ pub struct World {
     resource_epoch: u64,
     /// Bumped by [`Self::request_gpu_reupload`]: (meshes, textures).
     pub(crate) reupload: (u64, u64),
+    /// [`Self::set_debug_shading`] flags.
+    pub(crate) debug_shading: u32,
     /// Changes when only instance lists changed (LOD swaps): the renderer
     /// re-uploads instances without rebuilding GI or shadow sources.
     instance_epoch: u64,
@@ -859,6 +871,7 @@ impl Default for World {
             water_materials: HashMap::new(),
             resource_epoch: 1,
             reupload: (0, 0),
+            debug_shading: 0,
             instance_epoch: 1,
             lods: std::collections::BTreeMap::new(),
             next_lod: 1,
@@ -1467,6 +1480,17 @@ impl World {
                 .checked_add(1)
                 .expect("world instance epoch overflow");
         }
+    }
+
+    /// Debugging aid: switches off the places where the mesh shader drops
+    /// triangles or pixels, or paints what passes one of them (bit flags,
+    /// see [`DEBUG_SHADING_FLAGS`]). 0 is normal drawing.
+    pub fn set_debug_shading(&mut self, flags: u32) {
+        self.debug_shading = flags;
+    }
+
+    pub fn debug_shading(&self) -> u32 {
+        self.debug_shading
     }
 
     /// Debugging aid: the renderer throws away its GPU copies of every mesh
