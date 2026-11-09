@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.023 (2026-11-09)
+
+- Shadow maps draw many casters per call too: sun cascades, their static cache layers and lamp shadows send their mesh casters as one multi-draw per pipeline, texture and buffer page (kept while the casters stay the same). occlusion_city: the CPU's shadow setup went from 1.7 to 0.3 ms and the whole world from 9.9 to 7.1 ms per frame (lavapipe), picture identical. ENGINE_MULTI_DRAW=0 turns it off with the rest.
+
 ## 0.022 (2026-11-09)
 
 - Many meshes per draw call: where the GPU supports multi-draw (every Vulkan and DX12 card), the world pass and the depth prepass send their opaque meshes as one call per texture and buffer page, with the per-mesh arguments in a GPU buffer; meshes the occlusion test decides take theirs straight from its output. occlusion_city: 1,697 towers in 5 calls instead of 1,697, about 2 ms less CPU per frame (lavapipe), picture identical. ENGINE_MULTI_DRAW=0 turns it off. ENGINE_FIXED_DT=0.016 steps every frame by the same time, so two runs can be compared picture for picture.
