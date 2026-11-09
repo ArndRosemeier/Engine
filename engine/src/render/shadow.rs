@@ -1078,6 +1078,64 @@ pub struct ShadowGpu {
     /// Bumped on every atlas refill so the horizon map knows to rebuild.
     atlas_generation: u64,
     atlas_max_ground: f32,
+    /// Frames prepared so far (staggers the cascade redraws).
+    cascade_frame: u64,
+    /// What each sun cascade's map was last drawn with.
+    cascade_drawn: [Option<DrawnCascade>; CASCADE_COUNT],
+}
+
+/// The view one sun cascade's map holds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DrawnCascade {
+    pub vp: Mat4,
+    pub light: Vec3,
+    pub focus: Vec3,
+    pub radius: f32,
+}
+
+/// The sun may turn this far (cosine of ~0.5 degrees) before every cascade
+/// is drawn again, whatever its refresh interval.
+const CASCADE_LIGHT_COS: f32 = 0.999_96;
+/// The camera may move this share of a cascade's radius before it is drawn
+/// again (its map then still covers what the cascade shades).
+const CASCADE_FOCUS_SHARE: f32 = 0.1;
+
+/// Whether sun cascade `index` is drawn this frame. `every` is its refresh
+/// interval; cascades past the first are staggered (the middle one on even
+/// frames, the far one on odd frames for an interval of 2), so they do not
+/// all fall on the same frame.
+pub(crate) fn cascade_due(
+    frame: u64,
+    index: usize,
+    every: u32,
+    last: Option<&DrawnCascade>,
+    light: Vec3,
+    focus: Vec3,
+    radius: f32,
+) -> bool {
+    let Some(last) = last else {
+        return true;
+    };
+    if every <= 1
+        || (last.radius - radius).abs() > 1e-3
+        || last.light.dot(light) < CASCADE_LIGHT_COS
+        || last.focus.distance(focus) > radius * CASCADE_FOCUS_SHARE
+    {
+        return true;
+    }
+    let offset = index.saturating_sub(1) as u64;
+    (frame + offset) % u64::from(every) == 0
+}
+
+/// `ENGINE_SHADOW_REFRESH=1` draws every cascade every frame.
+fn refresh_override() -> Option<u32> {
+    static ON: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("ENGINE_SHADOW_REFRESH")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .map(|n| n.clamp(1, 8))
+    })
 }
 
 impl ShadowGpu {
@@ -1446,6 +1504,8 @@ impl ShadowGpu {
             atlas_pixels,
             atlas_origin_xz: [0.0, 0.0],
             atlas_extent: settings.atlas_extent_m,
+            cascade_frame: 0,
+            cascade_drawn: [None; CASCADE_COUNT],
             last_contact_epoch: u64::MAX,
             last_origin: RenderOrigin::default(),
             last_focus_xz: [f32::MAX, f32::MAX],
@@ -1651,7 +1711,7 @@ impl ShadowGpu {
         world: &World,
         eye: Vec3,
         view: &super::frustum::Frustum,
-    ) -> [Mat4; CASCADE_COUNT] {
+    ) -> ([Mat4; CASCADE_COUNT], [bool; CASCADE_COUNT]) {
         let wind = [world.time(), world.wind(), 0.0, 0.0];
         self.atlas_wrote = false;
         let mut uniforms = ShadowUniforms::zeroed();
@@ -1686,24 +1746,42 @@ impl ShadowGpu {
             for buf in &self.cascade_bufs {
                 queue.write_buffer(buf, 0, &ident);
             }
-            return [Mat4::IDENTITY; CASCADE_COUNT];
+            self.cascade_drawn = [None; CASCADE_COUNT];
+            return ([Mat4::IDENTITY; CASCADE_COUNT], [false; CASCADE_COUNT]);
         };
 
         uniforms.flags |= FLAG_CSM;
         let focus = world.camera().target();
         let ends = settings.cascade_end_m;
         uniforms.cascade_end = [ends[0], ends[1], ends[2], 0.0];
-        let mats = [
-            cascade_view_proj(focus, light, ends[0], self.map_size),
-            cascade_view_proj(focus, light, ends[1], self.map_size),
-            cascade_view_proj(focus, light, ends[2], self.map_size),
-        ];
+        // Each cascade is drawn anew when due; otherwise it keeps its map
+        // and is shaded with the matrix that map was drawn with.
+        let every = world
+            .shadow_cascade_refresh()
+            .map(|n| refresh_override().unwrap_or(n));
+        let frame = self.cascade_frame;
+        self.cascade_frame += 1;
+        let mut draw = [false; CASCADE_COUNT];
+        let mut mats = [Mat4::IDENTITY; CASCADE_COUNT];
+        for i in 0..CASCADE_COUNT {
+            let radius = ends[i];
+            let last = self.cascade_drawn[i].as_ref();
+            if cascade_due(frame, i, every[i], last, light, focus, radius) {
+                let vp = cascade_view_proj(focus, light, radius, self.map_size);
+                self.cascade_drawn[i] = Some(DrawnCascade {
+                    vp,
+                    light,
+                    focus,
+                    radius,
+                });
+                queue.write_buffer(&self.cascade_bufs[i], 0, &cascade_bytes(vp, wind));
+                draw[i] = true;
+            }
+            mats[i] = self.cascade_drawn[i].expect("cascade drawn above").vp;
+        }
         uniforms.light_vp0 = mats[0].to_cols_array_2d();
         uniforms.light_vp1 = mats[1].to_cols_array_2d();
         uniforms.light_vp2 = mats[2].to_cols_array_2d();
-        for (buf, m) in self.cascade_bufs.iter().zip(mats) {
-            queue.write_buffer(buf, 0, &cascade_bytes(m, wind));
-        }
 
         if settings.raymarch_height {
             if let Some(rules) = world
@@ -1783,7 +1861,7 @@ impl ShadowGpu {
         }
 
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
-        mats
+        (mats, draw)
     }
 }
 
@@ -1795,6 +1873,42 @@ mod tests {
     use crate::texture::{MaterialId, WaterMaterialId};
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn far_cascades_take_turns_and_redraw_when_the_view_changes() {
+        let light = Vec3::new(0.3, -1.0, 0.2).normalize();
+        let focus = Vec3::ZERO;
+        let drawn = |radius| DrawnCascade {
+            vp: Mat4::IDENTITY,
+            light,
+            focus,
+            radius,
+        };
+        let (mid, far) = (drawn(40.0), drawn(120.0));
+        // Near every frame; middle and far on alternate frames.
+        for frame in 0..6u64 {
+            let near = cascade_due(frame, 0, 1, Some(&drawn(12.0)), light, focus, 12.0);
+            let m = cascade_due(frame, 1, 2, Some(&mid), light, focus, 40.0);
+            let f = cascade_due(frame, 2, 2, Some(&far), light, focus, 120.0);
+            assert!(near);
+            assert_ne!(m, f, "frame {frame}: one of the far two");
+        }
+        // No map yet, a turned sun, a moved camera or a new radius: at once.
+        assert!(cascade_due(1, 1, 2, None, light, focus, 40.0));
+        let turned = Vec3::new(0.35, -1.0, 0.2).normalize();
+        assert!(cascade_due(1, 1, 2, Some(&mid), turned, focus, 40.0));
+        assert!(cascade_due(1, 1, 2, Some(&mid), light, Vec3::X * 5.0, 40.0));
+        assert!(!cascade_due(
+            1,
+            1,
+            2,
+            Some(&mid),
+            light,
+            Vec3::X * 3.0,
+            40.0
+        ));
+        assert!(cascade_due(1, 1, 2, Some(&mid), light, focus, 50.0));
+    }
 
     #[test]
     fn texel_snap_is_stable_inside_one_texel() {

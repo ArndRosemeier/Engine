@@ -493,6 +493,14 @@ so nothing pops in: a stale answer only costs speed. Shadow maps still draw
 every caster (light bounce and reflections use them off screen too).
 `world.occlusion_stats()` says how many meshes were tested and hidden.
 
+**Far shadows on alternate frames** (on by default): the near sun cascade is
+drawn every frame, the middle and far ones take turns, so each frame draws two
+shadow maps instead of three (about 40% less shadow work). A cascade not
+drawn this frame is shaded with the matrix its map was drawn with, so its
+shadows stay right, one frame old; it is drawn at once when the sun turns or
+the camera moves a tenth of its radius. `world.set_shadow_cascade_refresh([1, 1, 1])`
+draws all three every frame again.
+
 Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_global_illumination`,
 `set_bloom`, `set_tone_map`, `set_haze`, `set_lod_bias`, `set_view_distance`.
 
@@ -581,6 +589,7 @@ Every program built on the engine understands these:
 | `ENGINE_MSAA=4` | 4x MSAA on top of TAA (default 1 while TAA is on: TAA smooths edges and costs 10-15% less at 4K; 4 when `ENGINE_TAA=0`) |
 | `ENGINE_TONEMAP=aces` | Tone-map with ACES instead of AgX (`world.set_tone_map(ToneMap::Aces)` in code) |
 | `ENGINE_OCCLUSION=0` or `=1` | Switch occlusion culling off or on whatever the game set (`world.set_occlusion_culling`), to compare frame times |
+| `ENGINE_SHADOW_REFRESH=1` | Draw every sun cascade every frame, whatever `world.set_shadow_cascade_refresh` says, to compare frame times |
 | `ENGINE_OCCLUSION_CHECK=1` | Read every frame's occlusion answers back and compare them with the CPU copy of the test; prints mismatches (slow, for driver trouble) |
 | `ENGINE_INSTANCE_SUBMIT=cpu` | Draw every instance from the CPU instead of culling instances per view and shadow cascade on the GPU (default `gpu`) |
 | `ENGINE_TAA=0` | Turn temporal anti-aliasing off (`world.set_taa(false)` in code) |

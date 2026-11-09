@@ -100,6 +100,8 @@ pub struct GpuFrameStats {
     /// (from the newest answer read back, a frame or two old).
     pub occlusion_tested: u32,
     pub occlusion_hidden: u32,
+    /// Sun cascades drawn anew this frame (0 to 3).
+    pub shadow_cascades_drawn: u32,
 }
 
 impl GpuFrameStats {
@@ -122,8 +124,9 @@ impl GpuFrameStats {
 
     pub fn draw_line(&self) -> String {
         format!(
-            "shadow_atlas={} horizon={} submit={} inside={} boundary={} tested={} groups={} indirect={} occlusion_tested={} occlusion_hidden={}",
+            "shadow_atlas={} cascades={} horizon={} submit={} inside={} boundary={} tested={} groups={} indirect={} occlusion_tested={} occlusion_hidden={}",
             self.shadow_atlas,
+            self.shadow_cascades_drawn,
             self.terrain_horizon_rebuilds,
             self.instance_submit,
             self.direct_inside_batches,
@@ -566,6 +569,9 @@ pub struct Renderer {
     sky: SkyPipelines,
     shadow: ShadowGpu,
     shadow_vp: [glam::Mat4; 3],
+    /// Which sun cascades are drawn anew this frame (the others keep their
+    /// maps; see `World::set_shadow_cascade_refresh`).
+    shadow_draw: [bool; 3],
     clipmap: Option<ClipmapRenderer>,
     /// Ground pipelines, built on a worker thread at startup.
     clipmap_pipelines: pipeline_cache::Prewarm<std::sync::Arc<clipmap::ClipmapPipelines>>,
@@ -960,6 +966,7 @@ impl Renderer {
             sky,
             shadow,
             shadow_vp: [glam::Mat4::IDENTITY; 3],
+            shadow_draw: [true; 3],
             clipmap: None,
             portal,
             depth_view,
@@ -2255,7 +2262,8 @@ impl Renderer {
 
     fn write_shadows(&mut self, world: &World) {
         let eye = Self::main_scene_camera(world).eye();
-        self.shadow_vp = self.shadow.prepare(&self.queue, world, eye, &self.frustum);
+        (self.shadow_vp, self.shadow_draw) =
+            self.shadow.prepare(&self.queue, world, eye, &self.frustum);
         self.gpu_stats.shadow_atlas = self.shadow.atlas_wrote();
     }
 
@@ -3841,8 +3849,15 @@ impl Renderer {
         let mut frustums: Vec<Frustum> = Vec::new();
         let mut slots: Vec<usize> = Vec::new();
         if sun {
-            frustums.extend(self.shadow_vp.map(Frustum::from_view_projection));
-            slots.extend(0..3);
+            for cascade in (0..3).filter(|&c| self.shadow_draw[c]) {
+                frustums.push(Frustum::from_view_projection(self.shadow_vp[cascade]));
+                slots.push(cascade);
+            }
+        }
+        self.gpu_stats.shadow_cascades_drawn =
+            self.shadow_draw.iter().filter(|d| **d).count() as u32 * u32::from(sun);
+        if frustums.is_empty() {
+            return;
         }
         for (i, vp) in lamp_views.iter().enumerate() {
             frustums.push(Frustum::from_view_projection(*vp));

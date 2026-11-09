@@ -845,6 +845,8 @@ pub struct World {
     nav: nav::NavState,
     /// Nearby mesh CSM + height raymarch. `None` disables shadows.
     shadows: Option<ShadowSettings>,
+    /// Every how many frames each sun cascade is drawn anew.
+    shadow_cascade_refresh: [u32; 3],
     /// Instanced mesh submit path. Default stays CPU so Engine demos match today.
     instance_submit: InstanceSubmit,
     bloom: BloomSettings,
@@ -1001,6 +1003,7 @@ impl Default for World {
             prefab_instances: HashMap::new(),
             nav: Default::default(),
             shadows: Some(ShadowSettings::default()),
+            shadow_cascade_refresh: DEFAULT_SHADOW_CASCADE_REFRESH,
             instance_submit: InstanceSubmit::from_env(),
             bloom: BloomSettings::default(),
             ambient_occlusion: Some(AmbientOcclusion::default()),
@@ -1070,6 +1073,8 @@ impl Default for World {
 /// Below this many instances to reassign, LOD assignment runs on the
 /// calling thread instead of all cores.
 const LOD_PARALLEL_PLACES: usize = 8192;
+/// The near sun cascade every frame, the other two on alternate frames.
+pub const DEFAULT_SHADOW_CASCADE_REFRESH: [u32; 3] = [1, 2, 2];
 /// From this many animated characters their clocks tick on the frame's
 /// threads (a clock alone is a few nanoseconds).
 const ANIM_PARALLEL_CLOCKS: usize = 512;
@@ -3737,6 +3742,28 @@ impl World {
 
     pub fn shadows(&self) -> Option<ShadowSettings> {
         self.shadows
+    }
+
+    /// Every how many frames each sun cascade (near, middle, far) is drawn
+    /// anew. Between redraws a cascade keeps its last map and the light
+    /// matrix it was drawn with, so its shadows stay right, only up to
+    /// `n - 1` frames old. Redraws of different cascades fall on different
+    /// frames, so each frame draws fewer of them. A cascade is drawn at
+    /// once when it has no map yet, the sun turns, or the camera moves too
+    /// far for the old map.
+    ///
+    /// The default `[1, 2, 2]` draws the near cascade every frame and the
+    /// other two on alternate frames: two cascades a frame instead of
+    /// three. `[1, 1, 1]` draws all of them every frame (the old way);
+    /// `ENGINE_SHADOW_REFRESH=1` forces that for comparisons. Values are
+    /// clamped to 1..=8.
+    pub fn set_shadow_cascade_refresh(&mut self, every: [u32; 3]) {
+        self.shadow_cascade_refresh = every.map(|n| n.clamp(1, 8));
+    }
+
+    /// See [`World::set_shadow_cascade_refresh`].
+    pub fn shadow_cascade_refresh(&self) -> [u32; 3] {
+        self.shadow_cascade_refresh
     }
 
     /// Choose the instanced submit path. Both are first-class; neither falls back.
