@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.018 (2026-11-09)
+
+- Occlusion culling turns itself on where it pays: OcclusionMode::Auto (the new default) tries it whenever 32 or more meshes are in view, keeps it while it hides at least 15% of them and switches it off elsewhere, retrying less often each time. set_occlusion_culling(true/false) still forces it; set_occlusion_mode picks any mode; ENGINE_OCCLUSION=auto too. Without AO, hills and voxel ground now go into the depth pyramid, so they hide things as well.
+
 ## 0.017 (2026-11-09)
 
 - Adjustable render resolution: world.set_render_scale(0.5 to 1.0) draws the scene smaller than the window and the TAA pass upscales it to full size (like FSR 2 or Unreal's TSR). Off by default (1.0). ENGINE_RENDER_SCALE overrides it. At 0.5 the scene pass costs about a third and AO about 40% as much (lavapipe, occlusion_city).
