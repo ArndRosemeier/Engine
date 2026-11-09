@@ -197,13 +197,19 @@ fn content_hash(bytes: &[u8]) -> u64 {
 }
 
 /// [`crate::world::World::set_debug_shading`] flags: what each bit does.
-pub const DEBUG_SHADING_FLAGS: [(u32, &str); 6] = [
+pub const DEBUG_SHADING_FLAGS: [(u32, &str); 12] = [
     (1, "keep LOD-faded pixels"),
     (2, "keep broken elements"),
     (4, "depth prepass ignores texture alpha"),
     (8, "textured surfaces magenta"),
     (16, "untextured surfaces cyan"),
     (32, "every pixel opaque"),
+    (64, "invalid colours green"),
+    (128, "no reflections"),
+    (256, "no lamp light"),
+    (512, "no decals"),
+    (1024, "no bounce light (GI)"),
+    (2048, "textures without normal/ORM maps"),
 ];
 
 /// The curve that turns the HDR scene into screen colours.

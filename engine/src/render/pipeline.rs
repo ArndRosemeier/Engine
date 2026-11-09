@@ -121,6 +121,15 @@ struct Uniforms {
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
+// Debug shading (World::set_debug_shading): flags ride in torch_color.w.
+fn dbg(bit: u32) -> bool {
+    return (u32(u.torch_color.w + 0.5) & bit) != 0u;
+}
+
+fn not_finite(x: f32) -> bool {
+    return (bitcast<u32>(x) & 0x7f800000u) == 0x7f800000u;
+}
+
 // Sun plus sky lighting for a surface, with the frame's light and sky.
 // `sun_diffuse` is the caller's diffuse shape for the sun (each surface keeps
 // its own wrap), `vis` the sun shadow term.
@@ -148,7 +157,14 @@ fn shade_surface_occluded(
     sun_diffuse: f32,
     occlusion: f32,
 ) -> vec3<f32> {
-    let ds = apply_decals(world_p, n_in, base_in, roughness_in, metallic_in, u.eye);
+    var ds = apply_decals(world_p, n_in, base_in, roughness_in, metallic_in, u.eye);
+    if dbg(512u) {
+        ds.base = base_in;
+        ds.n = n_in;
+        ds.roughness = roughness_in;
+        ds.metallic = metallic_in;
+        ds.emit = vec3<f32>(0.0);
+    }
     let base = ds.base;
     let n = ds.n;
     let roughness = ds.roughness;
@@ -164,12 +180,22 @@ fn shade_surface_occluded(
     light.ao = screen_ao(u.view_proj * vec4<f32>(world_p, 1.0), u.ao_strength) * occlusion;
     light.gi = gi_irradiance(world_p, n);
     light.gi.a *= u.gi_strength;
+    if dbg(1024u) {
+        light.gi = vec4<f32>(0.0);
+    }
     let v = normalize(u.eye - world_p);
     let clip = u.view_proj * vec4<f32>(world_p, 1.0);
     let frag = clip.xy / max(clip.w, 1e-4) * vec2<f32>(960.0, 540.0);
     light.reflection = scene_reflection(world_p, n, v, roughness, base, metallic, frag);
+    if dbg(128u) {
+        light.reflection = vec4<f32>(0.0);
+    }
+    var lamps = lamp_light(base, n, v, world_p, roughness, metallic);
+    if dbg(256u) {
+        lamps = vec3<f32>(0.0);
+    }
     return pbr_shade(base, n, v, light, roughness, metallic, vis, sun_diffuse)
-        + lamp_light(base, n, v, world_p, roughness, metallic) + ds.emit;
+        + lamps + ds.emit;
 }
 
 // Light from the viewer's own lantern. A point light at the eye with a
@@ -804,11 +830,6 @@ fn fs_depth(in: VsOut) {
     }
 }
 
-// ---- Debug shading (World::set_debug_shading), flags in torch_color.w ----
-fn dbg(bit: u32) -> bool {
-    return (u32(u.torch_color.w + 0.5) & bit) != 0u;
-}
-
 // ---- Triplanar texturing (MaterialMaps::triplanar) ----
 struct TriSurface {
     albedo: vec4<f32>,
@@ -867,6 +888,9 @@ override SCENE_ALPHA_DITHER: f32 = 0.0;
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var c = shade_main(in);
+    if dbg(64u) && (not_finite(c.r) || not_finite(c.g) || not_finite(c.b) || not_finite(c.a)) {
+        return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+    }
     if dbg(32u) {
         c.a = 1.0;
     }
@@ -909,6 +933,10 @@ fn shade_main(in: VsOut) -> vec4<f32> {
             n = t.n;
             orm = t.orm;
             texel = t.albedo;
+            if dbg(2048u) {
+                n = geo_n;
+                orm = vec3<f32>(1.0);
+            }
         } else {
             n = mapped_normal(geo_n, in.world_p, in.uv);
             orm = material_orm(in.uv);
