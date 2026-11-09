@@ -568,7 +568,7 @@ Every program built on the engine understands these:
 | `ENGINE_SMOOTH_DT=0` | Hand the raw frame time to `frame.dt` (by default it is smoothed so motion does not shake) |
 | `ENGINE_AUTOFLY=1` | `FlyCamera` flies ahead in a slow curve by itself (for smoothness and speed checks) |
 | `ENGINE_GPU_PROFILE_EVERY=N` | Print GPU timings every N frames: shadow, AO, scene, water, TAA, post; plus a split of the scene pass (sky, land, grass, voxel, meshes, ...) where the GPU supports it |
-| `ENGINE_HITCH_MS` | Log frames slower than this (default 33) |
+| `ENGINE_HITCH_MS` | Log frames whose work is slower than this (default 33) to the file set with `World::set_hitch_log`: phases, game spans, Engine's slow steps, GPU uploads |
 | `ENGINE_CPU_TRACE=1` | Print every 2 s where the CPU time of a frame went: game update, each world tick, renderer sync and drawing (average and worst ms) |
 | `ENGINE_AUDIO=0` | Run silent: do not open a sound device |
 | `ENGINE_LOG_PIPELINES=1` | Print how long pipeline building took, whether the disk pipeline cache was used, and the work time of the first 5 frames |
