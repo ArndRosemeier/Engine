@@ -7,7 +7,7 @@ use crate::error::{EngineError, EngineResult};
 use crate::input::Input;
 use crate::limits::EngineLimits;
 use crate::lod::{LodId, LodLevel, LodSet};
-use crate::mesh::{AlbedoMap, BuiltMesh, MaterialMaps, Mesh};
+use crate::mesh::{AlbedoMap, BuiltMesh, MaterialMaps, Mesh, PreparedMesh};
 use crate::particles::ParticleWorld;
 use crate::place::{GlobalPlace, MeshInstance, Place};
 use crate::portal::{
@@ -173,6 +173,48 @@ impl InstanceSubmit {
 
 /// Fast 64-bit hash of texture bytes (several GB/s), to find identical maps.
 /// Four independent lanes keep the CPU busy; not for security.
+/// The 1x1 white albedo that maps without an albedo ride along with.
+fn white_texel() -> AlbedoMap {
+    AlbedoMap {
+        width: 1,
+        height: 1,
+        rgba: vec![255; 4],
+    }
+}
+
+/// The key a texture is shared by: large maps (or all, with `share`) are
+/// looked up by content, so generated assets (every tree, every facade)
+/// that carry the same maps share one GPU texture. `None`: not shared.
+pub(crate) fn texture_key(
+    albedo: Option<&AlbedoMap>,
+    maps: Option<&MaterialMaps>,
+    share: bool,
+) -> Option<u64> {
+    let white;
+    let map = match (albedo, maps) {
+        (Some(map), _) => map,
+        (None, Some(_)) => {
+            white = white_texel();
+            &white
+        }
+        (None, None) => return None,
+    };
+    (share || map.rgba.len() >= 1 << 20).then(|| {
+        let mut h = content_hash(&map.rgba) ^ ((map.width as u64) << 32 | map.height as u64);
+        let mut mix = |v: u64| h = (h ^ v).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
+        if let Some(m) = maps {
+            for map in [&m.normal, &m.orm, &m.emissive] {
+                mix(map.as_ref().map_or(1, |n| content_hash(&n.rgba)));
+            }
+            mix(m.normal_scale.to_bits() as u64);
+            mix(m.roughness.to_bits() as u64);
+            mix(m.metallic.to_bits() as u64);
+            mix(m.triplanar.to_bits() as u64);
+        }
+        h
+    })
+}
+
 fn content_hash(bytes: &[u8]) -> u64 {
     const K: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut lanes = [K, K ^ 1, K ^ 2, K ^ 3];
@@ -2018,9 +2060,26 @@ impl World {
 
     /// Spawn a mesh at a friendly [`Place`].
     pub fn place(&mut self, mesh: Mesh, place: Place) -> EngineResult<EntityId> {
-        let albedo = (mesh.albedo().cloned(), mesh.material_maps().cloned());
-        let id = self.spawn_built(mesh.build(), place.to_matrix());
-        self.attach_albedo(id, albedo)?;
+        self.place_prepared(mesh.prepare(), place)
+    }
+
+    /// Spawn a mesh made ready on another thread with [`Mesh::prepare`]:
+    /// only the bookkeeping is left for this frame.
+    pub fn spawn_prepared(&mut self, mesh: PreparedMesh) -> EntityId {
+        self.place_prepared(mesh, Place::default())
+            .expect("spawn at identity")
+    }
+
+    /// [`Self::spawn_prepared`] at `place`.
+    pub fn place_prepared(&mut self, mesh: PreparedMesh, place: Place) -> EngineResult<EntityId> {
+        let PreparedMesh {
+            built,
+            albedo,
+            maps,
+            key,
+        } = mesh;
+        let id = self.spawn_built(built, place.to_matrix());
+        self.attach_albedo_keyed(id, (albedo, maps), key)?;
         Ok(id)
     }
 
@@ -2185,32 +2244,24 @@ impl World {
         (albedo, maps): (Option<AlbedoMap>, Option<MaterialMaps>),
         share: bool,
     ) -> EngineResult<()> {
+        let key = texture_key(albedo.as_ref(), maps.as_ref(), share);
+        self.attach_albedo_keyed(id, (albedo, maps), key)
+    }
+
+    /// [`Self::attach_albedo_by_content`] with the content key worked out
+    /// already (see [`texture_key`]).
+    fn attach_albedo_keyed(
+        &mut self,
+        id: EntityId,
+        (albedo, maps): (Option<AlbedoMap>, Option<MaterialMaps>),
+        key: Option<u64>,
+    ) -> EngineResult<()> {
         let map = match (albedo, &maps) {
             (Some(map), _) => map,
             // Maps need an albedo to ride along with: a white texel.
-            (None, Some(_)) => AlbedoMap {
-                width: 1,
-                height: 1,
-                rgba: vec![255; 4],
-            },
+            (None, Some(_)) => white_texel(),
             (None, None) => return Ok(()),
         };
-        // Large maps are looked up by content first: generated assets (every
-        // tree) carry the same atlas and should share one GPU texture.
-        let key = (share || map.rgba.len() >= 1 << 20).then(|| {
-            let mut h = content_hash(&map.rgba) ^ ((map.width as u64) << 32 | map.height as u64);
-            let mut mix = |v: u64| h = (h ^ v).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
-            if let Some(m) = &maps {
-                for map in [&m.normal, &m.orm, &m.emissive] {
-                    mix(map.as_ref().map_or(1, |n| content_hash(&n.rgba)));
-                }
-                mix(m.normal_scale.to_bits() as u64);
-                mix(m.roughness.to_bits() as u64);
-                mix(m.metallic.to_bits() as u64);
-                mix(m.triplanar.to_bits() as u64);
-            }
-            h
-        });
         let shared = key
             .and_then(|k| self.texture_by_content.get(&k).copied())
             .filter(|tid| self.textures.contains_key(tid));

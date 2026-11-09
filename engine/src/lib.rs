@@ -140,7 +140,9 @@ pub use input::{Input, Key, MouseButton};
 pub use lamps::{Lamp, LampId, LampShape};
 pub use landscape::Landscape;
 pub use limits::EngineLimits;
-pub use mesh::{AlbedoMap, BuiltMesh, MaterialMaps, Mesh, PointId, Shape, SurfaceMaterial};
+pub use mesh::{
+    AlbedoMap, BuiltMesh, MaterialMaps, Mesh, PointId, PreparedMesh, Shape, SurfaceMaterial,
+};
 pub use model::{scatter_places, Model, ModelScene};
 pub use particles::{
     EmitterId, ParticleBlend, ParticleCollision, ParticleEmitter, ParticleForce, ParticleMode,

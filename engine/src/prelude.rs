@@ -23,7 +23,7 @@ pub use crate::lamps::{Lamp, LampId, LampShape};
 pub use crate::landscape::Landscape;
 pub use crate::limits::EngineLimits;
 pub use crate::lod::{LodId, LodLevel};
-pub use crate::mesh::{Mesh, PointId, Shape, SurfaceMaterial};
+pub use crate::mesh::{Mesh, PointId, PreparedMesh, Shape, SurfaceMaterial};
 pub use crate::model::{scatter_places, Model, ModelScene};
 pub use crate::parallel::build_all;
 pub use crate::particles::{
