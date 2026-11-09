@@ -20,7 +20,7 @@ pub(crate) struct GroundState {
     ignored: HashSet<EntityId>,
 }
 
-fn sphere(mesh: &BuiltMesh) -> (Vec3, f32) {
+pub(crate) fn sphere(mesh: &BuiltMesh) -> (Vec3, f32) {
     let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
     for p in &mesh.positions {
         lo = lo.min(*p);
@@ -38,6 +38,28 @@ fn max_scale(m: &Mat4) -> f32 {
         .length()
         .max(m.y_axis.truncate().length())
         .max(m.z_axis.truncate().length())
+}
+
+impl GroundState {
+    /// Bytes held in ground meshes.
+    pub(crate) fn bytes(&self) -> usize {
+        self.meshes.values().flatten().map(|m| m.bytes()).sum()
+    }
+
+    pub(crate) fn is_ignored(&self, id: EntityId) -> bool {
+        self.ignored.contains(&id)
+    }
+
+    /// What feet stand on for an entity whose mesh is about to go.
+    pub(crate) fn remember(
+        &mut self,
+        id: EntityId,
+        sphere: (Vec3, f32),
+        mesh: Option<Arc<GroundMesh>>,
+    ) {
+        self.spheres.insert(id, sphere);
+        self.meshes.insert(id, mesh);
+    }
 }
 
 impl World {

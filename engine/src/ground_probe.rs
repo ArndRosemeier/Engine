@@ -32,6 +32,11 @@ pub(crate) struct GroundMesh {
 }
 
 impl GroundMesh {
+    /// Bytes held.
+    pub(crate) fn bytes(&self) -> usize {
+        self.starts.capacity() * 4 + self.refs.capacity() * 4 + self.tris.capacity() * 36
+    }
+
     /// The upward faces of `mesh`; `None` if it has none.
     pub(crate) fn build(mesh: &BuiltMesh) -> Option<Self> {
         let mut tris = Vec::new();
@@ -61,7 +66,11 @@ impl GroundMesh {
             }
         }
         let size = (hi - lo).max(Vec2::splat(1e-3));
-        let cell = (size.max_element() / MAX_CELLS).max(MIN_CELL);
+        // About two faces' worth of area per cell: a few faces lie over
+        // each, and the grid never outweighs the faces themselves (a big,
+        // sparse mesh at 256 x 256 cells held a quarter megabyte of grid).
+        let sparse = (size.x * size.y * 2.0 / tris.len() as f32).sqrt();
+        let cell = (size.max_element() / MAX_CELLS).max(sparse).max(MIN_CELL);
         let nx = (size.x / cell).floor() as usize + 1;
         let nz = (size.y / cell).floor() as usize + 1;
         let span = |t: &[Vec3; 3]| {

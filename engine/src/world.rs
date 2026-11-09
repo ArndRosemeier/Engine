@@ -40,6 +40,8 @@ mod nav;
 mod world_audio;
 #[path = "world_buildings.rs"]
 mod world_buildings;
+#[path = "world_cpu_mesh.rs"]
+mod world_cpu_mesh;
 #[path = "world_crowds.rs"]
 mod world_crowds;
 #[path = "world_decals.rs"]
@@ -50,6 +52,7 @@ pub mod world_effects;
 mod world_grading;
 #[path = "world_ground.rs"]
 mod world_ground;
+pub use world_cpu_mesh::CpuMeshes;
 #[path = "world_ragdolls.rs"]
 mod world_ragdolls;
 #[path = "world_rooms.rs"]
@@ -61,7 +64,9 @@ pub use world_zfight::{WorldScan, MAX_Z_FIGHTING_MARKS};
 
 /// Opaque handle to a spawned entity. Saves can hold it; after loading,
 /// map it to the new one with [`Loaded::entity`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct EntityId(u64);
 
@@ -614,7 +619,11 @@ pub enum SurfaceMaterialRef {
 
 #[derive(Clone, Debug)]
 pub struct Entity {
+    /// The mesh as built. Empty once [`Self::released`] is set.
     pub(crate) mesh: BuiltMesh,
+    /// Set when the world let go of the CPU copy after the renderer
+    /// uploaded it (see [`CpuMeshes`]): what is still known of it.
+    pub(crate) released: Option<world_cpu_mesh::Released>,
     pub(crate) transform: Mat4,
     /// Per-instance transforms (+ tint) for GPU instancing.
     pub(crate) instances: Vec<MeshInstance>,
@@ -644,8 +653,30 @@ pub struct Entity {
 }
 
 impl Entity {
+    /// The mesh as built. Empty (no vertices) once the world has released
+    /// its CPU copy (see [`CpuMeshes`] and [`Self::has_cpu_mesh`]).
     pub fn mesh(&self) -> &BuiltMesh {
         &self.mesh
+    }
+
+    /// Whether the world still holds the mesh in RAM. `false` once it was
+    /// released after the upload (see [`CpuMeshes`]); the GPU copy draws on.
+    pub fn has_cpu_mesh(&self) -> bool {
+        self.released.is_none()
+    }
+
+    /// Vertices of the mesh, also after its CPU copy was released.
+    pub fn vertex_count(&self) -> usize {
+        self.released
+            .as_ref()
+            .map_or(self.mesh.vertex_count(), |r| r.vertex_count)
+    }
+
+    /// Indices of the mesh, also after its CPU copy was released.
+    pub fn index_count(&self) -> usize {
+        self.released
+            .as_ref()
+            .map_or(self.mesh.index_count(), |r| r.index_count)
     }
 
     pub fn transform(&self) -> Mat4 {
@@ -858,6 +889,8 @@ pub struct World {
     zfight: world_zfight::ZFightState,
     /// What feet stand on: see [`World::ground_below`].
     ground: world_ground::GroundState,
+    /// Which CPU copies of meshes go once uploaded: see [`CpuMeshes`].
+    cpu_meshes: world_cpu_mesh::CpuMeshState,
     /// Debug names (see [`World::set_name`]).
     entity_names: HashMap<EntityId, String>,
     /// Surface presentation sync. Engine default stays on so demos never tear;
@@ -994,6 +1027,7 @@ impl Default for World {
             entity_rooms: HashMap::new(),
             zfight: Default::default(),
             ground: Default::default(),
+            cpu_meshes: Default::default(),
             entity_names: HashMap::new(),
             vsync: true,
             whats_new_button: true,
@@ -1995,7 +2029,14 @@ impl World {
                 "entity {id} is instanced; openings must be a single mesh"
             )));
         }
-        let (half_w, half_h) = opening_extents(&e.mesh);
+        let (half_w, half_h) = match &e.released {
+            Some(r) if r.lo.x <= r.hi.x => (
+                r.lo.x.abs().max(r.hi.x.abs()),
+                r.lo.y.abs().max(r.hi.y.abs()),
+            ),
+            Some(_) => (0.0, 0.0),
+            None => opening_extents(&e.mesh),
+        };
         Ok(PortalPlane::from_transform(e.transform, half_w, half_h))
     }
 
@@ -2149,6 +2190,7 @@ impl World {
             id,
             Entity {
                 mesh: BuiltMesh::default(),
+                released: None,
                 transform: Mat4::IDENTITY,
                 instances: Vec::new(),
                 instance_reserve: 0,
@@ -2173,6 +2215,7 @@ impl World {
             id,
             Entity {
                 mesh,
+                released: None,
                 transform,
                 instances: Vec::new(),
                 instance_reserve: 0,
@@ -2186,6 +2229,7 @@ impl World {
             },
         );
         self.order.push(id);
+        self.cpu_meshes.spawned(id);
         self.bump_render_epoch();
         id
     }
@@ -2202,6 +2246,7 @@ impl World {
             id,
             Entity {
                 mesh,
+                released: None,
                 transform: Mat4::IDENTITY,
                 instances,
                 instance_reserve,
@@ -2215,6 +2260,7 @@ impl World {
             },
         );
         self.order.push(id);
+        self.cpu_meshes.spawned(id);
         self.bump_render_epoch();
         id
     }
@@ -2295,6 +2341,7 @@ impl World {
     /// them. [`Self::detach`] a child first to keep it.
     pub fn despawn(&mut self, id: EntityId) {
         self.forget_ground(id);
+        self.cpu_meshes.forget(id);
         self.sim_poses.remove(&id);
         self.entity_names.remove(&id);
         self.forget_ragdoll(id);
@@ -3870,6 +3917,7 @@ impl World {
         settings.validate()?;
         let impact = impact.into();
         crate::place::ensure_finite3(impact, "shatter impact")?;
+        self.needs_cpu_mesh(id, "shatter")?;
         let entity = self.entities.get(&id).ok_or(EngineError::UnknownEntity)?;
         if entity.instanced || entity.instance_of.is_some() {
             return Err(EngineError::InvalidValue(
@@ -3985,6 +4033,7 @@ impl World {
         {
             self.detach(id)?;
         }
+        self.needs_cpu_mesh(id, "add_body")?;
         let e = self.entities.get(&id).ok_or(EngineError::UnknownEntity)?;
         if e.instanced || e.instance_of.is_some() {
             return Err(EngineError::InvalidValue(

@@ -1051,6 +1051,11 @@ impl Renderer {
             }
             self.synced_render_epoch = world.render_epoch();
             self.synced_instance_epoch = world.instance_epoch();
+            self.cpu_spans.mark("sync.meshes", &mut t);
+            // Meshes the world no longer needs in RAM go once they are here.
+            let gpu = &self.gpu_meshes;
+            world.release_uploaded(|id| gpu.contains_key(&id));
+            self.cpu_spans.mark("sync.release", &mut t);
         } else {
             self.gpu_stats.instance_batches = u32::try_from(self.gpu_instance_batches.len())
                 .expect("GPU instance batch count exceeds u32");
@@ -1145,8 +1150,8 @@ impl Renderer {
 
         if let Some(gpu) = self.gpu_meshes.get(&id) {
             let same_mesh = entity.instance_of.is_some()
-                || (gpu.vertex_count == entity.mesh().vertex_count()
-                    && gpu.index_count == entity.mesh().index_count());
+                || (gpu.vertex_count == entity.vertex_count()
+                    && gpu.index_count == entity.index_count());
             if same_mesh && gpu.xform_rev == entity.xform_rev {
                 return;
             }
@@ -1166,8 +1171,8 @@ impl Renderer {
         let shadow_buffers_changed = match self.gpu_meshes.get_mut(&id) {
             Some(gpu) => {
                 let buffers_changed = if entity.instance_of.is_none()
-                    && (gpu.vertex_count != entity.mesh().vertex_count()
-                        || gpu.index_count != entity.mesh().index_count())
+                    && (gpu.vertex_count != entity.vertex_count()
+                        || gpu.index_count != entity.index_count())
                 {
                     *gpu = GpuMesh::upload(
                         &self.device,
