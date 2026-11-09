@@ -915,7 +915,7 @@ mod tests {
                 AlbedoMap {
                     width: 2,
                     height: 2,
-                    rgba: vec![180, 90, 60, 255].repeat(4),
+                    rgba: vec![180, 90, 60, 255].repeat(4).into(),
                 },
                 None,
             )

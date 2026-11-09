@@ -254,6 +254,15 @@ pub(crate) struct CrowdGpu {
 }
 
 impl CrowdGpu {
+    /// Video memory of the crowds' vertex and index buffers (bytes).
+    pub fn buffer_bytes(&self) -> u64 {
+        self.draws
+            .values()
+            .flat_map(|d| &d.meshes)
+            .map(GpuSkinnedMesh::buffer_bytes)
+            .sum()
+    }
+
     pub fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
@@ -387,7 +396,7 @@ impl CrowdGpu {
         world: &World,
         frustum: &Frustum,
         eye: Vec3,
-        mut upload: impl FnMut(&SkinMesh) -> GpuSkinnedMesh,
+        mut upload: impl FnMut(&SkinMesh, &SkinMesh) -> GpuSkinnedMesh,
     ) {
         let live: Vec<u32> = world.crowds().map(|(id, _)| id.0).collect();
         self.draws.retain(|id, _| live.contains(id));
@@ -434,7 +443,22 @@ impl CrowdGpu {
                     id.0,
                     CrowdDraw {
                         key,
-                        meshes: drawn.meshes.iter().map(&mut upload).collect(),
+                        // A simplified far mesh is drawn with the maps of
+                        // the mesh it was made from.
+                        meshes: drawn
+                            .meshes
+                            .iter()
+                            .enumerate()
+                            .map(|(i, m)| {
+                                let material = crowd
+                                    .far_source
+                                    .get(i)
+                                    .and_then(|&s| crowd.model.meshes.get(s))
+                                    .filter(|_| crowd.far.is_some())
+                                    .unwrap_or(m);
+                                upload(m, material)
+                            })
+                            .collect(),
                         bake,
                         _anim: anim,
                         anim_bind,

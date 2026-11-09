@@ -178,10 +178,13 @@ impl App {
                 // Video memory, to see a GPU running short.
                 if let Some(r) = self.renderer.as_ref() {
                     let (meshes, textures, n_meshes, n_textures) = r.mesh_and_texture_bytes();
+                    let (people, people_maps, n_people_maps) = r.character_bytes();
                     eprintln!(
-                        "gpu memory: meshes {} MiB ({n_meshes}), textures {} MiB ({n_textures}){}",
+                        "gpu memory: meshes {} MiB ({n_meshes}), textures {} MiB ({n_textures}), characters {} MiB + maps {} MiB ({n_people_maps}){}",
                         meshes >> 20,
                         textures >> 20,
+                        people >> 20,
+                        people_maps >> 20,
                         r.device()
                             .generate_allocator_report()
                             .map(|a| format!(", {} MiB allocated", a.total_allocated_bytes >> 20))
