@@ -20,8 +20,12 @@ macro_rules! timed {
     ($app:ident, $name:expr, $e:expr) => {{
         let t = Instant::now();
         $e;
+        let ms = elapsed_ms(t);
         if let Some(trace) = $app.cpu_trace.as_mut() {
-            trace.add($name, elapsed_ms(t));
+            trace.add($name, ms);
+        }
+        if $app.world.hitch_log().is_some() {
+            $app.tick_spans.push(($name, ms));
         }
     }};
 }
@@ -46,6 +50,8 @@ struct App {
     fps_frames: u32,
     pointer_locked: bool,
     hitch_ms: f32,
+    /// This frame's `tick.*` timings, kept for the hitch log.
+    tick_spans: Vec<(&'static str, f32)>,
     cpu_trace: Option<crate::cpu_trace::CpuTrace>,
     clock: crate::frame_clock::FrameClock,
     frame_stats: Option<crate::frame_clock::FrameStats>,
@@ -88,6 +94,7 @@ impl App {
             fps_frames: 0,
             pointer_locked: false,
             hitch_ms: hitch_threshold_ms()?,
+            tick_spans: Vec::new(),
             cpu_trace: crate::cpu_trace::CpuTrace::from_env(),
             clock: crate::frame_clock::FrameClock::from_env(),
             frame_stats: crate::frame_clock::FrameStats::from_env(),
@@ -167,7 +174,21 @@ impl App {
         let vsynced = self.world.vsync() && !self.no_pacing;
         let dt = self.clock.tick(raw_dt, self.refresh_hz.filter(|_| vsynced));
         if let Some(stats) = self.frame_stats.as_mut() {
-            stats.add(raw_dt);
+            if stats.add(raw_dt) {
+                // Video memory, to see a GPU running short.
+                if let Some(r) = self.renderer.as_ref() {
+                    let (meshes, textures, n_meshes, n_textures) = r.mesh_and_texture_bytes();
+                    eprintln!(
+                        "gpu memory: meshes {} MiB ({n_meshes}), textures {} MiB ({n_textures}){}",
+                        meshes >> 20,
+                        textures >> 20,
+                        r.device()
+                            .generate_allocator_report()
+                            .map(|a| format!(", {} MiB allocated", a.total_allocated_bytes >> 20))
+                            .unwrap_or_default()
+                    );
+                }
+            }
         }
 
         self.fps_accum_s += raw_dt.max(0.0);
@@ -336,7 +357,7 @@ impl App {
                 .renderer
                 .as_mut()
                 .expect("renderer must exist before redraw");
-            renderer.cpu_spans.on = self.cpu_trace.is_some();
+            renderer.cpu_spans.on = self.cpu_trace.is_some() || self.world.hitch_log().is_some();
             let sync_t = Instant::now();
             let size = renderer.size();
             self.world
@@ -383,9 +404,11 @@ impl App {
                 Err(other) => panic!("surface error: {other}"),
             }
             let render_ms = elapsed_ms(render_t);
+            let mut engine_spans = std::mem::take(&mut self.tick_spans);
+            engine_spans.extend(renderer.cpu_spans.take());
             if let Some(trace) = self.cpu_trace.as_mut() {
                 trace.add("game update", update_ms);
-                for (name, ms) in renderer.cpu_spans.take() {
+                for &(name, ms) in engine_spans.iter().filter(|(n, _)| !n.starts_with("tick.")) {
                     trace.add(name, ms);
                 }
                 trace.end_frame(raw_dt * 1000.0);
@@ -397,6 +420,7 @@ impl App {
                 anim_ms,
                 sync_ms,
                 render_ms,
+                steps: engine_spans,
             };
             if self.frame_index < 5 && crate::render::pipeline_cache::log_enabled() {
                 // The first frames are where a lazily built shader would stall.
@@ -485,6 +509,11 @@ impl ApplicationHandler for App {
             self._audio_out = crate::audio::scene::AudioOutput::start(self.world.audio());
         }
         let renderer = pollster::block_on(Renderer::new(window.clone()));
+        let gpu = renderer.gpu_info();
+        if let Some(warning) = gpu.driver_warning() {
+            eprintln!("[engine] {warning}");
+        }
+        self.world.set_gpu_info(gpu);
         let ui_backend = UiBackend::new(&window, renderer.device(), renderer.surface_format());
         window.set_visible(true);
         window.request_redraw();
@@ -662,6 +691,8 @@ struct HitchPhases {
     anim_ms: f32,
     sync_ms: f32,
     render_ms: f32,
+    /// Engine's own steps (ticks, sync and render stages) and their times.
+    steps: Vec<(&'static str, f32)>,
 }
 
 impl HitchPhases {
@@ -697,6 +728,7 @@ fn emit_hitch(
             ));
         }
     }
+    text.push_str(&engine_spans_line(&phases.steps));
     text.push_str(&format!(
         "  {:<12} {:>5.1}ms  {}\n",
         "gpu_sync",
@@ -716,6 +748,28 @@ fn emit_hitch(
         .unwrap_or_else(|e| panic!("hitch log {} could not be opened: {e}", path.display()));
     file.write_all(text.as_bytes())
         .unwrap_or_else(|e| panic!("hitch log {} could not be written: {e}", path.display()));
+}
+
+/// The engine's own slow steps of a hitch frame (ticks, sync and render
+/// stages over a millisecond), slowest first, in one line.
+fn engine_spans_line(spans: &[(&'static str, f32)]) -> String {
+    let mut merged: Vec<(&'static str, f32)> = Vec::new();
+    for &(name, ms) in spans {
+        match merged.iter_mut().find(|(n, _)| *n == name) {
+            Some(m) => m.1 += ms,
+            None => merged.push((name, ms)),
+        }
+    }
+    merged.retain(|(_, ms)| *ms >= 1.0);
+    if merged.is_empty() {
+        return String::new();
+    }
+    merged.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let parts: Vec<String> = merged
+        .iter()
+        .map(|(name, ms)| format!("{name} {ms:.1}"))
+        .collect();
+    format!("  {:<12} {}\n", "engine", parts.join(", "))
 }
 
 /// Run the engine: opens a window and calls `update` every frame.
@@ -769,7 +823,19 @@ fn format_error_chain(error: &EngineError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_bool_env_value, run_callback_until_fatal};
+    use super::{engine_spans_line, parse_bool_env_value, run_callback_until_fatal};
+
+    #[test]
+    fn hitch_log_lists_slow_engine_steps_slowest_first() {
+        let line = engine_spans_line(&[
+            ("tick.lods", 0.4),
+            ("sync.meshes", 3.0),
+            ("render.world", 9.5),
+            ("sync.meshes", 2.5),
+        ]);
+        assert_eq!(line, "  engine       render.world 9.5, sync.meshes 5.5\n");
+        assert_eq!(engine_spans_line(&[("tick.sky", 0.2)]), "");
+    }
 
     #[test]
     fn boolean_environment_values_are_strict() {

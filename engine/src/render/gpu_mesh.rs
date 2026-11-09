@@ -53,12 +53,12 @@ impl GpuMesh {
         let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vertices"),
             contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_SRC,
         });
         let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("indices"),
             contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_SRC,
         });
         let local_bounds = Bounds::around(&mesh.positions);
         Self::with_buffers(

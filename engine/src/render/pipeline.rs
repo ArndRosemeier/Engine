@@ -121,6 +121,15 @@ struct Uniforms {
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
+// Debug shading (World::set_debug_shading): flags ride in torch_color.w.
+fn dbg(bit: u32) -> bool {
+    return (u32(u.torch_color.w + 0.5) & bit) != 0u;
+}
+
+fn not_finite(x: f32) -> bool {
+    return (bitcast<u32>(x) & 0x7f800000u) == 0x7f800000u;
+}
+
 // Sun plus sky lighting for a surface, with the frame's light and sky.
 // `sun_diffuse` is the caller's diffuse shape for the sun (each surface keeps
 // its own wrap), `vis` the sun shadow term.
@@ -148,7 +157,14 @@ fn shade_surface_occluded(
     sun_diffuse: f32,
     occlusion: f32,
 ) -> vec3<f32> {
-    let ds = apply_decals(world_p, n_in, base_in, roughness_in, metallic_in, u.eye);
+    var ds = apply_decals(world_p, n_in, base_in, roughness_in, metallic_in, u.eye);
+    if dbg(512u) {
+        ds.base = base_in;
+        ds.n = n_in;
+        ds.roughness = roughness_in;
+        ds.metallic = metallic_in;
+        ds.emit = vec3<f32>(0.0);
+    }
     let base = ds.base;
     let n = ds.n;
     let roughness = ds.roughness;
@@ -164,12 +180,22 @@ fn shade_surface_occluded(
     light.ao = screen_ao(u.view_proj * vec4<f32>(world_p, 1.0), u.ao_strength) * occlusion;
     light.gi = gi_irradiance(world_p, n);
     light.gi.a *= u.gi_strength;
+    if dbg(1024u) {
+        light.gi = vec4<f32>(0.0);
+    }
     let v = normalize(u.eye - world_p);
     let clip = u.view_proj * vec4<f32>(world_p, 1.0);
     let frag = clip.xy / max(clip.w, 1e-4) * vec2<f32>(960.0, 540.0);
     light.reflection = scene_reflection(world_p, n, v, roughness, base, metallic, frag);
+    if dbg(128u) {
+        light.reflection = vec4<f32>(0.0);
+    }
+    var lamps = lamp_light(base, n, v, world_p, roughness, metallic);
+    if dbg(256u) {
+        lamps = vec3<f32>(0.0);
+    }
     return pbr_shade(base, n, v, light, roughness, metallic, vis, sun_diffuse)
-        + lamp_light(base, n, v, world_p, roughness, metallic) + ds.emit;
+        + lamps + ds.emit;
 }
 
 // Light from the viewer's own lantern. A point light at the eye with a
@@ -595,7 +621,7 @@ fn grass_profile(p: vec3<f32>, seed: f32, gain: f32) -> vec3<f32> {
 @vertex
 fn vs_main(v: VsIn) -> VsOut {
     var out: VsOut;
-    if element_dead(v.element) {
+    if element_dead(v.element) && !dbg(2u) {
         // A broken element: every corner outside the view, so nothing draws.
         out.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
         return out;
@@ -781,7 +807,13 @@ fn vegetation_shade(in: VsOut) -> vec4<f32> {
 // Depth prepass: only texels the shaded pass will cover on every sample.
 @fragment
 fn fs_depth(in: VsOut) {
-    if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) {
+    if dbg(8192u) && distance(in.world_p, u.eye) > 60.0 {
+        discard;
+    }
+    if dbg(4u) {
+        return;
+    }
+    if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) && !dbg(1u) {
         discard;
     }
     if in.surface3.w > 7.5 {
@@ -859,6 +891,12 @@ override SCENE_ALPHA_DITHER: f32 = 0.0;
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var c = shade_main(in);
+    if dbg(64u) && (not_finite(c.r) || not_finite(c.g) || not_finite(c.b) || not_finite(c.a)) {
+        return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+    }
+    if dbg(32u) {
+        c.a = 1.0;
+    }
     if SCENE_ALPHA_DITHER > 0.5 {
         let q = floor(in.clip.xy) + vec2<f32>(5.588238 * u.dither_frame);
         let h = fract(52.9829189 * fract(dot(q, vec2<f32>(0.06711056, 0.00583715))));
@@ -871,8 +909,34 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 
 fn shade_main(in: VsOut) -> vec4<f32> {
-    if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) {
+    if dbg(8192u) && distance(in.world_p, u.eye) > 60.0 {
         discard;
+    }
+    if !lod_dither_keep(in.lod_fade, in.clip.xy, u.dither_frame) && !dbg(1u) {
+        discard;
+    }
+    if dbg(32768u) {
+        // The depth this pixel was given, against the depth its own position
+        // has under the frame's camera: green where they agree, red where not.
+        let c = u.view_proj * vec4<f32>(in.world_p, 1.0);
+        let want = c.z / c.w;
+        let off = abs(want - in.clip.z) / max(abs(want), 1e-7);
+        if off > 0.02 || c.w <= 0.0 {
+            return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+        }
+        return vec4<f32>(0.1, 0.6 + 0.4 * fract(log2(max(in.clip.z, 1e-12)) * 0.5), 0.1, 1.0);
+    }
+    if dbg(4096u) {
+        // Depth bands: each doubling of the stored depth value is one band.
+        let z = max(in.clip.z, 1e-12);
+        let band = fract(log2(z) * 0.5);
+        return vec4<f32>(band, fract(band * 3.0), 1.0 - band, 1.0);
+    }
+    if dbg(8u) && in.surface3.w < 0.001 && mat.triplanar.x > 0.0 {
+        return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+    }
+    if dbg(16u) && in.surface3.w < 0.001 && mat.triplanar.x <= 0.0 {
+        return vec4<f32>(0.0, 1.0, 1.0, 1.0);
     }
     if in.surface3.w > 7.5 {
         return vegetation_shade(in);
@@ -892,6 +956,10 @@ fn shade_main(in: VsOut) -> vec4<f32> {
             n = t.n;
             orm = t.orm;
             texel = t.albedo;
+            if dbg(2048u) {
+                n = geo_n;
+                orm = vec3<f32>(1.0);
+            }
         } else {
             n = mapped_normal(geo_n, in.world_p, in.uv);
             orm = material_orm(in.uv);
