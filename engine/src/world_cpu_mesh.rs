@@ -126,6 +126,12 @@ impl World {
             .sum()
     }
 
+    /// Bytes held in what feet stand on (upward faces of meshes, kept for
+    /// released meshes and made on demand for the others).
+    pub fn ground_mesh_bytes(&self) -> usize {
+        self.ground.bytes()
+    }
+
     /// Error for tools that need the mesh of an entity that let it go.
     pub(crate) fn needs_cpu_mesh(&self, id: EntityId, what: &str) -> EngineResult<()> {
         match self.entities.get(&id) {

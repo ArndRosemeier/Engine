@@ -41,6 +41,11 @@ fn max_scale(m: &Mat4) -> f32 {
 }
 
 impl GroundState {
+    /// Bytes held in ground meshes.
+    pub(crate) fn bytes(&self) -> usize {
+        self.meshes.values().flatten().map(|m| m.bytes()).sum()
+    }
+
     pub(crate) fn is_ignored(&self, id: EntityId) -> bool {
         self.ignored.contains(&id)
     }

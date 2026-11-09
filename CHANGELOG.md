@@ -9,7 +9,8 @@ Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
 ## 0.010 (2026-11-09)
 
-- Less RAM for big worlds: World::set_cpu_meshes(CpuMeshes::Release) drops each mesh's CPU copy once the renderer has uploaded it (a town's blocks were held twice, in RAM and on the graphics card). Feet still stand on released meshes (their upward faces are kept), openings still work; World::keep_cpu_mesh keeps the ones you will shatter or give a body. The default stays CpuMeshes::Keep, so nothing changes until a game asks. World::cpu_mesh_bytes and cpu_mesh_counts show what is held.
+- Less RAM for big worlds: World::set_cpu_meshes(CpuMeshes::Release) drops each mesh's CPU copy once the renderer has uploaded it (a town's blocks were held twice, in RAM and on the graphics card). Feet still stand on released meshes (their upward faces are kept), openings still work; World::keep_cpu_mesh keeps the ones you will shatter or give a body. The default stays CpuMeshes::Keep, so nothing changes until a game asks. World::cpu_mesh_bytes, ground_mesh_bytes and cpu_mesh_counts show what is held.
+- What feet stand on takes far less memory: a mesh's ground grid now has about one cell per two upward faces instead of up to 256 x 256 cells (a town's worth went from 870 MB to 110 MB).
 
 ## 0.009 (2026-11-09)
 
