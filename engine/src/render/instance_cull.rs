@@ -412,7 +412,7 @@ impl InstanceCull {
                     planes,
                     centre: job.local.centre.into(),
                     radius: job.local.radius,
-                    source_start: range.start,
+                    source_start: range.start + job.gpu.first_instance,
                     instance_count: range.count,
                     draw_slots: job.draws.slots(),
                     _pad: 0,

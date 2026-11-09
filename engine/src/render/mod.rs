@@ -205,7 +205,12 @@ impl<'r> OpaqueDraw<'r> {
         let (instances, indirect) = self.sources();
         bundle.set_bind_group(1, self.albedo, &[]);
         bundle.set_vertex_buffer(0, g.vertex_buf.slice(..));
-        bundle.set_vertex_buffer(1, instances.slice(..));
+        match self.submit {
+            OpaqueSubmit::Mesh(MeshSubmit::Compacted) => {
+                bundle.set_vertex_buffer(1, instances.slice(..))
+            }
+            _ => bundle.set_vertex_buffer(1, g.instance_slice()),
+        }
         bundle.set_index_buffer(g.index_buf.slice(..), wgpu::IndexFormat::Uint32);
         match indirect {
             Some((args, offset)) => bundle.draw_indexed_indirect(args, offset),
@@ -225,8 +230,9 @@ struct OpaqueKey {
     albedo: wgpu::BindGroup,
     vertex: wgpu::Buffer,
     index: wgpu::Buffer,
-    /// Where the mesh starts in the arena page.
-    offsets: (u32, i32),
+    /// Where the mesh starts in the arena pages: first index, base vertex,
+    /// first instance and instance room.
+    offsets: (u32, i32, u32, usize),
     instances: wgpu::Buffer,
     /// Indirect args and offset, or the direct index and instance counts.
     indirect: Option<(wgpu::Buffer, u64)>,
@@ -240,7 +246,13 @@ impl OpaqueKey {
         self.albedo == *d.albedo
             && self.vertex == g.vertex_buf
             && self.index == g.index_buf
-            && self.offsets == (g.first_index, g.base_vertex)
+            && self.offsets
+                == (
+                    g.first_index,
+                    g.base_vertex,
+                    g.first_instance,
+                    g.instance_capacity,
+                )
             && self.instances == *instances
             && match (&self.indirect, indirect) {
                 (Some((a, o)), Some((b, p))) => a == b && *o == p,
@@ -258,7 +270,12 @@ impl OpaqueKey {
             albedo: d.albedo.clone(),
             vertex: g.vertex_buf.clone(),
             index: g.index_buf.clone(),
-            offsets: (g.first_index, g.base_vertex),
+            offsets: (
+                g.first_index,
+                g.base_vertex,
+                g.first_instance,
+                g.instance_capacity,
+            ),
             instances: instances.clone(),
             indirect: indirect.map(|(b, o)| (b.clone(), o)),
             counts: if indirect.is_some() {
@@ -642,7 +659,7 @@ pub struct Renderer {
     voxel: voxel_terrain::VoxelTerrainGpu,
     gpu_meshes: HashMap<EntityId, GpuMesh>,
     /// Every mesh's vertices and indices, in shared pages.
-    geometry: geometry::GeometryArena,
+    arenas: geometry::MeshArenas,
     /// GPU-mode instance buffers, one per prototype instead of one per spatial bin.
     gpu_instance_batches: HashMap<EntityId, GpuInstanceBatch>,
     gpu_batch_sources: Vec<BatchSourceState>,
@@ -1036,7 +1053,7 @@ impl Renderer {
             gi,
             voxel,
             gpu_meshes: HashMap::new(),
-            geometry: geometry::GeometryArena::default(),
+            arenas: geometry::MeshArenas::default(),
             gpu_instance_batches: HashMap::new(),
             gpu_batch_sources: Vec::new(),
             gpu_batch_source_scratch: Vec::new(),
@@ -1493,7 +1510,7 @@ impl Renderer {
                 let mut gpu = GpuMesh::upload(
                     &self.device,
                     &self.queue,
-                    &self.geometry,
+                    &self.arenas,
                     entity.mesh(),
                     &[],
                     &self.instance_cull,
@@ -1533,7 +1550,7 @@ impl Renderer {
                     *gpu = GpuMesh::upload(
                         &self.device,
                         &self.queue,
-                        &self.geometry,
+                        &self.arenas,
                         entity.mesh(),
                         &self.instance_scratch,
                         &self.instance_cull,
@@ -1544,6 +1561,7 @@ impl Renderer {
                     let reallocated = gpu.update_instances(
                         &self.device,
                         &self.queue,
+                        &self.arenas,
                         &self.instance_scratch,
                         &self.instance_cull,
                     );
@@ -1560,6 +1578,8 @@ impl Renderer {
                     });
                     GpuMesh::share_vertices(
                         &self.device,
+                        &self.queue,
+                        &self.arenas,
                         proto_gpu,
                         &self.instance_scratch,
                         &self.instance_cull,
@@ -1568,7 +1588,7 @@ impl Renderer {
                     GpuMesh::upload(
                         &self.device,
                         &self.queue,
-                        &self.geometry,
+                        &self.arenas,
                         entity.mesh(),
                         &self.instance_scratch,
                         &self.instance_cull,
@@ -1586,10 +1606,15 @@ impl Renderer {
         }
     }
 
+    /// Mesh or instance buffers moved: record the bundles that bake them
+    /// in anew (shadow views, and the terrain bundle, which is keyed by
+    /// its entities only).
     fn invalidate_shadow_bundles(&mut self) {
         for view in &mut self.shadow_bundles {
             *view = ShadowViewBundles::default();
         }
+        self.terrain_bundle_ids.clear();
+        self.terrain_bundle = None;
         self.static_shadow_epoch += 1;
     }
 
@@ -1821,6 +1846,8 @@ impl Renderer {
                 .resize(used + headroom, InstanceRaw::from_matrix(DEAD_INSTANCE));
             let mut gpu = GpuMesh::share_vertices(
                 &self.device,
+                &self.queue,
+                &self.arenas,
                 prototype_gpu,
                 &self.instance_scratch,
                 &self.instance_cull,
@@ -2086,9 +2113,9 @@ impl Renderer {
     /// Rough video memory held by meshes and textures (bytes): (mesh
     /// buffers, textures, mesh count, texture count). For diagnostics.
     pub fn mesh_and_texture_bytes(&self) -> (u64, u64, usize, usize) {
-        // Vertices and indices: the arena's pages, whatever share them.
-        let mesh = |g: &gpu_mesh::GpuMesh| g.instance_buf.size() + g.compact_buf.size();
-        let meshes: u64 = self.geometry.reserved_bytes()
+        // Vertices, indices and instances: the arenas' pages.
+        let mesh = |g: &gpu_mesh::GpuMesh| g.compact_buf.size();
+        let meshes: u64 = self.arenas.reserved_bytes()
             + self.gpu_meshes.values().map(mesh).sum::<u64>()
             + self
                 .gpu_instance_batches
@@ -4645,7 +4672,7 @@ impl Renderer {
                 .expect("terrain opaque index count exceeds u32");
             bundle.set_bind_group(1, &material.bind_group, &[]);
             bundle.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
-            bundle.set_vertex_buffer(1, gpu.instance_buf.slice(..));
+            bundle.set_vertex_buffer(1, gpu.instance_slice());
             bundle.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
             bundle.draw_indexed(
                 gpu.indices(0..opaque_index_count),
@@ -5123,7 +5150,7 @@ fn encode_shadow_bundle_draw<'a>(
         MeshSubmit::Direct => {
             let instance_count =
                 u32::try_from(gpu.instance_count).expect("shadow instance count exceeds u32");
-            bundle.set_vertex_buffer(1, gpu.instance_buf.slice(..));
+            bundle.set_vertex_buffer(1, gpu.instance_slice());
             bundle.draw_indexed(
                 gpu.indices(0..opaque_index_count),
                 gpu.base_vertex,
@@ -5148,12 +5175,8 @@ fn submit_batch_draw(
     }
     pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
     pass.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-    let stride = std::mem::size_of::<InstanceRaw>() as u64;
     for range in &batch.active_ranges {
-        let byte_start = u64::from(range.start)
-            .checked_mul(stride)
-            .expect("active instance range byte offset overflow");
-        pass.set_vertex_buffer(1, gpu.instance_buf.slice(byte_start..));
+        pass.set_vertex_buffer(1, gpu.instance_slice_from(range.start as usize));
         pass.draw_indexed(
             gpu.indices(indices.clone()),
             gpu.base_vertex,
@@ -5178,7 +5201,7 @@ fn submit_mesh_draw(
             *indirect_draws += 1;
         }
         MeshSubmit::Direct => {
-            pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
+            pass.set_vertex_buffer(1, gpu.instance_slice());
             pass.draw_indexed(
                 gpu.indices(indices),
                 gpu.base_vertex,
@@ -5197,7 +5220,7 @@ fn submit_occluded_draw(
     range_offset: u64,
 ) {
     pass.set_vertex_buffer(0, gpu.vertex_buf.slice(..));
-    pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
+    pass.set_vertex_buffer(1, gpu.instance_slice());
     pass.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
     pass.draw_indexed_indirect(args, occlusion::OcclusionFrame::offset(slot, range_offset));
 }
