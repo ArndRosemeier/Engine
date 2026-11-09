@@ -328,7 +328,7 @@ pub(crate) const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::G
 pub(crate) const DEPTH_CLEAR: f32 = 0.0;
 pub(crate) use shadow::ELEMENT_STATE_WORDS;
 
-pub(crate) use stencil::DEPTH_FORMAT;
+pub(crate) use stencil::depth_format;
 
 enum SceneUniformTarget {
     /// The live camera's view: the one the depth prepass and SSAO see.
@@ -465,7 +465,8 @@ impl Renderer {
     pub async fn new(window: std::sync::Arc<winit::window::Window>) -> Self {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
+            // `WGPU_BACKEND=dx12|vulkan|metal` picks one (a driver test).
+            backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY),
             ..Default::default()
         });
         let surface = instance
@@ -599,11 +600,13 @@ impl Renderer {
         };
         let (depth_texture, depth_view) = create_depth(&device, config.width, config.height);
         audit_note(&format!(
-            "renderer starts at {}x{}, {:?}, {}x MSAA",
+            "renderer starts at {}x{}, {:?}, {}x MSAA, depth {:?}, {:?}",
             config.width,
             config.height,
             config.present_mode,
-            stencil::scene_samples()
+            stencil::scene_samples(),
+            depth_format(),
+            adapter.get_info()
         ));
         // Independent parts compile on worker threads at once: startup
         // costs about the slowest part instead of the sum of all of them.
@@ -2078,7 +2081,8 @@ impl Renderer {
         self.cpu_spans.mark("world.prepass_ao", &mut t);
         // With a prepass the world pass keeps its depth: hidden fragments
         // then fail the depth test before any shading runs.
-        let (depth_load, stencil_load) = if self.ao_active {
+        let own_depth = world.debug_shading & 65536 != 0;
+        let (depth_load, stencil_load) = if self.ao_active && !own_depth {
             (wgpu::LoadOp::Load, wgpu::LoadOp::Load)
         } else {
             (wgpu::LoadOp::Clear(DEPTH_CLEAR), wgpu::LoadOp::Clear(0))
@@ -2106,7 +2110,7 @@ impl Renderer {
                     load: depth_load,
                     store: wgpu::StoreOp::Store,
                 }),
-                stencil_ops: Some(wgpu::Operations {
+                stencil_ops: stencil::has_stencil().then_some(wgpu::Operations {
                     load: stencil_load,
                     store: wgpu::StoreOp::Store,
                 }),
@@ -2188,7 +2192,7 @@ impl Renderer {
                             load: wgpu::LoadOp::Clear(DEPTH_CLEAR),
                             store: wgpu::StoreOp::Discard,
                         }),
-                        stencil_ops: Some(wgpu::Operations {
+                        stencil_ops: stencil::has_stencil().then_some(wgpu::Operations {
                             load: wgpu::LoadOp::Clear(0),
                             store: wgpu::StoreOp::Discard,
                         }),
@@ -2539,7 +2543,7 @@ impl Renderer {
                     load: wgpu::LoadOp::Clear(DEPTH_CLEAR),
                     store: wgpu::StoreOp::Store,
                 }),
-                stencil_ops: Some(wgpu::Operations {
+                stencil_ops: stencil::has_stencil().then_some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(0),
                     store: wgpu::StoreOp::Store,
                 }),
@@ -2707,7 +2711,7 @@ impl Renderer {
         // depth testing and shade every hidden fragment (2.4 -> 1.2 ms for
         // lod_forest on an RTX 5070). Leaf edges the prepass left out still
         // draw, they just don't occlude each other.
-        let nowrite = stamp && self.ao_active && world.debug_shading & 16384 == 0;
+        let nowrite = stamp && self.ao_active && world.debug_shading & (16384 | 65536) == 0;
         self.mark_scene(pass, stamp, SceneMark::Begin);
         pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
 
@@ -3483,7 +3487,7 @@ impl Renderer {
                     label: Some("visible-terrain-bundle"),
                     color_formats: &[Some(HDR_FORMAT)],
                     depth_stencil: Some(wgpu::RenderBundleDepthStencil {
-                        format: DEPTH_FORMAT,
+                        format: depth_format(),
                         depth_read_only: false,
                         stencil_read_only: true,
                     }),
@@ -4004,7 +4008,7 @@ fn create_depth(
         mip_level_count: 1,
         sample_count: stencil::scene_samples(),
         dimension: wgpu::TextureDimension::D2,
-        format: DEPTH_FORMAT,
+        format: depth_format(),
         // Sampled by the SSAO pass after the depth prepass.
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
@@ -4126,7 +4130,7 @@ fn choose_scene_samples(adapter: &wgpu::Adapter) -> u32 {
         Err(std::env::VarError::NotUnicode(_)) => panic!("ENGINE_MSAA must be valid Unicode"),
     };
     let color = adapter.get_texture_format_features(HDR_FORMAT).flags;
-    let depth = adapter.get_texture_format_features(DEPTH_FORMAT).flags;
+    let depth = adapter.get_texture_format_features(depth_format()).flags;
     if requested == 4 && color.sample_count_supported(4) && depth.sample_count_supported(4) {
         4
     } else {
