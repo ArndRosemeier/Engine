@@ -39,6 +39,8 @@ struct Playground {
     breakable: Vec<EntityId>,
     dominoes: Vec<EntityId>,
     sweeper: Option<EntityId>,
+    /// A trigger zone around the crate pyramid: counts crates thrown out.
+    pyramid_zone: Option<EntityId>,
     everything: Vec<EntityId>,
 }
 
@@ -84,6 +86,15 @@ fn build(world: &mut World, noise: &Noise) -> EngineResult<Playground> {
             )?;
         }
     }
+
+    // An invisible trigger zone around the pyramid; it reports every crate
+    // that leaves it (see `take_trigger_events` in the frame).
+    let zone = world.spawn_trigger(
+        Place::new(0.0, ground(0.0, 9.0) + 2.5, 9.0),
+        Trigger::cuboid((3.0, 2.8, 1.0)),
+    )?;
+    p.pyramid_zone = Some(zone);
+    p.everything.push(zone);
 
     // A brick wall, joints staggered.
     let stone = [rgb(170, 160, 146), rgb(150, 142, 130), rgb(184, 172, 156)];
@@ -199,6 +210,7 @@ fn main() -> EngineResult<()> {
     let mut frame_no = 0u32;
     let mut shots = 0u32;
     let mut report = 0.0_f32;
+    let mut thrown_out = 0u32;
 
     Engine::run("physics", move |world, frame| {
         // Uncapped so the title bar shows the real frame rate.
@@ -329,6 +341,13 @@ fn main() -> EngineResult<()> {
             things = build(world, &noise)?;
         }
 
+        // Crates (and pieces) leaving the pyramid's trigger zone.
+        for e in world.take_trigger_events() {
+            if Some(e.trigger) == things.pyramid_zone && !e.entered {
+                thrown_out += 1;
+            }
+        }
+
         // Hard knocks: a line in the log now and then (hook sounds up here).
         let hits = world.take_impacts();
         report -= frame.dt;
@@ -359,6 +378,17 @@ fn main() -> EngineResult<()> {
         let (bodies, awake) = world.body_count();
         world.report("bodies", bodies);
         world.report("moving", awake);
+        if let Some(zone) = things.pyramid_zone {
+            world.report("in the pyramid zone", world.in_trigger(zone).len());
+        }
+        world.report("thrown out of the pyramid zone", thrown_out);
+        if demo && frame_no == 200 {
+            // The blast at frame 30 lands right by the pyramid.
+            world.check(
+                "the blast throws crates out of the pyramid zone",
+                thrown_out > 0,
+            );
+        }
         Ok(())
     })
 }

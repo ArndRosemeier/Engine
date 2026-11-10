@@ -3210,3 +3210,162 @@ mod components {
         assert_eq!(world.component_counts().get("Name"), Some(&1));
     }
 }
+
+mod gameplay_physics {
+    use crate::color::rgb;
+    use crate::mesh::Mesh;
+    use crate::physics::{Body, BodyShape, Trigger};
+    use crate::place::Place;
+    use crate::world::{EntityId, World};
+    use glam::Vec3;
+
+    fn ball(world: &mut World, at: Vec3, body: Body) -> EntityId {
+        let id = world.spawn(Mesh::ball(Vec3::ZERO, 0.5, rgb(200, 80, 60)).unwrap());
+        world.set_place(id, Place::new(at.x, at.y, at.z)).unwrap();
+        world
+            .add_body(id, body.shape(BodyShape::Ball(0.5)))
+            .unwrap();
+        id
+    }
+
+    fn run(world: &mut World, frames: usize) {
+        for _ in 0..frames {
+            world.tick_physics(1.0 / 60.0);
+        }
+    }
+
+    #[test]
+    fn a_falling_ball_enters_and_leaves_a_trigger_once() {
+        let mut world = World::new();
+        let zone = world
+            .spawn_trigger(Place::new(0.0, 3.0, 0.0), Trigger::cuboid((1.0, 0.5, 1.0)))
+            .unwrap();
+        let b = ball(&mut world, Vec3::new(0.0, 6.0, 0.0), Body::dynamic());
+        let mut events = Vec::new();
+        let mut was_inside = false;
+        for _ in 0..120 {
+            world.tick_physics(1.0 / 60.0);
+            events.extend(world.take_trigger_events());
+            was_inside |= world.in_trigger(zone) == vec![b];
+        }
+        assert!(was_inside);
+        let summary: Vec<(EntityId, EntityId, bool)> = events
+            .iter()
+            .map(|e| (e.trigger, e.other, e.entered))
+            .collect();
+        assert_eq!(summary, vec![(zone, b, true), (zone, b, false)]);
+        assert!(world.in_trigger(zone).is_empty());
+        // It fell through the zone: triggers never stop anything.
+        assert!(world.entity(b).unwrap().transform().w_axis.y < 1.0);
+    }
+
+    #[test]
+    fn a_despawned_body_leaves_and_a_moved_trigger_finds_bodies() {
+        let mut world = World::new();
+        let b = ball(&mut world, Vec3::new(5.0, 0.5, 0.0), Body::fixed());
+        let zone = world
+            .spawn_trigger(Place::new(0.0, 0.5, 0.0), Trigger::ball(1.0))
+            .unwrap();
+        run(&mut world, 3);
+        assert!(world.take_trigger_events().is_empty());
+        // Move the trigger over the (fixed) ball.
+        world.set_place(zone, Place::new(5.0, 0.5, 0.0)).unwrap();
+        run(&mut world, 3);
+        let ev = world.take_trigger_events();
+        assert_eq!(ev.len(), 1, "{ev:?}");
+        assert!(ev[0].entered && ev[0].other == b);
+        world.despawn(b);
+        run(&mut world, 3);
+        let ev = world.take_trigger_events();
+        assert_eq!(ev.len(), 1, "{ev:?}");
+        assert!(!ev[0].entered && ev[0].other == b);
+        // Despawning the trigger's own entity removes the trigger.
+        world.despawn(zone);
+        run(&mut world, 1);
+        assert_eq!(world.trigger_count(), 0);
+    }
+
+    #[test]
+    fn a_trigger_on_a_mesh_entity_follows_it_and_filters_layers() {
+        let mut world = World::new();
+        let coin =
+            world.spawn(Mesh::box_at(Vec3::ZERO, Vec3::splat(0.3), rgb(240, 200, 40)).unwrap());
+        world.set_place(coin, Place::new(0.0, 0.5, 0.0)).unwrap();
+        world
+            .add_trigger(coin, Trigger::ball(0.8).layers(&[1]))
+            .unwrap();
+        // Layer 0 rests next to it: not noticed. Layer 1 is.
+        let rock = ball(&mut world, Vec3::new(0.5, 0.5, 0.0), Body::fixed());
+        let player = ball(
+            &mut world,
+            Vec3::new(-0.5, 0.5, 0.0),
+            Body::kinematic().layer(1),
+        );
+        run(&mut world, 3);
+        assert_eq!(world.in_trigger(coin), vec![player]);
+        let _ = rock;
+        assert!(world.add_trigger(coin, Trigger::ball(-1.0)).is_err());
+        assert!(world.add_body(rock, Body::fixed().layer(40)).is_err());
+    }
+
+    #[test]
+    fn layers_let_bodies_pass_through_each_other_but_not_the_ground() {
+        let mut world = World::new();
+        // A ball dropped onto a fixed one: same layer, it stays on top.
+        let floor_a = ball(&mut world, Vec3::new(0.0, 0.5, 0.0), Body::fixed());
+        let top_a = ball(&mut world, Vec3::new(0.0, 2.0, 0.0), Body::dynamic());
+        // Same, but the falling ball ignores layer 0: it falls to the ground.
+        let floor_b = ball(&mut world, Vec3::new(4.0, 0.5, 0.0), Body::fixed());
+        let top_b = ball(
+            &mut world,
+            Vec3::new(4.0, 2.0, 0.0),
+            Body::dynamic().layer(3).ignores(&[0]),
+        );
+        run(&mut world, 180);
+        let y = |w: &World, id| w.entity(id).unwrap().transform().w_axis.y;
+        assert!(y(&world, top_a) > 1.2, "top_a at {}", y(&world, top_a));
+        let yb = y(&world, top_b);
+        assert!(
+            (0.4..0.7).contains(&yb),
+            "top_b should rest on the ground, at {yb}"
+        );
+        let _ = (floor_a, floor_b);
+    }
+
+    #[test]
+    fn overlap_and_sphere_cast_find_bodies_and_ground() {
+        let mut world = World::new();
+        let a = ball(&mut world, Vec3::new(0.0, 0.5, 0.0), Body::fixed());
+        let b = ball(&mut world, Vec3::new(3.0, 0.5, 0.0), Body::fixed());
+        let zone = world
+            .spawn_trigger(Place::new(1.5, 0.5, 0.0), Trigger::ball(1.0))
+            .unwrap();
+        run(&mut world, 1);
+        assert_eq!(world.overlap_sphere((0.0, 0.5, 0.0), 0.2), vec![a]);
+        assert_eq!(world.overlap_sphere((1.5, 0.5, 0.0), 1.2), vec![a, b]);
+        assert_eq!(world.overlap_box((3.0, 0.5, 0.0), (0.6, 0.6, 0.6)), vec![b]);
+        // The trigger is not a thing.
+        assert!(world.overlap_sphere((1.5, 0.5, 0.0), 0.5).is_empty());
+        let _ = zone;
+        // A ball of radius 0.25 swept along x towards `b` stops 0.75 m short of its centre.
+        let hit = world
+            .cast_sphere((1.5, 0.5, 0.0), (1.0, 0.0, 0.0), 0.25, 10.0)
+            .unwrap();
+        assert_eq!(hit.entity, Some(b));
+        assert!((hit.distance - 0.75).abs() < 0.02, "{hit:?}");
+        assert!((hit.point.x - 2.5).abs() < 0.02, "{hit:?}");
+        assert!(hit.normal.x < -0.9, "{hit:?}");
+        // Straight down onto the flat ground at y = 0.
+        let hit = world
+            .cast_sphere((10.0, 5.0, 0.0), (0.0, -1.0, 0.0), 0.5, 10.0)
+            .unwrap();
+        assert_eq!(hit.entity, None);
+        assert!((hit.distance - 4.5).abs() < 0.02, "{hit:?}");
+        assert!(hit.point.y.abs() < 0.02, "{hit:?}");
+        // Rays pass through triggers.
+        let ray = world
+            .cast_ray((1.5, 3.0, 0.0), (0.0, -1.0, 0.0), 10.0)
+            .unwrap();
+        assert_eq!(ray.entity, None);
+    }
+}
