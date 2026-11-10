@@ -1209,7 +1209,7 @@ pub(crate) fn cascade_due(
         return true;
     }
     let offset = index.saturating_sub(1) as u64;
-    (frame + offset) % u64::from(every) == 0
+    (frame + offset).is_multiple_of(u64::from(every))
 }
 
 /// `ENGINE_SHADOW_REFRESH=1` draws every cascade every frame.

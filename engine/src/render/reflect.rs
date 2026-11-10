@@ -694,6 +694,7 @@ impl Reflect {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn filter_pass(
         &self,
         device: &wgpu::Device,

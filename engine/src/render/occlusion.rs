@@ -431,7 +431,7 @@ const AUTO_MAX_WAIT: u32 = 1920;
 /// Chooses, frame by frame, whether `OcclusionMode::Auto` culls: it tries,
 /// measures the share of tested meshes found hidden, and keeps culling only
 /// while that share is worth the test.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct OcclusionAuto {
     active: bool,
     /// Frames in the current state.
@@ -440,18 +440,6 @@ pub(crate) struct OcclusionAuto {
     wait: u32,
     tested: u64,
     hidden: u64,
-}
-
-impl Default for OcclusionAuto {
-    fn default() -> Self {
-        Self {
-            active: false,
-            frames: 0,
-            wait: 0,
-            tested: 0,
-            hidden: 0,
-        }
-    }
 }
 
 impl OcclusionAuto {

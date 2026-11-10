@@ -46,7 +46,7 @@ fn facade(variant: u32) -> (u32, u32, Vec<u8>) {
         for x in 0..SIZE {
             let (cx, cy) = (x / 8, y / 8);
             let window = (2..7).contains(&(x % 8)) && (2..6).contains(&(y % 8));
-            let lit = hash(variant * 7919 + cx * 31 + cy * 977) % 3 == 0;
+            let lit = hash(variant * 7919 + cx * 31 + cy * 977).is_multiple_of(3);
             let c = match (window, lit) {
                 (true, true) => [255, 230, 160],
                 (true, false) => [60, 75, 95],

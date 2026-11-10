@@ -841,7 +841,6 @@ fn add_readable_geometry(
             }
         }
         VisualKind::Charm => {
-            drop(add);
             for i in 0..8 {
                 let a = i as f32 * std::f32::consts::TAU / 8.0;
                 let pos = center
@@ -1404,11 +1403,7 @@ fn fire_layers(
         let burst = ParticleEmitter::new(c + Vec3::Y * 0.18)
             .with_color(color)
             .with_secondary_color(secondary)
-            .with_silhouette(if layer == 0 {
-                ParticleSilhouette::Flame
-            } else {
-                ParticleSilhouette::Flame
-            })
+            .with_silhouette(ParticleSilhouette::Flame)
             .with_size_over_life(SizeOverLife::GrowThenFade)
             .with_mode(ParticleMode::Burst)
             .with_burst_count(count)

@@ -197,7 +197,7 @@ fn main() -> EngineResult<()> {
             };
             true
         } else {
-            dig_every > 0 && frame_no % dig_every == 0
+            dig_every > 0 && frame_no.is_multiple_of(dig_every)
         };
         if input.pressed(Key::K) {
             let saved = Saved {

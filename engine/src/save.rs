@@ -90,8 +90,11 @@ struct SavedLamp {
     position: [f32; 3],
     direction: [f32; 3],
     /// Riding on a saved entity: (entity, bone name, offset, local direction).
-    on: Option<(u64, Option<String>, [f32; 3], Option<[f32; 3]>)>,
+    on: Option<SavedLampMount>,
 }
+
+/// A saved lamp's mount: (entity, bone name, offset, local direction).
+type SavedLampMount = (u64, Option<String>, [f32; 3], Option<[f32; 3]>);
 
 #[derive(Serialize, Deserialize)]
 struct SavedChunk {
@@ -341,7 +344,7 @@ impl World {
             chunks,
             game,
         };
-        let json = serde_json::to_vec(&file).map_err(|e| bad(e))?;
+        let json = serde_json::to_vec(&file).map_err(bad)?;
         let mut out = Vec::with_capacity(json.len() / 4 + blob.len() / 4 + 16);
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&VERSION.to_le_bytes());
@@ -384,7 +387,7 @@ impl World {
             .get(8..8usize.saturating_add(json_len))
             .ok_or_else(|| bad("damaged (header)"))?;
         let blob = &payload[8 + json_len..];
-        let file: SaveFile = serde_json::from_slice(json).map_err(|e| bad(e))?;
+        let file: SaveFile = serde_json::from_slice(json).map_err(bad)?;
         let slice = |(at, len): (u64, u64)| -> EngineResult<&[u8]> {
             blob.get(at as usize..(at + len) as usize)
                 .ok_or_else(|| bad("damaged (data out of range)"))

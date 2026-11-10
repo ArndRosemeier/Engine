@@ -359,7 +359,7 @@ impl TreeAsset {
             })
             .collect();
         for (n, (index, branch)) in terminals.into_iter().enumerate() {
-            if n as u32 % cluster_stride != 0 {
+            if !(n as u32).is_multiple_of(cluster_stride) {
                 continue;
             }
             asset.add_cluster(
@@ -429,6 +429,7 @@ impl TreeAsset {
     pub fn foliage_cluster_count(&self) -> usize {
         self.foliage_clusters
     }
+    #[allow(clippy::too_many_arguments)]
     fn add_branch(
         &mut self,
         start: Vec3,

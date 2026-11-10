@@ -584,24 +584,6 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(color, 1.0);
 }
 "#;
-
-#[cfg(test)]
-mod tests {
-    use super::SHADER;
-
-    #[test]
-    fn gradient_normalization_never_divides_by_zero() {
-        assert!(SHADER.contains("g / max(len, 1e-5)"));
-        assert!(!SHADER.contains("g / len"));
-    }
-
-    #[test]
-    fn anti_sun_azimuth_is_clamped_before_fractional_power() {
-        assert!(SHADER.contains("let az = clamp(0.5 + 0.5 * dot("));
-        assert!(SHADER.contains("), 0.0, 1.0);"));
-        assert!(SHADER.contains("pow(az, 1.35)"));
-    }
-}
 pub fn create_sky_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> SkyPipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("sky-shader"),
@@ -720,5 +702,23 @@ pub fn create_sky_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) 
         pipeline_portal,
         uniform_bufs,
         bind_groups,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SHADER;
+
+    #[test]
+    fn gradient_normalization_never_divides_by_zero() {
+        assert!(SHADER.contains("g / max(len, 1e-5)"));
+        assert!(!SHADER.contains("g / len"));
+    }
+
+    #[test]
+    fn anti_sun_azimuth_is_clamped_before_fractional_power() {
+        assert!(SHADER.contains("let az = clamp(0.5 + 0.5 * dot("));
+        assert!(SHADER.contains("), 0.0, 1.0);"));
+        assert!(SHADER.contains("pow(az, 1.35)"));
     }
 }
