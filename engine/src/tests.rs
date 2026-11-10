@@ -2223,6 +2223,57 @@ mod save_load {
         world.world_transform(id).unwrap().w_axis.truncate()
     }
 
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct Health(i32);
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct Cargo {
+        items: Vec<String>,
+    }
+    struct NotSaved;
+
+    #[test]
+    fn registered_components_on_saved_things_come_back_on_the_new_ids() {
+        let mut world = fresh();
+        world.save_component::<Health>("health");
+        world.save_component::<Cargo>("cargo");
+        let a = world
+            .spawn_named("cart", Place::new(1.0, 0.0, 0.0))
+            .unwrap();
+        let wheel = a.part("wheel").unwrap();
+        world.insert(a.root, Health(70)).unwrap();
+        world
+            .insert(
+                a.root,
+                Cargo {
+                    items: vec!["apples".into(), "rope".into()],
+                },
+            )
+            .unwrap();
+        world.insert(wheel, Health(5)).unwrap();
+        world.insert(a.root, NotSaved).unwrap();
+        // Scenery is not saved, so neither is what it carries.
+        let rock = world.spawn(Mesh::box_at(Vec3::ZERO, Vec3::ONE, rgb(90, 90, 90)).unwrap());
+        world.insert(rock, Health(1)).unwrap();
+        let bytes = world.save_to_bytes(&()).unwrap();
+
+        let mut back = fresh();
+        back.save_component::<Health>("health");
+        back.save_component::<Cargo>("cargo");
+        let loaded = back.load_from_bytes(&bytes).unwrap();
+        let root = loaded.entity(a.root).unwrap();
+        let new_wheel = loaded.entity(wheel).unwrap();
+        assert_eq!(back.get::<Health>(root), Some(&Health(70)));
+        assert_eq!(back.get::<Health>(new_wheel), Some(&Health(5)));
+        assert_eq!(back.get::<Cargo>(root).unwrap().items, ["apples", "rope"]);
+        assert!(!back.has::<NotSaved>(root));
+        assert_eq!(back.query::<Health>().count(), 2);
+
+        // A save with components nobody registered says what to do.
+        let mut unready = fresh();
+        let err = unready.load_from_bytes(&bytes).unwrap_err().to_string();
+        assert!(err.contains("save_component"), "{err}");
+    }
+
     #[test]
     fn a_world_comes_back_as_it_was_saved() {
         let mut world = fresh();
@@ -3062,4 +3113,100 @@ fn an_attached_lod_set_follows_its_parent_and_goes_with_it() {
         "the set went with its parent"
     );
     assert!(world.lod_levels(model).is_ok(), "the model stays");
+}
+
+mod components {
+    use crate::color::rgb;
+    use crate::error::EngineError;
+    use crate::mesh::Mesh;
+    use crate::place::Place;
+    use crate::world::World;
+    use glam::Vec3;
+
+    #[derive(Debug, PartialEq)]
+    struct Health(i32);
+    #[derive(Debug, PartialEq)]
+    struct Burning;
+    struct Name(&'static str);
+
+    fn thing(world: &mut World) -> crate::world::EntityId {
+        world.spawn(Mesh::box_at(Vec3::ZERO, Vec3::ONE, rgb(150, 100, 50)).unwrap())
+    }
+
+    #[test]
+    fn insert_get_change_and_remove() {
+        let mut world = World::new();
+        let orc = thing(&mut world);
+        assert_eq!(world.get::<Health>(orc), None);
+        world.insert(orc, Health(100)).unwrap();
+        world.get_mut::<Health>(orc).unwrap().0 -= 30;
+        assert_eq!(world.get::<Health>(orc), Some(&Health(70)));
+        world.insert(orc, Health(5)).unwrap(); // replaces
+        assert_eq!(world.get::<Health>(orc), Some(&Health(5)));
+        assert!(world.has::<Health>(orc));
+        assert!(!world.has::<Burning>(orc));
+        assert_eq!(world.remove::<Health>(orc), Some(Health(5)));
+        assert!(!world.has::<Health>(orc));
+        assert!(
+            world.entity(orc).is_ok(),
+            "removing a component keeps the entity"
+        );
+    }
+
+    #[test]
+    fn despawn_takes_the_components_along_and_stale_ids_are_refused() {
+        let mut world = World::new();
+        let orc = thing(&mut world);
+        world.insert(orc, Health(1)).unwrap();
+        world.insert(orc, Burning).unwrap();
+        world.despawn(orc);
+        assert!(!world.has::<Health>(orc));
+        assert_eq!(world.query::<Burning>().count(), 0);
+        assert!(matches!(
+            world.insert(orc, Health(3)),
+            Err(EngineError::UnknownEntity)
+        ));
+    }
+
+    #[test]
+    fn queries_list_entities_oldest_first_and_join_two_types() {
+        let mut world = World::new();
+        let ids: Vec<_> = (0..5).map(|_| thing(&mut world)).collect();
+        for (i, id) in ids.iter().enumerate() {
+            world.insert(*id, Health(10 * i as i32)).unwrap();
+            if i % 2 == 0 {
+                world.insert(*id, Burning).unwrap();
+            }
+        }
+        let order: Vec<_> = world.query::<Health>().map(|(id, _)| id).collect();
+        assert_eq!(order, ids);
+        for (_, health, _) in world.query2_mut::<Health, Burning>() {
+            health.0 -= 1;
+        }
+        let healths: Vec<i32> = world.query::<Health>().map(|(_, h)| h.0).collect();
+        assert_eq!(healths, [-1, 10, 19, 30, 39]);
+        assert_eq!(world.query2::<Burning, Health>().count(), 3);
+        for (_, h) in world.query_mut::<Health>() {
+            h.0 += 1;
+        }
+        // ids_with: change the world while walking the list.
+        for id in world.ids_with::<Burning>() {
+            if world.get::<Health>(id).is_some_and(|h| h.0 < 15) {
+                world.despawn(id);
+            }
+        }
+        assert_eq!(world.query::<Health>().count(), 4);
+        assert_eq!(world.query2::<Health, Burning>().count(), 2);
+    }
+
+    #[test]
+    fn pivots_carry_components_and_names_show_what_an_entity_has() {
+        let mut world = World::new();
+        let pivot = world.spawn_pivot(Place::default());
+        world.insert(pivot, Name("door hinge")).unwrap();
+        world.insert(pivot, Burning).unwrap();
+        assert_eq!(world.get::<Name>(pivot).unwrap().0, "door hinge");
+        assert_eq!(world.component_names(pivot), ["Burning", "Name"]);
+        assert_eq!(world.component_counts().get("Name"), Some(&1));
+    }
 }

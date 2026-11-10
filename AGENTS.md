@@ -18,6 +18,10 @@ below are compiled by `cargo test -p engine`, so they match the real API.
 - `world.spawn(mesh)` returns an `EntityId`. Keep the ids you need in your
   own state; move things with `world.set_place(id, Place::new(x, y, z))`,
   remove them with `world.despawn(id)`.
+- Game data that belongs to one entity (health, loot, "locked") goes on
+  the entity as a component: `world.insert(orc, Health(100))?`,
+  `world.get_mut::<Health>(orc)`, `world.query::<Health>()`. It is removed
+  when the entity is despawned. No side `HashMap<EntityId, _>` needed.
 - Every call that can fail returns `EngineResult`; use `?` inside the closure.
   Returning an error ends the program and prints it.
 - Units: metres, Y up, yaw in degrees (0 faces +Z, 90 faces +X), colours sRGB
@@ -28,6 +32,11 @@ below are compiled by `cargo test -p engine`, so they match the real API.
 
 ```rust,no_run
 use engine::prelude::*;
+
+/// A component: data that lives on an entity.
+struct Coin {
+    value: u32,
+}
 
 /// Everything the game remembers between frames.
 #[derive(Default)]
@@ -46,6 +55,9 @@ fn main() -> EngineResult<()> {
             world.spawn(Shape::box_at((0.0, -0.05, 0.0), (40.0, 0.1, 40.0), rgb(90, 120, 70))?);
             let player = world.spawn(Shape::box_at((0.0, 0.5, 0.0), (1.0, 1.0, 1.0), rgb(220, 160, 100))?);
             game.player = Some(player);
+            // Game data on an entity: any struct of yours.
+            let coin = world.spawn(Shape::box_at((3.0, 0.3, 3.0), (0.4, 0.4, 0.4), rgb(240, 200, 40))?);
+            world.insert(coin, Coin { value: 10 })?;
         }
 
         // Input and movement, scaled by frame.dt so speed does not depend on FPS.
@@ -58,8 +70,13 @@ fn main() -> EngineResult<()> {
         if let Some(player) = game.player {
             world.set_place(player, Place::new(game.position.x, 0.0, game.position.z))?;
         }
-        if frame.input.pressed(Key::Space) {
-            game.score += 1;
+        // Pick up coins within a metre; despawning removes their Coin too.
+        for coin in world.ids_with::<Coin>() {
+            let at = world.entity(coin)?.transform().w_axis.truncate();
+            if at.distance(game.position + Vec3::Y * 0.3) < 1.0 {
+                game.score += world.get::<Coin>(coin).map_or(0, |c| c.value);
+                world.despawn(coin);
+            }
         }
 
         // Camera: orbit, follow or first person, set every frame.
@@ -128,7 +145,10 @@ python tools/verify.py <package> --reference refs/<package>.png
    hand (doors, platforms, a sweeper arm).
 8. **Read the error.** `EngineError` messages say what was wrong (bad
    number, unknown entity, limit hit). Don't wrap them in `unwrap`.
-9. **Ground height comes from the terrain you made.** Use your height
+9. **Loop over a list of ids when the loop changes the world.**
+   `for id in world.ids_with::<Health>() { ... world.despawn(id); }`, not
+   `for (id, h) in world.query::<Health>()` (that borrows the world).
+10. **Ground height comes from the terrain you made.** Use your height
    function (`HeightField::height_at`, your own noise) or
    `world.cast_ray(...)` to place things on the ground.
 

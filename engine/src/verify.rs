@@ -220,6 +220,7 @@ impl Verify {
                 lamps: world.lamps().count(),
                 bodies: world.body_count().0,
                 bodies_awake: world.body_count().1,
+                components: world.component_counts(),
                 camera_eye: camera.eye().to_array(),
                 camera_target: camera.target().to_array(),
                 first_entities: world
@@ -229,6 +230,7 @@ impl Verify {
                         id: id.raw(),
                         position: e.transform().w_axis.truncate().to_array(),
                         instances: e.instances.len(),
+                        components: world.component_names(id),
                     })
                     .collect(),
             },
@@ -281,6 +283,8 @@ struct WorldSummary {
     lamps: usize,
     bodies: usize,
     bodies_awake: usize,
+    /// Entities per component type (`World::insert`).
+    components: std::collections::BTreeMap<&'static str, usize>,
     camera_eye: [f32; 3],
     camera_target: [f32; 3],
     first_entities: Vec<EntitySummary>,
@@ -291,6 +295,8 @@ struct EntitySummary {
     id: u64,
     position: [f32; 3],
     instances: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    components: Vec<&'static str>,
 }
 
 /// How a screenshot compares with a reference picture.
