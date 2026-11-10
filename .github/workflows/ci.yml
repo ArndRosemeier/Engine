@@ -62,10 +62,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Linux packages (audio, input, software Vulkan, virtual display)
+      - name: Linux packages (audio, input, software Vulkan, virtual display, X11 libraries winit loads at run time)
         run: >
           sudo apt-get update && sudo apt-get install -y
           libasound2-dev libudev-dev mesa-vulkan-drivers xvfb
+          libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxi6 libxrandr2
 
       - name: Rust ${{ env.RUST_TOOLCHAIN }}
         uses: dtolnay/rust-toolchain@master
