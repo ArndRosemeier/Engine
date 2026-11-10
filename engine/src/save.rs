@@ -30,7 +30,7 @@ use crate::hierarchy::LampLink;
 use crate::lamps::{Lamp, LampId, LampShape};
 use glam::{IVec3, Mat4, Vec3};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -45,6 +45,10 @@ struct SaveFile {
     lamps: Vec<SavedLamp>,
     chunks: Vec<SavedChunk>,
     game: serde_json::Value,
+    /// Components registered with `World::save_component`, by saved name:
+    /// (old entity id, value).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    components: BTreeMap<String, Vec<(u64, serde_json::Value)>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -336,8 +340,12 @@ impl World {
             }
         }
 
+        let components = self
+            .components
+            .save(&|id| saved_entities.contains(&id.raw()))?;
         let file = SaveFile {
             version: VERSION,
+            components,
             sky: self.physical_sky.map(|s| (s.hour, s.day)),
             things,
             lamps,
@@ -394,6 +402,12 @@ impl World {
         };
 
         // Check everything we need is here before touching the world.
+        let unknown = self.components.unknown_names(file.components.keys());
+        if !unknown.is_empty() {
+            return Err(bad(format!(
+                "has components {unknown:?}; call world.save_component::<YourType>(name) for each before loading"
+            )));
+        }
         for t in &file.things {
             if !self.prefabs.contains_key(&t.prefab) {
                 return Err(bad(format!(
@@ -592,6 +606,9 @@ impl World {
             sky.day = day;
             self.set_physical_sky(Some(sky));
         }
+
+        self.components
+            .load(file.components, &|old| entities.get(&old).copied())?;
 
         Ok(Loaded {
             game: file.game,

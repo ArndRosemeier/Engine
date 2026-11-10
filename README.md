@@ -359,6 +359,18 @@ place)` place it by name. A hull body wraps the parts hanging on it, so a
 dropped cart tumbles on its wheels. `Place` now has a roll too
 (`with_roll_deg`). See `examples/prefabs`.
 
+**Game data on entities (components):** hang any struct of yours on an
+entity and the engine keeps it with the entity:
+`world.insert(orc, Health(100))?`, `world.get::<Health>(orc)`,
+`world.get_mut::<Health>(orc)`, `world.remove::<Health>(orc)`, `has`. Walk
+them with `world.query::<Health>()`, `query_mut`, `query2::<Health,
+Burning>()` (both types), `query2_mut`, or `ids_with::<Health>()` when the
+loop despawns or spawns. Queries list entities oldest first, so runs repeat
+exactly. Despawning removes an entity's components; `component_names(id)`
+lists what it carries, and verify reports count them.
+`world.save_component::<Health>("health")` (at startup, before `load`) makes
+saves keep that type on saved things.
+
 **Save and load:** `world.save("slot1.save", &my_game)?` writes what changed
 during play: every placed prefab (parts, bodies with their speed and spin,
 animation clip and time), free-standing lamps and lamps riding on prefab

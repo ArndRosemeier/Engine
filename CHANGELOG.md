@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.033 (2026-11-10)
+
+- Game data on entities (typed components): world.insert(orc, Health(100)), get, get_mut, remove, has, query, query_mut, query2, query2_mut and ids_with. Components go away with their entity, queries list entities oldest first, verify reports count them, and save_component makes saves keep a type.
+
 ## 0.032 (2026-11-10)
 
 - AGENTS.md: a short guide for coding agents (the model in one minute, a game skeleton, rules that avoid common mistakes, verify runs, where to find things, how to change the engine). CLAUDE.md points to it. Its code is compiled by the tests, so it stays right.

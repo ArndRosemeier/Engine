@@ -53,6 +53,8 @@ mod world_grading;
 #[path = "world_ground.rs"]
 mod world_ground;
 pub use world_cpu_mesh::CpuMeshes;
+#[path = "world_components.rs"]
+pub(crate) mod world_components;
 #[path = "world_ragdolls.rs"]
 mod world_ragdolls;
 #[path = "world_rooms.rs"]
@@ -894,6 +896,8 @@ pub struct World {
     zfight: world_zfight::ZFightState,
     /// [`Self::check`] and [`Self::report`] results for verify runs.
     verify: world_verify::VerifyLog,
+    /// Game data on entities: see [`World::insert`].
+    components: world_components::Components,
     /// What feet stand on: see [`World::ground_below`].
     ground: world_ground::GroundState,
     /// Which CPU copies of meshes go once uploaded: see [`CpuMeshes`].
@@ -1040,6 +1044,7 @@ impl Default for World {
             entity_rooms: HashMap::new(),
             zfight: Default::default(),
             verify: Default::default(),
+            components: Default::default(),
             ground: Default::default(),
             cpu_meshes: Default::default(),
             entity_names: HashMap::new(),
@@ -2433,6 +2438,7 @@ impl World {
     /// Remove an entity, its children (and theirs) and the lamps riding on
     /// them. [`Self::detach`] a child first to keep it.
     pub fn despawn(&mut self, id: EntityId) {
+        self.components.forget(id);
         self.forget_ground(id);
         self.cpu_meshes.forget(id);
         self.sim_poses.remove(&id);
