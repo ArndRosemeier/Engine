@@ -26,6 +26,15 @@ pub fn draw_count_disabled_by_env() -> bool {
     std::env::var("ENGINE_DRAW_COUNT").is_ok_and(|v| v.trim() == "0")
 }
 
+/// Whether multi-draws may take their count from the GPU on this adapter.
+/// Not on Mesa's software driver (lavapipe, the verify runs' and CI's
+/// GPU): it carries a draw-count multi-draw's count over to the plain
+/// indirect draws after it, so after an empty group (nothing of it in view)
+/// the GPU-culled instanced props drew nothing.
+pub fn draw_counts_trusted(info: &wgpu::AdapterInfo) -> bool {
+    !(info.backend == wgpu::Backend::Vulkan && info.driver.eq_ignore_ascii_case("llvmpipe"))
+}
+
 /// What one multi-draw shares.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct GroupKey {
@@ -211,5 +220,168 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// Draw a full-screen triangle with a plain indirect draw, right after
+    /// a draw-count multi-draw whose count is zero when `after_count`; true
+    /// when it shows.
+    fn plain_draw_shows(device: &wgpu::Device, queue: &wgpu::Queue, after_count: bool) -> bool {
+        use wgpu::util::DeviceExt;
+        const SHADER: &str = r#"
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u)) * 2.0 - 1.0;
+    return vec4<f32>(p, 0.5, 1.0);
+}
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+}
+"#;
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(format.into())],
+            }),
+            multiview: None,
+            cache: None,
+        });
+        let indirect = wgpu::BufferUsages::INDIRECT;
+        let buffer = |data: &[u32], usage| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(data),
+                usage,
+            })
+        };
+        let index = buffer(&[0, 1, 2], wgpu::BufferUsages::INDEX);
+        // One triangle, one instance.
+        let args = buffer(&[3, 1, 0, 0, 0], indirect);
+        let counts = buffer(&[0], indirect);
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 256 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+            if after_count {
+                pass.multi_draw_indexed_indirect_count(&args, 0, &counts, 0, 1);
+            }
+            pass.draw_indexed_indirect(&args, 0);
+        }
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &read,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(4),
+                },
+            },
+            wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(enc.finish()));
+        read.slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+        device.poll(wgpu::PollType::Wait).expect("poll");
+        let px = read.slice(..).get_mapped_range()[256 + 4];
+        px == 255
+    }
+
+    /// Some drivers (Mesa's lavapipe) carry a draw-count multi-draw's count
+    /// over to the plain indirect draws after it, so those draw nothing
+    /// when it was zero: the GPU scene's empty groups then hid the instanced
+    /// props drawn after them. Draw counts are used only on drivers where
+    /// plain draws after them still show.
+    #[test]
+    fn plain_draws_after_draw_counts_show_where_draw_counts_are_used() {
+        if !crate::gpu_field::verify::gpu_tests_enabled() {
+            return;
+        }
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&Default::default())).expect("adapter");
+        let wanted =
+            wgpu::Features::MULTI_DRAW_INDIRECT | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;
+        if !adapter.features().contains(wanted) {
+            return;
+        }
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wanted,
+            ..Default::default()
+        }))
+        .expect("device");
+        assert!(
+            plain_draw_shows(&device, &queue, false),
+            "the test draw shows"
+        );
+        let info = adapter.get_info();
+        if draw_counts_trusted(&info) {
+            assert!(
+                plain_draw_shows(&device, &queue, true),
+                "{info:?} uses draw counts, yet a plain draw after an empty one draws nothing"
+            );
+        }
     }
 }

@@ -84,6 +84,7 @@ impl Renderer {
             && adapter
                 .features()
                 .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT)
+            && gpu_scene::draw_counts_trusted(&adapter.get_info())
             && !gpu_scene::draw_count_disabled_by_env();
         if draw_count {
             required_features |= wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;

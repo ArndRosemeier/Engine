@@ -699,8 +699,10 @@ every mesh for the second depth pass. Where the GPU can (Vulkan and DX12
 cards), it also decides how many draws each multi-draw issues: it packs the
 visible meshes of each group together and counts them, so hidden meshes cost
 no draw at all (`multi_draw_indexed_indirect_count`; `ENGINE_DRAW_COUNT=0`
-draws every row, hidden ones with no instances). `ENGINE_GPU_SCENE=0` turns
-the GPU scene off.
+draws every row, hidden ones with no instances). Not on Mesa's software
+driver (lavapipe, used by verify runs and CI): it carries an empty count over
+to the draws after it, which hid instanced props up close, so there every
+row is drawn. `ENGINE_GPU_SCENE=0` turns the GPU scene off.
 
 **GPU shadows** (with GPU draw counts): the shadow-casting meshes live on
 the GPU the same way. One compute pass tests every caster against every

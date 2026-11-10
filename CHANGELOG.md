@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.047 (2026-11-10)
+
+- Instanced things no longer vanish up close on the software GPU used by verify runs and CI (it mishandled GPU draw counts, so they are off there)
+
 ## 0.046 (2026-11-10)
 
 - Smoother loading: texture mip levels are made on the GPU (no CPU stall when a model or material first appears), custom material shaders compile on a worker thread, and the hitch log shows time lost between frames
