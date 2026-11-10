@@ -713,7 +713,7 @@ fn cs_update(@builtin(global_invocation_id) id: vec3<u32>) {
             }
             let v = voxel_at(cell);
             if v.a > 0.5 {
-                let n = -vec3<f32>(step) * mask;
+                let n = select(vec3<f32>(0.0), -vec3<f32>(step), mask > vec3<f32>(0.5));
                 let hit = gi.origin + (start + dir * t) * gi.voxel;
                 radiance = hit_radiance(v.rgb, hit + n * 0.05, n);
                 break;
