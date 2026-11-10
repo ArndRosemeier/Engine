@@ -17,7 +17,7 @@ const CHARACTER: &str = concat!(
 );
 /// How fast the walk and jog clips move the character (m/s).
 const WALK: f32 = 1.4;
-const JOG: f32 = 3.5;
+const JOG: f32 = 3.2;
 
 /// The state machine, with a footstep at each foot-down of walk and jog.
 fn graph(model: &AnimatedModel) -> AnimGraph {
@@ -97,6 +97,8 @@ fn main() -> EngineResult<()> {
             )?);
             let hero = world.spawn_animated_shared(model.clone(), Place::default())?;
             world.set_anim_graph(hero, graph(&model))?;
+            // Feet on the ground, also through the jog's flight phase.
+            world.set_foot_ik(hero, Some(FootIk::default()))?;
             game.hero = Some(hero);
         }
         let Some(hero) = game.hero else {
