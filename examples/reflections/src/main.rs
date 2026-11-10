@@ -78,7 +78,7 @@ fn build(world: &mut World) -> EngineResult<ReflectionProbeId> {
             k += 1;
             let h = 18.0 + ((k * 37) % 5) as f32 * 9.0;
             let w = 10.0 + ((k * 13) % 3) as f32 * 2.0;
-            let glass = k % 3 != 0;
+            let glass = !k.is_multiple_of(3);
             let (color, material) = if glass {
                 (rgb(40, 62, 80), finish(0.04, 0.55))
             } else {

@@ -248,7 +248,12 @@ impl BuildingPlan {
             return Err(EngineError::InvalidValue("a building needs a floor".into()));
         }
         for w in floors.windows(2) {
-            if !(w[0].y1 <= w[1].y0 + 1e-3) {
+            // NaN fails too.
+            let up = w[0].y1.partial_cmp(&(w[1].y0 + 1e-3));
+            if !matches!(
+                up,
+                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+            ) {
                 return Err(EngineError::InvalidValue(
                     "floors must go up without overlapping".into(),
                 ));
@@ -379,7 +384,7 @@ impl BuildingPlan {
                 "element needs a finite box with positive size".into(),
             ));
         }
-        if element.floor as usize >= self.floors.len() + 1 {
+        if element.floor as usize > self.floors.len() {
             return Err(EngineError::InvalidValue(format!(
                 "element floor {} but the plan has {} floors",
                 element.floor,

@@ -1329,7 +1329,7 @@ impl VoxelTerrainGpu {
             })
             .collect();
         out.extend(self.far.values().filter_map(|node| {
-            (!node.hidden && test(node.bounds)).then(|| {
+            (!node.hidden && test(node.bounds)).then_some({
                 (
                     node.indices.start as u32..node.indices.end as u32,
                     node.vertices.start as i32,

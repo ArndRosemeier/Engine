@@ -577,10 +577,10 @@ mod tests {
         let f = 5u32;
         let mats = sample_joint_matrices(&model, walk, f as f32 * d / frames as f32);
         let row = (start + f) as usize * joints * 3;
-        for j in 0..joints {
+        for (j, mat) in mats.iter().enumerate().take(joints) {
             for r in 0..3 {
                 let got = glam::Vec4::from_array(b.rows[row + j * 3 + r]);
-                assert!((got - mats[j].row(r)).length() < 1e-5);
+                assert!((got - mat.row(r)).length() < 1e-5);
             }
         }
         assert_eq!(b.clips[IDLE].0, 0);

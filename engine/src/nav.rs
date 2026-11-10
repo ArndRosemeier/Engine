@@ -575,12 +575,12 @@ impl NavGrid {
                 continue;
             }
             let (i, j) = self.ij(col);
-            for k in 0..8 {
+            for (k, dir) in DIRS.iter().enumerate() {
                 let l = self.cols[col as usize][s as usize].links[k];
                 if l == NONE {
                     continue;
                 }
-                let (ni, nj) = (i + DIRS[k].0, j + DIRS[k].1);
+                let (ni, nj) = (i + dir.0, j + dir.1);
                 if !domain.contains(ni, nj) {
                     continue;
                 }
@@ -599,9 +599,8 @@ impl NavGrid {
             for i in out.i0..out.i1 {
                 let col = self.idx(i, j).unwrap();
                 let l = (j - domain.j0) as usize * w + (i - domain.i0) as usize;
-                for s in 0..self.cols[col].len() {
-                    let span = &mut self.cols[col][s];
-                    let d = dist[l][s] as f32 / 10.0;
+                for (span, &d) in self.cols[col].iter_mut().zip(&dist[l]) {
+                    let d = d as f32 / 10.0;
                     span.walk = span.open && (d + 0.5) * cell >= need;
                 }
             }

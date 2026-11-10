@@ -225,7 +225,7 @@ fn main() -> EngineResult<()> {
             }
         }
         time += frame.dt;
-        camera.update_above(world, frame, |x, z| gy(x, z));
+        camera.update_above(world, frame, gy);
         world.set_proc_focus(camera.position);
 
         // Drive the carts: move the root, roll the wheels (relative to the body).

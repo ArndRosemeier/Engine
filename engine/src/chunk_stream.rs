@@ -581,9 +581,7 @@ impl ChunkStream {
                         payload,
                     })
                     .is_err()
-                {
-                    return;
-                }
+                {}
             });
         }
         self.missing = missing;

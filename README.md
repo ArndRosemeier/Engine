@@ -722,7 +722,10 @@ ENGINE_GPU_TESTS=1 cargo test -p engine     # also the GPU checks
 cargo clippy --workspace --all-targets
 ```
 
-Warnings are errors in this workspace. Screenshots work headless (for example
+Warnings are errors in this workspace. The `ci` check runs formatting,
+clippy (`-D warnings`, every example included) and the tests on Windows and
+Linux for every pull request, with the Rust version pinned in
+`.github/workflows/ci.yml`; raise it on purpose and fix the new lints. Screenshots work headless (for example
 under Xvfb with a software Vulkan driver), which is how renders are checked
 without a GPU.
 

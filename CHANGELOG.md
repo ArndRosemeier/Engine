@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.030 (2026-11-10)
+
+- CI on every pull request: formatting, clippy and the tests on Windows and Linux. Clippy is clean again (22 small lint fixes, no behaviour change).
+
 ## 0.029 (2026-11-10)
 
 - Texture arrays bind only the material slots in use: wgpu checked all 16,384 fallback textures every time a pass bound the table. Finer CPU spans inside world.prepass_ao (prepass.first, hiz_cull, unseen, instances, ssao).

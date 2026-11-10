@@ -1554,7 +1554,7 @@ impl Renderer {
         self.rebuild_if_asked(world);
         self.apply_present_mode(world.vsync());
         self.frame_no += 1;
-        if self.frame_no % 512 == 0 {
+        if self.frame_no.is_multiple_of(512) {
             // Forget moves long settled (the entries only matter for a while).
             let frame = self.frame_no;
             self.moved_at
@@ -2169,7 +2169,7 @@ impl Renderer {
                 GpuInstanceBatch {
                     gpu,
                     slots,
-                    free: vec![used..used + headroom],
+                    free: std::iter::once(used..used + headroom).collect(),
                     used_end: used,
                     active_ranges: Vec::new(),
                 },
@@ -2533,9 +2533,7 @@ impl Renderer {
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             // Receiver loss is only possible if capture teardown abandons this operation.
-            if tx.send(result).is_err() {
-                return;
-            }
+            if tx.send(result).is_err() {}
         });
         self.device
             .poll(wgpu::PollType::Wait)

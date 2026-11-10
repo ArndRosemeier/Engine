@@ -392,9 +392,7 @@ impl TerrainStream {
             rayon::spawn(move || {
                 let built = terrain.build_chunk_built(key.0, key.1);
                 // Receiver loss means TerrainStream teardown; the completed job has no owner.
-                if tx.send((key, built)).is_err() {
-                    return;
-                }
+                if tx.send((key, built)).is_err() {}
             });
         }
     }

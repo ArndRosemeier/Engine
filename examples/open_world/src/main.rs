@@ -121,7 +121,7 @@ impl WorldGenerator for Continents {
             tile.place(self.models.rocks[i % self.models.rocks.len()], p);
         }
         // Now and then a hut with a camp fire on flat ground.
-        if seed % 7 == 0 {
+        if seed.is_multiple_of(7) {
             let c = tile.centre();
             let h = ground(c.x, c.y);
             if h > 3.0 && h < 120.0 && self.slope(c.x, c.y) < 0.15 {

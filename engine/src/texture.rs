@@ -96,6 +96,7 @@ impl TerrainMaterialDesc {
     /// This constructor avoids a fragile eight-field literal. Use the builder
     /// fields on the returned value only for visual tuning; texture handles are
     /// kept explicit so accidentally missing terrain layers fail at setup time.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_albedos(
         grass: TextureId,
         grass_dry: TextureId,
