@@ -336,6 +336,14 @@ rough surfaces read blurrier mips. `.dynamic()` re-captures continuously,
 changed); up to 8 probes, smaller boxes win where they overlap. Outside
 every probe, surfaces reflect the sky. See `examples/reflections`.
 
+**See-through things (glass, water in a tank, ghosts):** give the mesh a
+colour with alpha, `rgba(60, 130, 240, 110)`. The engine draws see-through
+meshes after the solid ones and sorts them far to near from the camera every
+frame, so nearer glass tints what is behind it from any side. The sort is per
+entity (and per instanced spawn), not per triangle: for glass you look
+through from many sides, make each pane its own entity rather than one big
+mesh. See `examples/glass`.
+
 **Decals:** `world.spawn_decal(Decal::new(DecalKind::Scorch, hit.point,
 hit.normal, 1.5).on(hit.entity))?` paints a mark onto whatever is there:
 terrain, walls, moving bodies and animated characters (it sticks to the
@@ -725,6 +733,7 @@ cargo run --release -p <name>
 | `voxel_destruction` | Digging terrain and shattering towers; K saves, L loads |
 | `lamps` | A hamlet at night: street lamps, a camp fire, lit windows, a lantern walker and a sweeping searchlight, all casting shadows (L your own lantern, T shadows, N/M the hour) |
 | `anim_states` | An animation state machine: idle, walk, jog, sword attack and talk chosen by rules on speed, a flag and a trigger; footstep sounds from clip events |
+| `glass` | Coloured glass panes, a glass ball and glass cubes seen from every side, sorted far to near (`ENGINE_GLASS_YAW` holds the camera) |
 | `characters` | Walk, run and idle blending into each other, speed-matched; feet planted on stone steps by foot IK (I toggles IK, B blending) |
 | `navigation` | Villagers find their own way around houses, walls, a fountain and crates and up stairs to a terrace; click sends everyone there, N shows the walkable area |
 | `prefabs` | Carts built from parts driving with spinning wheels, a windmill turning its sails, a lantern carried in a hand; C drops carts that tumble whole, X removes them |

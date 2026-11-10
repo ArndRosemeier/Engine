@@ -87,6 +87,7 @@ VARIANTS: list[Launch] = [
     Launch("prefabs: lantern in hand", "prefabs", {"ENGINE_PREFABS_VIEW": "walker"}),
     Launch("prefabs: carts dropped from the sky", "prefabs", {"ENGINE_PREFABS_DROP": "1"}),
     Launch("anim_states: the scripted demo", "anim_states", {"ENGINE_ANIM_DEMO": "1"}),
+    Launch("glass: from the far side", "glass", {"ENGINE_GLASS_YAW": "270"}),
     Launch("characters: from the side", "characters", {"ENGINE_CHARACTERS_VIEW": "side"}),
     Launch("characters: without foot IK (compare)", "characters",
            {"ENGINE_CHARACTERS_VIEW": "side", "ENGINE_CHARACTERS_IK": "0"}),

@@ -477,6 +477,7 @@ impl Renderer {
         };
         let vp = taa::jittered(vp, self.taa_jitter);
         self.frustum = Frustum::from_view_projection(vp);
+        self.view_eye = camera.eye();
         if target == SceneUniformTarget::Main {
             self.occlusion_view_proj = vp;
         }

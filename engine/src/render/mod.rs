@@ -909,6 +909,8 @@ pub struct Renderer {
     terrain_origin: crate::space::RenderOrigin,
     /// This frame's view volume, for skipping draws outside it.
     frustum: Frustum,
+    /// Where that view looks from, for drawing see-through things far to near.
+    view_eye: glam::Vec3,
     size: PhysicalSize<u32>,
     /// Reused while packing instance rows for a dirty entity.
     instance_scratch: Vec<InstanceRaw>,
@@ -939,6 +941,8 @@ pub struct Renderer {
     batch_opaque: Vec<EntityId>,
     batch_terrain: Vec<EntityId>,
     batch_transparent: Vec<EntityId>,
+    /// `draw_transparent` and `batch_transparent` together, farthest first.
+    transparent_order: Vec<TransparentDraw>,
     batch_water: Vec<EntityId>,
     gpu_stats: GpuFrameStats,
     next_scene_uniform_slot: usize,
@@ -1521,4 +1525,25 @@ mod vsync_tests {
 struct Bindless {
     table: material_table::MaterialTable,
     pipes: pipeline::BindlessPipelines,
+}
+
+/// One see-through draw: a single mesh or an instanced batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransparentDraw {
+    Mesh(EntityId),
+    Batch(EntityId),
+}
+
+/// Sort see-through draws far to near from `eye`, so nearer glass blends
+/// over farther glass. Ties keep a fixed order (by entity) so frames repeat.
+pub(crate) fn back_to_front(eye: glam::Vec3, draws: &mut [(glam::Vec3, TransparentDraw)]) {
+    let key = |d: &TransparentDraw| match *d {
+        TransparentDraw::Mesh(id) => (id.raw(), 0),
+        TransparentDraw::Batch(id) => (id.raw(), 1),
+    };
+    draws.sort_by(|a, b| {
+        b.0.distance_squared(eye)
+            .total_cmp(&a.0.distance_squared(eye))
+            .then_with(|| key(&a.1).cmp(&key(&b.1)))
+    });
 }
