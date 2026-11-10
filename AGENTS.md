@@ -29,7 +29,9 @@ below are compiled by `cargo test -p engine`, so they match the real API.
   game depend on them. `world.env_overrides()` and verify reports show
   which were set.
 - Every call that can fail returns `EngineResult`; use `?` inside the closure.
-  Returning an error ends the program and prints it.
+  Returning an error stops the game and prints `error: ...` to stderr at
+  once. The window then shows the error until it is closed (Escape), and
+  the program exits with code 1. A verify run stops right away.
 - Units: metres, Y up, yaw in degrees (0 faces +Z, 90 faces +X), colours sRGB
   (`rgb(220, 160, 100)`). `use engine::prelude::*;` brings everything
   everyday into scope, including `glam` maths types (`Vec3`).
