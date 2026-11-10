@@ -25,6 +25,7 @@ members = [
     "examples/coast",
     "examples/island",
     "examples/physics",
+    "examples/gameplay",
     "examples/lamps",
     "examples/prefabs",
     "examples/characters",

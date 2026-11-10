@@ -32,8 +32,9 @@ pub use crate::particles::{
     MAX_PARTICLE_EMITTERS,
 };
 pub use crate::physics::{
-    Body, BodyHit, BodyId, BodyImpact, BodyKind, BodyShape, Impact, PhysicsGround, PhysicsSettings,
-    PhysicsWorld, RayHit, Trigger, TriggerEvent, TriggerShape,
+    Body, BodyHit, BodyId, BodyImpact, BodyKind, BodyShape, Character, CharacterState, Impact,
+    Joint, JointId, JointKind, PhysicsGround, PhysicsSettings, PhysicsWorld, RayHit, Trigger,
+    TriggerEvent, TriggerShape,
 };
 pub use crate::place::{GlobalPlace, MeshInstance, Place};
 pub use crate::portal::{Portal, PortalId, PortalSettings, SpaceId};

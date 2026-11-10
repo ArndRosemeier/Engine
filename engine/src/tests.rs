@@ -3369,3 +3369,279 @@ mod gameplay_physics {
         assert_eq!(ray.entity, None);
     }
 }
+
+mod characters_and_joints {
+    use crate::color::rgb;
+    use crate::mesh::Mesh;
+    use crate::physics::{Body, BodyShape, Character, Joint, Trigger};
+    use crate::place::Place;
+    use crate::world::{EntityId, World};
+    use glam::{Quat, Vec3};
+
+    fn run(world: &mut World, frames: usize) {
+        for _ in 0..frames {
+            world.tick_physics(1.0 / 60.0);
+        }
+    }
+
+    fn feet(world: &World, id: EntityId) -> Vec3 {
+        world.world_transform(id).unwrap().w_axis.truncate()
+    }
+
+    fn wall(world: &mut World, center: Vec3, size: Vec3) -> EntityId {
+        let id = world.spawn(Mesh::box_at(Vec3::ZERO, size, rgb(150, 150, 150)).unwrap());
+        world
+            .set_place(id, Place::new(center.x, center.y, center.z))
+            .unwrap();
+        world
+            .add_body(id, Body::fixed().shape(BodyShape::Box(size * 0.5)))
+            .unwrap();
+        id
+    }
+
+    fn person(world: &mut World, at: Vec3) -> EntityId {
+        let id = world.spawn_pivot(Place::new(at.x, at.y, at.z).yaw_deg(30.0).unwrap());
+        world.add_character(id, Character::default()).unwrap();
+        id
+    }
+
+    #[test]
+    fn a_character_lands_walks_and_keeps_its_turn() {
+        let mut world = World::new();
+        let p = person(&mut world, Vec3::new(0.0, 1.0, 0.0));
+        run(&mut world, 60);
+        let s = world.character(p).unwrap();
+        assert!(s.grounded, "{s:?}");
+        assert!(feet(&world, p).y.abs() < 0.05, "{:?}", feet(&world, p));
+        world.walk(p, (2.0, 0.0, 0.0)).unwrap();
+        run(&mut world, 120);
+        let f = feet(&world, p);
+        assert!((f.x - 4.0).abs() < 0.15, "walked to {f}");
+        assert!(f.y.abs() < 0.05 && f.z.abs() < 0.01, "{f}");
+        // Its yaw is the game's: physics only moved it.
+        let (_, r, _) = world
+            .world_transform(p)
+            .unwrap()
+            .to_scale_rotation_translation();
+        assert!(r.angle_between(Quat::from_rotation_y(30f32.to_radians())) < 1e-3);
+        // Teleport with set_place.
+        world.set_place(p, Place::new(-5.0, 0.0, 0.0)).unwrap();
+        run(&mut world, 1);
+        assert!(feet(&world, p).x < -4.9);
+        assert!(world.add_body(p, Body::dynamic()).is_err());
+        assert!(world.walk(EntityId::from_raw(999), Vec3::X).is_err());
+    }
+
+    #[test]
+    fn a_character_stops_at_walls_climbs_steps_but_not_ledges() {
+        let mut world = World::new();
+        // A wall across +x at x = 3.
+        wall(
+            &mut world,
+            Vec3::new(3.5, 1.5, 0.0),
+            Vec3::new(1.0, 3.0, 6.0),
+        );
+        let a = person(&mut world, Vec3::new(0.0, 0.0, 0.0));
+        // A 0.25 m step at x = 2, z = 10, and a 0.6 m ledge at z = 20.
+        wall(
+            &mut world,
+            Vec3::new(4.0, 0.125, 10.0),
+            Vec3::new(4.0, 0.25, 4.0),
+        );
+        wall(
+            &mut world,
+            Vec3::new(4.0, 0.3, 20.0),
+            Vec3::new(4.0, 0.6, 4.0),
+        );
+        let b = person(&mut world, Vec3::new(0.0, 0.0, 10.0));
+        let c = person(&mut world, Vec3::new(0.0, 0.0, 20.0));
+        for id in [a, b, c] {
+            world.walk(id, (3.0, 0.0, 0.0)).unwrap();
+        }
+        run(&mut world, 120);
+        let (fa, fb, fc) = (feet(&world, a), feet(&world, b), feet(&world, c));
+        assert!(fa.x > 2.4 && fa.x < 2.66, "stopped at the wall: {fa}");
+        assert!(
+            fb.x > 4.0 && (fb.y - 0.25).abs() < 0.06,
+            "on the step: {fb}"
+        );
+        assert!(
+            fc.x < 1.7 && fc.y.abs() < 0.06,
+            "stopped at the ledge: {fc}"
+        );
+    }
+
+    #[test]
+    fn a_character_jumps_only_from_the_ground() {
+        let mut world = World::new();
+        let p = person(&mut world, Vec3::ZERO);
+        run(&mut world, 10);
+        assert!(world.jump(p, 5.0).unwrap());
+        let mut top = 0.0f32;
+        let mut airborne_jump = None;
+        for i in 0..90 {
+            run(&mut world, 1);
+            top = top.max(feet(&world, p).y);
+            if i == 10 {
+                airborne_jump = Some(world.jump(p, 5.0).unwrap());
+            }
+        }
+        assert_eq!(airborne_jump, Some(false));
+        // v² / 2g = 1.27 m.
+        assert!((top - 1.27).abs() < 0.1, "jumped {top} m");
+        assert!(world.character(p).unwrap().grounded);
+        assert!(feet(&world, p).y.abs() < 0.05);
+        // Hitting a ceiling ends the rise.
+        wall(
+            &mut world,
+            Vec3::new(0.0, 2.6, 0.0),
+            Vec3::new(4.0, 0.2, 4.0),
+        );
+        run(&mut world, 2);
+        assert!(world.jump(p, 5.0).unwrap());
+        let mut top = 0.0f32;
+        for _ in 0..60 {
+            run(&mut world, 1);
+            top = top.max(feet(&world, p).y);
+        }
+        assert!(
+            top < 0.75,
+            "head hit the ceiling at 2.5 m, feet reached {top}"
+        );
+    }
+
+    #[test]
+    fn a_character_shoves_crates_and_trips_triggers() {
+        let mut world = World::new();
+        let p = person(&mut world, Vec3::ZERO);
+        let crate_ =
+            world.spawn(Mesh::box_at(Vec3::ZERO, Vec3::splat(0.6), rgb(150, 100, 50)).unwrap());
+        world.set_place(crate_, Place::new(1.5, 0.3, 0.0)).unwrap();
+        world
+            .add_body(
+                crate_,
+                Body::dynamic()
+                    .density(0.3)
+                    .shape(BodyShape::Box(Vec3::splat(0.3))),
+            )
+            .unwrap();
+        let zone = world
+            .spawn_trigger(Place::new(-3.0, 1.0, 0.0), Trigger::ball(0.5))
+            .unwrap();
+        run(&mut world, 30);
+        world.walk(p, (2.0, 0.0, 0.0)).unwrap();
+        run(&mut world, 90);
+        let cx = world.entity(crate_).unwrap().transform().w_axis.x;
+        assert!(cx > 2.0, "crate pushed to {cx}");
+        world.walk(p, (-3.0, 0.0, 0.0)).unwrap();
+        let mut entered = false;
+        for _ in 0..120 {
+            run(&mut world, 1);
+            entered |= world
+                .take_trigger_events()
+                .iter()
+                .any(|e| e.trigger == zone && e.other == p && e.entered);
+        }
+        assert!(entered);
+        world.despawn(p);
+        run(&mut world, 1);
+        assert_eq!(world.character_count(), 0);
+    }
+
+    fn ball(world: &mut World, at: Vec3) -> EntityId {
+        let id = world.spawn(Mesh::ball(Vec3::ZERO, 0.25, rgb(200, 80, 60)).unwrap());
+        world.set_place(id, Place::new(at.x, at.y, at.z)).unwrap();
+        world
+            .add_body(id, Body::dynamic().shape(BodyShape::Ball(0.25)))
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn a_pinned_pendulum_keeps_its_length_and_a_rope_holds() {
+        let mut world = World::new();
+        let bob = ball(&mut world, Vec3::new(2.0, 5.0, 0.0));
+        let j = world.pin(bob, Joint::ball().at((0.0, 5.0, 0.0))).unwrap();
+        let hanging = ball(&mut world, Vec3::new(5.0, 4.0, 0.0));
+        world
+            .pin(hanging, Joint::rope(2.0).at((5.0, 6.0, 0.0)))
+            .unwrap();
+        let mut lowest = f32::MAX;
+        for _ in 0..240 {
+            run(&mut world, 1);
+            let p = world.entity(bob).unwrap().transform().w_axis.truncate();
+            let d = p.distance(Vec3::new(0.0, 5.0, 0.0));
+            assert!((d - 2.0).abs() < 0.05, "pendulum length {d}");
+            lowest = lowest.min(p.y);
+        }
+        assert!(lowest < 3.1, "it swung down to {lowest}");
+        let h = world.entity(hanging).unwrap().transform().w_axis;
+        assert!(
+            (h.y - 4.0).abs() < 0.1 && h.x.abs() - 5.0 < 0.1,
+            "rope: {h}"
+        );
+        assert_eq!(world.joint_count(), 2);
+        world.remove_joint(j);
+        assert!(!world.has_joint(j));
+        world.despawn(hanging);
+        run(&mut world, 1);
+        assert_eq!(world.joint_count(), 0);
+    }
+
+    #[test]
+    fn a_hinged_door_stays_within_its_limits_and_a_motor_slides() {
+        let mut world = World::new();
+        let door = world
+            .spawn(Mesh::box_at(Vec3::ZERO, Vec3::new(1.0, 2.0, 0.1), rgb(120, 80, 40)).unwrap());
+        world.set_place(door, Place::new(0.5, 1.1, 0.0)).unwrap();
+        world
+            .add_body(
+                door,
+                Body::dynamic().shape(BodyShape::Box(Vec3::new(0.5, 1.0, 0.05))),
+            )
+            .unwrap();
+        world
+            .pin(
+                door,
+                Joint::hinge(Vec3::Y)
+                    .at((0.0, 1.1, 0.0))
+                    .limits(-10.0, 60.0),
+            )
+            .unwrap();
+        // Shove its free edge hard.
+        world
+            .push_at(door, (0.0, 0.0, -200.0), (1.0, 1.1, 0.0))
+            .unwrap();
+        let mut widest = 0.0f32;
+        for _ in 0..180 {
+            run(&mut world, 1);
+            let m = world.entity(door).unwrap().transform();
+            let hinge_to_edge = m.transform_point3(Vec3::X * 0.5);
+            assert!(
+                hinge_to_edge
+                    .truncate()
+                    .distance(Vec3::new(0.0, 1.1, 0.0).truncate())
+                    < 1.2
+            );
+            let angle = (-hinge_to_edge.z).atan2(hinge_to_edge.x).to_degrees().abs();
+            widest = widest.max(angle);
+        }
+        assert!(
+            widest > 30.0 && widest < 66.0,
+            "door opened {widest} degrees"
+        );
+
+        let piston = ball(&mut world, Vec3::new(10.0, 3.0, 0.0));
+        world
+            .pin(
+                piston,
+                Joint::slider(Vec3::Y).limits(-1.0, 1.0).motor(1.0, 1.0e4),
+            )
+            .unwrap();
+        run(&mut world, 120);
+        let y = world.entity(piston).unwrap().transform().w_axis.y;
+        assert!((y - 4.0).abs() < 0.05, "slider pushed up to its limit: {y}");
+        assert!(world.pin(piston, Joint::hinge(Vec3::ZERO)).is_err());
+        assert!(world.add_joint(piston, piston, Joint::weld()).is_err());
+    }
+}

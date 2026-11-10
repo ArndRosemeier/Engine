@@ -81,6 +81,9 @@ jobs:
       - name: physics (nothing sinks into the ground)
         run: python3 tools/verify.py physics --frames 240 --width 640 --height 360
 
+      - name: gameplay (character, door, stairs, coins, rope)
+        run: python3 tools/verify.py gameplay --frames 600 --width 640 --height 360
+
       - name: Keep the reports and screenshots
         if: always()
         uses: actions/upload-artifact@v4

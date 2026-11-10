@@ -233,6 +233,27 @@ bodies touching a shape, and `cast_sphere(origin, dir, radius, max)` is a fat
 `cast_ray` (bodies and ground). `examples/physics` counts crates thrown out of
 a trigger around its pyramid.
 
+**Characters you walk (a character controller):**
+`world.add_character(player, Character::default())?` turns any entity (a
+mesh, an animated model, a pivot) into a walking capsule whose place is its
+feet. Every frame `world.walk(player, frame.input.move_dir_xz(yaw) * 5.0)?`
+and `if frame.input.pressed(Key::Space) { world.jump(player, 5.0)?; }`;
+it slides along walls, climbs steps (`step_height`, 0.35 m) and slopes
+(`max_slope`, 45 degrees), keeps its feet on the ground going downhill, falls,
+and shoves crates aside. `world.character(player)` says whether it is
+`grounded`, its real `velocity` and `feet`. Physics only moves it: turn it
+with `set_place` as usual, and `set_place` somewhere else teleports it.
+Triggers notice characters.
+
+**Joints:** `world.add_joint(a, b, Joint::hinge(Vec3::Y).at(point))?` joins two
+bodies; `world.pin(body, joint)?` joins one to a fixed point in the world.
+`Joint::hinge(axis)` (doors, wheels, levers; `.limits(min_deg, max_deg)`,
+`.motor(deg_per_s, max_force)`), `Joint::ball()` (chains, pendulums),
+`Joint::slider(axis)` (drawers, lifts; limits in metres, motor in m/s),
+`Joint::rope(length)` and `Joint::weld()`. Limits and motors move the second
+body relative to the first. `remove_joint(id)` breaks one; despawning a body
+removes its joints. `examples/gameplay` has all of this in one small park.
+
 **Physics without a window (game servers, tools, tests):** `PhysicsWorld::new()`
 runs the same bodies, shapes and ground with no `World` and no GPU.
 `add(&body, transform)` for boxes, balls and capsules, `add_mesh(&body,
@@ -667,6 +688,7 @@ cargo run --release -p <name>
 | `navigation` | Villagers find their own way around houses, walls, a fountain and crates and up stairs to a terrace; click sends everyone there, N shows the walkable area |
 | `prefabs` | Carts built from parts driving with spinning wheels, a windmill turning its sails, a lantern carried in a hand; C drops carts that tumble whole, X removes them |
 | `buildings` | A block of breakable towers: punch panels (click), blast (F), topple (T), pancake (P), rebuild (R) |
+| `gameplay` | A walking character (WASD, Space) shoving a hinged door open, climbing stairs, picking up coins with trigger zones; a lamp swings on a rope |
 | `ragdolls` | People strolling about: click knocks one flying, F a blast; they tumble, settle and get up (K keeps them down, G gets everyone up) |
 | `crowds` | A thousand people walking about a town square: far ones instanced and GPU-animated, near ones full characters (N: near characters on/off, F: far mesh) |
 | `moons` | A night under three moons of different sizes, colours, cycles and paths (Space: time, arrows: hour and day, M: one moon to compare) |
