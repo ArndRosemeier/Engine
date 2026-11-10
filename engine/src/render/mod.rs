@@ -1025,6 +1025,17 @@ impl Renderer {
             required_limits.max_binding_array_elements_per_shader_stage =
                 material_table::MATERIAL_TABLE_ELEMENTS;
         }
+        // Bind only the table slots in use: wgpu checks every bound texture
+        // each time a pass binds the table, so 16k fallback slots cost
+        // about a millisecond of CPU per pass.
+        let partial_table = texture_arrays
+            && adapter
+                .features()
+                .contains(wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY)
+            && !material_table::partial_disabled_by_env();
+        if partial_table {
+            required_features |= wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY;
+        }
         if gpu_profile_interval.is_some() {
             let timestamp_features =
                 wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
@@ -1188,7 +1199,7 @@ impl Renderer {
         shadow.set_gi_views(&device, gi.probe_views().clone());
         let pipelines = create_pipelines(&device, &queue, HDR_FORMAT, &shadow);
         let bindless = texture_arrays.then(|| {
-            let mut table = material_table::MaterialTable::new(&device);
+            let mut table = material_table::MaterialTable::new(&device, partial_table);
             let white = material::GpuMaterial::new(
                 &device,
                 &queue,
@@ -2861,6 +2872,8 @@ impl Renderer {
         };
 
         self.cpu_spans.mark("world.cull", &mut t);
+        // Finer spans inside world.prepass_ao (its own clock).
+        let mut tp = std::time::Instant::now();
         let depth = self.depth_view.clone();
         let occluding = self.occlusion_active;
         // A full prepass (the world pass then only tests depth) for AO; for
@@ -2885,6 +2898,7 @@ impl Renderer {
                 self.cpu_spans.mark("world.record_opaque", &mut t);
             }
             self.encode_depth_prepass(encoder, world, live, &main_cull, main_uniform_slot, phase);
+            self.cpu_spans.mark("prepass.first", &mut tp);
         }
         if occluding {
             match scene_rows {
@@ -2904,6 +2918,7 @@ impl Renderer {
                     &occlusion_ids,
                 ),
             }
+            self.cpu_spans.mark("prepass.hiz_cull", &mut tp);
             self.encode_depth_prepass(
                 encoder,
                 world,
@@ -2912,6 +2927,7 @@ impl Renderer {
                 main_uniform_slot,
                 PrepassPhase::Unseen,
             );
+            self.cpu_spans.mark("prepass.unseen", &mut tp);
             if submit == InstanceSubmit::GpuIndirect {
                 // Instanced props: compact again, now also dropping the
                 // instances hidden behind the pyramid. The prepass above
@@ -2936,6 +2952,7 @@ impl Renderer {
                     Some(&hiz),
                 );
                 main_cull.compacted.extend(batches);
+                self.cpu_spans.mark("prepass.instances", &mut tp);
             }
         }
         if let Some(ao) = ao {
@@ -2950,6 +2967,7 @@ impl Renderer {
                 },
             );
             self.ssao.encode(encoder);
+            self.cpu_spans.mark("prepass.ssao", &mut tp);
         }
         self.mark_gpu(encoder, Mark::AoDone);
         self.cpu_spans.mark("world.prepass_ao", &mut t);

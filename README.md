@@ -545,6 +545,11 @@ material). In occlusion_city with 16 facade textures
 1,696, with the same picture. Shadow cutouts (textured foliage casters)
 still split by texture. `ENGINE_TEXTURE_ARRAYS=0` turns it off.
 
+Only the table slots in use are bound (on GPUs with partially bound binding
+arrays): wgpu checks every bound texture each time a pass binds the table, so
+binding all 4096 slots cost about a millisecond of CPU per pass.
+`ENGINE_PARTIAL_TABLE=0` binds them all, to compare.
+
 **GPU scene** (automatic with multi-draws): every opaque mesh lives on the
 GPU as a row that stays there from frame to frame; the CPU writes a row only
 when its mesh changes (moved, new, hidden by a room). Each frame the GPU
@@ -659,6 +664,7 @@ Every program built on the engine understands these:
 | `ENGINE_RENDER_SCALE=0.75` | Draw the scene at that share of the window and upscale (0.5 to 1.0), whatever `world.set_render_scale` says |
 | `ENGINE_MULTI_DRAW=0` | Draw every opaque mesh with its own draw call instead of multi-draws, to compare |
 | `ENGINE_TEXTURE_ARRAYS=0` | Split multi-draws by texture instead of reading every texture through the material table, to compare |
+| `ENGINE_PARTIAL_TABLE=0` | Bind every material-table slot (unused ones to fallbacks) instead of only the slots in use, to compare |
 | `ENGINE_GPU_SCENE=0` | Build the opaque mesh draws on the CPU each frame instead of keeping them on the GPU, to compare |
 | `ENGINE_DRAW_COUNT=0` | GPU scene: draw every row (hidden ones with no instances) instead of letting the GPU count the visible ones, to compare |
 | `ENGINE_GPU_SHADOWS=0` | Pick each shadow view's mesh casters on the CPU instead of the GPU, to compare |

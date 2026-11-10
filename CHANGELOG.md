@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.029 (2026-11-10)
+
+- Texture arrays bind only the material slots in use: wgpu checked all 16,384 fallback textures every time a pass bound the table. Finer CPU spans inside world.prepass_ao (prepass.first, hiz_cull, unseen, instances, ssao).
+
 ## 0.028 (2026-11-10)
 
 - GPU shadows: shadow-casting meshes stay on the GPU; one compute pass culls them for every shadow view and writes draw-count multi-draws. ENGINE_GPU_SHADOWS=0 turns it off. Meshes whose texture has no see-through texels now cast shadows without the alpha test (one draw group instead of one per texture).

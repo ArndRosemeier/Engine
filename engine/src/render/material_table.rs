@@ -23,6 +23,12 @@ pub const MATERIAL_TABLE_ELEMENTS: u32 = MATERIAL_TABLE_SLOTS * 4;
 pub const MATERIAL_TABLE_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_BINDING_ARRAY
     .union(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING);
 
+/// Whether binding only the used slots is switched off
+/// (`ENGINE_PARTIAL_TABLE=0`: every slot bound, unused ones to fallbacks).
+pub fn partial_disabled_by_env() -> bool {
+    std::env::var("ENGINE_PARTIAL_TABLE").is_ok_and(|v| v.trim() == "0")
+}
+
 /// Whether texture arrays are switched off (`ENGINE_TEXTURE_ARRAYS=0`).
 pub fn disabled_by_env() -> bool {
     std::env::var("ENGINE_TEXTURE_ARRAYS").is_ok_and(|v| v.trim() == "0")
@@ -43,6 +49,9 @@ pub struct MaterialTable {
     binds: Option<[wgpu::BindGroup; 2]>,
     /// Goes up whenever the bind groups are made anew.
     version: u64,
+    /// Bind only the slots up to the highest one in use
+    /// (`PARTIALLY_BOUND_BINDING_ARRAY`); shaders read only those.
+    partial: bool,
 }
 
 pub fn table_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -84,7 +93,7 @@ pub fn table_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 }
 
 impl MaterialTable {
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, partial: bool) -> Self {
         Self {
             layout: table_layout(device),
             params: device.create_buffer(&wgpu::BufferDescriptor {
@@ -98,6 +107,7 @@ impl MaterialTable {
             free: Vec::new(),
             binds: None,
             version: 0,
+            partial,
         }
     }
 
@@ -183,8 +193,18 @@ impl MaterialTable {
             &neutral.white_linear,
             &neutral.white_srgb,
         ];
+        let bound = if self.partial {
+            let used = self
+                .entries
+                .iter()
+                .rposition(Option::is_some)
+                .map_or(0, |i| i + 1);
+            used.max(1)
+        } else {
+            MATERIAL_TABLE_SLOTS as usize
+        };
         let maps: [Vec<&wgpu::TextureView>; 4] = std::array::from_fn(|map| {
-            (0..MATERIAL_TABLE_SLOTS as usize)
+            (0..bound)
                 .map(|slot| match self.entries.get(slot) {
                     Some(Some(e)) => &e.views[map],
                     _ => fallback[map],
