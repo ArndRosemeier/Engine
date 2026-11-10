@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.046 (2026-11-10)
+
+- Smoother loading: texture mip levels are made on the GPU (no CPU stall when a model or material first appears), custom material shaders compile on a worker thread, and the hitch log shows time lost between frames
+
 ## 0.045 (2026-11-10)
 
 - Fixes from a fresh-agent test: look_follow_entity keeps the follow camera out of walls and the player, cast_ray/cast_sphere_ignoring, an API-at-a-glance page and a door recipe in AGENTS.md, and tools/new_example.py to start an example listed everywhere

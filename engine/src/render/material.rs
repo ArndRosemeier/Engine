@@ -192,7 +192,17 @@ pub fn upload_map(
     map: &AlbedoMap,
     kind: MapKind,
 ) -> wgpu::Texture {
-    let levels = mip_chain(map, kind);
+    let gpu_mips = super::mipgen::get(device);
+    let level_count = if gpu_mips.is_some() {
+        mip_level_count(map.width, map.height)
+    } else {
+        0
+    };
+    let levels = if gpu_mips.is_some() {
+        Vec::new()
+    } else {
+        mip_chain(map, kind)
+    };
     let format = match kind {
         MapKind::Color => wgpu::TextureFormat::Rgba8UnormSrgb,
         MapKind::Data | MapKind::Normal => wgpu::TextureFormat::Rgba8Unorm,
@@ -204,35 +214,68 @@ pub fn upload_map(
             height: map.height,
             depth_or_array_layers: 1,
         },
-        mip_level_count: levels.len() as u32,
+        mip_level_count: if gpu_mips.is_some() {
+            level_count
+        } else {
+            levels.len() as u32
+        },
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | if gpu_mips.is_some() {
+                // Drawn into by the mip passes (COPY_SRC lets tests read it back).
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+            } else {
+                wgpu::TextureUsages::empty()
+            },
         view_formats: &[],
     });
+    if let Some(gen) = gpu_mips {
+        // Level 0 only; the GPU draws the smaller ones (no CPU work per texel).
+        write_level(queue, &texture, 0, map.width, map.height, &map.rgba);
+        gen.generate(device, queue, &texture, kind);
+        return texture;
+    }
     for (level, (w, h, data)) in levels.iter().enumerate() {
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: level as u32,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(w * 4),
-                rows_per_image: Some(*h),
-            },
-            wgpu::Extent3d {
-                width: *w,
-                height: *h,
-                depth_or_array_layers: 1,
-            },
-        );
+        write_level(queue, &texture, level as u32, *w, *h, data);
     }
     texture
+}
+
+/// Levels of a full mip chain down to 1x1 (as `mip_chain` makes).
+fn mip_level_count(width: u32, height: u32) -> u32 {
+    32 - width.max(height).max(1).leading_zeros()
+}
+
+fn write_level(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    level: u32,
+    w: u32,
+    h: u32,
+    data: &[u8],
+) {
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: level,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(w * 4),
+            rows_per_image: Some(h),
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
 }
 
 fn srgb_to_linear(v: u8) -> f32 {
@@ -564,6 +607,30 @@ mod tests {
             - glam::Vec3::ONE;
         assert!((n.length() - 1.0).abs() < 0.02, "unit length: {n:?}");
         assert!(n.z > 0.95, "flattened toward +z: {n:?}");
+    }
+
+    #[test]
+    fn gpu_mip_level_count_matches_the_cpu_chain() {
+        for (w, h) in [
+            (1, 1),
+            (2, 1),
+            (6, 3),
+            (7, 5),
+            (256, 64),
+            (2048, 2048),
+            (1000, 3),
+        ] {
+            let map = AlbedoMap {
+                width: w,
+                height: h,
+                rgba: vec![0u8; (w * h * 4) as usize].into(),
+            };
+            assert_eq!(
+                mip_level_count(w, h) as usize,
+                mip_chain(&map, MapKind::Data).len(),
+                "{w}x{h}"
+            );
+        }
     }
 
     #[test]

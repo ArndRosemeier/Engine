@@ -256,6 +256,7 @@ impl Renderer {
         // the driver compile too.
         let pipelines_started = std::time::Instant::now();
         let pipeline_cache = pipeline_cache::DiskCache::open(&adapter, &device);
+        let mipgen = mipgen::register(&device);
         let joint_layout = joint_bind_layout(&device);
         let mut shadow = ShadowGpu::new(&device, &queue, ShadowSettings::default(), &joint_layout);
         let shadow_scene = (draw_count && !shadow_scene::disabled_by_env())
@@ -467,6 +468,7 @@ impl Renderer {
             gpu_skinned: HashMap::new(),
             gpu_skinned_meshes: HashMap::new(),
             skinned_maps: material::MapCache::default(),
+            _mipgen: mipgen,
             gpu_textures: HashMap::new(),
             gpu_mesh_albedo: HashMap::new(),
             cutout_albedo: HashMap::new(),
@@ -514,6 +516,8 @@ impl Renderer {
             source_custom: Vec::new(),
             draw_custom: Vec::new(),
             gpu_custom: HashMap::new(),
+            custom_compiling: HashMap::new(),
+            wait_for_workers: false,
             custom_params_layout: None,
             batch_water: Vec::new(),
             gpu_stats: GpuFrameStats::default(),

@@ -1813,7 +1813,7 @@ pub fn custom_params_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 pub fn create_custom_material(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
-    pipelines: &Pipelines,
+    scene_layouts: [&wgpu::BindGroupLayout; 2],
     params_layout: &wgpu::BindGroupLayout,
     material: &crate::custom_material::CustomMaterial,
 ) -> GpuCustomMaterial {
@@ -1823,11 +1823,7 @@ pub fn create_custom_material(
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("custom-material-layout"),
-        bind_group_layouts: &[
-            &pipelines.bind_layout,
-            &pipelines.albedo_layout,
-            params_layout,
-        ],
+        bind_group_layouts: &[scene_layouts[0], scene_layouts[1], params_layout],
         push_constant_ranges: &[],
     });
     let make = |blend: wgpu::BlendState, solid: bool| {

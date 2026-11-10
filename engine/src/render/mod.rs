@@ -13,6 +13,7 @@ mod instance_cull;
 mod lights;
 mod material;
 mod material_table;
+mod mipgen;
 mod occlusion;
 mod particles_gpu;
 mod pipeline;
@@ -890,6 +891,8 @@ pub struct Renderer {
     gpu_skinned_meshes: HashMap<usize, (Vec<GpuSkinnedMesh>, wgpu::Buffer)>,
     /// Characters' maps, one GPU copy per content (see [`material::MapCache`]).
     skinned_maps: material::MapCache,
+    /// Keeps the GPU mip generator registered for this device.
+    _mipgen: mipgen::Registration,
     gpu_textures: HashMap<TextureId, GpuTexture>,
     gpu_mesh_albedo: HashMap<TextureId, wgpu::BindGroup>,
     /// The mesh albedos with see-through texels (alpha below one half):
@@ -946,6 +949,13 @@ pub struct Renderer {
     source_custom: Vec<TransparentDraw>,
     draw_custom: Vec<TransparentDraw>,
     gpu_custom: HashMap<crate::custom_material::CustomMaterialId, pipeline::GpuCustomMaterial>,
+    /// Custom materials whose pipelines compile on a worker.
+    custom_compiling: HashMap<
+        crate::custom_material::CustomMaterialId,
+        std::thread::JoinHandle<pipeline::GpuCustomMaterial>,
+    >,
+    /// Fixed-step runs wait for worker results (see `set_wait_for_workers`).
+    wait_for_workers: bool,
     custom_params_layout: Option<wgpu::BindGroupLayout>,
     /// `draw_transparent` and `batch_transparent` together, farthest first.
     transparent_order: Vec<TransparentDraw>,
