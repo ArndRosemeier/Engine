@@ -881,6 +881,10 @@ pub struct Renderer {
     skinned_maps: material::MapCache,
     gpu_textures: HashMap<TextureId, GpuTexture>,
     gpu_mesh_albedo: HashMap<TextureId, wgpu::BindGroup>,
+    /// The mesh albedos with see-through texels (alpha below one half):
+    /// only those cast shadows through the alpha test. Casters with an
+    /// opaque texture take the plain depth pipeline, no texture bound.
+    cutout_albedo: HashMap<TextureId, wgpu::BindGroup>,
     audit_frame: u64,
     /// The world's re-upload requests already carried out.
     reupload_seen: (u64, u64),
@@ -1330,6 +1334,7 @@ impl Renderer {
             skinned_maps: material::MapCache::default(),
             gpu_textures: HashMap::new(),
             gpu_mesh_albedo: HashMap::new(),
+            cutout_albedo: HashMap::new(),
             audit_frame: 0,
             reupload_seen: (0, 0),
             gpu_check_seen: 0,
@@ -4527,7 +4532,7 @@ impl Renderer {
             device: &self.device,
             shadow: &self.shadow,
             gpu_meshes: &self.gpu_meshes,
-            gpu_mesh_albedo: &self.gpu_mesh_albedo,
+            cutout_albedo: &self.cutout_albedo,
             gpu_instance_batches: &self.gpu_instance_batches,
         };
         let record = |&(slot, _, draws, batches): &(usize, usize, &[ShadowDraw], bool)| {
@@ -4585,7 +4590,7 @@ impl Renderer {
         let mut rest: Vec<ShadowDraw> = Vec::new();
         for cutout in [false, true] {
             for d in draws {
-                let albedo = d.albedo.and_then(|tid| self.gpu_mesh_albedo.get(&tid));
+                let albedo = d.albedo.and_then(|tid| self.cutout_albedo.get(&tid));
                 if albedo.is_some() != cutout {
                     continue;
                 }
@@ -4649,7 +4654,7 @@ impl Renderer {
                 device: &self.device,
                 shadow: &self.shadow,
                 gpu_meshes: &self.gpu_meshes,
-                gpu_mesh_albedo: &self.gpu_mesh_albedo,
+                cutout_albedo: &self.cutout_albedo,
                 gpu_instance_batches: &self.gpu_instance_batches,
             }
             .record(slot, &rest, false)
@@ -5436,7 +5441,7 @@ impl Renderer {
                 }
                 let gpu = self.gpu_meshes.get(&id)?;
                 let bounds = gpu.bounds?;
-                let albedo = entity.albedo.and_then(|tid| self.gpu_mesh_albedo.get(&tid));
+                let albedo = entity.albedo.and_then(|tid| self.cutout_albedo.get(&tid));
                 Some(shadow_scene::ShadowRow {
                     id,
                     order: u32::try_from(order).expect("shadow source exceeds u32"),
@@ -5907,10 +5912,17 @@ impl Renderer {
                     .insert(&self.queue, Some(tid), &gpu_material, repeat);
             }
             let bind = gpu_material.bind;
+            if has_cutout_texels(&world.textures()[&tid].rgba) {
+                self.cutout_albedo.insert(tid, bind.clone());
+            } else {
+                self.cutout_albedo.remove(&tid);
+            }
             self.gpu_mesh_albedo.insert(tid, bind);
         }
         self.gpu_mesh_albedo
             .retain(|id, _| world.textures().contains_key(id));
+        self.cutout_albedo
+            .retain(|id, _| self.gpu_mesh_albedo.contains_key(id));
         if let Some(b) = self.bindless.as_mut() {
             b.table.retain(|id| world.textures().contains_key(&id));
             let p = &self.pipelines;
@@ -6023,7 +6035,7 @@ struct ShadowBundleCtx<'r> {
     device: &'r wgpu::Device,
     shadow: &'r ShadowGpu,
     gpu_meshes: &'r HashMap<EntityId, GpuMesh>,
-    gpu_mesh_albedo: &'r HashMap<TextureId, wgpu::BindGroup>,
+    cutout_albedo: &'r HashMap<TextureId, wgpu::BindGroup>,
     gpu_instance_batches: &'r HashMap<EntityId, GpuInstanceBatch>,
 }
 
@@ -6064,7 +6076,7 @@ impl ShadowBundleCtx<'_> {
             };
             bundle.set_pipeline(pipeline);
             let albedo_of =
-                |draw: &ShadowDraw| draw.albedo.and_then(|tid| self.gpu_mesh_albedo.get(&tid));
+                |draw: &ShadowDraw| draw.albedo.and_then(|tid| self.cutout_albedo.get(&tid));
             for draw in draws {
                 let albedo = albedo_of(draw);
                 if albedo.is_some() != cutout {
@@ -6280,6 +6292,9 @@ fn draw_shadow_scene(
     pass.set_bind_group(0, view_bind, &[]);
     let mut bound: Option<&shadow_scene::ShadowKey> = None;
     for (i, g) in scene.groups.iter().enumerate() {
+        if !scene.draws(view, g) {
+            continue;
+        }
         let k = &g.key;
         if bound.is_none_or(|b| b.cutout != k.cutout) {
             pass.set_pipeline(match (k.cutout, shadow.cutout_pipeline.as_ref()) {
@@ -6305,6 +6320,13 @@ fn draw_shadow_scene(
         pass.multi_draw_indexed_indirect_count(&scene.args, args, &scene.counts, count, g.len);
         bound = Some(k);
     }
+}
+
+/// Whether an RGBA8 texture has texels the shadow alpha test can cut
+/// (alpha below one half). Without any, filtering and mips stay at or above
+/// one half too, so the test never discards and plain depth is the same.
+fn has_cutout_texels(rgba: &[u8]) -> bool {
+    rgba.chunks_exact(4).any(|px| px[3] < 128)
 }
 
 fn caster_hash(selection: &ShadowCullSelection, space: SpaceId) -> u64 {
@@ -6517,6 +6539,12 @@ mod vsync_tests {
             resolve_present_mode(false, &supported),
             wgpu::PresentMode::Immediate
         );
+    }
+
+    #[test]
+    fn only_see_through_texels_need_the_shadow_alpha_test() {
+        assert!(!has_cutout_texels(&[10, 20, 30, 255, 0, 0, 0, 128]));
+        assert!(has_cutout_texels(&[10, 20, 30, 255, 0, 0, 0, 127]));
     }
 
     #[test]

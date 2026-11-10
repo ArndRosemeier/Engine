@@ -165,6 +165,8 @@ pub struct ShadowGroup {
     pub key: ShadowKey,
     pub start: u32,
     pub len: u32,
+    /// How many of its rows are static casters.
+    pub fixed: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -186,6 +188,8 @@ pub struct ShadowScene {
     rows_buf: wgpu::Buffer,
     pub args: wgpu::Buffer,
     pub counts: wgpu::Buffer,
+    /// Each view's mode at the last [`Self::encode`] (3: not drawn).
+    view_modes: [u32; MAX_VIEWS],
     params: wgpu::Buffer,
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
@@ -261,6 +265,7 @@ impl ShadowScene {
             rows_buf,
             args,
             counts,
+            view_modes: [3; MAX_VIEWS],
             params,
             layout,
             pipeline,
@@ -307,9 +312,11 @@ impl ShadowScene {
                     key: r.key.clone(),
                     start: i as u32,
                     len: 1,
+                    fixed: 0,
                 }),
             }
             let g = groups.len() - 1;
+            groups[g].fixed += u32::from(r.fixed);
             group_of.push((g as u32, groups[g].start));
         }
         let gpu_rows: Vec<GpuRow> = rows
@@ -414,6 +421,12 @@ impl ShadowScene {
             if now != self.meta[i].1 {
                 self.meta[i].1 = now;
                 self.gpu_rows[i].fixed = u32::from(now);
+                let g = &mut self.groups[self.gpu_rows[i].group as usize];
+                if now {
+                    g.fixed += 1;
+                } else {
+                    g.fixed -= 1;
+                }
                 changed.push(self.meta[i].0);
                 queue.write_buffer(
                     &self.rows_buf,
@@ -449,6 +462,7 @@ impl ShadowScene {
                 None => SKIP,
             };
             params.modes[v / 4][v % 4] = mode;
+            self.view_modes[v] = mode;
         }
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         encoder.clear_buffer(&self.counts, 0, None);
@@ -486,6 +500,18 @@ impl ShadowScene {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &*bind, &[]);
         pass.dispatch_workgroups(params.rows.div_ceil(GROUP), 1, 1);
+    }
+
+    /// Whether group `g` can have draws in `view` this frame: a view of
+    /// moving casters skips all-static groups, a static view all-moving
+    /// ones, so a cached cascade records only what can move.
+    pub fn draws(&self, view: usize, g: &ShadowGroup) -> bool {
+        match self.view_modes.get(view).copied().unwrap_or(3) {
+            1 => g.fixed < g.len,
+            2 => g.fixed > 0,
+            3 => false,
+            _ => true,
+        }
     }
 
     /// Byte offsets of view `view`'s group `g`: its first draw and its count.
