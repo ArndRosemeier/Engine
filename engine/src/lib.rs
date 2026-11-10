@@ -103,6 +103,12 @@ pub mod water_mesh;
 pub mod world;
 pub mod zfight;
 
+/// The agent guide's code blocks are compiled as doc tests, so the guide
+/// cannot drift from the API.
+#[cfg(doctest)]
+#[doc = include_str!("../../AGENTS.md")]
+pub struct AgentsGuide;
+
 pub(crate) mod app;
 pub(crate) mod marching_cubes;
 pub(crate) mod render;

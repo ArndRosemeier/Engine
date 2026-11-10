@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.032 (2026-11-10)
+
+- AGENTS.md: a short guide for coding agents (the model in one minute, a game skeleton, rules that avoid common mistakes, verify runs, where to find things, how to change the engine). CLAUDE.md points to it. Its code is compiled by the tests, so it stays right.
+
 ## 0.031 (2026-11-10)
 
 - Verify runs for agents and CI: `python tools/verify.py <example>` plays a program for a fixed number of frames and writes a screenshot and report.json; games state what must hold with `world.check` and `world.report`. Fixes boulders and balls sinking through voxel and height terrain when they rest exactly on a seam between collision tiles.
