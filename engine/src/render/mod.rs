@@ -22,6 +22,7 @@ mod postprocess;
 mod reflect;
 mod ribbons_gpu;
 mod shadow;
+mod shadow_scene;
 mod skinned;
 mod sky_pipeline;
 mod ssao;
@@ -855,6 +856,13 @@ pub struct Renderer {
     /// Opaque meshes kept on the GPU as rows the GPU culls and draws from
     /// (see `gpu_scene.rs`); with multi-draws unless `ENGINE_GPU_SCENE=0`.
     gpu_scene: Option<gpu_scene::GpuScene>,
+    /// Shadow-casting meshes kept on the GPU, culled per shadow view there
+    /// (see `shadow_scene.rs`); with GPU draw counts unless
+    /// `ENGINE_GPU_SHADOWS=0`.
+    shadow_scene: Option<shadow_scene::ShadowScene>,
+    /// Per sun cascade: goes up when a static caster in its view changes
+    /// (the GPU shadow scene's part of the static cache key).
+    static_caster_gen: [u64; 3],
     /// Goes up whenever textures and materials are synced (their bind
     /// groups may be new).
     materials_synced: u64,
@@ -1111,6 +1119,8 @@ impl Renderer {
         let pipeline_cache = pipeline_cache::DiskCache::open(&adapter, &device);
         let joint_layout = joint_bind_layout(&device);
         let mut shadow = ShadowGpu::new(&device, &queue, ShadowSettings::default(), &joint_layout);
+        let shadow_scene = (draw_count && !shadow_scene::disabled_by_env())
+            .then(|| shadow_scene::ShadowScene::new(&device));
         // Parts only some apps use are built on worker threads meanwhile.
         let clipmap_pipelines = {
             let device = device.clone();
@@ -1308,6 +1318,8 @@ impl Renderer {
             arenas: geometry::MeshArenas::default(),
             multi_draw,
             gpu_scene: gpu_scene_on.then(gpu_scene::GpuScene::default),
+            shadow_scene,
+            static_caster_gen: [0; 3],
             materials_synced: 0,
             bindless,
             gpu_instance_batches: HashMap::new(),
@@ -4694,6 +4706,15 @@ impl Renderer {
         }
         let mut t = std::time::Instant::now();
         let mut selections = self.select_shadow_culls(world, &frustums);
+        let changed_statics = self.sync_shadow_scene(world);
+        if !changed_statics.is_empty() {
+            for (c, gen) in self.static_caster_gen.iter_mut().enumerate() {
+                let frustum = Frustum::from_view_projection(self.shadow_vp[c]);
+                if changed_statics.iter().any(|b| frustum.intersects(*b)) {
+                    *gen += 1;
+                }
+            }
+        }
         self.cpu_spans.mark("shadows.select", &mut t);
         let default_space = world.living_in() == SpaceId::DEFAULT;
         let voxel_on = default_space && self.voxel.is_drawing();
@@ -4722,7 +4743,8 @@ impl Renderer {
                     } else {
                         u64::MAX
                     },
-                    casters: caster_hash(&fixed, world.living_in()),
+                    casters: caster_hash(&fixed, world.living_in())
+                        ^ self.static_caster_gen[slot].wrapping_mul(0x9E37_79B9_7F4A_7C15),
                 };
                 let cache = self
                     .shadow
@@ -4763,6 +4785,22 @@ impl Renderer {
         self.prepare_shadow_bundles(&bundle_slots, &bundle_selections);
         self.cpu_spans.mark("shadows.bundles", &mut t);
         let selections = &bundle_selections[..slots.len()];
+        if let Some(scene) = self.shadow_scene.as_mut() {
+            let mut views: Vec<Option<(Frustum, shadow_scene::ViewMode)>> =
+                vec![None; shadow_scene::MAX_VIEWS];
+            for (i, &slot) in slots.iter().enumerate() {
+                let mode = match uses[i] {
+                    ShadowCacheUse::Plain => shadow_scene::ViewMode::All,
+                    ShadowCacheUse::Hit | ShadowCacheUse::Miss => shadow_scene::ViewMode::Moving,
+                };
+                views[slot] = Some((frustums[i], mode));
+                if uses[i] == ShadowCacheUse::Miss {
+                    views[STATIC_SHADOW_SLOT + slot] =
+                        Some((frustums[i], shadow_scene::ViewMode::Static));
+                }
+            }
+            scene.encode(&self.device, &self.queue, encoder, &views);
+        }
 
         let new_encoder = |device: &wgpu::Device, label| {
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) })
@@ -4891,6 +4929,15 @@ impl Renderer {
                         wgpu::LoadOp::Clear(1.0),
                         "shadow-csm-static",
                     );
+                    if let Some(scene) = this.shadow_scene.as_ref() {
+                        draw_shadow_scene(
+                            &mut pass,
+                            scene,
+                            STATIC_SHADOW_SLOT + slot,
+                            &this.shadow,
+                            view_bind,
+                        );
+                    }
                     let view = &this.shadow_bundles[STATIC_SHADOW_SLOT + slot];
                     if let Some(multi) = view.multi.as_ref() {
                         multi.encode(&mut pass, &this.shadow, view_bind);
@@ -4922,6 +4969,9 @@ impl Renderer {
                     "shadow-lamp"
                 },
             );
+            if let Some(scene) = this.shadow_scene.as_ref() {
+                draw_shadow_scene(&mut pass, scene, slot, &this.shadow, view_bind);
+            }
             let view = &this.shadow_bundles[slot];
             if let Some(multi) = view.multi.as_ref() {
                 multi.encode(&mut pass, &this.shadow, view_bind);
@@ -5259,7 +5309,13 @@ impl Renderer {
                 compact_batches: Vec::new(),
             })
             .collect();
-        for (source, &id) in self.shadow_mesh_sources.iter().enumerate() {
+        // With the GPU shadow scene the GPU picks each view's mesh casters.
+        let mesh_sources = if self.shadow_scene.is_some() {
+            &[][..]
+        } else {
+            &self.shadow_mesh_sources[..]
+        };
+        for (source, &id) in mesh_sources.iter().enumerate() {
             let group = (source / SHADOW_GROUP) as u32;
             if !entity_in_space(world, id, world.living_in()) {
                 continue;
@@ -5333,6 +5389,79 @@ impl Renderer {
             }
         }
         selections
+    }
+
+    /// Whether a caster has not changed lately (the static shadow cache).
+    fn caster_settled(&self, id: EntityId) -> bool {
+        self.moved_at
+            .get(&id)
+            .is_none_or(|&at| self.frame_no.saturating_sub(at) > STATIC_SHADOW_SETTLE)
+    }
+
+    /// Bring the GPU shadow scene up to date; the bounds of static casters
+    /// that came, went or changed.
+    fn sync_shadow_scene(&mut self, world: &World) -> Vec<Bounds> {
+        let Some(mut scene) = self.shadow_scene.take() else {
+            return Vec::new();
+        };
+        let space = world.living_in();
+        let stamp = shadow_scene::ShadowStamp {
+            render: world.render_epoch(),
+            instance: world.instance_epoch(),
+            resource: self.materials_synced,
+            space,
+        };
+        let changed = if scene.stamp != Some(stamp) || world.rooms_culling() {
+            let rows = self.shadow_rows(world, space);
+            scene.stamp = Some(stamp);
+            scene.apply(&self.device, &self.queue, rows)
+        } else {
+            scene.refresh_fixed(&self.queue, |id| {
+                self.caster_settled(id) && self.gpu_meshes.get(&id).is_some_and(|g| !g.sways)
+            })
+        };
+        self.shadow_scene = Some(scene);
+        changed
+    }
+
+    /// Every shadow-casting mesh of `space` as a GPU shadow row.
+    fn shadow_rows(&self, world: &World, space: SpaceId) -> Vec<shadow_scene::ShadowRow> {
+        self.shadow_mesh_sources
+            .iter()
+            .enumerate()
+            .filter_map(|(order, &id)| {
+                let entity = world.entity(id).ok()?;
+                if entity.space() != space {
+                    return None;
+                }
+                let gpu = self.gpu_meshes.get(&id)?;
+                let bounds = gpu.bounds?;
+                let albedo = entity.albedo.and_then(|tid| self.gpu_mesh_albedo.get(&tid));
+                Some(shadow_scene::ShadowRow {
+                    id,
+                    order: u32::try_from(order).expect("shadow source exceeds u32"),
+                    key: shadow_scene::ShadowKey {
+                        cutout: albedo.is_some(),
+                        albedo: albedo.cloned(),
+                        vertex: gpu.vertex_buf.clone(),
+                        index: gpu.index_buf.clone(),
+                        instances: gpu.instance_buf.clone(),
+                    },
+                    bounds,
+                    args: DrawIndexedArgs {
+                        index_count: u32::try_from(gpu.opaque_index_count)
+                            .expect("index count exceeds u32"),
+                        instance_count: u32::try_from(gpu.instance_count)
+                            .expect("instance count exceeds u32"),
+                        first_index: gpu.first_index,
+                        base_vertex: gpu.base_vertex,
+                        first_instance: gpu.first_instance,
+                    },
+                    visible: !world.room_hidden(id),
+                    fixed: self.caster_settled(id) && !gpu.sways,
+                })
+            })
+            .collect()
     }
 
     fn rebuild_shadow_sources(&mut self, world: &World) {
@@ -6139,6 +6268,45 @@ fn shadow_cache_env() -> bool {
 }
 
 /// Which static casters a cache layer holds, and how they are drawn.
+/// A view's casters from the GPU shadow scene: its groups as draw-count
+/// multi-draws. Leaves `view_bind` bound at group 0.
+fn draw_shadow_scene(
+    pass: &mut wgpu::RenderPass<'_>,
+    scene: &shadow_scene::ShadowScene,
+    view: usize,
+    shadow: &ShadowGpu,
+    view_bind: &wgpu::BindGroup,
+) {
+    pass.set_bind_group(0, view_bind, &[]);
+    let mut bound: Option<&shadow_scene::ShadowKey> = None;
+    for (i, g) in scene.groups.iter().enumerate() {
+        let k = &g.key;
+        if bound.is_none_or(|b| b.cutout != k.cutout) {
+            pass.set_pipeline(match (k.cutout, shadow.cutout_pipeline.as_ref()) {
+                (true, Some(p)) => p,
+                _ => &shadow.mesh_pipeline,
+            });
+        }
+        if let Some(albedo) = k.albedo.as_ref() {
+            if bound.is_none_or(|b| b.albedo.as_ref() != Some(albedo)) {
+                pass.set_bind_group(1, albedo, &[]);
+            }
+        }
+        if bound.is_none_or(|b| b.vertex != k.vertex) {
+            pass.set_vertex_buffer(0, k.vertex.slice(..));
+        }
+        if bound.is_none_or(|b| b.instances != k.instances) {
+            pass.set_vertex_buffer(1, k.instances.slice(..));
+        }
+        if bound.is_none_or(|b| b.index != k.index) {
+            pass.set_index_buffer(k.index.slice(..), wgpu::IndexFormat::Uint32);
+        }
+        let (args, count) = scene.offsets(view, g, i);
+        pass.multi_draw_indexed_indirect_count(&scene.args, args, &scene.counts, count, g.len);
+        bound = Some(k);
+    }
+}
+
 fn caster_hash(selection: &ShadowCullSelection, space: SpaceId) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();

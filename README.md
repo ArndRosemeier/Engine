@@ -559,6 +559,15 @@ no draw at all (`multi_draw_indexed_indirect_count`; `ENGINE_DRAW_COUNT=0`
 draws every row, hidden ones with no instances). `ENGINE_GPU_SCENE=0` turns
 the GPU scene off.
 
+**GPU shadows** (with GPU draw counts): the shadow-casting meshes live on
+the GPU the same way. One compute pass tests every caster against every
+shadow view drawn this frame (sun cascades, their static-cache layers, lamp
+faces) with the CPU's own sphere test, and writes each view's draws; the
+CPU no longer walks the casters per view. The static cache keeps working: a
+cached cascade draws only the moving casters live, and its cached layer is
+redrawn only when a static caster in its view changes.
+`ENGINE_GPU_SHADOWS=0` turns it off.
+
 Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_global_illumination`,
 `set_bloom`, `set_tone_map`, `set_haze`, `set_lod_bias`, `set_view_distance`.
 
@@ -652,6 +661,7 @@ Every program built on the engine understands these:
 | `ENGINE_TEXTURE_ARRAYS=0` | Split multi-draws by texture instead of reading every texture through the material table, to compare |
 | `ENGINE_GPU_SCENE=0` | Build the opaque mesh draws on the CPU each frame instead of keeping them on the GPU, to compare |
 | `ENGINE_DRAW_COUNT=0` | GPU scene: draw every row (hidden ones with no instances) instead of letting the GPU count the visible ones, to compare |
+| `ENGINE_GPU_SHADOWS=0` | Pick each shadow view's mesh casters on the CPU instead of the GPU, to compare |
 | `ENGINE_SHADOW_CACHE=0` | Draw every sun shadow caster every frame (no static cache), to compare frame times |
 | `ENGINE_SHADOW_REFRESH=1` | Draw every sun cascade every frame, whatever `world.set_shadow_cascade_refresh` says, to compare frame times |
 | `ENGINE_OCCLUSION_CHECK=1` | Read every frame's occlusion answers back and compare them with the CPU copy of the test; prints mismatches (slow, for driver trouble) |
