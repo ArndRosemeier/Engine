@@ -93,10 +93,8 @@ fn main() -> EngineResult<()> {
         // Camera: orbit, follow or first person, set every frame.
         world.look_follow(game.position, 0.0, 8.0, 4.0);
 
-        // A little UI (egui).
-        engine::egui::Window::new("score").show(frame.ui.ctx(), |ui| {
-            ui.label(format!("Score: {}", game.score));
-        });
+        // HUD text in a corner (bars, menus: README "Game UI"; full egui: frame.ui.ctx()).
+        frame.ui.text(Anchor::TopLeft, format!("Score: {}", game.score));
 
         // Self-checks: a verify run fails if one is ever false (see below).
         world.check("player stays on the field", game.position.length() < 20.0);
@@ -178,6 +176,8 @@ python tools/verify.py <package> --reference refs/<package>.png
 | Trigger zones, layers, overlap queries | README "Triggers, layers and shape queries", `examples/gameplay` |
 | A player that walks, jumps, climbs stairs | README "Characters you walk", `examples/gameplay` |
 | Doors, ropes, hinges, sliders | README "Joints", `examples/gameplay` |
+| HUD text, health bars, menus, crosshair | README "Game UI (HUD)", `examples/gameplay` |
+| Names over things, damage numbers | README "Text in the world", `examples/gameplay` |
 | Characters, animation, foot IK | README "Character animation", `examples/characters` |
 | AI walking around obstacles | README "Navigation", `examples/navigation` |
 | Many people | README "Crowds", `examples/crowds` |

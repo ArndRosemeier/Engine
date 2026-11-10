@@ -3645,3 +3645,156 @@ mod characters_and_joints {
         assert!(world.add_joint(piston, piston, Joint::weld()).is_err());
     }
 }
+
+#[cfg(test)]
+mod hud_and_labels {
+    use crate::color::{rgb, Color};
+    use crate::hud::Anchor;
+    use crate::labels::Label;
+    use crate::mesh::Mesh;
+    use crate::place::Place;
+    use crate::ui::UiFrame;
+    use crate::world::World;
+    use glam::Vec3;
+
+    /// Run one headless egui frame of 800 x 600 points.
+    fn egui_frame(build: impl FnOnce(&egui::Context)) {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut build = Some(build);
+        let _ = ctx.run(input, |ctx| {
+            if let Some(build) = build.take() {
+                build(ctx)
+            }
+        });
+    }
+
+    #[test]
+    fn colours_go_back_to_the_bytes_they_came_from() {
+        for (r, g, b) in [(0, 0, 0), (255, 255, 255), (220, 160, 100), (3, 128, 250)] {
+            assert_eq!(rgb(r, g, b).to_srgba8(), [r, g, b, 255]);
+        }
+        assert_eq!(Color::rgba(10, 20, 30, 128).to_srgba8()[3], 128);
+    }
+
+    #[test]
+    fn screen_point_puts_what_the_camera_looks_at_in_the_middle() {
+        let mut world = World::new();
+        world.look_first_person((0.0, 1.0, 0.0), 0.0, 0.0);
+        let mid = world.screen_point((0.0, 1.0, 10.0), 800.0, 600.0).unwrap();
+        assert!(
+            (mid.x - 400.0).abs() < 0.5 && (mid.y - 300.0).abs() < 0.5,
+            "{mid}"
+        );
+        let up = world.screen_point((0.0, 3.0, 10.0), 800.0, 600.0).unwrap();
+        assert!(up.y < 300.0);
+        assert!(world
+            .screen_point((0.0, 1.0, -10.0), 800.0, 600.0)
+            .is_none());
+    }
+
+    #[test]
+    fn labels_ride_on_entities_and_go_with_them() {
+        let mut world = World::new();
+        let shop =
+            world.spawn(Mesh::box_at(Vec3::ZERO, (1.0, 1.0, 1.0), rgb(200, 200, 200)).unwrap());
+        world.set_place(shop, Place::new(0.0, 0.0, 8.0)).unwrap();
+        world
+            .set_label(shop, Label::new("Shop").color(rgb(255, 220, 120)))
+            .unwrap();
+        assert_eq!(world.label(shop).map(|l| l.text.as_str()), Some("Shop"));
+        assert!(world.set_label(shop, Label::new("x").size(-1.0)).is_err());
+
+        world.look_first_person((0.0, 2.0, 0.0), 0.0, 0.0);
+        egui_frame(|ctx| world.draw_labels(ctx, 1.0 / 60.0));
+        assert_eq!(world.labels_on_screen(), 1);
+
+        // Turned away: not drawn.
+        world.look_first_person((0.0, 2.0, 0.0), 180.0, 0.0);
+        egui_frame(|ctx| world.draw_labels(ctx, 1.0 / 60.0));
+        assert_eq!(world.labels_on_screen(), 0);
+
+        // Too far: not drawn.
+        world
+            .set_label(shop, Label::new("Shop").max_distance(5.0))
+            .unwrap();
+        world.look_first_person((0.0, 2.0, 0.0), 0.0, 0.0);
+        egui_frame(|ctx| world.draw_labels(ctx, 1.0 / 60.0));
+        assert_eq!(world.labels_on_screen(), 0);
+
+        world.despawn(shop);
+        assert!(world.label(shop).is_none());
+    }
+
+    #[test]
+    fn a_wall_hides_labels_that_ask_for_it() {
+        use crate::physics::{Body, BodyShape};
+        let mut world = World::new();
+        let npc = world.spawn(Mesh::box_at(Vec3::ZERO, (0.5, 1.8, 0.5), rgb(90, 90, 200)).unwrap());
+        world.set_place(npc, Place::new(0.0, 0.0, 10.0)).unwrap();
+        world
+            .set_label(npc, Label::new("Guard").hidden_by_walls(true))
+            .unwrap();
+        let wall =
+            world.spawn(Mesh::box_at(Vec3::ZERO, (6.0, 6.0, 0.3), rgb(150, 150, 150)).unwrap());
+        world.set_place(wall, Place::new(0.0, 3.0, 5.0)).unwrap();
+        world
+            .add_body(
+                wall,
+                Body::fixed().shape(BodyShape::Box(Vec3::new(3.0, 3.0, 0.15))),
+            )
+            .unwrap();
+        world.tick_physics(1.0 / 60.0);
+        world.look_first_person((0.0, 2.0, 0.0), 0.0, 0.0);
+        egui_frame(|ctx| world.draw_labels(ctx, 1.0 / 60.0));
+        assert_eq!(world.labels_on_screen(), 0);
+        world.despawn(wall);
+        world.tick_physics(1.0 / 60.0);
+        egui_frame(|ctx| world.draw_labels(ctx, 1.0 / 60.0));
+        assert_eq!(world.labels_on_screen(), 1);
+    }
+
+    #[test]
+    fn floating_text_rises_fades_and_ends() {
+        let mut world = World::new();
+        world.float_text((0.0, 1.0, 5.0), "+10", rgb(255, 220, 60));
+        world.float_text((f32::NAN, 0.0, 0.0), "bad", Color::WHITE);
+        assert_eq!(world.float_text_count(), 1);
+        world.age_float_texts(0.6);
+        assert_eq!(world.float_text_count(), 1);
+        world.age_float_texts(0.7);
+        assert_eq!(world.float_text_count(), 0);
+        for i in 0..300 {
+            world.float_text((0.0, 0.0, 0.0), format!("{i}"), Color::WHITE);
+        }
+        assert_eq!(world.float_text_count(), 256);
+    }
+
+    #[test]
+    fn hud_items_on_one_corner_stack() {
+        egui_frame(|ctx| {
+            let ui = UiFrame::new(ctx.clone(), Default::default());
+            let size = egui::vec2(100.0, 20.0);
+            let a = ui.hud_slot(Anchor::TopLeft, size);
+            let b = ui.hud_slot(Anchor::TopLeft, size);
+            assert_eq!(a.min, egui::pos2(16.0, 16.0));
+            assert!(b.min.y >= a.max.y, "{a:?} {b:?}");
+            let c = ui.hud_slot(Anchor::BottomRight, size);
+            let d = ui.hud_slot(Anchor::BottomRight, size);
+            assert_eq!(c.max, egui::pos2(784.0, 584.0));
+            assert!(d.max.y <= c.min.y, "{c:?} {d:?}");
+            // Drawing them does not panic either.
+            ui.text(Anchor::Top, "Coins: 3");
+            ui.bar(Anchor::BottomLeft, "Health", 73.0, 100.0, rgb(200, 60, 60));
+            ui.bar(Anchor::BottomLeft, "Bad", f32::NAN, 0.0, rgb(200, 60, 60));
+            ui.crosshair();
+            assert_eq!(ui.menu("Paused", &["Resume", "Quit"]), None);
+        });
+    }
+}

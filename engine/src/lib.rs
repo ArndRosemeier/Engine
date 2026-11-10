@@ -58,7 +58,9 @@ pub mod gpu_info;
 pub mod grading;
 pub(crate) mod ground_probe;
 pub mod hierarchy;
+pub mod hud;
 pub mod input;
+pub mod labels;
 pub mod lamps;
 pub mod landscape;
 pub mod limits;
@@ -145,7 +147,9 @@ pub use gpu_field::{
     FieldKernel, FieldMeshBounds, FieldParamsBlob, GpuField, PaintedField, ParamsMirror,
     FIELD_CHUNK_SIZE, MAX_FIELD_UNIFORM_BYTES,
 };
+pub use hud::Anchor;
 pub use input::{Input, Key, MouseButton};
+pub use labels::Label;
 pub use lamps::{Lamp, LampId, LampShape};
 pub use landscape::Landscape;
 pub use limits::EngineLimits;

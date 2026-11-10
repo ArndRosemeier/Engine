@@ -1,8 +1,9 @@
 //! Gameplay physics in one small park: a walking character, a hinged door
 //! it shoves open, stairs it climbs, coins picked up by trigger zones, and a
-//! lamp swinging on a rope.
+//! lamp swinging on a rope. On top: a HUD (coin count, a bar, a pause
+//! menu), names hanging over things and "+1" floating up from coins.
 //!
-//! Controls: WASD walks, Space jumps, Q/E turn the camera, Esc quits.
+//! Controls: WASD walks, Space jumps, Q/E turn the camera, P pauses, Esc quits.
 //!
 //! `ENGINE_GAMEPLAY_DEMO=1` (on in verify runs) walks the route by itself:
 //! through the door, up the stairs, picking up every coin.
@@ -33,6 +34,9 @@ struct Game {
     lowest: f32,
     leg: usize,
     jumps: u32,
+    paused: bool,
+    most_labels: usize,
+    floated: bool,
 }
 
 fn main() -> EngineResult<()> {
@@ -94,6 +98,7 @@ fn main() -> EngineResult<()> {
                     .at((-0.8, 1.22, 2.0))
                     .limits(-100.0, 100.0),
             )?;
+            world.set_label(door, Label::new("Door").above(1.6))?;
             game.door = Some(door);
 
             // Stairs up to a terrace: steps of 0.25 m a character climbs.
@@ -107,11 +112,15 @@ fn main() -> EngineResult<()> {
                     wood,
                 )?;
             }
-            solid(
+            let terrace = solid(
                 world,
                 Vec3::new(7.0, 0.75, 8.0),
                 Vec3::new(4.0, 1.5, 4.0),
                 wood,
+            )?;
+            world.set_label(
+                terrace,
+                Label::new("Terrace").color(rgb(255, 225, 150)).above(1.6),
             )?;
 
             // Coins along the route, each with a trigger zone.
@@ -149,6 +158,7 @@ fn main() -> EngineResult<()> {
             )?);
             world.set_place(player, Place::new(0.0, 0.0, -8.0))?;
             world.add_character(player, Character::default())?;
+            world.set_label(player, Label::new("You").size(16.0))?;
             game.player = Some(player);
         }
         frame_no += 1;
@@ -156,6 +166,20 @@ fn main() -> EngineResult<()> {
             return Ok(());
         };
         let feet = world.world_transform(player)?.w_axis.truncate();
+
+        // P opens and closes the pause menu; while it is open nothing moves.
+        if frame.input.pressed(Key::P) {
+            game.paused = !game.paused;
+        }
+        if game.paused {
+            match frame.ui.menu("Paused", &["Resume", "Quit"]) {
+                Some(0) => game.paused = false,
+                Some(1) => world.request_exit(),
+                _ => {}
+            }
+            world.walk(player, Vec3::ZERO)?;
+            return Ok(());
+        }
 
         // Walk where the keys (or the demo route) say.
         game.yaw += frame.input.yaw_sign() * 90.0 * frame.dt;
@@ -182,6 +206,8 @@ fn main() -> EngineResult<()> {
         // Coins: picked up when the player enters their trigger.
         for e in world.take_trigger_events() {
             if e.entered && e.other == player && world.has::<Coin>(e.trigger) {
+                let at = world.world_transform(e.trigger)?.w_axis.truncate();
+                world.float_text(at, "+1", rgb(255, 215, 60));
                 world.despawn(e.trigger);
                 game.coins += 1;
             }
@@ -200,10 +226,24 @@ fn main() -> EngineResult<()> {
             .cast_sphere(head, want, 0.3, want.length())
             .map_or(1.0, |hit| hit.distance / want.length());
         world.look_follow(feet, game.yaw, (6.0 * room).max(1.5), 3.0);
-        engine::egui::Window::new("gameplay").show(frame.ui.ctx(), |ui| {
-            ui.label(format!("Coins: {} / 4", game.coins));
-            ui.label("WASD walk, Space jump, Q/E turn");
-        });
+
+        // The HUD: text in the corners, a bar, a hint at the bottom.
+        frame
+            .ui
+            .text(Anchor::TopLeft, format!("Coins: {} / 4", game.coins));
+        frame.ui.bar(
+            Anchor::TopLeft,
+            "Route",
+            game.leg as f32,
+            ROUTE.len() as f32,
+            rgb(90, 170, 230),
+        );
+        frame.ui.text_styled(
+            Anchor::Bottom,
+            "WASD walk, Space jump, Q/E turn, P pause",
+            16.0,
+            rgb(230, 230, 230),
+        );
 
         // Self-checks for verify runs (`python tools/verify.py gameplay --frames 600`).
         game.highest = game.highest.max(feet.y);
@@ -217,6 +257,9 @@ fn main() -> EngineResult<()> {
             game.widest_door = game.widest_door.max(angle);
         }
         world.check("the player never sinks into the floor", feet.y > -0.05);
+        // Labels drawn last frame, and floating text after a pickup.
+        game.most_labels = game.most_labels.max(world.labels_on_screen());
+        game.floated |= world.float_text_count() > 0;
         if let Some(lamp) = game.lamp {
             let p = world.entity(lamp)?.transform().w_axis.truncate();
             world.check(
@@ -232,11 +275,14 @@ fn main() -> EngineResult<()> {
                 game.widest_door > 30.0,
             );
             world.check("the player jumped", game.jumps == 1);
+            world.check("labels show over the scene", game.most_labels >= 2);
+            world.check("a picked-up coin floats +1", game.floated);
         }
         world.report("coins", game.coins);
         world.report("highest feet (m)", game.highest);
         world.report("lowest feet (m)", game.lowest);
         world.report("door opened (degrees)", game.widest_door);
+        world.report("labels on screen", world.labels_on_screen());
         world.report(
             "on the ground",
             world.character(player).is_some_and(|c| c.grounded),

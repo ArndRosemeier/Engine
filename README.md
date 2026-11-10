@@ -478,7 +478,23 @@ call `particles_mut().advance(dt)` only for slow motion or fixed steps.
 `mouse_down(MouseButton::Left)`, `move_xz()` for WASD, `mouse_delta()`.
 `FlyCamera` does all of it for a free camera.
 
-**UI:** `frame.ui` is an egui frame: panels, buttons, images, modals.
+**Game UI (HUD):** one call each on `frame.ui`, every frame you want it shown.
+`frame.ui.text(Anchor::TopLeft, format!("Coins: {coins}"))` writes shadowed
+text in a corner or edge (`text_styled` adds size and colour);
+`frame.ui.bar(Anchor::BottomLeft, "Health", hp, 100.0, rgb(200, 60, 60))`
+draws a filled bar with the numbers on it; `frame.ui.crosshair()` marks the
+middle; `frame.ui.menu("Paused", &["Resume", "Quit"])` dims the screen and
+returns the index of the button clicked. Items on the same anchor stack
+instead of overlapping. For anything else, `frame.ui.ctx()` is the full egui
+context: panels, buttons, images, `frame.ui.modal(...)`.
+
+**Text in the world:** `world.set_label(npc, Label::new("Guard"))?` hangs a
+name over an entity (`.color`, `.size`, `.above(metres)`, `.max_distance`,
+`.hidden_by_walls(true)`). It follows the entity, fades with distance and
+goes away on despawn (it is a component). `world.float_text(point, "+10",
+rgb(255, 215, 60))` rises and fades over a second: damage numbers, pickups.
+`world.screen_point(point, width, height)` gives where any world point shows
+on screen. `examples/gameplay` uses all of it.
 
 **Finding z-fighting (flickering surfaces):** run any app with
 `ENGINE_ZFIGHT=1` and every place where two faces lie in the same plane and
@@ -688,7 +704,7 @@ cargo run --release -p <name>
 | `navigation` | Villagers find their own way around houses, walls, a fountain and crates and up stairs to a terrace; click sends everyone there, N shows the walkable area |
 | `prefabs` | Carts built from parts driving with spinning wheels, a windmill turning its sails, a lantern carried in a hand; C drops carts that tumble whole, X removes them |
 | `buildings` | A block of breakable towers: punch panels (click), blast (F), topple (T), pancake (P), rebuild (R) |
-| `gameplay` | A walking character (WASD, Space) shoving a hinged door open, climbing stairs, picking up coins with trigger zones; a lamp swings on a rope |
+| `gameplay` | A walking character (WASD, Space) shoving a hinged door open, climbing stairs, picking up coins with trigger zones; a lamp swings on a rope; HUD, pause menu (P), names over things and floating "+1" |
 | `ragdolls` | People strolling about: click knocks one flying, F a blast; they tumble, settle and get up (K keeps them down, G gets everyone up) |
 | `crowds` | A thousand people walking about a town square: far ones instanced and GPU-animated, near ones full characters (N: near characters on/off, F: far mesh) |
 | `moons` | A night under three moons of different sizes, colours, cycles and paths (Space: time, arrows: hour and day, M: one moon to compare) |

@@ -225,6 +225,8 @@ impl Verify {
                 triggers: world.trigger_count(),
                 joints: world.joint_count(),
                 characters: world.character_count(),
+                labels_on_screen: world.labels_on_screen(),
+                float_texts: world.float_text_count(),
                 components: world.component_counts(),
                 camera_eye: camera.eye().to_array(),
                 camera_target: camera.target().to_array(),
@@ -294,6 +296,8 @@ struct WorldSummary {
     triggers: usize,
     joints: usize,
     characters: usize,
+    labels_on_screen: usize,
+    float_texts: usize,
     /// Entities per component type (`World::insert`).
     components: std::collections::BTreeMap<&'static str, usize>,
     camera_eye: [f32; 3],
