@@ -34,8 +34,10 @@ const DEFAULT_FRAMES: u32 = 120;
 /// A pixel differs when a channel is off by more than this.
 const PIXEL_THRESHOLD: u8 = 8;
 const DEFAULT_TOLERANCE: f64 = 0.002;
-/// Entities listed by place in the report.
-const LISTED_ENTITIES: usize = 100;
+/// Entities listed by place in the report: enough to see where things are,
+/// small enough that an agent reading the report does not drown in it. Games
+/// put what matters into `world.report`.
+const LISTED_ENTITIES: usize = 20;
 
 pub(crate) struct Verify {
     pub dir: PathBuf,
