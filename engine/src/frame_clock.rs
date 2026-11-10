@@ -23,7 +23,7 @@ pub(crate) struct FrameClock {
     long: Option<f32>,
     enabled: bool,
     /// Every step this long, whatever the frame took (for tests).
-    fixed: Option<f32>,
+    pub(crate) fixed: Option<f32>,
 }
 
 impl FrameClock {

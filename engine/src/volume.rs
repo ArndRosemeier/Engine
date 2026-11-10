@@ -587,6 +587,14 @@ impl Volume {
 
     /// One chunk's surface as a welded triangle list for physics colliders.
     /// Empty when the chunk is missing or holds no surface.
+    ///
+    /// The tile reaches one cell into each neighbouring chunk, so tiles
+    /// overlap. Rapier's internal-edge fix treats a mesh's open border edge
+    /// as a rim, not ground: a ball resting exactly on the seam between two
+    /// tiles got no support from either and sank through the terrain. With
+    /// the overlap every resting point is inside at least one tile. Overlap
+    /// cells are left out where the neighbour chunk is missing and the volume
+    /// has no source, so no false wall appears at the edge of loaded ground.
     pub(crate) fn collision_triangles(&self, chunk_key: IVec3) -> (Vec<Vec3>, Vec<[u32; 3]>) {
         let mut verts = Vec::new();
         let mut tris = Vec::new();
@@ -598,19 +606,41 @@ impl Volume {
         // same edge vertex with tiny float differences.
         let quant = 1024.0 / self.voxel_size;
         let mut index: HashMap<(i32, i32, i32), u32> = HashMap::new();
-        for y in 0..CHUNK_SIZE {
-            for z in 0..CHUNK_SIZE {
-                for x in 0..CHUNK_SIZE {
-                    let c = [
-                        chunk.get(x, y, z),
-                        chunk.get(x + 1, y, z),
-                        chunk.get(x + 1, y, z + 1),
-                        chunk.get(x, y, z + 1),
-                        chunk.get(x, y + 1, z),
-                        chunk.get(x + 1, y + 1, z),
-                        chunk.get(x + 1, y + 1, z + 1),
-                        chunk.get(x, y + 1, z + 1),
-                    ];
+        let base = chunk_key * CHUNK_SIZE;
+        let inside = 0..CHUNK_SIZE;
+        for y in -1..=CHUNK_SIZE {
+            for z in -1..=CHUNK_SIZE {
+                for x in -1..=CHUNK_SIZE {
+                    let c = if inside.contains(&x) && inside.contains(&y) && inside.contains(&z) {
+                        [
+                            chunk.get(x, y, z),
+                            chunk.get(x + 1, y, z),
+                            chunk.get(x + 1, y, z + 1),
+                            chunk.get(x, y, z + 1),
+                            chunk.get(x, y + 1, z),
+                            chunk.get(x + 1, y + 1, z),
+                            chunk.get(x + 1, y + 1, z + 1),
+                            chunk.get(x, y + 1, z + 1),
+                        ]
+                    } else {
+                        // An overlap cell in a neighbouring chunk.
+                        let g = base + IVec3::new(x, y, z);
+                        let neighbour = g.div_euclid(IVec3::splat(CHUNK_SIZE));
+                        if !self.has_source() && !self.chunks.contains_key(&neighbour) {
+                            continue;
+                        }
+                        let k = |dx: i32, dy: i32, dz: i32| self.corner(g + IVec3::new(dx, dy, dz));
+                        [
+                            k(0, 0, 0),
+                            k(1, 0, 0),
+                            k(1, 0, 1),
+                            k(0, 0, 1),
+                            k(0, 1, 0),
+                            k(1, 1, 0),
+                            k(1, 1, 1),
+                            k(0, 1, 1),
+                        ]
+                    };
                     let solid = c.iter().filter(|v| **v >= 0.0).count();
                     if solid == 0 || solid == 8 {
                         continue;

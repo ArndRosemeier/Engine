@@ -1490,6 +1490,41 @@ mod physics_world {
         );
     }
 
+    /// A ball rolling down a slope right on the seam between two collision
+    /// tiles (x = 0) must stay on top. Tiles used to end exactly at the seam
+    /// and the internal-edge fix gave no support there: the ball sank through.
+    #[test]
+    fn a_ball_rolling_along_a_tile_seam_stays_on_the_ground() {
+        use crate::physics::BodyShape;
+        let mut volume = crate::volume::Volume::new(0.5);
+        volume.ensure_bounds(Vec3::new(-8.0, -4.0, -12.0), Vec3::new(8.0, 20.0, 12.0));
+        let keys: Vec<_> = volume.chunk_keys().collect();
+        // A ridge along the seam, sloping down towards -z.
+        let ground = |x: f32, z: f32| 6.0 + z * 0.2 - x * x * 0.05;
+        volume.generate_chunks(&keys, |p| ((ground(p.x, p.z) - p.y) * 2.0).clamp(-6.0, 6.0));
+        let mut world = World::new();
+        world.set_voxel_terrain(Some(crate::voxel_terrain::VoxelTerrain::new(volume)));
+        let id = world.spawn(Mesh::ball(Vec3::ZERO, 1.2, rgb(120, 116, 110)).unwrap());
+        world
+            .set_place(id, Place::new(0.0, ground(0.0, 6.0) + 1.25, 6.0))
+            .unwrap();
+        world
+            .add_body(
+                id,
+                Body::dynamic().shape(BodyShape::Ball(1.2)).friction(0.9),
+            )
+            .unwrap();
+        for _ in 0..90 {
+            world.tick_physics(1.0 / 60.0);
+            let p = world.entity(id).unwrap().transform().w_axis;
+            assert!(
+                p.y - ground(p.x, p.z) > 0.9,
+                "ball sank into the ground at {p:?} (ground {})",
+                ground(p.x, p.z)
+            );
+        }
+    }
+
     /// A pile of crates and balls tumbling down height terrain, built once in
     /// `World` and once in a standalone `PhysicsWorld`, stepped 10 s.
     #[test]
