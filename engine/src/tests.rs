@@ -3409,6 +3409,43 @@ mod characters_and_joints {
     }
 
     #[test]
+    fn a_follow_camera_ignores_the_player_but_not_walls() {
+        let mut world = World::new();
+        let p = person(&mut world, Vec3::new(0.0, 0.0, 0.0));
+        run(&mut world, 30);
+        let head = feet(&world, p) + Vec3::Y * 1.6;
+        // From inside the player, a plain cast hits the player at once.
+        let hit = world.cast_sphere(head, Vec3::NEG_Z, 0.3, 6.0).unwrap();
+        assert!(hit.distance < 0.1, "{hit:?}");
+        assert!(world
+            .cast_sphere_ignoring(head, Vec3::NEG_Z, 0.3, 6.0, p)
+            .is_none());
+        assert!(world.cast_ray_ignoring(head, Vec3::NEG_Z, 6.0, p).is_none());
+
+        // Open space behind: the camera sits at the full distance.
+        world.look_follow_entity(p, 0.0, 6.0, 3.0).unwrap();
+        let eye = world.camera().eye();
+        assert!((eye.z + 6.0).abs() < 0.05, "{eye}");
+        // A wall 3 m behind: it is pulled in front of the wall.
+        let wall_id = wall(
+            &mut world,
+            Vec3::new(0.0, 1.5, -3.0),
+            Vec3::new(6.0, 3.0, 0.2),
+        );
+        run(&mut world, 1);
+        let hit = world
+            .cast_sphere_ignoring(head, Vec3::NEG_Z, 0.3, 6.0, p)
+            .unwrap();
+        assert_eq!(hit.entity, Some(wall_id));
+        world.look_follow_entity(p, 0.0, 6.0, 3.0).unwrap();
+        let eye = world.camera().eye();
+        assert!(eye.z > -2.9 && eye.z < -1.0, "{eye}");
+        assert!(world
+            .look_follow_entity(EntityId::from_raw(999), 0.0, 6.0, 3.0)
+            .is_err());
+    }
+
+    #[test]
     fn a_character_lands_walks_and_keeps_its_turn() {
         let mut world = World::new();
         let p = person(&mut world, Vec3::new(0.0, 1.0, 0.0));

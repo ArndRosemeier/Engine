@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.044 (2026-11-10)
+
+- Fixes from a fresh-agent test: look_follow_entity keeps the follow camera out of walls and the player, cast_ray/cast_sphere_ignoring, an API-at-a-glance page and a door recipe in AGENTS.md, and tools/new_example.py to start an example listed everywhere
+
 ## 0.043 (2026-11-10)
 
 - Agent guide: the game skeleton walks a character, picks up coins with a trigger and shows a HUD; compiled recipes for HUD, world text, zones, doors, crates and sounds

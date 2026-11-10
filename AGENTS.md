@@ -80,7 +80,7 @@ fn main() -> EngineResult<()> {
         }
         let Some(player) = game.player else { return Ok(()) };
 
-        // Input: A/D turn, W/S walk (move_dir_xz matches the follow camera),
+        // Input: Q/E turn, WASD walk (move_dir_xz matches the follow camera),
         // Space jumps. walk takes a speed in m/s; the engine applies frame.dt.
         game.yaw += frame.input.yaw_sign() * 90.0 * frame.dt;
         world.walk(player, frame.input.move_dir_xz(game.yaw) * 5.0)?;
@@ -98,9 +98,9 @@ fn main() -> EngineResult<()> {
             }
         }
 
-        // Camera: orbit, follow or first person, set every frame.
+        // Camera: behind the player, pulled in at walls; set every frame.
+        world.look_follow_entity(player, game.yaw, 6.0, 3.0)?;
         let feet = world.world_transform(player)?.w_axis.truncate();
-        world.look_follow(feet, game.yaw, 6.0, 3.0);
 
         // HUD: text, bars and menus in corners (README "Game UI"; full egui: frame.ui.ctx()).
         frame.ui.text(Anchor::TopLeft, format!("Score: {}", game.score));
@@ -139,6 +139,51 @@ python tools/verify.py <package> --reference refs/<package>.png
   in normal runs.
 - No display (Linux CI, containers): `tools/verify.py` uses `xvfb-run`; a
   software Vulkan driver (Mesa lavapipe) is enough.
+
+## The API at a glance
+
+The everyday calls, so you don't have to search the source. All are in
+`engine::prelude`.
+
+- **Shapes (meshes)**: `Shape::box_at(center, size, color)`,
+  `Shape::ball(center, radius, color)`, `Shape::cylinder(center, axis,
+  radius, length, sides, color)` (centred on `center`: a 2 m post standing
+  on the ground has `center` y = 1). Your own: `Mesh::new()`, `add_point`,
+  then `add_triangle` / `add_quad` with points counter-clockwise seen from
+  the front (the back is not drawn); `add_box` and `append_translated`
+  build up several parts. `Shape` and `Mesh` are the same type.
+- **Places**: `Place::new(x, y, z)` then `.with_yaw_deg(a)`,
+  `.with_pitch_deg(a)`, `.with_roll_deg(a)`, `.with_scale(s)`,
+  `.with_stretch(Vec3)`, `.with_tint(color)`. Yaw 0 faces +Z, 90 faces +X.
+  Where an entity is now: `world.world_transform(id)?.w_axis.truncate()`.
+- **Cameras** (call one every frame): `look_follow_entity(player, yaw,
+  distance, height)` (behind a player, pulled in at walls),
+  `look_follow(target, yaw, distance, height)` (no wall check),
+  `look_orbit(target, distance, yaw, pitch)`, `look_first_person(eye, yaw,
+  pitch)`.
+- **Rays**: `cast_ray(origin, dir, max)` and `cast_sphere(origin, dir,
+  radius, max)` return `Option<RayHit>` with `entity: Option<EntityId>`
+  (None for ground), `point`, `normal` and `distance`. A ray that starts
+  inside the player hits the player: use `cast_ray_ignoring(.., player)` /
+  `cast_sphere_ignoring(.., player)`.
+- **Bodies**: `Body::fixed()` (walls, floors), `Body::dynamic()` (physics
+  moves it), `Body::kinematic()` (you move it with `set_place`; it pushes
+  dynamic bodies and blocks characters). The collider defaults to the
+  mesh's convex hull; `.shape(BodyShape::Box(half_extents))`, `Ball(r)`,
+  `Capsule { half_height, radius }`, `BoundingBox` or `Mesh` (exact
+  triangles, fixed and kinematic only) choose another.
+- **HUD anchors**: `Anchor::TopLeft`, `Top`, `TopRight`, `Left`, `Center`,
+  `Right`, `BottomLeft`, `Bottom`, `BottomRight`; lines at one anchor stack.
+- **Input**: `frame.input.down(Key::W)` (held), `pressed(Key::Space)` (this
+  frame), `move_dir_xz(yaw)` (WASD or arrows, W forward and A/D sideways,
+  as a world direction for that yaw), `yaw_sign()` (Q/E turning: -1, 0
+  or 1).
+- **Glow**: emission (custom materials, lamps) is in linear light, and
+  bloom starts to show around 1. For a clearly glowing gem or sign use 3
+  to 5; 1.5 reads as a faint shine.
+
+Not here? `grep -rn "pub fn <name>" engine/src`, and the README section
+for the feature.
 
 ## Recipes for common game pieces
 
@@ -184,6 +229,20 @@ fn zone_events(world: &mut World, zone: EntityId, player: EntityId) -> bool {
         entered |= e.trigger == zone && e.other == player && e.entered;
     }
     entered
+}
+
+/// A door you swing by hand: build the mesh with its hinge edge at the
+/// origin (the exception to "build around the centre"), so turning the
+/// entity's yaw swings it. Kinematic: it blocks the player and pushes crates.
+fn setup_door(world: &mut World) -> EngineResult<EntityId> {
+    let door = world.spawn(Shape::box_at((0.5, 1.0, 0.0), (1.0, 2.0, 0.1), rgb(120, 80, 50))?);
+    world.set_place(door, Place::new(4.5, 0.0, 0.0))?; // the hinge
+    world.add_body(door, Body::kinematic())?;
+    Ok(door)
+}
+fn swing_door(world: &mut World, door: EntityId, open: f32) -> EngineResult<()> {
+    // open: 0 shut .. 1 open (raise it by frame.dt per second for a smooth swing).
+    world.set_place(door, Place::new(4.5, 0.0, 0.0).with_yaw_deg(-100.0 * open))
 }
 
 /// A door on a hinge that a motor swings open, and a crate that physics owns.
@@ -277,7 +336,9 @@ and `params`; return `color` (alpha used with `.see_through()`), `normal`,
 10. **Build meshes around the origin and place the entity.** A mesh made
     at `(3, 0, 3)` (`Shape::box_at((3.0, 0.0, 3.0), ...)`) still has its
     entity at `(0, 0, 0)`: `transform()` and distance checks see the
-    origin. Make it at `(0, 0, 0)`, then `set_place` it.
+    origin. Make it at `(0, 0, 0)`, then `set_place` it. The exception is
+    a thing that turns about an edge (a door, a lid): put that edge at the
+    origin, so yaw turns it there (see the door recipe).
 11. **Ground height comes from the terrain you made.** Use your height
    function (`HeightField::height_at`, your own noise) or
    `world.cast_ray(...)` to place things on the ground.
@@ -286,7 +347,8 @@ and `params`; return `color` (alpha used with `.see_through()`), `normal`,
 
 | You want | Look at |
 |---|---|
-| A starting point for a game | `examples/starter` (copy the folder) |
+| A new game or example in this repo | `python tools/new_example.py <name> "<what it shows>"` (makes the crate from the skeleton above and adds it everywhere it must be listed) |
+| A finished small scene to copy from | `examples/starter` |
 | Terrain you can dig | README "Destruction", `examples/voxel_destruction` |
 | An endless streamed world | README "Huge streamed worlds", `examples/open_world` |
 | Physics, throwing, explosions | README "Physics", `examples/physics` |
@@ -321,11 +383,13 @@ The API docs are in the code: `cargo doc -p engine --open`, or read the
   `cargo test -p engine` on Windows and Linux, and the verify runs.
 - Raise the version by exactly 0.001 per merge:
   `python tools/bump_version.py "What this brings, in plain words"`.
-- A new runnable example goes into the workspace `Cargo.toml`, the README
-  Examples table, the "Where to find things" table above and, when it can
-  check itself, a verify step in `.github/workflows/ci.yml`; variants with
-  environment settings go into `run_examples.py` (`VARIANTS`). Examples call
-  `world.set_vsync(false)`.
+- Start a new runnable example with `python tools/new_example.py <name>
+  "<what it shows>" --find "<a 'You want' line>"`: it adds the crate to the
+  workspace `Cargo.toml`, the README Examples table, the "Where to find
+  things" table above and a verify step in `.github/workflows/ci.yml`
+  (`--no-ci` when it cannot check itself). Variants with environment
+  settings go into `run_examples.py` (`VARIANTS`). Examples call
+  `world.set_vsync(false)` (or `Settings::vsync(false)`).
 - A new feature gets a README section and, if agents will reach for it, a
   compiled snippet here (this file is a doctest).
 - Fix bugs with a test that fails before the fix

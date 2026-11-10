@@ -213,19 +213,8 @@ fn main() -> EngineResult<()> {
             }
         }
 
-        // Follow camera, pulled in when a wall is between it and the player
-        // (a fat ray from the head back towards where the camera wants to be).
-        let head = feet + Vec3::Y * 1.6;
-        let back = Vec3::new(
-            -game.yaw.to_radians().sin(),
-            0.0,
-            -game.yaw.to_radians().cos(),
-        );
-        let want = back * 6.0 + Vec3::Y * 1.4;
-        let room = world
-            .cast_sphere(head, want, 0.3, want.length())
-            .map_or(1.0, |hit| hit.distance / want.length());
-        world.look_follow(feet, game.yaw, (6.0 * room).max(1.5), 3.0);
+        // Follow camera, pulled in when a wall is between it and the player.
+        world.look_follow_entity(player, game.yaw, 6.0, 3.0)?;
 
         // The HUD: text in the corners, a bar, a hint at the bottom.
         frame

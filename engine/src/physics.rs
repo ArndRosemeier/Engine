@@ -867,10 +867,23 @@ impl Physics {
     /// First body or ground along a ray. Ground means the colliders physics
     /// has built so far; the world combines this with terrain rays.
     pub fn cast_ray(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<RayHit> {
+        self.cast_ray_ignoring(origin, dir, max, None)
+    }
+
+    /// [`Self::cast_ray`] that passes through `ignore` (a body or character).
+    pub fn cast_ray_ignoring(
+        &self,
+        origin: Vec3,
+        dir: Vec3,
+        max: f32,
+        ignore: Option<EntityId>,
+    ) -> Option<RayHit> {
         let dir = dir.try_normalize()?;
         let ray = Ray::new(origin, dir);
-        let skip_ground =
-            |_: ColliderHandle, c: &rapier3d::prelude::Collider| c.user_data != GROUND_TAG;
+        let ignore_raw = ignore.map(|id| id.raw());
+        let skip_ground = |_: ColliderHandle, c: &rapier3d::prelude::Collider| {
+            c.user_data != GROUND_TAG && Some(c.user_data as u64) != ignore_raw
+        };
         let filter = QueryFilter::default()
             .exclude_sensors()
             .predicate(&skip_ground);

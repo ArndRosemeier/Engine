@@ -129,11 +129,25 @@ impl World {
         direction: impl Into<Vec3>,
         max_distance: f32,
     ) -> Option<crate::physics::RayHit> {
+        self.cast_ray_ignoring(origin, direction, max_distance, None)
+    }
+
+    /// [`Self::cast_ray`] that passes through one entity's body or
+    /// character, such as the player a ray starts inside.
+    pub fn cast_ray_ignoring(
+        &self,
+        origin: impl Into<Vec3>,
+        direction: impl Into<Vec3>,
+        max_distance: f32,
+        ignore: impl Into<Option<EntityId>>,
+    ) -> Option<crate::physics::RayHit> {
         let (origin, dir) = (origin.into(), direction.into().try_normalize()?);
         if !origin.is_finite() || !max_distance.is_finite() || max_distance <= 0.0 {
             return None;
         }
-        let body = self.physics.cast_ray(origin, dir, max_distance);
+        let body = self
+            .physics
+            .cast_ray_ignoring(origin, dir, max_distance, ignore.into());
         let reach = body.map_or(max_distance, |h| h.distance);
         let ground = self.ground_ray(origin, dir, reach);
         match (body, ground) {
@@ -363,6 +377,20 @@ impl World {
         radius: f32,
         max_distance: f32,
     ) -> Option<crate::physics::RayHit> {
+        self.cast_sphere_ignoring(origin, direction, radius, max_distance, None)
+    }
+
+    /// [`Self::cast_sphere`] that passes through one entity's body or
+    /// character: a cast from the player's head does not hit the player.
+    pub fn cast_sphere_ignoring(
+        &self,
+        origin: impl Into<Vec3>,
+        direction: impl Into<Vec3>,
+        radius: f32,
+        max_distance: f32,
+        ignore: impl Into<Option<EntityId>>,
+    ) -> Option<crate::physics::RayHit> {
+        let ignore = ignore.into();
         let (origin, dir) = (origin.into(), direction.into().try_normalize()?);
         if !origin.is_finite()
             || !max_distance.is_finite()
@@ -372,7 +400,9 @@ impl World {
         {
             return None;
         }
-        let body = self.physics.cast_ball(origin, dir, radius, max_distance);
+        let body = self
+            .physics
+            .cast_ball(origin, dir, radius, max_distance, ignore);
         // The ground: a ray from the centre, pulled back by how far the
         // ball reaches towards the surface along the ray.
         let ground = self
