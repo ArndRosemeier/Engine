@@ -3798,3 +3798,167 @@ mod hud_and_labels {
         });
     }
 }
+
+#[cfg(test)]
+mod anim_graphs {
+    use crate::anim::AnimatedModel;
+    use crate::anim_graph::{AnimGraph, AnimState, When};
+    use crate::place::Place;
+    use crate::world::{EntityId, World};
+    use std::sync::Arc;
+
+    fn character() -> Option<Arc<AnimatedModel>> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../examples/model_viewer/assets/character.glb"
+        );
+        let examples = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples");
+        match AnimatedModel::load_with(path, examples, &crate::limits::EngineLimits::default()) {
+            Ok(m) => Some(Arc::new(m)),
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                None
+            }
+        }
+    }
+
+    fn graph() -> AnimGraph {
+        AnimGraph::new("idle")
+            .state(AnimState::looped("idle", "idle"))
+            .state(AnimState::looped("walk", "walk").match_speed("speed", 1.4))
+            .state(AnimState::once("attack", "sword attack").then("idle"))
+            .transition("idle", "walk", When::above("speed", 0.2))
+            .transition("walk", "idle", When::below("speed", 0.1))
+            .transition_any("attack", When::trigger("attack"))
+            .blend(0.1)
+            .event("walk", 0.1, "footstep")
+    }
+
+    fn setup() -> Option<(World, EntityId)> {
+        let model = character()?;
+        let mut world = World::default();
+        let id = world
+            .spawn_animated_shared(model, Place::default())
+            .unwrap();
+        world.set_anim_graph(id, graph()).unwrap();
+        Some((world, id))
+    }
+
+    fn run(world: &mut World, seconds: f32) {
+        for _ in 0..(seconds * 60.0).round() as usize {
+            world.tick_animations(1.0 / 60.0);
+        }
+    }
+
+    #[test]
+    fn values_move_the_graph_between_states() {
+        let Some((mut world, id)) = setup() else {
+            return;
+        };
+        assert_eq!(world.anim_state(id), Some("idle"));
+        world.set_anim_value(id, "speed", 1.4).unwrap();
+        run(&mut world, 0.1);
+        assert_eq!(world.anim_state(id), Some("walk"));
+        assert_eq!(
+            world.animated_entity(id).unwrap().animator().clip_name(),
+            "walk"
+        );
+        world.set_anim_value(id, "speed", 0.0).unwrap();
+        run(&mut world, 0.1);
+        assert_eq!(world.anim_state(id), Some("idle"));
+    }
+
+    #[test]
+    fn a_trigger_plays_a_clip_once_and_goes_on() {
+        let Some((mut world, id)) = setup() else {
+            return;
+        };
+        world.anim_trigger(id, "attack").unwrap();
+        run(&mut world, 0.05);
+        assert_eq!(world.anim_state(id), Some("attack"));
+        let length = world
+            .animated_entity(id)
+            .unwrap()
+            .animator()
+            .clip_duration()
+            .unwrap();
+        run(&mut world, length * 0.5);
+        assert_eq!(world.anim_state(id), Some("attack"), "still swinging");
+        run(&mut world, length * 0.5 + 0.1);
+        assert_eq!(world.anim_state(id), Some("idle"), "then back to idle");
+        // The trigger was used up: it does not fire again.
+        run(&mut world, 0.5);
+        assert_eq!(world.anim_state(id), Some("idle"));
+    }
+
+    #[test]
+    fn clip_events_fire_once_per_loop() {
+        let Some((mut world, id)) = setup() else {
+            return;
+        };
+        world.set_anim_value(id, "speed", 1.4).unwrap();
+        run(&mut world, 0.02);
+        world.take_anim_events();
+        let length = world
+            .animated_entity(id)
+            .unwrap()
+            .animator()
+            .clip_duration()
+            .unwrap();
+        run(&mut world, length * 3.0);
+        let steps = world.take_anim_events();
+        assert_eq!(steps.len(), 3, "{steps:?}");
+        assert!(steps
+            .iter()
+            .all(|e| e.entity == id && e.name == "footstep" && e.state == "walk"));
+    }
+
+    #[test]
+    fn match_speed_plays_faster_when_moving_faster() {
+        let Some((mut world, id)) = setup() else {
+            return;
+        };
+        world.set_anim_value(id, "speed", 1.4).unwrap();
+        run(&mut world, 0.5);
+        let a = world.animated_entity(id).unwrap().animator().time();
+        world.set_anim_value(id, "speed", 2.8).unwrap();
+        run(&mut world, 0.25);
+        let b = world.animated_entity(id).unwrap().animator().time();
+        let d = world
+            .animated_entity(id)
+            .unwrap()
+            .animator()
+            .clip_duration()
+            .unwrap();
+        let moved = (b - a).rem_euclid(d);
+        assert!((moved - 0.5).abs() < 0.03, "twice the speed: {moved}");
+    }
+
+    #[test]
+    fn mistakes_are_named() {
+        let Some((mut world, id)) = setup() else {
+            return;
+        };
+        let e = world
+            .set_anim_value(id, "sped", 1.0)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("sped") && e.contains("speed"), "{e}");
+        assert!(world.anim_trigger(id, "jump").is_err());
+        assert!(world.set_anim_flag(id, "grounded", true).is_err());
+        let bad_clip = AnimGraph::new("idle").state(AnimState::looped("idle", "Idle"));
+        let e = world.set_anim_graph(id, bad_clip).unwrap_err().to_string();
+        assert!(e.contains("\"Idle\"") && e.contains("idle"), "{e}");
+        let bad_state = graph().transition("walk", "run", When::above("speed", 3.0));
+        assert!(world
+            .set_anim_graph(id, bad_state)
+            .unwrap_err()
+            .to_string()
+            .contains("run"));
+        assert!(world.set_anim_graph(id, AnimGraph::new("x")).is_err());
+        let plain = world.spawn(crate::mesh::Mesh::default());
+        assert!(world.set_anim_graph(plain, graph()).is_err());
+        // The good graph still runs.
+        assert_eq!(world.anim_state(id), Some("idle"));
+    }
+}

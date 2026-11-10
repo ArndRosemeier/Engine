@@ -84,6 +84,9 @@ jobs:
       - name: gameplay (character, door, stairs, coins, rope)
         run: python3 tools/verify.py gameplay --frames 600 --width 640 --height 360
 
+      - name: anim_states (state machine, clip events)
+        run: python3 tools/verify.py anim_states --frames 780 --width 640 --height 360
+
       - name: Keep the reports and screenshots
         if: always()
         uses: actions/upload-artifact@v4

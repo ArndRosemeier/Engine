@@ -446,6 +446,30 @@ blades, glass or effects out; `sole_points(id)` says where both soles are, for
 checks. Legs are found by bone name (UE, Mixamo, Blender rigs). See
 `examples/characters`.
 
+**Animation state machines:** say which clip plays when, instead of calling
+`play_animation` from game code. States play a clip looped or once
+(`.then("idle")` when it ends); transitions fire on values, flags and
+triggers the game sets; clip events report moments such as footsteps.
+```rust,ignore
+let graph = AnimGraph::new("idle")
+    .state(AnimState::looped("idle", "idle"))
+    .state(AnimState::looped("walk", "walk").match_speed("speed", 1.4))
+    .state(AnimState::once("attack", "sword attack").then("idle"))
+    .transition("idle", "walk", When::above("speed", 0.2))
+    .transition("walk", "idle", When::below("speed", 0.15))
+    .transition_any("attack", When::trigger("attack")).blend(0.1)
+    .event("walk", 0.0, "footstep");
+world.set_anim_graph(hero, graph)?;
+world.set_anim_value(hero, "speed", speed)?;   // every frame
+world.anim_trigger(hero, "attack")?;           // once, on a key press
+for e in world.take_anim_events() { /* e.entity, e.name, e.state */ }
+```
+`match_speed` plays the clip at the real speed so feet don't slide;
+`When::flag`, `When::Finished` and `When::all([...])` cover the rest; the
+first transition that holds wins, one per frame. `world.anim_state(id)` says
+where it is. Misspelt states, clips or value names are errors that list the
+right ones. See `examples/anim_states`.
+
 **Navigation (AI walking):** `world.build_nav(min, max, NavSettings::default())?`
 works out where characters can walk: ground, floors, steps and bridges made of
 fixed bodies, several levels above each other, kept a radius away from walls
@@ -700,6 +724,7 @@ cargo run --release -p <name>
 | `texgen` | The texture layers (`ENGINE_TEXGEN_FAMILY=natural/ground/facade/roof/medieval`) |
 | `voxel_destruction` | Digging terrain and shattering towers; K saves, L loads |
 | `lamps` | A hamlet at night: street lamps, a camp fire, lit windows, a lantern walker and a sweeping searchlight, all casting shadows (L your own lantern, T shadows, N/M the hour) |
+| `anim_states` | An animation state machine: idle, walk, jog, sword attack and talk chosen by rules on speed, a flag and a trigger; footstep sounds from clip events |
 | `characters` | Walk, run and idle blending into each other, speed-matched; feet planted on stone steps by foot IK (I toggles IK, B blending) |
 | `navigation` | Villagers find their own way around houses, walls, a fountain and crates and up stairs to a terrace; click sends everyone there, N shows the walkable area |
 | `prefabs` | Carts built from parts driving with spinning wheels, a windmill turning its sails, a lantern carried in a hand; C drops carts that tumble whole, X removes them |

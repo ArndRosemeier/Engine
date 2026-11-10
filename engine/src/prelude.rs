@@ -1,6 +1,7 @@
 //! Everyday imports for the friendly API.
 
 pub use crate::anim::{AnimatedModel, AnimationProfile, FootIk, Locomotion};
+pub use crate::anim_graph::{AnimEvent, AnimGraph, AnimState, When};
 pub use crate::audio::{
     Acoustics, Audio, Bus, ClipId, MusicTrack, Play, PlaySound, Reverb, Sound, SoundId, Stock,
     VoiceId,

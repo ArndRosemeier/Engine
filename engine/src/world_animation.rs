@@ -23,6 +23,7 @@ impl World {
             id,
             AnimatedEntity {
                 animator,
+                graph: None,
                 transform: place.to_matrix(),
                 space: self.spawn_space,
             },
@@ -143,6 +144,12 @@ impl World {
     /// Advance all skinned clip clocks (call once per frame before render sync).
     pub fn tick_animations(&mut self, dt: f32) {
         use rayon::prelude::*;
+        // State machines pick this frame's clip and speed first.
+        for e in self.animated.values_mut() {
+            if let Some(g) = e.graph.as_mut() {
+                g.step(&mut e.animator);
+            }
+        }
         // Each clock is its own: on the frame's threads when there are many.
         let mut all: Vec<&mut AnimatedEntity> = self.animated.values_mut().collect();
         if all.len() >= ANIM_PARALLEL_CLOCKS {
@@ -153,7 +160,86 @@ impl World {
                 e.animator.tick(dt);
             }
         }
+        // Clip events, in spawn order so runs repeat exactly.
+        const MAX_PENDING_EVENTS: usize = 4096;
+        for id in &self.animated_order {
+            if let Some(e) = self.animated.get_mut(id) {
+                if let Some(g) = e.graph.as_mut() {
+                    g.events(*id, &e.animator, &mut self.anim_events);
+                }
+            }
+        }
+        if self.anim_events.len() > MAX_PENDING_EVENTS {
+            let extra = self.anim_events.len() - MAX_PENDING_EVENTS;
+            self.anim_events.drain(..extra);
+        }
         self.tick_foot_ik(dt);
+    }
+
+    /// Let a state machine choose `id`'s clips (see [`AnimGraph`]): it
+    /// starts in the graph's start state. Errors name any state, clip or
+    /// value the graph gets wrong. Replaces a graph set before; while one
+    /// runs, don't also call `play_animation` or `set_locomotion`.
+    pub fn set_anim_graph(&mut self, id: EntityId, graph: AnimGraph) -> EngineResult<()> {
+        let e = self.animated.get_mut(&id).ok_or_else(|| {
+            EngineError::InvalidValue(format!(
+                "set_anim_graph: entity {id} is not animated (spawn_animated)"
+            ))
+        })?;
+        e.graph = Some(Box::new(crate::anim_graph::AnimGraphRun::start(
+            graph,
+            &mut e.animator,
+        )?));
+        Ok(())
+    }
+
+    /// Stop the state machine; the clip playing keeps playing.
+    pub fn remove_anim_graph(&mut self, id: EntityId) {
+        if let Some(e) = self.animated.get_mut(&id) {
+            e.graph = None;
+            e.animator.set_speed(1.0);
+        }
+    }
+
+    fn graph_of(&mut self, id: EntityId) -> EngineResult<&mut crate::anim_graph::AnimGraphRun> {
+        self.animated
+            .get_mut(&id)
+            .and_then(|e| e.graph.as_deref_mut())
+            .ok_or_else(|| {
+                EngineError::InvalidValue(format!(
+                    "entity {id} has no anim graph (set_anim_graph first)"
+                ))
+            })
+    }
+
+    /// Set a number the graph's conditions read ("speed").
+    pub fn set_anim_value(&mut self, id: EntityId, name: &str, value: f32) -> EngineResult<()> {
+        self.graph_of(id)?.set_value(name, value)
+    }
+
+    /// Set a yes/no the graph's conditions read ("grounded").
+    pub fn set_anim_flag(&mut self, id: EntityId, name: &str, on: bool) -> EngineResult<()> {
+        self.graph_of(id)?.set_flag(name, on)
+    }
+
+    /// Fire a one-off trigger ("attack"). It is used by the next frame's
+    /// transitions and dropped if none of them takes it.
+    pub fn anim_trigger(&mut self, id: EntityId, name: &str) -> EngineResult<()> {
+        self.graph_of(id)?.trigger(name)
+    }
+
+    /// The state `id`'s graph is in.
+    pub fn anim_state(&self, id: EntityId) -> Option<&str> {
+        self.animated
+            .get(&id)?
+            .graph
+            .as_deref()
+            .map(|g| g.state_name())
+    }
+
+    /// Clip events ("footstep") since the last call, oldest first.
+    pub fn take_anim_events(&mut self) -> Vec<AnimEvent> {
+        std::mem::take(&mut self.anim_events)
     }
 
     /// Cross-fade time between clips for one animated entity (default 0.2 s,
