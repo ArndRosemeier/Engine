@@ -302,13 +302,18 @@ impl App {
             .expect("UI backend must exist before redraw");
 
         // A locked pointer means the game owns the mouse, so egui's
-        // hover state must not swallow look and movement input.
+        // hover state must not swallow look and movement input. Otherwise
+        // the UI takes only what it uses: the keys while a text field has
+        // focus, the mouse while the pointer is over a panel. A pointer
+        // resting on a label must not eat the game's keys.
         let mut input = self.input.clone();
-        if !self.world.bind_listen()
-            && !self.pointer_locked
-            && (ui_backend.wants_keyboard_input() || ui_backend.wants_pointer_input())
-        {
-            input = Input::new();
+        if !self.world.bind_listen() && !self.pointer_locked {
+            if ui_backend.wants_keyboard_input() {
+                input.clear_keys();
+            }
+            if ui_backend.wants_pointer_input() {
+                input.clear_pointer();
+            }
         }
         if input_log() {
             eprintln!(

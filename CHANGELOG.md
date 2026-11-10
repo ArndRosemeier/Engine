@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.044 (2026-11-10)
+
+- Tab and the arrow keys belong to the game unless a UI text field has focus; a pointer resting on a panel no longer swallows the game's keys
+
 ## 0.043 (2026-11-10)
 
 - Agent guide: the game skeleton walks a character, picks up coins with a trigger and shows a HUD; compiled recipes for HUD, world text, zones, doors, crates and sounds
