@@ -259,31 +259,77 @@ impl Renderer {
     }
 
     /// Pipelines for new custom materials, params for changed ones.
+    ///
+    /// A new material's two pipelines compile on a worker thread (a driver
+    /// compile can take tens of milliseconds); things wearing it are drawn
+    /// from the frame it is ready. Fixed-step runs (verify, screenshots)
+    /// wait for it, so their frames stay the same every run.
     fn sync_custom_materials(&mut self, world: &World) {
         self.gpu_custom
+            .retain(|id, _| world.custom_materials.contains_key(id));
+        self.custom_compiling
             .retain(|id, _| world.custom_materials.contains_key(id));
         if world.custom_materials.is_empty() {
             return;
         }
         let layout = self
             .custom_params_layout
-            .get_or_insert_with(|| pipeline::custom_params_layout(&self.device));
+            .get_or_insert_with(|| pipeline::custom_params_layout(&self.device))
+            .clone();
+        for (id, (material, _)) in &world.custom_materials {
+            if self.gpu_custom.contains_key(id) || self.custom_compiling.contains_key(id) {
+                continue;
+            }
+            let device = self.device.clone();
+            let scene = self.pipelines.bind_layout.clone();
+            let albedo = self.pipelines.albedo_layout.clone();
+            let params = layout.clone();
+            let material = material.clone();
+            let job = std::thread::Builder::new()
+                .name("engine-custom-material".into())
+                .spawn(move || {
+                    pipeline::create_custom_material(
+                        &device,
+                        HDR_FORMAT,
+                        [&scene, &albedo],
+                        &params,
+                        &material,
+                    )
+                })
+                .expect("spawn custom material compile thread");
+            self.custom_compiling.insert(*id, job);
+        }
+        let ready: Vec<_> = self
+            .custom_compiling
+            .iter()
+            .filter(|(_, job)| self.wait_for_workers || job.is_finished())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ready {
+            let job = self.custom_compiling.remove(&id).expect("listed above");
+            let gpu = match job.join() {
+                Ok(gpu) => gpu,
+                // A WGSL mistake is caught by `add_material`; a panic here is a bug.
+                Err(panic) => std::panic::resume_unwind(panic),
+            };
+            self.gpu_custom.insert(id, gpu);
+        }
         for (id, (material, revision)) in &world.custom_materials {
-            let gpu = self.gpu_custom.entry(*id).or_insert_with(|| {
-                pipeline::create_custom_material(
-                    &self.device,
-                    HDR_FORMAT,
-                    &self.pipelines,
-                    layout,
-                    material,
-                )
-            });
+            let Some(gpu) = self.gpu_custom.get_mut(id) else {
+                continue;
+            };
             if gpu.revision != *revision {
                 self.queue
                     .write_buffer(&gpu.params, 0, bytemuck::cast_slice(&material.params));
                 gpu.revision = *revision;
             }
         }
+    }
+
+    /// Wait for work on other threads (custom material compiles) instead of
+    /// drawing without it: fixed-step runs want the same frames every time.
+    pub fn set_wait_for_workers(&mut self, wait: bool) {
+        self.wait_for_workers = wait;
     }
 
     pub(super) fn sync_entity_mesh(&mut self, id: EntityId, entity: &Entity) {

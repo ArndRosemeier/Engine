@@ -42,6 +42,11 @@ struct App {
     input: Input,
     start: Instant,
     last: Instant,
+    /// When the last frame's work ended, to see time lost between frames
+    /// (window events, the OS) in the hitch log.
+    frame_done_at: Option<Instant>,
+    /// Time spent resizing the swapchain since the last frame (ms).
+    resize_ms: f32,
     frame_index: u32,
     first_update_done: bool,
     screenshot_path: Option<PathBuf>,
@@ -118,6 +123,8 @@ impl App {
             input: Input::new(),
             start: now,
             last: now,
+            frame_done_at: None,
+            resize_ms: 0.0,
             frame_index: 0,
             first_update_done: false,
             screenshot_path,
@@ -216,7 +223,11 @@ impl App {
 
     /// One whole frame: input, the game's update, simulation, rendering.
     fn run_frame(&mut self, event_loop: &ActiveEventLoop) {
+        let between_ms = self.frame_done_at.map(elapsed_ms).unwrap_or(0.0);
+        let pace_t = Instant::now();
         self.pace_frame();
+        let pace_ms = elapsed_ms(pace_t);
+        let resize_ms = std::mem::take(&mut self.resize_ms);
         let now = Instant::now();
         let cpu_dt = (now - self.last).as_secs_f32();
         self.last = now;
@@ -524,6 +535,9 @@ impl App {
                 anim_ms,
                 sync_ms,
                 render_ms,
+                between_ms,
+                pace_ms,
+                resize_ms,
                 steps: engine_spans,
             };
             if self.frame_index < 5 && crate::render::pipeline_cache::log_enabled() {
@@ -536,7 +550,7 @@ impl App {
                     phases.render_ms
                 );
             }
-            if phases.work_ms() >= self.hitch_ms {
+            if phases.work_ms() + phases.between_ms >= self.hitch_ms {
                 if let Some(path) = self.world.hitch_log() {
                     emit_hitch(
                         path,
@@ -550,6 +564,7 @@ impl App {
                 }
             }
             self.frame_index += 1;
+            self.frame_done_at = Some(Instant::now());
             self.world.verify_next_frame();
             let queued = self.world.take_screenshot_queue();
             for path in queued {
@@ -656,6 +671,10 @@ impl ApplicationHandler for App {
         window.set_visible(true);
         window.request_redraw();
         self.window = Some(window);
+        let mut renderer = renderer;
+        // Fixed-step runs (verify, screenshots) must give the same frames
+        // every time: wait for work the renderer does on other threads.
+        renderer.set_wait_for_workers(self.clock.fixed.is_some() || self.screenshot_path.is_some());
         self.renderer = Some(renderer);
         self.ui_backend = Some(ui_backend);
         self.start = Instant::now();
@@ -714,7 +733,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(size) => {
                 if let Some(r) = self.renderer.as_mut() {
+                    let t = Instant::now();
                     r.resize(size);
+                    self.resize_ms += elapsed_ms(t);
                 }
             }
             // Frames run from `about_to_wait`: on Windows a burst of input
@@ -829,6 +850,12 @@ struct HitchPhases {
     anim_ms: f32,
     sync_ms: f32,
     render_ms: f32,
+    /// Time between the end of the last frame and the start of this one
+    /// (window events, swapchain resizes, the OS), the frame pacer's wait
+    /// within it not counted, and that wait and the resizes on their own.
+    between_ms: f32,
+    pace_ms: f32,
+    resize_ms: f32,
     /// Engine's own steps (ticks, sync and render stages) and their times.
     steps: Vec<(&'static str, f32)>,
 }
@@ -854,6 +881,12 @@ fn emit_hitch(
         "HITCH work={work_ms:.1}ms wall={wall_ms:.1}ms frame={frame_index} fps={fps:.0}  phases update={:.1} anim={:.1} sync={:.1} render={:.1}\n",
         phases.update_ms, phases.anim_ms, phases.sync_ms, phases.render_ms
     );
+    if phases.between_ms >= 1.0 || phases.resize_ms >= 1.0 {
+        text.push_str(&format!(
+            "  between frames {:.1}ms (resizing the window {:.1}ms; the pacer then waited {:.1}ms)\n",
+            phases.between_ms, phases.resize_ms, phases.pace_ms
+        ));
+    }
     let mut notes = notes.to_vec();
     notes.sort_by(|a, b| b.ms.total_cmp(&a.ms));
     for note in &notes {
