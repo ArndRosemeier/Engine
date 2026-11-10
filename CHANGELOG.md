@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.049 (2026-11-10)
+
+- Sun shadows keep their maps while the camera moves a little, so buildings are not drawn into them again every frame
+
 ## 0.048 (2026-11-10)
 
 - Long sessions stay fast: textures made for meshes are freed with the last mesh that uses them (a streamed world used to pile them up until the frame rate fell), and world.resource_census() counts what the world and GPU hold, to catch anything else that grows
