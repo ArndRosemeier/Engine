@@ -686,6 +686,28 @@ impl Renderer {
                 self.batch_water.push(prototype);
             }
         }
+        self.sort_transparent();
+    }
+
+    /// See-through draws far to near, so each blends over what is behind it.
+    fn sort_transparent(&mut self) {
+        use super::{back_to_front, TransparentDraw};
+        let centre = |gpu: &GpuMesh| gpu.bounds.map_or(glam::Vec3::ZERO, |b| b.centre);
+        let mut keyed: Vec<(glam::Vec3, TransparentDraw)> = self
+            .draw_transparent
+            .iter()
+            .map(|&id| (centre(&self.gpu_meshes[&id]), TransparentDraw::Mesh(id)))
+            .chain(self.batch_transparent.iter().map(|&id| {
+                (
+                    centre(&self.gpu_instance_batches[&id].gpu),
+                    TransparentDraw::Batch(id),
+                )
+            }))
+            .collect();
+        back_to_front(self.view_eye, &mut keyed);
+        self.transparent_order.clear();
+        self.transparent_order
+            .extend(keyed.into_iter().map(|(_, d)| d));
     }
 
     /// Rebuild material/pass membership only when static world state changes.

@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.041 (2026-11-10)
+
+- Glass and other see-through things are drawn far to near, so they look right from every side; new glass example
+
 ## 0.040 (2026-11-10)
 
 - Animation state machines: states, rules on speed, flags and triggers, and clip events like footsteps; new anim_states example

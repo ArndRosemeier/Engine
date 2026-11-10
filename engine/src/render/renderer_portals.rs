@@ -16,6 +16,7 @@ impl Renderer {
             return;
         }
         let saved_frustum = self.frustum;
+        let saved_eye = self.view_eye;
         let saved_jitter = std::mem::replace(&mut self.taa_jitter, glam::Vec2::ZERO);
         self.view_aspect = Some(1.0);
         // A probe sees every room, not just the ones the camera does.
@@ -90,6 +91,7 @@ impl Renderer {
         self.view_aspect = None;
         self.taa_jitter = saved_jitter;
         self.frustum = saved_frustum;
+        self.view_eye = saved_eye;
     }
 
     pub(super) fn render_portal_level<'a>(

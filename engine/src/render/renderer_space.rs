@@ -278,59 +278,66 @@ impl Renderer {
         } else {
             &self.pipelines.transparent
         });
-        for &id in &self.draw_transparent {
-            if !entity_in_space(world, id, space) {
-                continue;
+        // Far to near, single meshes and instanced batches together.
+        for i in 0..self.transparent_order.len() {
+            match self.transparent_order[i] {
+                TransparentDraw::Mesh(id) => {
+                    if !entity_in_space(world, id, space) {
+                        continue;
+                    }
+                    let entity = world.entity(id).expect("draw list is live");
+                    let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
+                    let albedo = entity
+                        .albedo
+                        .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
+                        .unwrap_or(&self.pipelines.white_albedo);
+                    pass.set_bind_group(1, albedo, &[]);
+                    if let Some((args, cslot)) =
+                        stamp.then(|| main_cull.occlusion_slot(id)).flatten()
+                    {
+                        submit_occluded_draw(pass, gpu, args, cslot, TRANSLUCENT_INDIRECT_OFFSET);
+                        continue;
+                    }
+                    submit_mesh_draw(
+                        pass,
+                        gpu,
+                        if use_cull {
+                            mesh_submit(&main_cull.compacted, id)
+                        } else {
+                            MeshSubmit::Direct
+                        },
+                        gpu.opaque_index_count as u32..gpu.index_count as u32,
+                        TRANSLUCENT_INDIRECT_OFFSET,
+                        &mut self.gpu_stats.indirect_draws,
+                    );
+                }
+                TransparentDraw::Batch(prototype) => {
+                    if !entity_in_space(world, prototype, space) {
+                        continue;
+                    }
+                    let entity = world
+                        .entity(prototype)
+                        .expect("batch draw prototype is live");
+                    let batch = self
+                        .gpu_instance_batches
+                        .get(&prototype)
+                        .expect("batch draw is synced");
+                    let gpu = &batch.gpu;
+                    let albedo = entity
+                        .albedo
+                        .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
+                        .unwrap_or(&self.pipelines.white_albedo);
+                    pass.set_bind_group(1, albedo, &[]);
+                    submit_batch_draw(
+                        pass,
+                        batch,
+                        use_cull.then(|| mesh_submit(&main_cull.compacted, prototype)),
+                        gpu.opaque_index_count as u32..gpu.index_count as u32,
+                        TRANSLUCENT_INDIRECT_OFFSET,
+                        &mut self.gpu_stats.indirect_draws,
+                    );
+                }
             }
-            let entity = world.entity(id).expect("draw list is live");
-            let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
-            let albedo = entity
-                .albedo
-                .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
-                .unwrap_or(&self.pipelines.white_albedo);
-            pass.set_bind_group(1, albedo, &[]);
-            if let Some((args, cslot)) = stamp.then(|| main_cull.occlusion_slot(id)).flatten() {
-                submit_occluded_draw(pass, gpu, args, cslot, TRANSLUCENT_INDIRECT_OFFSET);
-                continue;
-            }
-            submit_mesh_draw(
-                pass,
-                gpu,
-                if use_cull {
-                    mesh_submit(&main_cull.compacted, id)
-                } else {
-                    MeshSubmit::Direct
-                },
-                gpu.opaque_index_count as u32..gpu.index_count as u32,
-                TRANSLUCENT_INDIRECT_OFFSET,
-                &mut self.gpu_stats.indirect_draws,
-            );
-        }
-        for &prototype in &self.batch_transparent {
-            if !entity_in_space(world, prototype, space) {
-                continue;
-            }
-            let entity = world
-                .entity(prototype)
-                .expect("batch draw prototype is live");
-            let batch = self
-                .gpu_instance_batches
-                .get(&prototype)
-                .expect("batch draw is synced");
-            let gpu = &batch.gpu;
-            let albedo = entity
-                .albedo
-                .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
-                .unwrap_or(&self.pipelines.white_albedo);
-            pass.set_bind_group(1, albedo, &[]);
-            submit_batch_draw(
-                pass,
-                batch,
-                use_cull.then(|| mesh_submit(&main_cull.compacted, prototype)),
-                gpu.opaque_index_count as u32..gpu.index_count as u32,
-                TRANSLUCENT_INDIRECT_OFFSET,
-                &mut self.gpu_stats.indirect_draws,
-            );
         }
 
         pass.set_pipeline(if portal_mask {

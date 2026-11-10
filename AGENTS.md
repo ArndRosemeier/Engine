@@ -179,6 +179,7 @@ python tools/verify.py <package> --reference refs/<package>.png
 | HUD text, health bars, menus, crosshair | README "Game UI (HUD)", `examples/gameplay` |
 | Names over things, damage numbers | README "Text in the world", `examples/gameplay` |
 | Animation states (idle/walk/attack rules, footstep events) | README "Animation state machines", `examples/anim_states` |
+| Glass and other see-through things | README "See-through things", `examples/glass` |
 | Characters, animation, foot IK | README "Character animation", `examples/characters` |
 | AI walking around obstacles | README "Navigation", `examples/navigation` |
 | Many people | README "Crowds", `examples/crowds` |

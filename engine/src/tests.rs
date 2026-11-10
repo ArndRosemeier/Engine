@@ -440,8 +440,11 @@ fn terrain_stream_budgets_main_thread_work() {
 
     let t0 = Instant::now();
     stream.sync(&mut world, focus);
+    // The budget itself is checked by the counts below. The clock only
+    // catches a gross regression: shared CI runners running every test at
+    // once made a tight bound (750 ms) fail with nothing wrong.
     assert!(
-        t0.elapsed() < Duration::from_millis(750),
+        t0.elapsed() < Duration::from_secs(5),
         "first sync should not build the whole ring on the main thread"
     );
     // Focus chunk is forced in; at most one extra upload same frame.
@@ -3960,5 +3963,47 @@ mod anim_graphs {
         assert!(world.set_anim_graph(plain, graph()).is_err());
         // The good graph still runs.
         assert_eq!(world.anim_state(id), Some("idle"));
+    }
+}
+
+#[cfg(test)]
+mod transparency_order {
+    use crate::render::{back_to_front, TransparentDraw};
+    use crate::world::EntityId;
+    use glam::Vec3;
+
+    #[test]
+    fn see_through_draws_go_far_to_near() {
+        let id = |n| EntityId::from_raw(n);
+        let mut draws = vec![
+            (Vec3::new(0.0, 0.0, 2.0), TransparentDraw::Mesh(id(1))),
+            (Vec3::new(0.0, 0.0, 9.0), TransparentDraw::Batch(id(2))),
+            (Vec3::new(0.0, 0.0, 5.0), TransparentDraw::Mesh(id(3))),
+            (Vec3::new(0.0, 5.0, 0.0), TransparentDraw::Mesh(id(4))),
+        ];
+        back_to_front(Vec3::ZERO, &mut draws);
+        let order: Vec<_> = draws.iter().map(|d| d.1).collect();
+        assert_eq!(
+            order,
+            vec![
+                TransparentDraw::Batch(id(2)),
+                TransparentDraw::Mesh(id(3)),
+                TransparentDraw::Mesh(id(4)),
+                TransparentDraw::Mesh(id(1)),
+            ],
+            "equal distances keep entity order"
+        );
+        // From the other side, the order turns around.
+        back_to_front(Vec3::new(0.0, 0.0, 12.0), &mut draws);
+        let order: Vec<_> = draws.iter().map(|d| d.1).collect();
+        assert_eq!(
+            order,
+            vec![
+                TransparentDraw::Mesh(id(4)),
+                TransparentDraw::Mesh(id(1)),
+                TransparentDraw::Mesh(id(3)),
+                TransparentDraw::Batch(id(2)),
+            ]
+        );
     }
 }
