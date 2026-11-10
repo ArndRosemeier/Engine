@@ -1185,6 +1185,20 @@ const CASCADE_LIGHT_COS: f32 = 0.999_96;
 /// again (its map then still covers what the cascade shades).
 const CASCADE_FOCUS_SHARE: f32 = 0.1;
 
+/// Whether a cascade drawn as `last` still serves for this light, camera
+/// focus and radius (its map is kept; only moving casters are redrawn).
+pub(crate) fn cascade_holds(last: &DrawnCascade, light: Vec3, focus: Vec3, radius: f32) -> bool {
+    (last.radius - radius).abs() <= 1e-3
+        && last.light.dot(light) >= CASCADE_LIGHT_COS
+        && last.focus.distance(focus) <= radius * CASCADE_FOCUS_SHARE
+}
+
+/// The half-size a cascade of `radius` is drawn with: a margin for the
+/// camera moving while the map is kept (see [`cascade_holds`]).
+pub(crate) fn cascade_reach(radius: f32) -> f32 {
+    radius * (1.0 + CASCADE_FOCUS_SHARE)
+}
+
 /// Whether sun cascade `index` is drawn this frame. `every` is its refresh
 /// interval; cascades past the first are staggered (the middle one on even
 /// frames, the far one on odd frames for an interval of 2), so they do not
@@ -1201,11 +1215,7 @@ pub(crate) fn cascade_due(
     let Some(last) = last else {
         return true;
     };
-    if every <= 1
-        || (last.radius - radius).abs() > 1e-3
-        || last.light.dot(light) < CASCADE_LIGHT_COS
-        || last.focus.distance(focus) > radius * CASCADE_FOCUS_SHARE
-    {
+    if every <= 1 || !cascade_holds(last, light, focus, radius) {
         return true;
     }
     let offset = index.saturating_sub(1) as u64;
@@ -1856,14 +1866,21 @@ impl ShadowGpu {
             let radius = ends[i];
             let last = self.cascade_drawn[i].as_ref();
             if cascade_due(frame, i, every[i], last, light, focus, radius) {
-                let vp = cascade_view_proj(focus, light, radius, self.map_size);
-                self.cascade_drawn[i] = Some(DrawnCascade {
-                    vp,
+                // A cascade that still covers the view keeps its matrix, so
+                // its static casters come from the cache and only moving
+                // ones are drawn; it is re-centred once the camera has moved
+                // a share of its radius (or the sun has turned).
+                let kept = last
+                    .copied()
+                    .filter(|l| cascade_holds(l, light, focus, radius));
+                let drawn = kept.unwrap_or_else(|| DrawnCascade {
+                    vp: cascade_view_proj(focus, light, cascade_reach(radius), self.map_size),
                     light,
                     focus,
                     radius,
                 });
-                queue.write_buffer(&self.cascade_bufs[i], 0, &cascade_bytes(vp, wind));
+                self.cascade_drawn[i] = Some(drawn);
+                queue.write_buffer(&self.cascade_bufs[i], 0, &cascade_bytes(drawn.vp, wind));
                 draw[i] = true;
             }
             mats[i] = self.cascade_drawn[i].expect("cascade drawn above").vp;
@@ -1997,6 +2014,38 @@ mod tests {
             40.0
         ));
         assert!(cascade_due(1, 1, 2, Some(&mid), light, focus, 50.0));
+    }
+
+    #[test]
+    fn a_kept_cascade_still_covers_its_radius_round_the_moved_camera() {
+        let light = Vec3::new(0.2, -1.0, 0.1).normalize();
+        let radius = 300.0;
+        let at = Vec3::new(10.0, 2.0, -4.0);
+        let drawn = DrawnCascade {
+            vp: cascade_view_proj(at, light, cascade_reach(radius), 2048),
+            light,
+            focus: at,
+            radius,
+        };
+        // The camera walked almost the share the map is kept for.
+        let moved = at + Vec3::new(radius * CASCADE_FOCUS_SHARE * 0.99, 0.0, 0.0);
+        assert!(cascade_holds(&drawn, light, moved, radius));
+        // Everything within the radius of where it is now is on the map.
+        let side = light.cross(Vec3::Z).normalize();
+        let up = light.cross(side).normalize();
+        for (a, b) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (0.7, 0.7)] {
+            let p = moved + (side * a + up * b) * radius;
+            let ndc = drawn.vp.project_point3(p);
+            assert!(
+                ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0,
+                "{p} off the map: {ndc}"
+            );
+        }
+        // A bit further, or a turned sun: re-centred.
+        let far = at + Vec3::new(radius * CASCADE_FOCUS_SHARE * 1.01, 0.0, 0.0);
+        assert!(!cascade_holds(&drawn, light, far, radius));
+        let turned = Vec3::new(0.25, -1.0, 0.1).normalize();
+        assert!(!cascade_holds(&drawn, turned, at, radius));
     }
 
     #[test]
