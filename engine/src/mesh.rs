@@ -953,7 +953,9 @@ impl Mesh {
         }
     }
 
-    /// Connect 3 or 4 existing points into a face.
+    /// Connect 3 or 4 existing points into a face. List them
+    /// counter-clockwise as seen from the side the face shows (its front);
+    /// the back is not drawn.
     pub fn add_face(&mut self, points: &[PointId]) -> EngineResult<()> {
         if points.len() != 3 && points.len() != 4 {
             return Err(EngineError::InvalidMesh(format!(
@@ -973,10 +975,12 @@ impl Mesh {
         Ok(())
     }
 
+    /// A triangle, counter-clockwise seen from its front (see [`Self::add_face`]).
     pub fn add_triangle(&mut self, a: PointId, b: PointId, c: PointId) -> EngineResult<()> {
         self.add_face(&[a, b, c])
     }
 
+    /// A quad, counter-clockwise seen from its front (see [`Self::add_face`]).
     pub fn add_quad(&mut self, a: PointId, b: PointId, c: PointId, d: PointId) -> EngineResult<()> {
         self.add_face(&[a, b, c, d])
     }

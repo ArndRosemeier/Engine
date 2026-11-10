@@ -335,6 +335,40 @@ impl World {
         );
     }
 
+    /// Third-person camera behind an entity (a player), pulled in when a
+    /// wall, a body or the ground is between the player's head and where
+    /// the camera wants to be, so it never looks through walls. Yaw in
+    /// degrees (0 = +Z), the direction the player faces; `distance` back
+    /// and `height` up, in metres. The entity itself is ignored.
+    pub fn look_follow_entity(
+        &mut self,
+        entity: EntityId,
+        yaw_degrees: f32,
+        distance: f32,
+        height: f32,
+    ) -> EngineResult<()> {
+        let feet = self.world_transform(entity)?.w_axis.truncate();
+        let head = feet + Vec3::Y * 1.4;
+        let yaw = yaw_degrees.to_radians();
+        let want = Vec3::new(-yaw.sin(), 0.0, -yaw.cos()) * distance + Vec3::Y * (height - 1.4);
+        let length = want.length();
+        let room = if length > 1e-3 {
+            self.cast_sphere_ignoring(head, want, 0.3, length, entity)
+                .map_or(1.0, |hit| (hit.distance / length).clamp(0.0, 1.0))
+        } else {
+            1.0
+        };
+        // Keep a little room so the camera does not touch the player.
+        let room = room.max(0.25 / distance.max(0.25));
+        self.look_follow(
+            feet,
+            yaw_degrees,
+            distance * room,
+            1.4 + (height - 1.4) * room,
+        );
+        Ok(())
+    }
+
     /// How far the camera helpers may see, in metres.
     ///
     /// The helpers rebuild the camera every frame, so a game that reaches into

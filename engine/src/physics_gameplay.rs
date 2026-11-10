@@ -334,10 +334,19 @@ impl Physics {
     /// Sweep a sphere from `origin` along unit `dir`; the first body or
     /// built ground collider it touches within `max`. `distance` is how far
     /// the sphere's centre travelled.
-    pub fn cast_ball(&self, origin: Vec3, dir: Vec3, radius: f32, max: f32) -> Option<RayHit> {
+    pub fn cast_ball(
+        &self,
+        origin: Vec3,
+        dir: Vec3,
+        radius: f32,
+        max: f32,
+        ignore: Option<EntityId>,
+    ) -> Option<RayHit> {
         let dir = dir.try_normalize()?;
-        let skip_ground =
-            |_: ColliderHandle, c: &rapier3d::prelude::Collider| c.user_data != GROUND_TAG;
+        let ignore_raw = ignore.map(|id| id.raw());
+        let skip_ground = |_: ColliderHandle, c: &rapier3d::prelude::Collider| {
+            c.user_data != GROUND_TAG && Some(c.user_data as u64) != ignore_raw
+        };
         let filter = QueryFilter::default()
             .exclude_sensors()
             .predicate(&skip_ground);
