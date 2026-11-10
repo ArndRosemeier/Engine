@@ -174,6 +174,7 @@ impl Renderer {
         if asked.1 != self.reupload_seen.1 {
             self.gpu_textures.clear();
             self.gpu_mesh_albedo.clear();
+            self.cutout_albedo.clear();
             self.gpu_materials.clear();
             self.synced_resource_epoch = u64::MAX;
             self.terrain_bundle_ids.clear();

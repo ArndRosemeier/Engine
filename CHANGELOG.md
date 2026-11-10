@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.028 (2026-11-10)
+
+- GPU shadows: shadow-casting meshes stay on the GPU; one compute pass culls them for every shadow view and writes draw-count multi-draws. ENGINE_GPU_SHADOWS=0 turns it off. Meshes whose texture has no see-through texels now cast shadows without the alpha test (one draw group instead of one per texture).
+
 ## 0.027 (2026-11-09)
 
 - GPU draw counts: the GPU packs each multi-draw group's visible meshes and counts them (multi_draw_indexed_indirect_count), so hidden meshes cost no draw. ENGINE_DRAW_COUNT=0 turns it off.
