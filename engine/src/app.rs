@@ -436,6 +436,7 @@ impl App {
             timed!(self, "tick.water", self.world.tick_water(dt));
             timed!(self, "tick.auto_quality", self.world.tick_auto_quality(dt));
             timed!(self, "tick.lods", self.world.tick_lods());
+            timed!(self, "tick.textures", self.world.tick_textures());
             timed!(self, "tick.sky", self.world.tick_sky());
             timed!(self, "tick.grading", self.world.tick_grading(dt));
             timed!(self, "tick.zfight_watch", self.world.tick_zfight_watch(dt));
@@ -524,6 +525,11 @@ impl App {
                 trace.end_frame(raw_dt * 1000.0);
             }
             let gpu = renderer.take_gpu_stats();
+            // The resource census, about twice a second (see crate::census).
+            if self.frame_index.is_multiple_of(CENSUS_EVERY_FRAMES) {
+                let census = renderer.gpu_census(u64::from(self.frame_index));
+                self.world.set_gpu_census(census);
+            }
             self.world
                 .set_occlusion_stats(crate::world::OcclusionStats {
                     tested: gpu.occlusion_tested,
@@ -817,6 +823,9 @@ fn input_log() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("ENGINE_INPUT_LOG").is_ok_and(|v| v.trim() != "0"))
 }
+
+/// Frames between two counts of what the renderer holds.
+const CENSUS_EVERY_FRAMES: u32 = 30;
 
 fn hitch_threshold_ms() -> EngineResult<f32> {
     match std::env::var("ENGINE_HITCH_MS") {

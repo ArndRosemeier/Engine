@@ -242,6 +242,12 @@ impl GeometryArena {
         })
     }
 
+    /// Pages in use.
+    pub fn page_count(&self) -> usize {
+        let pages = self.pages.lock().expect("geometry arena lock poisoned");
+        pages.pages.iter().flatten().count()
+    }
+
     /// Bytes of GPU memory the pages take, used or not.
     pub fn reserved_bytes(&self) -> u64 {
         let pages = self.pages.lock().expect("geometry arena lock poisoned");

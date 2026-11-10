@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.047 (2026-11-10)
+
+- Long sessions stay fast: textures made for meshes are freed with the last mesh that uses them (a streamed world used to pile them up until the frame rate fell), and world.resource_census() counts what the world and GPU hold, to catch anything else that grows
+
 ## 0.046 (2026-11-10)
 
 - Smoother loading: texture mip levels are made on the GPU (no CPU stall when a model or material first appears), custom material shaders compile on a worker thread, and the hitch log shows time lost between frames
