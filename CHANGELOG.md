@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.043 (2026-11-10)
+
+- Agent guide: the game skeleton walks a character, picks up coins with a trigger and shows a HUD; compiled recipes for HUD, world text, zones, doors, crates and sounds
+
 ## 0.042 (2026-11-10)
 
 - Custom materials: a game writes a small WGSL function for a surface (lava, holograms, force fields), with time and params it sets each frame; it is lit and shadowed like any mesh, and mistakes name the line

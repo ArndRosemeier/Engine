@@ -50,7 +50,7 @@ struct Coin {
 #[derive(Default)]
 struct Game {
     player: Option<EntityId>,
-    position: Vec3,
+    yaw: f32,
     score: u32,
 }
 
@@ -62,44 +62,51 @@ fn main() -> EngineResult<()> {
         if frame.first {
             // Setup runs once. Spawning here, not every frame.
             world.set_physical_sky(Some(PhysicalSky::at_hour(15.0)));
-            world.spawn(Shape::box_at((0.0, -0.05, 0.0), (40.0, 0.1, 40.0), rgb(90, 120, 70))?);
-            let player = world.spawn(Shape::box_at((0.0, 0.5, 0.0), (1.0, 1.0, 1.0), rgb(220, 160, 100))?);
+            // The ground: a mesh plus a fixed body, so the player stands on it.
+            let ground = world.spawn(Shape::box_at((0.0, 0.0, 0.0), (40.0, 0.2, 40.0), rgb(90, 120, 70))?);
+            world.set_place(ground, Place::new(0.0, -0.1, 0.0))?;
+            world.add_body(ground, Body::fixed().shape(BodyShape::Box(Vec3::new(20.0, 0.1, 20.0))))?;
+            // The player: a character controller walks it, slides along walls,
+            // climbs steps and falls. Its place is its feet.
+            let player = world.spawn(Shape::box_at((0.0, 0.9, 0.0), (0.6, 1.8, 0.6), rgb(220, 160, 100))?);
+            world.add_character(player, Character::default())?;
             game.player = Some(player);
-            // Game data on an entity: any struct of yours.
-            // Build the mesh around the origin and place the entity, so the
-            // entity's position is where the coin is.
+            // A coin: mesh made around the origin, then placed. A trigger on
+            // it reports when something walks in; the Coin component is game data.
             let coin = world.spawn(Shape::box_at((0.0, 0.0, 0.0), (0.4, 0.4, 0.4), rgb(240, 200, 40))?);
-            world.set_place(coin, Place::new(3.0, 0.3, 3.0))?;
+            world.set_place(coin, Place::new(3.0, 0.5, 3.0))?;
+            world.add_trigger(coin, Trigger::ball(0.6))?;
             world.insert(coin, Coin { value: 10 })?;
         }
+        let Some(player) = game.player else { return Ok(()) };
 
-        // Input and movement, scaled by frame.dt so speed does not depend on FPS.
-        let mut step = Vec3::ZERO;
-        if frame.input.down(Key::W) { step.z += 1.0; }
-        if frame.input.down(Key::S) { step.z -= 1.0; }
-        if frame.input.down(Key::A) { step.x -= 1.0; }
-        if frame.input.down(Key::D) { step.x += 1.0; }
-        game.position += step.normalize_or_zero() * 5.0 * frame.dt;
-        if let Some(player) = game.player {
-            world.set_place(player, Place::new(game.position.x, 0.0, game.position.z))?;
+        // Input: A/D turn, W/S walk (move_dir_xz matches the follow camera),
+        // Space jumps. walk takes a speed in m/s; the engine applies frame.dt.
+        game.yaw += frame.input.yaw_sign() * 90.0 * frame.dt;
+        world.walk(player, frame.input.move_dir_xz(game.yaw) * 5.0)?;
+        if frame.input.pressed(Key::Space) {
+            world.jump(player, 5.0)?;
         }
-        // Pick up coins within a metre; despawning removes their Coin too.
-        for coin in world.ids_with::<Coin>() {
-            let at = world.entity(coin)?.transform().w_axis.truncate();
-            if at.distance(Vec3::new(game.position.x, 0.3, game.position.z)) < 1.0 {
-                game.score += world.get::<Coin>(coin).map_or(0, |c| c.value);
-                world.despawn(coin);
+
+        // Coins: picked up when the player enters their trigger.
+        for e in world.take_trigger_events() {
+            if e.entered && e.other == player {
+                if let Some(coin) = world.get::<Coin>(e.trigger) {
+                    game.score += coin.value;
+                    world.despawn(e.trigger); // removes its Coin and trigger too
+                }
             }
         }
 
         // Camera: orbit, follow or first person, set every frame.
-        world.look_follow(game.position, 0.0, 8.0, 4.0);
+        let feet = world.world_transform(player)?.w_axis.truncate();
+        world.look_follow(feet, game.yaw, 6.0, 3.0);
 
-        // HUD text in a corner (bars, menus: README "Game UI"; full egui: frame.ui.ctx()).
+        // HUD: text, bars and menus in corners (README "Game UI"; full egui: frame.ui.ctx()).
         frame.ui.text(Anchor::TopLeft, format!("Score: {}", game.score));
 
         // Self-checks: a verify run fails if one is ever false (see below).
-        world.check("player stays on the field", game.position.length() < 20.0);
+        world.check("player stays above the ground", feet.y > -1.0);
         world.report("score", game.score);
         Ok(())
     })
@@ -132,6 +139,77 @@ python tools/verify.py <package> --reference refs/<package>.png
   in normal runs.
 - No display (Linux CI, containers): `tools/verify.py` uses `xvfb-run`; a
   software Vulkan driver (Mesa lavapipe) is enough.
+
+## Recipes for common game pieces
+
+Each function is compiled with the guide, so the calls are right. Call the
+`setup_*` ones inside `if frame.first`, the others every frame.
+
+```rust,no_run
+use engine::prelude::*;
+
+/// HUD: lines stack in each corner; bars, a crosshair, a pause menu.
+fn hud(frame: &Frame, health: f32, paused: &mut bool, world: &mut World) {
+    frame.ui.text(Anchor::TopLeft, "Find the key");
+    frame.ui.bar(Anchor::TopLeft, "Health", health, 100.0, rgb(200, 60, 60));
+    frame.ui.text_styled(Anchor::Bottom, "WASD walk, Space jump", 16.0, rgb(230, 230, 230));
+    frame.ui.crosshair();
+    if frame.input.pressed(Key::P) {
+        *paused = !*paused;
+    }
+    if *paused {
+        match frame.ui.menu("Paused", &["Resume", "Quit"]) {
+            Some(0) => *paused = false,
+            Some(1) => world.request_exit(),
+            _ => {}
+        }
+    }
+}
+
+/// Text in the world: a name that follows an entity, a number that rises and fades.
+fn setup_names(world: &mut World, orc: EntityId) -> EngineResult<()> {
+    world.set_label(orc, Label::new("Orc").size(16.0).color(rgb(255, 120, 90)))
+}
+fn show_damage(world: &mut World, at: Vec3, damage: u32) {
+    world.float_text(at + Vec3::Y * 2.0, format!("-{damage}"), rgb(255, 80, 60));
+}
+
+/// A zone: an invisible box that reports who walks in and out.
+fn setup_zone(world: &mut World) -> EngineResult<EntityId> {
+    world.spawn_trigger(Place::new(0.0, 1.0, 10.0), Trigger::cuboid((2.0, 1.0, 2.0)))
+}
+fn zone_events(world: &mut World, zone: EntityId, player: EntityId) -> bool {
+    let mut entered = false;
+    for e in world.take_trigger_events() {
+        entered |= e.trigger == zone && e.other == player && e.entered;
+    }
+    entered
+}
+
+/// A door on a hinge that a motor swings open, and a crate that physics owns.
+fn setup_door_and_crate(world: &mut World) -> EngineResult<()> {
+    let door = world.spawn(Shape::box_at((0.0, 0.0, 0.0), (1.0, 2.0, 0.1), rgb(120, 80, 50))?);
+    world.set_place(door, Place::new(5.0, 1.0, 0.0))?;
+    world.add_body(door, Body::dynamic().shape(BodyShape::Box(Vec3::new(0.5, 1.0, 0.05))))?;
+    world.pin(door, Joint::hinge(Vec3::Y).at((4.5, 1.0, 0.0)).limits(0.0, 100.0).motor(60.0, 50.0))?;
+
+    let crate_box = world.spawn(Shape::box_at((0.0, 0.0, 0.0), (0.8, 0.8, 0.8), rgb(150, 110, 70))?);
+    world.set_place(crate_box, Place::new(0.0, 3.0, 2.0))?; // place first, then the body
+    world.add_body(crate_box, Body::dynamic())?;
+    world.push(crate_box, Vec3::new(0.0, 2.0, 1.0))?; // from now on, move it by pushing
+    Ok(())
+}
+
+/// A sound where something happened.
+fn bang(world: &mut World, at: Vec3) {
+    world.play_sound(&Sound::stock(Stock::Explosion, 0), PlaySound::at(at));
+}
+# fn main() {}
+```
+
+For animated characters (clips chosen by rules on speed, flags and
+triggers, with footstep events) see `examples/anim_states`; for custom
+shader looks see the next section.
 
 ## A custom material
 
@@ -243,8 +321,13 @@ The API docs are in the code: `cargo doc -p engine --open`, or read the
   `cargo test -p engine` on Windows and Linux, and the verify runs.
 - Raise the version by exactly 0.001 per merge:
   `python tools/bump_version.py "What this brings, in plain words"`.
-- A new runnable example goes into `run_examples.py` (`VARIANTS`) and the
-  Examples table in the README. Examples call `world.set_vsync(false)`.
+- A new runnable example goes into the workspace `Cargo.toml`, the README
+  Examples table, the "Where to find things" table above and, when it can
+  check itself, a verify step in `.github/workflows/ci.yml`; variants with
+  environment settings go into `run_examples.py` (`VARIANTS`). Examples call
+  `world.set_vsync(false)`.
+- A new feature gets a README section and, if agents will reach for it, a
+  compiled snippet here (this file is a doctest).
 - Fix bugs with a test that fails before the fix
   (`engine/src/tests.rs` has physics, world and save tests without a GPU).
   Add a `world.check` to an example when a bug shows only in a running game.
