@@ -1,0 +1,651 @@
+//! Copying the world into GPU buffers each frame: entity meshes, instance batches, materials.
+//!
+//! Part of `impl Renderer`, split from `render/mod.rs` by topic.
+
+use super::*;
+
+impl Renderer {
+    pub fn sync_world(&mut self, world: &mut World) {
+        let mut t = std::time::Instant::now();
+        self.reupload_if_asked(world);
+        self.rebuild_if_asked(world);
+        self.apply_present_mode(world.vsync());
+        self.frame_no += 1;
+        if self.frame_no.is_multiple_of(512) {
+            // Forget moves long settled (the entries only matter for a while).
+            let frame = self.frame_no;
+            self.moved_at
+                .retain(|_, at| frame - *at <= STATIC_SHADOW_SETTLE);
+        }
+        if let Some((start, words)) = world.take_element_upload() {
+            // Building elements fell: static shadows change.
+            self.static_shadow_epoch += 1;
+            let words = &words[..words.len().min(ELEMENT_STATE_WORDS.saturating_sub(start))];
+            if !words.is_empty() {
+                self.queue.write_buffer(
+                    &self.shadow.element_states,
+                    (start * 4) as u64,
+                    bytemuck::cast_slice(words),
+                );
+            }
+        }
+        self.ribbons.sync(&self.queue, world.ribbon_frame());
+        let (particle_commands, particle_dt, particle_time) = world.particles_frame();
+        self.particles
+            .sync(&self.queue, particle_commands, particle_dt, particle_time);
+        self.cpu_spans.mark("sync.effects", &mut t);
+        self.gpu_stats = GpuFrameStats::default();
+        self.gpu_stats.entities =
+            u32::try_from(world.entity_count()).expect("entity count exceeds u32");
+        self.gpu_stats.animated = u32::try_from(world.animated_entities().count())
+            .expect("animated entity count exceeds u32");
+        self.gpu_stats.instance_submit = world.instance_submit();
+        if self.synced_resource_epoch != world.resource_epoch()
+            || self.terrain_origin != world.render_origin()
+        {
+            self.sync_textures_and_materials(world);
+            self.synced_resource_epoch = world.resource_epoch();
+            self.materials_synced += 1;
+        }
+
+        if let Some(proc) = world.proc_terrain() {
+            let format = HDR_FORMAT;
+            match self.clipmap.as_mut() {
+                Some(clip) => clip.ensure_config(&self.device, &self.queue, &proc.config),
+                None => {
+                    let pipes = match self.clipmap_pipelines.get() {
+                        Some(pipes) => pipes.clone(),
+                        None => std::sync::Arc::new(clipmap::ClipmapPipelines::new(
+                            &self.device,
+                            format,
+                            &self.shadow.resource_layout,
+                        )),
+                    };
+                    self.clipmap = Some(ClipmapRenderer::new(
+                        &self.device,
+                        &self.queue,
+                        pipes,
+                        proc.config.clone(),
+                    ));
+                }
+            }
+            if let Some(clip) = self.clipmap.as_mut() {
+                clip.ensure_layers(&self.device, &self.queue, proc.layers);
+                let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+                let vp = taa::jittered(world.camera().view_projection(aspect), self.taa_jitter);
+                let light_dir = world.light().direction.normalize_or_zero();
+                let torch_color = world.torch().map(|t| t.color.to_vec3()).unwrap_or_default();
+                let torch_radius_m = world.torch().map(|t| t.radius_m.max(0.0)).unwrap_or(0.0);
+                let torch_curve = world.torch().map(|t| t.curve.max(0.05)).unwrap_or(2.0);
+                clip.prepare(
+                    &self.queue,
+                    vp,
+                    light_dir,
+                    world.light().ambient,
+                    world.light().color,
+                    world.camera().eye(),
+                    torch_color,
+                    torch_radius_m,
+                    torch_curve,
+                    SkyLight::from_world(world),
+                    if world.ambient_occlusion().is_some() {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    proc,
+                    clipmap::GrassFrame {
+                        scale: world.grass_scale(),
+                        time: world.time(),
+                        wind: world.wind(),
+                    },
+                );
+            }
+        } else {
+            self.clipmap = None;
+        }
+
+        self.cpu_spans.mark("sync.terrain", &mut t);
+        if self.synced_render_epoch != world.render_epoch()
+            || self.synced_instance_epoch != world.instance_epoch()
+        {
+            self.gpu_meshes.retain(|id, _| world.contains_entity(*id));
+
+            // Prototypes first so like-entities can share their GPU vertex buffers.
+            for (id, entity) in world.entities() {
+                if entity.instance_of.is_none() {
+                    self.sync_entity_mesh(id, entity);
+                }
+            }
+            match world.instance_submit() {
+                InstanceSubmit::CpuIndexed => {
+                    for (id, entity) in world.entities() {
+                        if entity.instance_of.is_some() {
+                            self.sync_entity_mesh(id, entity);
+                        }
+                    }
+                }
+                InstanceSubmit::GpuIndirect => {
+                    self.cpu_spans.mark("sync.meshes", &mut t);
+                    self.sync_gpu_instance_batches(world);
+                    self.cpu_spans.mark("sync.batches", &mut t);
+                }
+            }
+            self.synced_render_epoch = world.render_epoch();
+            self.synced_instance_epoch = world.instance_epoch();
+            self.cpu_spans.mark("sync.meshes", &mut t);
+            // Meshes the world no longer needs in RAM go once they are here.
+            let gpu = &self.gpu_meshes;
+            world.release_uploaded(|id| gpu.contains_key(&id));
+            self.cpu_spans.mark("sync.release", &mut t);
+        } else {
+            self.gpu_stats.instance_batches = u32::try_from(self.gpu_instance_batches.len())
+                .expect("GPU instance batch count exceeds u32");
+        }
+
+        self.cpu_spans.mark("sync.meshes", &mut t);
+        self.gpu_skinned
+            .retain(|id, _| world.contains_animated(*id));
+        let live_models: HashSet<usize> = world
+            .animated_entities()
+            .map(|(_, anim)| Arc::as_ptr(anim.animator.model()) as usize)
+            .collect();
+        self.gpu_skinned_meshes
+            .retain(|k, _| live_models.contains(k));
+
+        // Every pose first, on the frame's threads when there are several
+        // (each reads only its own animator), then the uploads in order.
+        let animated: Vec<(&EntityId, &crate::world::AnimatedEntity)> =
+            world.animated_entities().collect();
+        if self.poses.len() < animated.len() {
+            self.poses.resize_with(animated.len(), Vec::new);
+        }
+        let poses = &mut self.poses[..animated.len()];
+        let pose = |scratch: &mut crate::anim::PoseScratch,
+                    (out, (_, anim)): (
+            &mut Vec<glam::Mat4>,
+            &(&EntityId, &crate::world::AnimatedEntity),
+        )| {
+            anim.animator.write_pose(scratch, out);
+        };
+        if animated.len() >= crate::world::ANIM_PARALLEL_POSES {
+            use rayon::prelude::*;
+            crate::parallel::frame_pool().install(|| {
+                poses
+                    .par_iter_mut()
+                    .zip(animated.par_iter())
+                    .for_each_init(crate::anim::PoseScratch::default, pose)
+            });
+        } else {
+            let mut scratch = crate::anim::PoseScratch::default();
+            for pair in poses.iter_mut().zip(animated.iter()) {
+                pose(&mut scratch, pair);
+            }
+        }
+        self.cpu_spans.mark("sync.poses", &mut t);
+        for (i, (id, anim)) in animated.into_iter().enumerate() {
+            let joints = std::mem::take(&mut self.poses[i]);
+            match self.gpu_skinned.get_mut(id) {
+                Some(gpu) => {
+                    gpu.update(
+                        &self.queue,
+                        anim.transform,
+                        &joints,
+                        anim.animator.morph_weights(),
+                    );
+                    self.gpu_stats.skinned_pose_writes += 1;
+                }
+                None => {
+                    let key = Arc::as_ptr(anim.animator.model()) as usize;
+                    let (meshes, morphs) = if let Some(shared) = self.gpu_skinned_meshes.get(&key) {
+                        shared.clone()
+                    } else {
+                        let model = anim.animator.model();
+                        let (rows, table) = skinned::morph_table(model);
+                        let uploaded: Vec<GpuSkinnedMesh> = model
+                            .meshes
+                            .iter()
+                            .zip(&rows)
+                            .map(|(m, rows)| {
+                                GpuSkinnedMesh::upload(
+                                    &self.device,
+                                    &self.queue,
+                                    &self.pipelines.albedo_layout,
+                                    &self.pipelines.material_sampler,
+                                    &self.pipelines.neutral_maps,
+                                    &mut self.skinned_maps,
+                                    m,
+                                    m,
+                                    Some(rows),
+                                )
+                            })
+                            .collect();
+                        let shared = (uploaded, skinned::upload_morph_table(&self.device, &table));
+                        self.gpu_skinned_meshes.insert(key, shared.clone());
+                        self.gpu_stats.skinned_model_uploads += 1;
+                        shared
+                    };
+                    self.gpu_stats.skinned_new += 1;
+                    self.gpu_skinned.insert(
+                        *id,
+                        GpuSkinnedEntity::from_shared_meshes(
+                            &self.device,
+                            &self.skinned.joint_bind_layout,
+                            meshes,
+                            &morphs,
+                            anim.transform,
+                            &joints,
+                            anim.animator.morph_weights(),
+                        ),
+                    );
+                }
+            }
+            self.poses[i] = joints;
+        }
+        self.cpu_spans.mark("sync.skinned", &mut t);
+    }
+
+    /// The material-table slot a mesh with `albedo` draws with (texture
+    /// arrays), as `albedo_of` picks its bind group; `None` without a table
+    /// or when the table is full.
+    pub(super) fn material_slot(&self, albedo: Option<TextureId>) -> Option<u32> {
+        let table = &self.bindless.as_ref()?.table;
+        match albedo {
+            Some(tid) if self.gpu_mesh_albedo.contains_key(&tid) => table.slot(Some(tid)),
+            _ => table.slot(None),
+        }
+    }
+
+    pub(super) fn sync_entity_mesh(&mut self, id: EntityId, entity: &Entity) {
+        if entity.instanced && entity.instances.is_empty() {
+            if let Some(gpu) = self.gpu_meshes.get_mut(&id) {
+                if gpu.xform_rev != entity.xform_rev {
+                    gpu.clear_instances();
+                    gpu.xform_rev = entity.xform_rev;
+                }
+            } else if entity.instance_of.is_none() {
+                let mut gpu = GpuMesh::upload(
+                    &self.device,
+                    &self.queue,
+                    &self.arenas,
+                    entity.mesh(),
+                    &[],
+                    &self.instance_cull,
+                );
+                gpu.xform_rev = entity.xform_rev;
+                self.gpu_meshes.insert(id, gpu);
+            }
+            return;
+        }
+
+        let material = self.material_slot(entity.albedo);
+        if let Some(gpu) = self.gpu_meshes.get(&id) {
+            let same_mesh = entity.instance_of.is_some()
+                || (gpu.vertex_count == entity.vertex_count()
+                    && gpu.index_count == entity.index_count());
+            if same_mesh && gpu.xform_rev == entity.xform_rev && gpu.material == material {
+                return;
+            }
+        }
+
+        self.instance_scratch.clear();
+        if entity.instanced {
+            self.instance_scratch
+                .extend(entity.instances.iter().map(|inst| {
+                    InstanceRaw::from_matrix_tint(entity.transform * inst.transform, inst.tint)
+                }));
+        } else {
+            self.instance_scratch
+                .push(InstanceRaw::from_matrix(entity.transform));
+        }
+        if let Some(slot) = material {
+            for raw in &mut self.instance_scratch {
+                raw.material = slot;
+            }
+        }
+
+        let shadow_buffers_changed = match self.gpu_meshes.get_mut(&id) {
+            Some(gpu) => {
+                let buffers_changed = if entity.instance_of.is_none()
+                    && (gpu.vertex_count != entity.vertex_count()
+                        || gpu.index_count != entity.index_count())
+                {
+                    *gpu = GpuMesh::upload(
+                        &self.device,
+                        &self.queue,
+                        &self.arenas,
+                        entity.mesh(),
+                        &self.instance_scratch,
+                        &self.instance_cull,
+                    );
+                    self.gpu_stats.mesh_rebuild += 1;
+                    true
+                } else {
+                    let reallocated = gpu.update_instances(
+                        &self.device,
+                        &self.queue,
+                        &self.arenas,
+                        &self.instance_scratch,
+                        &self.instance_cull,
+                    );
+                    self.gpu_stats.instance_rewrites += 1;
+                    reallocated
+                };
+                gpu.xform_rev = entity.xform_rev;
+                gpu.material = material;
+                buffers_changed
+            }
+            None => {
+                let mut gpu = if let Some(proto) = entity.instance_of {
+                    let proto_gpu = self.gpu_meshes.get(&proto).unwrap_or_else(|| {
+                        panic!("instanced-like entity {id} has no GPU mesh for prototype {proto}")
+                    });
+                    GpuMesh::share_vertices(
+                        &self.device,
+                        &self.queue,
+                        &self.arenas,
+                        proto_gpu,
+                        &self.instance_scratch,
+                        &self.instance_cull,
+                    )
+                } else {
+                    GpuMesh::upload(
+                        &self.device,
+                        &self.queue,
+                        &self.arenas,
+                        entity.mesh(),
+                        &self.instance_scratch,
+                        &self.instance_cull,
+                    )
+                };
+                gpu.xform_rev = entity.xform_rev;
+                gpu.material = material;
+                self.gpu_meshes.insert(id, gpu);
+                self.gpu_stats.mesh_new += 1;
+                false
+            }
+        };
+        self.moved_at.insert(id, self.frame_no);
+        if shadow_buffers_changed {
+            self.invalidate_shadow_bundles();
+        }
+    }
+
+    /// Mesh or instance buffers moved: record the bundles that bake them
+    /// in anew (shadow views, and the terrain bundle, which is keyed by
+    /// its entities only).
+    pub(super) fn invalidate_shadow_bundles(&mut self) {
+        for view in &mut self.shadow_bundles {
+            *view = ShadowViewBundles::default();
+        }
+        self.terrain_bundle_ids.clear();
+        self.terrain_bundle = None;
+        self.static_shadow_epoch += 1;
+    }
+
+    /// Bring a batch up to date without a new buffer: keep the slots that
+    /// still fit, free the ones whose entity is gone, place new or grown
+    /// entities in free space. False when it no longer fits (rebuild it).
+    pub(super) fn update_batch_in_place(
+        &mut self,
+        world: &World,
+        batch: &mut GpuInstanceBatch,
+        build: &BatchBuild,
+    ) -> bool {
+        let unchanged = batch.slots.len() == build.sources.len()
+            && batch
+                .slots
+                .iter()
+                .zip(&build.sources)
+                .all(|(slot, source)| {
+                    slot.id == source.id
+                        && slot.xform_rev == source.xform_rev
+                        && slot.active_count == source.instance_count
+                });
+        if unchanged {
+            return true;
+        }
+        let wanted: HashMap<EntityId, &BatchBuildSource> =
+            build.sources.iter().map(|s| (s.id, s)).collect();
+        // Plan first, so a batch that cannot fit is left untouched.
+        let mut free = batch.free.clone();
+        let mut used_end = batch.used_end;
+        let mut kept: Vec<BatchSlot> = Vec::with_capacity(build.sources.len());
+        let mut freed: Vec<std::ops::Range<usize>> = Vec::new();
+        for slot in batch.slots.drain(..) {
+            match wanted.get(&slot.id) {
+                Some(source)
+                    if source.instance_count <= slot.capacity
+                        && source.instance_reserve <= slot.capacity =>
+                {
+                    kept.push(slot)
+                }
+                _ => freed.push(slot.start..slot.start + slot.capacity),
+            }
+        }
+        for r in &freed {
+            give_free(&mut free, r.clone());
+        }
+        let kept_ids: HashSet<EntityId> = kept.iter().map(|s| s.id).collect();
+        let mut placed: Vec<BatchSlot> = Vec::new();
+        for source in &build.sources {
+            if kept_ids.contains(&source.id) {
+                continue;
+            }
+            let capacity = batch_slot_capacity(source.instance_count.max(source.instance_reserve));
+            let Some(start) = take_free(&mut free, capacity) else {
+                // Put the kept slots back so the caller can rebuild cleanly.
+                batch.slots = kept;
+                return false;
+            };
+            used_end = used_end.max(start + capacity);
+            placed.push(BatchSlot {
+                id: source.id,
+                xform_rev: u64::MAX,
+                start,
+                capacity,
+                active_count: 0,
+                bounds: None,
+            });
+        }
+        // Shrink the used end past trailing free space.
+        if let Some(last) = free.last() {
+            if last.end >= batch.gpu.instance_capacity && last.start < used_end {
+                used_end = last.start;
+            }
+        }
+        batch.free = free;
+        batch.used_end = used_end;
+        // Freed ranges go dead so the merged ranges never draw stale data.
+        for r in freed {
+            let dead = vec![InstanceRaw::from_matrix(DEAD_INSTANCE); r.end - r.start];
+            batch.gpu.write_instances_at(&self.queue, r.start, &dead);
+        }
+        kept.extend(placed);
+        // Keep the source order so the next frame's quick check matches.
+        let order: HashMap<EntityId, usize> = build
+            .sources
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.id, i))
+            .collect();
+        kept.sort_by_key(|slot| order[&slot.id]);
+        for (slot, source) in kept.iter_mut().zip(&build.sources) {
+            if slot.xform_rev == source.xform_rev && slot.active_count == source.instance_count {
+                continue;
+            }
+            let entity = world
+                .entity(source.id)
+                .unwrap_or_else(|_| panic!("instance batch source {} disappeared", source.id));
+            self.instance_scratch.clear();
+            self.instance_scratch
+                .extend(entity.instances.iter().map(|inst| {
+                    InstanceRaw::from_matrix_tint(entity.transform * inst.transform, inst.tint)
+                }));
+            slot.bounds = batch.gpu.bounds_for_instances(&self.instance_scratch);
+            // Pad to the old count with dead entries so a shrink leaves no
+            // stale instances behind.
+            let n = self.instance_scratch.len();
+            if slot.active_count > n {
+                self.instance_scratch
+                    .resize(slot.active_count, InstanceRaw::from_matrix(DEAD_INSTANCE));
+            }
+            batch
+                .gpu
+                .write_instances_at(&self.queue, slot.start, &self.instance_scratch);
+            slot.xform_rev = source.xform_rev;
+            slot.active_count = source.instance_count;
+            self.gpu_stats.batch_partial_writes += 1;
+        }
+        batch.slots = kept;
+        batch.rebuild_active_ranges();
+        batch.gpu.bounds = batch
+            .slots
+            .iter()
+            .filter_map(|slot| slot.bounds)
+            .reduce(|combined, bounds| combined.union(bounds));
+        true
+    }
+
+    pub(super) fn sync_gpu_instance_batches(&mut self, world: &World) {
+        self.gpu_batch_source_scratch.clear();
+        for (id, entity) in world.entities() {
+            if !entity.instanced {
+                continue;
+            }
+            let prototype = entity.instance_of.unwrap_or(id);
+            let prototype_entity = world.entity(prototype).unwrap_or_else(|_| {
+                panic!("instanced entity {id} references missing prototype {prototype}")
+            });
+            if entity.material != prototype_entity.material
+                || entity.albedo != prototype_entity.albedo
+                || entity.casts_shadow != prototype_entity.casts_shadow
+            {
+                panic!("instanced entity {id} is not render-compatible with prototype {prototype}");
+            }
+            self.gpu_batch_source_scratch.push(BatchSourceState {
+                id,
+                prototype,
+                xform_rev: entity.xform_rev,
+                instance_count: entity.instances.len(),
+                instance_reserve: entity.instance_reserve,
+                material: entity.material,
+                albedo: entity.albedo,
+                casts_shadow: entity.casts_shadow,
+                prototype_material: prototype_entity.material,
+                prototype_albedo: prototype_entity.albedo,
+                prototype_casts_shadow: prototype_entity.casts_shadow,
+            });
+        }
+
+        if self.gpu_batch_source_scratch == self.gpu_batch_sources {
+            self.gpu_stats.instance_batches = u32::try_from(self.gpu_instance_batches.len())
+                .expect("GPU instance batch count exceeds u32");
+            return;
+        }
+
+        let mut builds: HashMap<EntityId, BatchBuild> = HashMap::new();
+        for source in &self.gpu_batch_source_scratch {
+            builds
+                .entry(source.prototype)
+                .or_default()
+                .sources
+                .push(BatchBuildSource {
+                    id: source.id,
+                    xform_rev: source.xform_rev,
+                    instance_count: source.instance_count,
+                    instance_reserve: source.instance_reserve,
+                });
+        }
+
+        let batch_count_before = self.gpu_instance_batches.len();
+        self.gpu_instance_batches
+            .retain(|prototype, _| builds.contains_key(prototype));
+        let mut shadow_buffers_changed = self.gpu_instance_batches.len() != batch_count_before;
+        for (prototype, build) in builds {
+            if let Some(mut batch) = self.gpu_instance_batches.remove(&prototype) {
+                let (writes, slots) = (self.gpu_stats.batch_partial_writes, batch.slots.len());
+                if self.update_batch_in_place(world, &mut batch, &build) {
+                    if writes != self.gpu_stats.batch_partial_writes || slots != batch.slots.len() {
+                        self.moved_at.insert(prototype, self.frame_no);
+                    }
+                    self.gpu_instance_batches.insert(prototype, batch);
+                    continue;
+                }
+            }
+            self.moved_at.insert(prototype, self.frame_no);
+
+            let prototype_gpu = self.gpu_meshes.get(&prototype).unwrap_or_else(|| {
+                panic!("instance batch has no GPU mesh for prototype {prototype}")
+            });
+            self.instance_scratch.clear();
+            let mut slots = Vec::with_capacity(build.sources.len());
+            for source in build.sources {
+                let entity = world
+                    .entity(source.id)
+                    .unwrap_or_else(|_| panic!("instance batch source {} disappeared", source.id));
+                let start = self.instance_scratch.len();
+                self.instance_scratch
+                    .extend(entity.instances.iter().map(|inst| {
+                        InstanceRaw::from_matrix_tint(entity.transform * inst.transform, inst.tint)
+                    }));
+                let bounds = prototype_gpu.bounds_for_instances(&self.instance_scratch[start..]);
+                let capacity =
+                    batch_slot_capacity(source.instance_count.max(source.instance_reserve));
+                self.instance_scratch
+                    .resize(start + capacity, InstanceRaw::from_matrix(DEAD_INSTANCE));
+                slots.push(BatchSlot {
+                    id: source.id,
+                    xform_rev: source.xform_rev,
+                    start,
+                    capacity,
+                    active_count: source.instance_count,
+                    bounds,
+                });
+            }
+            // Room to grow, so streamed tiles coming and going reuse this
+            // buffer instead of rebuilding it.
+            let used = self.instance_scratch.len();
+            let headroom = (used / 2).max(64);
+            self.instance_scratch
+                .resize(used + headroom, InstanceRaw::from_matrix(DEAD_INSTANCE));
+            let mut gpu = GpuMesh::share_vertices(
+                &self.device,
+                &self.queue,
+                &self.arenas,
+                prototype_gpu,
+                &self.instance_scratch,
+                &self.instance_cull,
+            );
+            gpu.bounds = slots
+                .iter()
+                .filter_map(|slot| slot.bounds)
+                .reduce(|combined, bounds| combined.union(bounds));
+            self.gpu_instance_batches.insert(
+                prototype,
+                GpuInstanceBatch {
+                    gpu,
+                    slots,
+                    free: std::iter::once(used..used + headroom).collect(),
+                    used_end: used,
+                    active_ranges: Vec::new(),
+                },
+            );
+            self.gpu_instance_batches
+                .get_mut(&prototype)
+                .expect("instance batch was just inserted")
+                .rebuild_active_ranges();
+            self.gpu_stats.batch_rewrites += 1;
+            shadow_buffers_changed = true;
+        }
+        if shadow_buffers_changed {
+            self.invalidate_shadow_bundles();
+        }
+        std::mem::swap(
+            &mut self.gpu_batch_sources,
+            &mut self.gpu_batch_source_scratch,
+        );
+        self.gpu_stats.instance_batches = u32::try_from(self.gpu_instance_batches.len())
+            .expect("GPU instance batch count exceeds u32");
+    }
+}

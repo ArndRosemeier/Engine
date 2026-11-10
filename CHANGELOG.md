@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.036 (2026-11-10)
+
+- Engine source split into topic files: World methods in world_<topic>.rs, renderer methods in render/renderer_<topic>.rs, so agents and people find code faster. No behaviour change.
+
 ## 0.035 (2026-11-10)
 
 - Helpful errors instead of panics at startup: no GPU, no window, no surface format, missing HDR support and running out of GPU memory now end the run with an error that says what to try (driver update, Mesa lavapipe without a GPU, lower quality). GPUs without Depth32FloatStencil8, timestamp queries or the optional draw features fall back instead of stopping. Errors print as readable messages.
