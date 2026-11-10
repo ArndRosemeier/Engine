@@ -35,6 +35,7 @@ mod water_gpu;
 mod water_pipeline;
 
 use crate::camera::Camera;
+use crate::error::{EngineError, EngineResult};
 use crate::mesh::InstanceRaw;
 use crate::portal::{
     oblique_view_projection, portal_destination_clip, portal_render_camera, portal_view_camera,
@@ -968,7 +969,10 @@ pub struct Renderer {
 
 impl Renderer {
     /// `msaa`: the game's [`crate::Settings::msaa`] (`ENGINE_MSAA` wins).
-    pub async fn new(window: std::sync::Arc<winit::window::Window>, msaa: Option<u32>) -> Self {
+    pub async fn new(
+        window: std::sync::Arc<winit::window::Window>,
+        msaa: Option<u32>,
+    ) -> EngineResult<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             // `WGPU_BACKEND=dx12|vulkan|metal` picks one (a driver test).
@@ -976,9 +980,16 @@ impl Renderer {
             backend_options: dx12_options(),
             ..Default::default()
         });
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("failed to create surface");
+        let surface = instance.create_surface(window.clone()).map_err(|e| {
+            EngineError::Window(format!(
+                "could not create a drawing surface for the window ({e}). \
+                 The engine needs a Vulkan, DirectX 12 or Metal driver: update \
+                 the graphics driver. Without a GPU (CI, containers) install \
+                 Mesa's software Vulkan driver (lavapipe, package \
+                 mesa-vulkan-drivers); on Linux also check that a display (or \
+                 Xvfb) is running"
+            ))
+        })?;
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -987,25 +998,52 @@ impl Renderer {
                 force_fallback_adapter: false,
             })
             .await
-            .expect("no suitable GPU adapter");
+            .map_err(|e| {
+                EngineError::Gpu(format!(
+                    "no GPU that can draw to this window ({e}). The engine needs \
+                     Vulkan, DirectX 12 or Metal: update the graphics driver. \
+                     Without a GPU (CI, containers) install Mesa's software \
+                     Vulkan driver (lavapipe, package mesa-vulkan-drivers)"
+                ))
+            })?;
 
-        let gpu_profile_interval = GpuProfiler::requested_interval();
-        let portal_depth = wgpu::Features::DEPTH32FLOAT_STENCIL8;
-        if !adapter.features().contains(portal_depth) {
-            panic!("GPU adapter does not support DEPTH32FLOAT_STENCIL8 (required for portals)");
+        if adapter.get_info().backend == wgpu::Backend::Gl {
+            return Err(EngineError::Gpu(
+                "OpenGL is not supported (WGPU_BACKEND=gl?). The engine runs on Vulkan, \
+                 DirectX 12 or Metal: unset WGPU_BACKEND or pick one of those"
+                    .into(),
+            ));
         }
-        let mut required_features = portal_depth | pipeline_cache::wanted_features(&adapter);
+        let mut gpu_profile_interval = GpuProfiler::requested_interval();
+        let portal_depth = wgpu::Features::DEPTH32FLOAT_STENCIL8;
+        // Portals and room culling need a stencil next to 32-bit depth. A GPU
+        // without it still runs, with plain depth (portals draw without
+        // their stencil mask).
+        let stencil_ok = adapter.features().contains(portal_depth);
+        stencil::choose_depth_format(stencil_ok);
+        if !stencil_ok {
+            eprintln!(
+                "[engine] this GPU has no Depth32FloatStencil8; running with plain depth \
+                 (portal masks off)"
+            );
+        }
+        let base_features = if stencil::has_stencil() {
+            portal_depth
+        } else {
+            wgpu::Features::empty()
+        };
+        let mut required_features = base_features | pipeline_cache::wanted_features(&adapter);
         // Many meshes per draw call (see `MultiDraw`), where the GPU can.
         let multi_draw_features =
             wgpu::Features::MULTI_DRAW_INDIRECT | wgpu::Features::INDIRECT_FIRST_INSTANCE;
-        let multi_draw =
+        let mut multi_draw =
             adapter.features().contains(multi_draw_features) && multi_draw_env() != Some(false);
         if multi_draw {
             required_features |= multi_draw_features;
         }
         // The GPU scene's multi-draws read their draw counts from the GPU.
-        let gpu_scene_on = multi_draw && !gpu_scene::disabled_by_env();
-        let draw_count = gpu_scene_on
+        let mut gpu_scene_on = multi_draw && !gpu_scene::disabled_by_env();
+        let mut draw_count = gpu_scene_on
             && adapter
                 .features()
                 .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT)
@@ -1014,7 +1052,7 @@ impl Renderer {
             required_features |= wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;
         }
         let mut required_limits = wgpu::Limits::default();
-        let texture_arrays = multi_draw
+        let mut texture_arrays = multi_draw
             && adapter
                 .features()
                 .contains(material_table::MATERIAL_TABLE_FEATURES)
@@ -1029,7 +1067,7 @@ impl Renderer {
         // Bind only the table slots in use: wgpu checks every bound texture
         // each time a pass binds the table, so 16k fallback slots cost
         // about a millisecond of CPU per pass.
-        let partial_table = texture_arrays
+        let mut partial_table = texture_arrays
             && adapter
                 .features()
                 .contains(wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY)
@@ -1041,27 +1079,59 @@ impl Renderer {
             let timestamp_features =
                 wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
             if !adapter.features().contains(timestamp_features) {
-                panic!("ENGINE_GPU_PROFILE_EVERY requested unsupported GPU timestamp queries");
-            }
-            required_features |= timestamp_features;
-            // Splitting the scene pass needs stamps inside it; optional.
-            if adapter
-                .features()
-                .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES)
-            {
-                required_features |= wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
+                eprintln!(
+                    "[engine] ENGINE_GPU_PROFILE_EVERY: this GPU has no timestamp queries; \
+                     GPU timings are off"
+                );
+                gpu_profile_interval = None;
+            } else {
+                required_features |= timestamp_features;
+                // Splitting the scene pass needs stamps inside it; optional.
+                if adapter
+                    .features()
+                    .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES)
+                {
+                    required_features |= wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
+                }
             }
         }
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("engine-device"),
-                required_features,
-                required_limits,
-                memory_hints: wgpu::MemoryHints::Performance,
-                trace: wgpu::Trace::Off,
-            })
+        let describe = |features: wgpu::Features, limits: &wgpu::Limits| wgpu::DeviceDescriptor {
+            label: Some("engine-device"),
+            required_features: features,
+            required_limits: limits.clone(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        };
+        let (device, queue) = match adapter
+            .request_device(&describe(required_features, &required_limits))
             .await
-            .expect("failed to create device");
+        {
+            Ok(pair) => pair,
+            Err(first) => {
+                // The driver refused the extras: run with the plain feature
+                // set (one draw call per mesh, textures bound per draw).
+                eprintln!(
+                    "[engine] the GPU refused the optional features ({first}); \
+                     running without multi-draw, the GPU scene and texture arrays"
+                );
+                multi_draw = false;
+                gpu_scene_on = false;
+                draw_count = false;
+                texture_arrays = false;
+                partial_table = false;
+                gpu_profile_interval = None;
+                required_limits = wgpu::Limits::default();
+                adapter
+                    .request_device(&describe(base_features, &required_limits))
+                    .await
+                    .map_err(|e| {
+                        EngineError::Gpu(format!(
+                            "the GPU ({}) refused to start ({e}). Update the graphics driver",
+                            adapter.get_info().name
+                        ))
+                    })?
+            }
+        };
 
         let hdr_features = adapter.get_texture_format_features(HDR_FORMAT);
         stencil::init_scene_samples(choose_scene_samples(&adapter, msaa));
@@ -1075,9 +1145,11 @@ impl Renderer {
                 .flags
                 .contains(wgpu::TextureFormatFeatureFlags::BLENDABLE)
         {
-            panic!(
-                "GPU adapter does not support filterable, blendable Rgba16Float render targets required for Engine HDR bloom"
-            );
+            return Err(EngineError::Gpu(format!(
+                "the GPU ({}) cannot draw to filterable, blendable Rgba16Float targets, \
+                 which HDR lighting and bloom need. Update the graphics driver",
+                adapter.get_info().name
+            )));
         }
 
         let caps = surface.get_capabilities(&adapter);
@@ -1086,7 +1158,13 @@ impl Renderer {
             .iter()
             .copied()
             .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+            .or_else(|| caps.formats.first().copied())
+            .ok_or_else(|| {
+                EngineError::Window(format!(
+                    "the GPU ({}) cannot draw to this window (no surface formats)",
+                    adapter.get_info().name
+                ))
+            })?;
 
         // FIFO is the synchronized default: it prevents startup tearing and
         // keeps normal presentation stable across GPUs and window compositors.
@@ -1113,8 +1191,16 @@ impl Renderer {
             panic!("requested present mode {present_mode:?} is unsupported by this surface");
         }
 
+        // Screenshots copy the finished frame out of the surface; a surface
+        // that cannot be copied still runs, without screenshots.
+        let surface_usage = if caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+        } else {
+            eprintln!("[engine] this window surface cannot be copied; screenshots are off");
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+        };
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: surface_usage,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -1293,7 +1379,7 @@ impl Renderer {
                 },
             );
         }
-        Self {
+        Ok(Self {
             pipeline_cache,
             pipeline_cache_settled: false,
             clipmap_pipelines,
@@ -1411,7 +1497,7 @@ impl Renderer {
             taa_frame: 0,
             taa_jitter: glam::Vec2::ZERO,
             render_scale: 1.0,
-        }
+        })
     }
 
     /// Apply the world's presentation preference to the surface.
@@ -2504,9 +2590,16 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("capture-encoder"),
             });
-        let src = self.last_color.as_ref().expect(
-            "capture_png needs request_capture before render_with so the HUD is in the shot",
-        );
+        let Some(src) = self.last_color.as_ref() else {
+            return Err(crate::EngineError::Gpu(
+                if self.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+                    "no frame to capture yet (request_capture comes before render_with)"
+                } else {
+                    "screenshots are off: this window surface cannot be copied"
+                }
+                .into(),
+            ));
+        };
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: src,
@@ -2573,6 +2666,9 @@ impl Renderer {
     }
 
     fn store_composited(&mut self, encoder: &mut wgpu::CommandEncoder, src: &wgpu::Texture) {
+        if !self.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+            return;
+        }
         let width = self.config.width.max(1);
         let height = self.config.height.max(1);
         let format = self.config.format;
@@ -3193,7 +3289,10 @@ impl Renderer {
             },
         );
 
-        if level >= world.portal_recursion() {
+        // Looking through portals needs the stencil to keep the far space
+        // inside the doorway. Without one (a GPU without Depth32FloatStencil8,
+        // or ENGINE_DEPTH_FORMAT=d32) doorways show nothing beyond them.
+        if level >= world.portal_recursion() || !stencil::has_stencil() {
             return;
         }
 

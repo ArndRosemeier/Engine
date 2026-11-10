@@ -1,7 +1,11 @@
 use thiserror::Error;
 
 /// User-facing errors. Prefer these over panics for bad input / resources.
-#[derive(Debug, Error)]
+///
+/// `Debug` prints the same readable message as `Display` (plus causes), so
+/// `fn main() -> EngineResult<()>` ends with `Error: GPU: ...` rather than a
+/// struct dump.
+#[derive(Error)]
 pub enum EngineError {
     #[error("invalid mesh: {0}")]
     InvalidMesh(String),
@@ -42,6 +46,15 @@ pub enum EngineError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
+    /// No usable GPU, or it lacks something the engine needs. The message
+    /// says what and what to try.
+    #[error("GPU: {0}")]
+    Gpu(String),
+
+    /// The window or its drawing surface could not be made.
+    #[error("window: {0}")]
+    Window(String),
+
     #[error("event loop creation failed: {0}")]
     EventLoopCreation(#[source] winit::error::EventLoopError),
 
@@ -68,4 +81,32 @@ impl EngineError {
     }
 }
 
+impl std::fmt::Debug for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self}")?;
+        let mut source = std::error::Error::source(self);
+        while let Some(cause) = source {
+            write!(f, "\n  caused by: {cause}")?;
+            source = cause.source();
+        }
+        Ok(())
+    }
+}
+
 pub type EngineResult<T> = Result<T, EngineError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_reads_like_the_message_with_its_causes() {
+        let plain = EngineError::Gpu("no GPU".into());
+        assert_eq!(format!("{plain:?}"), "GPU: no GPU");
+        let io = EngineError::Io(std::io::Error::other("disk full"));
+        assert_eq!(
+            format!("{io:?}"),
+            "I/O error: disk full\n  caused by: disk full"
+        );
+    }
+}

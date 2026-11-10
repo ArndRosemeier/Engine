@@ -62,6 +62,8 @@ struct App {
     /// ENGINE_PRESENT_MODE or a screenshot run: never pace.
     no_pacing: bool,
     fatal_error: Option<String>,
+    /// Why the engine itself had to stop (no GPU, window, GPU memory).
+    exit_error: Option<EngineError>,
     /// `ENGINE_VERIFY` run settings, and how it ended.
     verify: Option<crate::verify::Verify>,
     verify_result: Option<EngineResult<()>>,
@@ -135,6 +137,7 @@ impl App {
                 || verify.is_some()
                 || std::env::var("ENGINE_PACE").is_ok_and(|v| v.trim() == "0"),
             fatal_error: None,
+            exit_error: None,
             verify,
             verify_result: None,
             fixed_time: 0.0,
@@ -155,11 +158,13 @@ impl App {
             let grabbed = window
                 .set_cursor_grab(CursorGrabMode::Locked)
                 .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
-            grabbed.expect("this platform supports neither locked nor confined pointer grab");
+            if let Err(e) = grabbed {
+                eprintln!("[engine] could not lock the pointer to the window ({e})");
+            }
         } else {
-            window
-                .set_cursor_grab(CursorGrabMode::None)
-                .expect("release pointer grab");
+            if let Err(e) = window.set_cursor_grab(CursorGrabMode::None) {
+                eprintln!("[engine] could not release the pointer ({e})");
+            }
         }
         window.set_cursor_visible(!wanted);
         self.pointer_locked = wanted;
@@ -180,6 +185,21 @@ impl App {
 }
 
 impl App {
+    /// End the run because the engine cannot go on; `run` returns `error`.
+    /// A verify run still writes its report, with the error as the problem.
+    fn stop_with(&mut self, event_loop: &ActiveEventLoop, error: EngineError) {
+        if let Some(v) = self.verify.as_ref() {
+            let _ = v.finish(
+                &self.world,
+                self.frame_index,
+                Some(&error.to_string()),
+                None,
+            );
+        }
+        self.exit_error = Some(error);
+        event_loop.exit();
+    }
+
     /// Wait for the display's next refresh slot when vsync does not.
     fn pace_frame(&mut self) {
         if self.no_pacing {
@@ -445,7 +465,16 @@ impl App {
                     renderer.resize(renderer.size());
                 }
                 Err(wgpu::SurfaceError::OutOfMemory) => {
-                    panic!("GPU out of memory");
+                    self.stop_with(
+                        event_loop,
+                        EngineError::Gpu(
+                            "out of GPU memory. Lower the quality (Settings::quality, \
+                             world.set_quality), the view distance or the render scale, \
+                             or spawn fewer unique meshes and textures"
+                                .into(),
+                        ),
+                    );
+                    return;
                 }
                 // Timeout is transient presentation backpressure. Skip this frame, preserve
                 // world state, and request the next redraw; repeated timeouts remain visible
@@ -453,7 +482,11 @@ impl App {
                 Err(wgpu::SurfaceError::Timeout) => {
                     eprintln!("surface frame timed out; retrying on next redraw");
                 }
-                Err(other) => panic!("surface error: {other}"),
+                Err(other) => {
+                    // Anything else: rebuild the surface and try the next frame.
+                    eprintln!("[engine] surface error ({other}); reconfiguring");
+                    renderer.resize(renderer.size());
+                }
             }
             let render_ms = elapsed_ms(render_t);
             let mut engine_spans = std::mem::take(&mut self.tick_spans);
@@ -515,9 +548,11 @@ impl App {
                         )
                     });
                 }
-                renderer
-                    .capture_png(&self.world, &path)
-                    .unwrap_or_else(|error| panic!("{error}"));
+                if let Err(error) = renderer.capture_png(&self.world, &path) {
+                    self.exit_error = Some(error);
+                    event_loop.exit();
+                    return;
+                }
                 eprintln!("wrote screenshot {}", path.display());
             }
             if let (Some(v), Some(error)) = (self.verify.as_ref(), self.fatal_error.as_deref()) {
@@ -537,9 +572,11 @@ impl App {
             if !self.screenshot_wait {
                 if let Some(path) = self.screenshot_path.clone() {
                     if self.frame_index >= self.screenshot_frame {
-                        renderer
-                            .capture_png(&self.world, &path)
-                            .unwrap_or_else(|error| panic!("{error}"));
+                        if let Err(error) = renderer.capture_png(&self.world, &path) {
+                            self.exit_error = Some(error);
+                            event_loop.exit();
+                            return;
+                        }
                         eprintln!("wrote screenshot {}", path.display());
                         if let Some(v) = self.verify.as_ref() {
                             self.verify_result =
@@ -571,11 +608,16 @@ impl ApplicationHandler for App {
             // holds the event loop, and a shown window that cannot answer
             // stands still and cannot be dragged. Shown once it can.
             .with_visible(false);
-        let window = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .expect("failed to create window"),
-        );
+        let window = match event_loop.create_window(attrs) {
+            Ok(window) => Arc::new(window),
+            Err(e) => {
+                let error = EngineError::Window(format!(
+                    "could not open a window ({e}); on Linux check that a display (or Xvfb) is running"
+                ));
+                self.stop_with(event_loop, error);
+                return;
+            }
+        };
         // Sound starts while the pipelines build: the device opens and the
         // engine's own sounds are synthesised on worker threads.
         if self.screenshot_path.is_none() && self.settings.audio {
@@ -584,7 +626,13 @@ impl ApplicationHandler for App {
         }
         // Without TAA, edges need MSAA unless the game chose otherwise.
         let msaa = self.settings.msaa.or((!self.settings.taa).then_some(4));
-        let renderer = pollster::block_on(Renderer::new(window.clone(), msaa));
+        let renderer = match pollster::block_on(Renderer::new(window.clone(), msaa)) {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                self.stop_with(event_loop, error);
+                return;
+            }
+        };
         let gpu = renderer.gpu_info();
         if let Some(warning) = gpu.driver_warning() {
             eprintln!("[engine] {warning}");
@@ -817,13 +865,18 @@ fn emit_hitch(
         phases.render_ms,
         gpu.draw_line()
     ));
-    let mut file = std::fs::OpenOptions::new()
+    let written = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
-        .unwrap_or_else(|e| panic!("hitch log {} could not be opened: {e}", path.display()));
-    file.write_all(text.as_bytes())
-        .unwrap_or_else(|e| panic!("hitch log {} could not be written: {e}", path.display()));
+        .and_then(|mut file| file.write_all(text.as_bytes()));
+    if let Err(e) = written {
+        // A diagnostics file must never stop the game.
+        eprintln!(
+            "[engine] hitch log {} could not be written: {e}",
+            path.display()
+        );
+    }
 }
 
 /// The engine's own slow steps of a hitch frame (ticks, sync and render
@@ -881,6 +934,9 @@ pub fn run_with_settings(
     event_loop
         .run_app(&mut app)
         .map_err(EngineError::EventLoopRun)?;
+    if let Some(error) = app.exit_error.take() {
+        return Err(error);
+    }
     app.verify_result.take().unwrap_or(Ok(()))
 }
 

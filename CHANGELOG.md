@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.035 (2026-11-10)
+
+- Helpful errors instead of panics at startup: no GPU, no window, no surface format, missing HDR support and running out of GPU memory now end the run with an error that says what to try (driver update, Mesa lavapipe without a GPU, lower quality). GPUs without Depth32FloatStencil8, timestamp queries or the optional draw features fall back instead of stopping. Errors print as readable messages.
+
 ## 0.034 (2026-11-10)
 
 - Settings: everything a game sets at startup in one typed struct, Engine::run_with_settings("my game", Settings::default().window(1280, 720).vsync(false).quality(Quality::Medium), update). Bad values are named before the window opens; ENGINE_* variables stay as debug overrides, and world.env_overrides() and verify reports list them. AGENTS.md gains a rule on building meshes around the origin (its skeleton had that bug; a verify run caught it).

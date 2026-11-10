@@ -6,12 +6,24 @@ use wgpu::{CompareFunction, DepthStencilState, StencilFaceState, StencilOperatio
 /// `ENGINE_DEPTH_FORMAT=d32` picks plain 32-bit depth (portals then draw
 /// without their stencil mask); a test of driver trouble with the
 /// combined format.
+static DEPTH_FORMAT: std::sync::OnceLock<wgpu::TextureFormat> = std::sync::OnceLock::new();
+
 pub(crate) fn depth_format() -> wgpu::TextureFormat {
-    static FORMAT: std::sync::OnceLock<wgpu::TextureFormat> = std::sync::OnceLock::new();
-    *FORMAT.get_or_init(|| match std::env::var("ENGINE_DEPTH_FORMAT").as_deref() {
+    *DEPTH_FORMAT.get_or_init(|| pick_depth_format(true))
+}
+
+/// Pick the depth format once at startup: `ENGINE_DEPTH_FORMAT=d32` or a
+/// GPU without `Depth32FloatStencil8` gets plain 32-bit depth.
+pub(crate) fn choose_depth_format(stencil_supported: bool) {
+    let _ = DEPTH_FORMAT.set(pick_depth_format(stencil_supported));
+}
+
+fn pick_depth_format(stencil_supported: bool) -> wgpu::TextureFormat {
+    match std::env::var("ENGINE_DEPTH_FORMAT").as_deref() {
         Ok("d32") => wgpu::TextureFormat::Depth32Float,
+        _ if !stencil_supported => wgpu::TextureFormat::Depth32Float,
         _ => wgpu::TextureFormat::Depth32FloatStencil8,
-    })
+    }
 }
 
 /// Whether [`depth_format`] has a stencil.
