@@ -180,6 +180,92 @@ impl World {
         }
     }
 
+    // ---- Joints ----
+
+    /// Join two bodies: a hinge, ball joint, slider, rope or weld (see
+    /// [`crate::physics::Joint`]). Both entities need a body
+    /// ([`Self::add_body`]); the joint goes when either body does.
+    pub fn add_joint(
+        &mut self,
+        a: EntityId,
+        b: EntityId,
+        joint: crate::physics::Joint,
+    ) -> EngineResult<crate::physics::JointId> {
+        self.physics.add_joint(a, Some(b), &joint)
+    }
+
+    /// Join a body to a fixed point in the world (`joint.at(point)`, or the
+    /// body's own place): a door on its frame, a lamp on a chain.
+    pub fn pin(
+        &mut self,
+        body: EntityId,
+        joint: crate::physics::Joint,
+    ) -> EngineResult<crate::physics::JointId> {
+        self.physics.add_joint(body, None, &joint)
+    }
+
+    /// Take a joint away (break the hinge, cut the rope).
+    pub fn remove_joint(&mut self, joint: crate::physics::JointId) {
+        self.physics.remove_joint(joint);
+    }
+
+    /// Is this joint still there (its bodies may have been removed)?
+    pub fn has_joint(&self, joint: crate::physics::JointId) -> bool {
+        self.physics.has_joint(joint)
+    }
+
+    pub fn joint_count(&self) -> usize {
+        self.physics.joint_count()
+    }
+
+    // ---- Characters ----
+
+    /// Make an entity (a mesh, an animated model or a pivot) a walking
+    /// character: from now on [`Self::walk`] and [`Self::jump`] move it, and
+    /// it slides along walls, climbs steps and slopes, falls and pushes
+    /// crates. Its place is its feet; physics writes its position every
+    /// frame and keeps its rotation (turn it with `set_place` as usual).
+    /// `set_place` to somewhere else teleports it.
+    pub fn add_character(
+        &mut self,
+        id: EntityId,
+        character: crate::physics::Character,
+    ) -> EngineResult<()> {
+        let feet = self.world_transform(id)?.w_axis.truncate();
+        self.physics.add_character(id, &character, feet)
+    }
+
+    pub fn remove_character(&mut self, id: EntityId) {
+        self.physics.remove_character(id);
+    }
+
+    pub fn is_character(&self, id: EntityId) -> bool {
+        self.physics.is_character(id)
+    }
+
+    /// How many characters there are.
+    pub fn character_count(&self) -> usize {
+        self.physics.character_ids().len()
+    }
+
+    /// Walk at `velocity` m/s (only x and z count) until told otherwise:
+    /// call it every frame with what the keys say, `Vec3::ZERO` to stop.
+    pub fn walk(&mut self, id: EntityId, velocity: impl Into<Vec3>) -> EngineResult<()> {
+        self.physics.walk(id, velocity.into())
+    }
+
+    /// Jump at `speed` m/s (5 is a person's jump). Only from the ground:
+    /// returns whether it jumped.
+    pub fn jump(&mut self, id: EntityId, speed: f32) -> EngineResult<bool> {
+        self.physics.jump(id, speed)
+    }
+
+    /// What a character did in the last physics step: on the ground,
+    /// sliding, its real velocity and where its feet are.
+    pub fn character(&self, id: EntityId) -> Option<crate::physics::CharacterState> {
+        self.physics.character_state(id)
+    }
+
     // ---- Triggers and shape queries ----
 
     /// Give an entity (a mesh, a pivot, anything with a place) an invisible
@@ -331,6 +417,10 @@ impl World {
             let m = self.world_transform(id).ok();
             self.physics.move_trigger(id, m);
         }
+        for id in self.physics.character_ids() {
+            let feet = self.world_transform(id).ok().map(|m| m.w_axis.truncate());
+            self.physics.sync_character(id, feet);
+        }
         let field = self.height_field.as_ref();
         let height = |x: f32, z: f32| field.map_or(0.0, |f| f.height_at(x, z));
         let around = crate::physics::Surroundings {
@@ -373,6 +463,14 @@ impl World {
         }
         if changed {
             self.bump_render_epoch();
+        }
+        for (id, feet) in result.characters {
+            if let Some(mut m) = self.matrix_of(id) {
+                m.w_axis = feet.extend(1.0);
+                if self.write_matrix(id, m).is_ok() && self.hierarchy.children.contains_key(&id) {
+                    let _ = self.update_subtree(id);
+                }
+            }
         }
         for id in result.expired {
             self.despawn(id);

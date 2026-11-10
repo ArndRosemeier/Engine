@@ -175,7 +175,9 @@ python tools/verify.py <package> --reference refs/<package>.png
 | Terrain you can dig | README "Destruction", `examples/voxel_destruction` |
 | An endless streamed world | README "Huge streamed worlds", `examples/open_world` |
 | Physics, throwing, explosions | README "Physics", `examples/physics` |
-| Trigger zones, layers, overlap queries | README "Triggers, layers and shape queries" |
+| Trigger zones, layers, overlap queries | README "Triggers, layers and shape queries", `examples/gameplay` |
+| A player that walks, jumps, climbs stairs | README "Characters you walk", `examples/gameplay` |
+| Doors, ropes, hinges, sliders | README "Joints", `examples/gameplay` |
 | Characters, animation, foot IK | README "Character animation", `examples/characters` |
 | AI walking around obstacles | README "Navigation", `examples/navigation` |
 | Many people | README "Crowds", `examples/crowds` |

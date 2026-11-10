@@ -57,7 +57,8 @@ pub enum TriggerShape {
 /// An invisible zone that reports what goes in and out: a door that opens,
 /// a coin to pick up, a finish line, lava. See [`crate::World::add_trigger`].
 ///
-/// Triggers notice entities with a body ([`Body`], any kind) and ragdolls;
+/// Triggers notice entities with a body ([`Body`], any kind), characters
+/// and ragdolls;
 /// they never push anything, and rays and overlap queries pass through them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Trigger {
@@ -251,7 +252,10 @@ impl Physics {
             return None;
         }
         let id = EntityId::from_raw(c.user_data as u64);
-        (self.bodies.contains_key(&id) || self.ragdolls.contains_key(&id)).then_some(id)
+        (self.bodies.contains_key(&id)
+            || self.ragdolls.contains_key(&id)
+            || self.characters.contains_key(&id))
+        .then_some(id)
     }
 
     /// Compare what is in each trigger now with the last step, and record

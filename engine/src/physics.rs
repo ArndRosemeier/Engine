@@ -49,6 +49,14 @@ mod physics_gameplay;
 #[path = "physics_ragdoll.rs"]
 mod physics_ragdoll;
 use physics_gameplay::{body_groups, ground_groups, TriggerTracked};
+#[path = "physics_joints.rs"]
+mod physics_joints;
+use physics_joints::JointTracked;
+pub use physics_joints::{Joint, JointId, JointKind};
+#[path = "physics_character.rs"]
+mod physics_character;
+use physics_character::CharacterTracked;
+pub use physics_character::{Character, CharacterState};
 pub use physics_gameplay::{Trigger, TriggerEvent, TriggerShape, MAX_LAYER};
 pub(crate) use physics_ragdoll::{JointDesc, LinkDesc, PartDesc, PartShape};
 
@@ -477,6 +485,10 @@ pub(crate) struct Physics {
     /// Trigger zones by the entity that carries them.
     triggers: HashMap<EntityId, TriggerTracked>,
     trigger_events: Vec<TriggerEvent>,
+    joints: HashMap<JointId, JointTracked>,
+    next_joint: u64,
+    /// Walking characters by their entity.
+    characters: HashMap<EntityId, CharacterTracked>,
 }
 
 impl std::fmt::Debug for Physics {
@@ -573,6 +585,9 @@ impl Physics {
             alpha: 1.0,
             triggers: HashMap::new(),
             trigger_events: Vec::new(),
+            joints: HashMap::new(),
+            next_joint: 0,
+            characters: HashMap::new(),
         }
     }
 
@@ -633,6 +648,11 @@ impl Physics {
         indices: impl FnOnce() -> Vec<[u32; 3]>,
     ) -> EngineResult<()> {
         body.validate()?;
+        if self.characters.contains_key(&id) {
+            return Err(EngineError::InvalidValue(format!(
+                "entity {id} is a character; remove_character before add_body"
+            )));
+        }
         self.remove(id);
         let (scale, rotation, translation) = split(transform);
         if !scale.is_finite() || scale.min_element() <= 1e-6 {
@@ -986,7 +1006,7 @@ impl Physics {
             out.sink.push((s.id, dt * 0.6));
             true
         });
-        if self.bodies.is_empty() && self.ragdolls.is_empty() {
+        if self.bodies.is_empty() && self.ragdolls.is_empty() && self.characters.is_empty() {
             self.accumulator = 0.0;
             // Nothing can be inside a trigger.
             self.update_triggers();
@@ -1002,6 +1022,7 @@ impl Physics {
             self.clock += h;
             self.update_ground(around);
             self.apply_water(around, &mut out.splashes);
+            self.step_characters(h);
             for t in self.bodies.values_mut() {
                 t.prev = t.cur;
             }
@@ -1029,6 +1050,8 @@ impl Physics {
             self.accumulator = self.accumulator.min(h);
         }
 
+        self.drop_broken_joints();
+
         // Rubble whose time is up starts sinking.
         let mut done = Vec::new();
         for (id, t) in self.bodies.iter_mut() {
@@ -1051,6 +1074,7 @@ impl Physics {
         // Draw between the last two steps.
         let alpha = (self.accumulator / h).clamp(0.0, 1.0);
         self.alpha = alpha;
+        out.characters = self.character_places(alpha);
         for (id, t) in self.bodies.iter_mut() {
             if t.kind == BodyKind::Fixed {
                 continue;
@@ -1322,12 +1346,14 @@ impl Physics {
         let h = 1.0 / self.settings.steps_per_second;
         let mut out = HashSet::new();
         let ragdoll_parts = self.ragdoll_handles();
+        let characters = self.character_handles();
         let handles = self
             .bodies
             .values()
             .filter(|t| t.kind == BodyKind::Dynamic)
             .map(|t| t.handle)
-            .chain(ragdoll_parts);
+            .chain(ragdoll_parts)
+            .chain(characters);
         for handle in handles {
             let Some(b) = self.world.bodies.get(handle) else {
                 continue;
@@ -1484,6 +1510,8 @@ pub(crate) struct TickResult {
     pub sink: Vec<(EntityId, f32)>,
     pub expired: Vec<EntityId>,
     pub splashes: Vec<Splash>,
+    /// Characters' feet positions to write.
+    pub characters: Vec<(EntityId, Vec3)>,
 }
 
 /// A ground collider from triangles; `None` when there are none.
