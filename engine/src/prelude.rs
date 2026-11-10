@@ -52,6 +52,7 @@ pub use crate::ribbons::{RibbonId, RibbonProfile, RibbonStyle, RibbonWorld};
 pub use crate::rocks::{rock_model, rock_model_with, RockModel, RockShape};
 pub use crate::rooms::{Opening, OpeningId, Room, RoomId};
 pub use crate::scatter::Scatter;
+pub use crate::settings::Settings;
 pub use crate::sim::{Headless, HeadlessRun, SimClock, SimSteps};
 pub use crate::sky::{MoonSpec, PhysicalSky, SkyWeather, MAX_MOONS};
 pub use crate::space::{
