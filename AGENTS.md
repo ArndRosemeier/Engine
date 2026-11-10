@@ -206,5 +206,9 @@ The API docs are in the code: `cargo doc -p engine --open`, or read the
 - Rendering changes: compare screenshots before and after
   (`--save-reference` on `main`, `--reference` on your branch) and look at
   them.
-- The files are large (`world.rs`, `render/mod.rs`); search before
-  reading whole files.
+- `World`'s methods live in `engine/src/world_<topic>.rs` (spawn,
+  physics, hierarchy, animation, lighting, sky, terrain, ...) and the
+  renderer's in `engine/src/render/renderer_<topic>.rs` (setup, sync,
+  frame, opaque, shadows, ...); `world.rs` and `render/mod.rs` hold the
+  types. Search (`grep -rn "pub fn <name>" engine/src`) before reading
+  whole files.
