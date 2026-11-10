@@ -48,6 +48,8 @@ impl Renderer {
             self.materials_synced += 1;
         }
 
+        self.sync_custom_materials(world);
+
         if let Some(proc) = world.proc_terrain() {
             let format = HDR_FORMAT;
             match self.clipmap.as_mut() {
@@ -253,6 +255,34 @@ impl Renderer {
         match albedo {
             Some(tid) if self.gpu_mesh_albedo.contains_key(&tid) => table.slot(Some(tid)),
             _ => table.slot(None),
+        }
+    }
+
+    /// Pipelines for new custom materials, params for changed ones.
+    fn sync_custom_materials(&mut self, world: &World) {
+        self.gpu_custom
+            .retain(|id, _| world.custom_materials.contains_key(id));
+        if world.custom_materials.is_empty() {
+            return;
+        }
+        let layout = self
+            .custom_params_layout
+            .get_or_insert_with(|| pipeline::custom_params_layout(&self.device));
+        for (id, (material, revision)) in &world.custom_materials {
+            let gpu = self.gpu_custom.entry(*id).or_insert_with(|| {
+                pipeline::create_custom_material(
+                    &self.device,
+                    HDR_FORMAT,
+                    &self.pipelines,
+                    layout,
+                    material,
+                )
+            });
+            if gpu.revision != *revision {
+                self.queue
+                    .write_buffer(&gpu.params, 0, bytemuck::cast_slice(&material.params));
+                gpu.revision = *revision;
+            }
         }
     }
 

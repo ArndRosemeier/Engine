@@ -94,7 +94,7 @@ impl Renderer {
                 let listed = match e.material {
                     None => opaque.contains(&id),
                     Some(SurfaceMaterialRef::Terrain(_)) => terrain.contains(&id),
-                    Some(SurfaceMaterialRef::Water(_)) => true,
+                    Some(SurfaceMaterialRef::Water(_) | SurfaceMaterialRef::Custom(_)) => true,
                 };
                 if !listed {
                     out.push(format!("{}: missing from the draw list", name(id)));

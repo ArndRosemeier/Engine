@@ -686,6 +686,18 @@ impl Renderer {
                 self.batch_water.push(prototype);
             }
         }
+        self.draw_custom.clear();
+        for &draw in &self.source_custom {
+            let (id, gpu) = match draw {
+                TransparentDraw::Mesh(id) => (id, self.gpu_meshes.get(&id)),
+                TransparentDraw::Batch(id) => {
+                    (id, self.gpu_instance_batches.get(&id).map(|b| &b.gpu))
+                }
+            };
+            if entity_in_space(world, id, space) && gpu.is_some_and(visible) {
+                self.draw_custom.push(draw);
+            }
+        }
         self.sort_transparent();
     }
 
@@ -713,6 +725,7 @@ impl Renderer {
     /// Rebuild material/pass membership only when static world state changes.
     pub(super) fn rebuild_draw_sources(&mut self, world: &World) {
         self.source_opaque.clear();
+        self.source_custom.clear();
         self.source_terrain.clear();
         self.source_transparent.clear();
         self.source_water.clear();
@@ -760,6 +773,13 @@ impl Renderer {
                         self.source_water.push(id);
                     }
                 }
+                Some(SurfaceMaterialRef::Custom(mid)) => {
+                    if world.custom_material(mid).is_some_and(|m| m.see_through) {
+                        self.source_transparent.push(id);
+                    } else {
+                        self.source_custom.push(TransparentDraw::Mesh(id));
+                    }
+                }
             }
         }
         if gpu_batches {
@@ -802,6 +822,13 @@ impl Renderer {
                     Some(SurfaceMaterialRef::Water(_)) => {
                         if has_xlucent {
                             self.batch_source_water.push(prototype);
+                        }
+                    }
+                    Some(SurfaceMaterialRef::Custom(mid)) => {
+                        if world.custom_material(mid).is_some_and(|m| m.see_through) {
+                            self.batch_source_transparent.push(prototype);
+                        } else {
+                            self.source_custom.push(TransparentDraw::Batch(prototype));
                         }
                     }
                 }

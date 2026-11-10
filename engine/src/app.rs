@@ -62,6 +62,8 @@ struct App {
     /// ENGINE_PRESENT_MODE or a screenshot run: never pace.
     no_pacing: bool,
     fatal_error: Option<String>,
+    /// The game's own error, returned from `run` when the window closes.
+    game_error: Option<EngineError>,
     /// Why the engine itself had to stop (no GPU, window, GPU memory).
     exit_error: Option<EngineError>,
     /// `ENGINE_VERIFY` run settings, and how it ended.
@@ -137,6 +139,7 @@ impl App {
                 || verify.is_some()
                 || std::env::var("ENGINE_PACE").is_ok_and(|v| v.trim() == "0"),
             fatal_error: None,
+            game_error: None,
             exit_error: None,
             verify,
             verify_result: None,
@@ -359,8 +362,11 @@ impl App {
                             }
                         });
                     });
-                } else if !run_callback_until_fatal(&mut self.fatal_error, || update(world, &frame))
-                {
+                } else if !run_callback_until_fatal(
+                    &mut self.fatal_error,
+                    &mut self.game_error,
+                    || update(world, &frame),
+                ) {
                     world.set_pointer_lock(false);
                 }
                 if self.fatal_error.is_none() {
@@ -940,11 +946,19 @@ pub fn run_with_settings(
     if let Some(error) = app.exit_error.take() {
         return Err(error);
     }
-    app.verify_result.take().unwrap_or(Ok(()))
+    if let Some(result) = app.verify_result.take() {
+        return result;
+    }
+    // The game returned an error: the program ends with it (exit code 1).
+    app.game_error.take().map_or(Ok(()), Err)
 }
 
+/// Runs the game's callback until it first returns an error. The error is
+/// printed to stderr at once (the window shows it too, until it is closed)
+/// and kept so `run` can return it.
 fn run_callback_until_fatal(
     fatal_error: &mut Option<String>,
+    game_error: &mut Option<EngineError>,
     callback: impl FnOnce() -> EngineResult<()>,
 ) -> bool {
     if fatal_error.is_some() {
@@ -953,7 +967,12 @@ fn run_callback_until_fatal(
     match callback() {
         Ok(()) => true,
         Err(error) => {
-            *fatal_error = Some(format_error_chain(&error));
+            let message = format_error_chain(&error);
+            eprintln!(
+                "error: {message}\nThe game stopped. Close the window (or press Escape) to exit."
+            );
+            *fatal_error = Some(message);
+            *game_error = Some(error);
             false
         }
     }
@@ -998,23 +1017,34 @@ mod tests {
     #[test]
     fn callback_error_is_persistent_and_callback_never_runs_again() {
         let mut fatal_error = None;
+        let mut game_error = None;
         let mut calls = 0_u32;
 
-        assert!(!run_callback_until_fatal(&mut fatal_error, || {
-            calls += 1;
-            Err(EngineError::application(std::io::Error::other(
-                "session failed",
-            )))
-        }));
-        assert!(!run_callback_until_fatal(&mut fatal_error, || {
-            calls += 1;
-            EngineResult::Ok(())
-        }));
+        assert!(!run_callback_until_fatal(
+            &mut fatal_error,
+            &mut game_error,
+            || {
+                calls += 1;
+                Err(EngineError::application(std::io::Error::other(
+                    "session failed",
+                )))
+            }
+        ));
+        assert!(!run_callback_until_fatal(
+            &mut fatal_error,
+            &mut game_error,
+            || {
+                calls += 1;
+                EngineResult::Ok(())
+            }
+        ));
 
         assert_eq!(calls, 1);
         assert_eq!(
             fatal_error.as_deref(),
             Some("application callback failed: session failed\nCaused by: session failed")
         );
+        // The first error is kept for `run` to return.
+        assert!(matches!(game_error, Some(EngineError::Application { .. })));
     }
 }

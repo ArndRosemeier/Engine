@@ -192,6 +192,9 @@ impl World {
             Some(SurfaceMaterialRef::Water(mat)) if !self.water_materials.contains_key(&mat) => {
                 return Err(EngineError::UnknownMaterial)
             }
+            Some(SurfaceMaterialRef::Custom(mat)) if !self.custom_materials.contains_key(&mat) => {
+                return Err(EngineError::UnknownMaterial)
+            }
             _ => {}
         }
         let e = self

@@ -751,6 +751,7 @@ dependencies = [
  "image",
  "libc",
  "meshopt",
+ "naga",
  "noise",
  "pollster",
  "rapier3d",
@@ -1646,6 +1647,14 @@ name = "material_showcase"
 version = "0.1.0"
 dependencies = [
  "engine",
+]
+
+[[package]]
+name = "materials"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "glam 0.33.12",
 ]
 
 [[package]]

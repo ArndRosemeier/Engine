@@ -273,11 +273,63 @@ impl Renderer {
         pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
 
         self.mark_scene(pass, stamp, SceneMark::Skinned);
-        pass.set_pipeline(if portal_mask {
+
+        // Solid meshes with a game's custom material: each with its own
+        // pipeline and params, the whole mesh (not in portal views yet).
+        if !portal_mask {
+            for i in 0..self.draw_custom.len() {
+                let draw = self.draw_custom[i];
+                let (TransparentDraw::Mesh(id) | TransparentDraw::Batch(id)) = draw;
+                let entity = world.entity(id).expect("draw list is live");
+                let Some(SurfaceMaterialRef::Custom(mid)) = entity.material else {
+                    continue;
+                };
+                let Some(custom) = self.gpu_custom.get(&mid) else {
+                    continue;
+                };
+                let albedo = entity
+                    .albedo
+                    .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
+                    .unwrap_or(&self.pipelines.white_albedo);
+                pass.set_pipeline(&custom.opaque);
+                pass.set_bind_group(1, albedo, &[]);
+                pass.set_bind_group(2, &custom.bind, &[]);
+                match draw {
+                    TransparentDraw::Mesh(_) => {
+                        let gpu = self.gpu_meshes.get(&id).expect("draw list is synced");
+                        submit_mesh_draw(
+                            pass,
+                            gpu,
+                            MeshSubmit::Direct,
+                            0..gpu.index_count as u32,
+                            0,
+                            &mut self.gpu_stats.indirect_draws,
+                        );
+                    }
+                    TransparentDraw::Batch(_) => {
+                        let batch = self
+                            .gpu_instance_batches
+                            .get(&id)
+                            .expect("batch draw is synced");
+                        submit_batch_draw(
+                            pass,
+                            batch,
+                            None,
+                            0..batch.gpu.index_count as u32,
+                            0,
+                            &mut self.gpu_stats.indirect_draws,
+                        );
+                    }
+                }
+            }
+        }
+
+        let transparent_pipeline = if portal_mask {
             &self.pipelines.transparent_portal
         } else {
             &self.pipelines.transparent
-        });
+        };
+        pass.set_pipeline(transparent_pipeline);
         // Far to near, single meshes and instanced batches together.
         for i in 0..self.transparent_order.len() {
             match self.transparent_order[i] {
@@ -292,6 +344,23 @@ impl Renderer {
                         .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
                         .unwrap_or(&self.pipelines.white_albedo);
                     pass.set_bind_group(1, albedo, &[]);
+                    if let Some(SurfaceMaterialRef::Custom(mid)) = entity.material {
+                        // A see-through custom material: its own pipeline, whole mesh.
+                        if let (false, Some(custom)) = (portal_mask, self.gpu_custom.get(&mid)) {
+                            pass.set_pipeline(&custom.blend);
+                            pass.set_bind_group(2, &custom.bind, &[]);
+                            submit_mesh_draw(
+                                pass,
+                                gpu,
+                                MeshSubmit::Direct,
+                                0..gpu.index_count as u32,
+                                0,
+                                &mut self.gpu_stats.indirect_draws,
+                            );
+                            pass.set_pipeline(transparent_pipeline);
+                        }
+                        continue;
+                    }
                     if let Some((args, cslot)) =
                         stamp.then(|| main_cull.occlusion_slot(id)).flatten()
                     {
@@ -328,6 +397,22 @@ impl Renderer {
                         .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
                         .unwrap_or(&self.pipelines.white_albedo);
                     pass.set_bind_group(1, albedo, &[]);
+                    if let Some(SurfaceMaterialRef::Custom(mid)) = entity.material {
+                        if let (false, Some(custom)) = (portal_mask, self.gpu_custom.get(&mid)) {
+                            pass.set_pipeline(&custom.blend);
+                            pass.set_bind_group(2, &custom.bind, &[]);
+                            submit_batch_draw(
+                                pass,
+                                batch,
+                                None,
+                                0..gpu.index_count as u32,
+                                0,
+                                &mut self.gpu_stats.indirect_draws,
+                            );
+                            pass.set_pipeline(transparent_pipeline);
+                        }
+                        continue;
+                    }
                     submit_batch_draw(
                         pass,
                         batch,

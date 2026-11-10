@@ -4007,3 +4007,95 @@ mod transparency_order {
         );
     }
 }
+
+#[cfg(test)]
+mod custom_materials {
+    use crate::color::rgb;
+    use crate::custom_material::CustomMaterial;
+    use crate::mesh::Mesh;
+    use crate::world::{SurfaceMaterialRef, World};
+    use glam::Vec3;
+
+    const LAVA: &str = r#"
+fn material(m: MaterialIn, base: MaterialOut) -> MaterialOut {
+    var o = base;
+    let flow = sin(m.world_pos.x * 2.0 + m.time) * 0.5 + 0.5;
+    o.color = vec4<f32>(0.1, 0.02, 0.0, 1.0);
+    o.emission = mix(vec3<f32>(1.0, 0.2, 0.0), vec3<f32>(1.0, 0.8, 0.1), flow) * m.params[0].x;
+    return o;
+}
+"#;
+
+    #[test]
+    fn the_engine_shader_compiles_with_and_without_a_material() {
+        let plain = crate::render::lit_shader_source(None);
+        let module = naga::front::wgsl::parse_str(&plain).expect("plain lit shader parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("plain lit shader validates");
+        CustomMaterial::new("lava", LAVA).check().unwrap();
+    }
+
+    #[test]
+    fn mistakes_name_the_line_in_the_game_code() {
+        let typo = "fn material(m: MaterialIn, base: MaterialOut) -> MaterialOut {\n    var o = base;\n    o.colour = vec4<f32>(1.0);\n    return o;\n}\n";
+        let e = CustomMaterial::new("typo", typo)
+            .check()
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("\"typo\" line 3"), "{e}");
+        assert!(e.contains("o.colour"), "shows the line: {e}");
+
+        let missing = CustomMaterial::new("none", "fn shade() {}")
+            .check()
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("fn material(m: MaterialIn"), "{e}");
+        assert!(missing.contains("no `fn material`"), "{missing}");
+
+        let wrong_type = "fn material(m: MaterialIn, base: MaterialOut) -> MaterialOut {\n    var o = base;\n    o.roughness = vec3<f32>(1.0);\n    return o;\n}\n";
+        let e = CustomMaterial::new("types", wrong_type)
+            .check()
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("line 3"), "{e}");
+    }
+
+    #[test]
+    fn materials_go_on_entities_and_take_params() {
+        let mut world = World::new();
+        let rock = world.spawn(Mesh::box_at(Vec3::ZERO, (1.0, 1.0, 1.0), rgb(90, 90, 90)).unwrap());
+        let lava = world
+            .add_material(CustomMaterial::new("lava", LAVA).param(0, [2.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+        world.set_custom_material(rock, lava).unwrap();
+        assert_eq!(
+            world.entity(rock).unwrap().material(),
+            Some(SurfaceMaterialRef::Custom(lava))
+        );
+        world
+            .set_material_param(lava, 0, [3.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        assert_eq!(world.custom_material(lava).unwrap().params[0][0], 3.0);
+        assert!(world.set_material_param(lava, 4, [0.0; 4]).is_err());
+        assert!(world
+            .set_material_param(lava, 0, [f32::NAN, 0.0, 0.0, 0.0])
+            .is_err());
+        assert!(world
+            .add_material(CustomMaterial::new("bad", "fn material() {}"))
+            .is_err());
+        world.clear_custom_material(rock).unwrap();
+        assert_eq!(world.entity(rock).unwrap().material(), None);
+
+        // A material from another world is refused.
+        let mut other = World::new();
+        let ghost = other.add_material(CustomMaterial::new("a", LAVA)).unwrap();
+        let ghost2 = other.add_material(CustomMaterial::new("b", LAVA)).unwrap();
+        assert_eq!(world.custom_material_count(), 1);
+        assert!(world.set_custom_material(rock, ghost2).is_err());
+        let _ = ghost;
+    }
+}
