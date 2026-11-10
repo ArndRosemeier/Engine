@@ -44,8 +44,12 @@ const TILE_KEEP_S: f32 = 3.0;
 /// Rubble sinks into the ground for this long before it vanishes.
 const SINK_SECONDS: f32 = 2.0;
 
+#[path = "physics_gameplay.rs"]
+mod physics_gameplay;
 #[path = "physics_ragdoll.rs"]
 mod physics_ragdoll;
+use physics_gameplay::{body_groups, ground_groups, TriggerTracked};
+pub use physics_gameplay::{Trigger, TriggerEvent, TriggerShape, MAX_LAYER};
 pub(crate) use physics_ragdoll::{JointDesc, LinkDesc, PartDesc, PartShape};
 
 /// How a body moves.
@@ -103,6 +107,11 @@ pub struct Body {
     pub ccd: bool,
     /// How quickly motion and spin die down in air (0 = never).
     pub damping: f32,
+    /// Collision layer, 0 to [`MAX_LAYER`] (default 0). See [`Body::layer`].
+    pub layer: u8,
+    /// Which layers this body collides with, one bit per layer (default:
+    /// all). The ground and triggers are always included.
+    pub collides_with: u32,
 }
 
 impl Default for Body {
@@ -124,6 +133,8 @@ impl Body {
             spin: Vec3::ZERO,
             ccd: false,
             damping: 0.05,
+            layer: 0,
+            collides_with: u32::MAX,
         }
     }
 
@@ -185,6 +196,32 @@ impl Body {
         self
     }
 
+    /// Put the body on a collision layer (0 to [`MAX_LAYER`]). Two bodies
+    /// collide only when each one's `collides_with` has the other's layer:
+    /// `Body::dynamic().layer(2).collides_with(&[0, 2])` lets debris (layer 2)
+    /// hit the world (0) and other debris but pass through the player (1).
+    pub fn layer(mut self, layer: u8) -> Self {
+        self.layer = layer;
+        self
+    }
+
+    /// Collide only with bodies on these layers (and always with the ground).
+    pub fn collides_with(mut self, layers: &[u8]) -> Self {
+        self.collides_with = layers
+            .iter()
+            .filter(|l| **l <= MAX_LAYER)
+            .fold(0, |m, l| m | 1 << l);
+        self
+    }
+
+    /// Pass through bodies on these layers.
+    pub fn ignores(mut self, layers: &[u8]) -> Self {
+        for l in layers.iter().filter(|l| **l <= MAX_LAYER) {
+            self.collides_with &= !(1 << l);
+        }
+        self
+    }
+
     pub fn validate(&self) -> EngineResult<()> {
         let bad = |what: &str| Err(EngineError::InvalidValue(format!("body {what}")));
         if !self.density.is_finite() || self.density <= 0.0 {
@@ -201,6 +238,12 @@ impl Body {
         }
         if !self.velocity.is_finite() || !self.spin.is_finite() {
             return bad("velocity and spin must be finite");
+        }
+        if self.layer > MAX_LAYER {
+            return Err(EngineError::InvalidValue(format!(
+                "body layer must be 0..={MAX_LAYER}, got {}",
+                self.layer
+            )));
         }
         match self.shape {
             BodyShape::Mesh if self.kind == BodyKind::Dynamic => {
@@ -431,6 +474,9 @@ pub(crate) struct Physics {
     ragdolls: HashMap<EntityId, physics_ragdoll::RagBodies>,
     /// How far between the last two steps things are drawn.
     alpha: f32,
+    /// Trigger zones by the entity that carries them.
+    triggers: HashMap<EntityId, TriggerTracked>,
+    trigger_events: Vec<TriggerEvent>,
 }
 
 impl std::fmt::Debug for Physics {
@@ -525,6 +571,8 @@ impl Physics {
             statics: HashMap::new(),
             ragdolls: HashMap::new(),
             alpha: 1.0,
+            triggers: HashMap::new(),
+            trigger_events: Vec::new(),
         }
     }
 
@@ -677,6 +725,7 @@ impl Physics {
                 .friction(body.friction)
                 .restitution(body.bounce)
                 .user_data(tag(id))
+                .collision_groups(body_groups(body.layer, body.collides_with))
                 .active_events(rapier3d::prelude::ActiveEvents::COLLISION_EVENTS),
             Some(handle),
         );
@@ -802,7 +851,9 @@ impl Physics {
         let ray = Ray::new(origin, dir);
         let skip_ground =
             |_: ColliderHandle, c: &rapier3d::prelude::Collider| c.user_data != GROUND_TAG;
-        let filter = QueryFilter::default().predicate(&skip_ground);
+        let filter = QueryFilter::default()
+            .exclude_sensors()
+            .predicate(&skip_ground);
         let (handle, hit) = self
             .world
             .cast_ray_and_get_normal(&ray, max, true, filter)?;
@@ -833,7 +884,9 @@ impl Physics {
                     .get(&EntityId::from_raw(c.user_data as u64))
                     .is_some_and(|t| t.kind == BodyKind::Fixed)
         };
-        let filter = QueryFilter::default().predicate(&fixed_only);
+        let filter = QueryFilter::default()
+            .exclude_sensors()
+            .predicate(&fixed_only);
         let start = lo - 1.0;
         let ray = Ray::new(Vec3::new(p.x, start, p.z), Vec3::Y);
         self.world
@@ -859,7 +912,9 @@ impl Physics {
                     .get(&EntityId::from_raw(c.user_data as u64))
                     .is_some_and(|t| t.kind == BodyKind::Fixed)
         };
-        let filter = QueryFilter::default().predicate(&fixed_only);
+        let filter = QueryFilter::default()
+            .exclude_sensors()
+            .predicate(&fixed_only);
         let (handle, hit) = self
             .world
             .cast_ray_and_get_normal(&ray, max, solid, filter)?;
@@ -933,6 +988,8 @@ impl Physics {
         });
         if self.bodies.is_empty() && self.ragdolls.is_empty() {
             self.accumulator = 0.0;
+            // Nothing can be inside a trigger.
+            self.update_triggers();
             return out;
         }
 
@@ -959,6 +1016,7 @@ impl Physics {
             let events = StartEvents::default();
             self.world.step_with_events(&(), &events);
             self.collect_impacts(events, &before);
+            self.update_triggers();
             for t in self.bodies.values_mut() {
                 if let Some(b) = self.world.bodies.get(t.handle) {
                     t.cur = (b.translation(), *b.rotation());
@@ -1140,7 +1198,8 @@ impl Physics {
                 let c = ColliderBuilder::cuboid(1.0e4, 5.0, 1.0e4)
                     .translation(Vec3::new(0.0, y - 5.0, 0.0))
                     .friction(0.7)
-                    .user_data(GROUND_TAG);
+                    .user_data(GROUND_TAG)
+                    .collision_groups(ground_groups());
                 self.plane = Some(self.world.insert_collider(c, None));
             }
             if let (GroundSource::Voxels { .. }, Some(v)) = (source, around.voxels) {
@@ -1316,7 +1375,8 @@ impl Physics {
         let c = ColliderBuilder::cuboid(half.x.max(0.01), half.y.max(0.01), half.z.max(0.01))
             .position(pose(center, rotation))
             .friction(0.7)
-            .user_data(GROUND_TAG);
+            .user_data(GROUND_TAG)
+            .collision_groups(ground_groups());
         let h = self.world.insert_collider(c, None);
         self.statics.insert((owner, part), h);
     }
@@ -1438,7 +1498,11 @@ fn ground_mesh(verts: Vec<Vec3>, tris: Vec<[u32; 3]>) -> Option<ColliderBuilder>
     )
     .or_else(|_| ColliderBuilder::trimesh(verts, tris))
     .ok()?;
-    Some(b.friction(0.7).user_data(GROUND_TAG))
+    Some(
+        b.friction(0.7)
+            .user_data(GROUND_TAG)
+            .collision_groups(ground_groups()),
+    )
 }
 
 /// Tiles still to build, in a fixed order: colliders inserted in the same

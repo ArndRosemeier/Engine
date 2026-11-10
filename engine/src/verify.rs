@@ -222,6 +222,7 @@ impl Verify {
                 lamps: world.lamps().count(),
                 bodies: world.body_count().0,
                 bodies_awake: world.body_count().1,
+                triggers: world.trigger_count(),
                 components: world.component_counts(),
                 camera_eye: camera.eye().to_array(),
                 camera_target: camera.target().to_array(),
@@ -288,6 +289,7 @@ struct WorldSummary {
     lamps: usize,
     bodies: usize,
     bodies_awake: usize,
+    triggers: usize,
     /// Entities per component type (`World::insert`).
     components: std::collections::BTreeMap<&'static str, usize>,
     camera_eye: [f32; 3],

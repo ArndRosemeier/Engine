@@ -216,6 +216,23 @@ and `.ccd(true)` for small fast things. Then `push`, `push_at`,
 becomes colliders around moving bodies (flat floor at y = 0 without terrain;
 `set_physics_settings` changes that and gravity). See `examples/physics`.
 
+**Triggers, layers and shape queries (gameplay physics):**
+`world.spawn_trigger(place, Trigger::cuboid((2.0, 1.0, 2.0)))?` makes an
+invisible zone (`Trigger::ball(r)`, `Trigger::capsule(h, r)`); or
+`world.add_trigger(coin, Trigger::ball(0.6))?` puts one on an entity you
+already have, and it follows it. Every frame, `world.take_trigger_events()`
+says what went in or came out (`e.trigger`, `e.other`, `e.entered`), and
+`world.in_trigger(zone)` lists who is inside. Triggers notice bodies of every
+kind and ragdolls, never push anything, and rays and queries pass through
+them. Collision layers: `Body::dynamic().layer(2).ignores(&[1])` (layers 0 to
+27) passes through layer 1 but still lands on the ground;
+`.collides_with(&[0, 2])` lists the layers it hits, and
+`Trigger::ball(2.0).layers(&[1])` notices only layer 1. Queries:
+`world.overlap_sphere(center, r)` and `overlap_box(center, half)` list the
+bodies touching a shape, and `cast_sphere(origin, dir, radius, max)` is a fat
+`cast_ray` (bodies and ground). `examples/physics` counts crates thrown out of
+a trigger around its pyramid.
+
 **Physics without a window (game servers, tools, tests):** `PhysicsWorld::new()`
 runs the same bodies, shapes and ground with no `World` and no GPU.
 `add(&body, transform)` for boxes, balls and capsules, `add_mesh(&body,

@@ -33,7 +33,7 @@ pub use crate::particles::{
 };
 pub use crate::physics::{
     Body, BodyHit, BodyId, BodyImpact, BodyKind, BodyShape, Impact, PhysicsGround, PhysicsSettings,
-    PhysicsWorld, RayHit,
+    PhysicsWorld, RayHit, Trigger, TriggerEvent, TriggerShape,
 };
 pub use crate::place::{GlobalPlace, MeshInstance, Place};
 pub use crate::portal::{Portal, PortalId, PortalSettings, SpaceId};

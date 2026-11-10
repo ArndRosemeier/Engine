@@ -180,6 +180,133 @@ impl World {
         }
     }
 
+    // ---- Triggers and shape queries ----
+
+    /// Give an entity (a mesh, a pivot, anything with a place) an invisible
+    /// trigger zone that follows it. Read who went in and out with
+    /// [`Self::take_trigger_events`], or who is inside with
+    /// [`Self::in_trigger`]. Replaces a trigger the entity already has; it
+    /// goes away when the entity is despawned.
+    ///
+    /// ```ignore
+    /// let pad = world.spawn_trigger(Place::new(0.0, 1.0, 5.0), Trigger::cuboid((1.0, 1.0, 1.0)))?;
+    /// for e in world.take_trigger_events() {
+    ///     if e.trigger == pad && e.entered { /* something stepped on the pad */ }
+    /// }
+    /// ```
+    pub fn add_trigger(
+        &mut self,
+        id: EntityId,
+        trigger: crate::physics::Trigger,
+    ) -> EngineResult<()> {
+        let m = self.world_transform(id)?;
+        self.physics.add_trigger(id, &trigger, m)
+    }
+
+    /// A new invisible entity at `place` carrying a trigger zone (a pivot:
+    /// move it with [`Self::set_place`], hang it on things with
+    /// [`Self::attach`]).
+    pub fn spawn_trigger(
+        &mut self,
+        place: Place,
+        trigger: crate::physics::Trigger,
+    ) -> EngineResult<EntityId> {
+        trigger.validate()?;
+        let id = self.spawn_pivot(place);
+        self.add_trigger(id, trigger)?;
+        Ok(id)
+    }
+
+    pub fn remove_trigger(&mut self, id: EntityId) {
+        self.physics.remove_trigger(id);
+    }
+
+    pub fn has_trigger(&self, id: EntityId) -> bool {
+        self.physics.has_trigger(id)
+    }
+
+    /// How many trigger zones there are.
+    pub fn trigger_count(&self) -> usize {
+        self.physics.trigger_count()
+    }
+
+    /// Bodies inside a trigger after the last physics step, in id order.
+    pub fn in_trigger(&self, trigger: EntityId) -> Vec<EntityId> {
+        self.physics.in_trigger(trigger)
+    }
+
+    /// Everything that went into or came out of a trigger since the last
+    /// call, in the order it happened. Call it every frame.
+    pub fn take_trigger_events(&mut self) -> Vec<crate::physics::TriggerEvent> {
+        self.physics.take_trigger_events()
+    }
+
+    /// Entities with a body (or a ragdoll) touching a sphere, in id order.
+    /// Triggers and the ground are left out. Sees bodies as of the last
+    /// physics step.
+    pub fn overlap_sphere(&self, center: impl Into<Vec3>, radius: f32) -> Vec<EntityId> {
+        let c = center.into();
+        if !c.is_finite() || !radius.is_finite() || radius <= 0.0 {
+            return Vec::new();
+        }
+        self.physics.overlap_ball(c, radius)
+    }
+
+    /// Entities with a body touching an axis-aligned box, in id order.
+    pub fn overlap_box(
+        &self,
+        center: impl Into<Vec3>,
+        half_extents: impl Into<Vec3>,
+    ) -> Vec<EntityId> {
+        let (c, h) = (center.into(), half_extents.into());
+        if !c.is_finite() || !h.is_finite() || h.min_element() <= 0.0 {
+            return Vec::new();
+        }
+        self.physics.overlap_box(c, h, glam::Quat::IDENTITY)
+    }
+
+    /// Sweep a ball of `radius` from `origin` along `direction`: the first
+    /// body or ground it touches within `max_distance`. A fat ray, for
+    /// thrown things, "can I fit through here" and aiming help.
+    /// `distance` is how far the ball's centre got; `point` is where it
+    /// touched. Height and voxel ground count as locally flat.
+    pub fn cast_sphere(
+        &self,
+        origin: impl Into<Vec3>,
+        direction: impl Into<Vec3>,
+        radius: f32,
+        max_distance: f32,
+    ) -> Option<crate::physics::RayHit> {
+        let (origin, dir) = (origin.into(), direction.into().try_normalize()?);
+        if !origin.is_finite()
+            || !max_distance.is_finite()
+            || max_distance <= 0.0
+            || !radius.is_finite()
+            || radius <= 0.0
+        {
+            return None;
+        }
+        let body = self.physics.cast_ball(origin, dir, radius, max_distance);
+        // The ground: a ray from the centre, pulled back by how far the
+        // ball reaches towards the surface along the ray.
+        let ground = self
+            .ground_ray(origin, dir, max_distance + radius * 8.0)
+            .and_then(|g| {
+                let facing = (-dir.dot(g.normal)).max(0.125);
+                let distance = (g.distance - radius / facing).max(0.0);
+                (distance <= max_distance).then(|| crate::physics::RayHit {
+                    point: origin + dir * distance - g.normal * radius,
+                    distance,
+                    ..g
+                })
+            });
+        match (body, ground) {
+            (Some(b), Some(g)) if g.distance < b.distance => Some(g),
+            (Some(b), _) => Some(b),
+            (None, g) => g,
+        }
+    }
+
     pub fn physics_settings(&self) -> crate::physics::PhysicsSettings {
         self.physics.settings()
     }
@@ -200,6 +327,10 @@ impl World {
 
     /// Step physics. The engine calls this every frame.
     pub fn tick_physics(&mut self, dt: f32) {
+        for id in self.physics.trigger_ids() {
+            let m = self.world_transform(id).ok();
+            self.physics.move_trigger(id, m);
+        }
         let field = self.height_field.as_ref();
         let height = |x: f32, z: f32| field.map_or(0.0, |f| f.height_at(x, z));
         let around = crate::physics::Surroundings {

@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.037 (2026-11-10)
+
+- Gameplay physics: trigger zones that report what goes in and out, collision layers, and overlap and sphere-cast queries.
+
 ## 0.036 (2026-11-10)
 
 - Engine source split into topic files: World methods in world_<topic>.rs, renderer methods in render/renderer_<topic>.rs, so agents and people find code faster. No behaviour change.

@@ -11,10 +11,10 @@ use rapier3d::prelude::{
 };
 
 /// Collision group of ragdoll torsos, heads and legs.
-const RAGDOLL: Group = Group::GROUP_30;
+const RAGDOLL: Group = Group::from_bits_retain(super::physics_gameplay::RAGDOLL_BIT);
 /// Collision group of ragdoll arms: they start out against the torso, so
 /// they skip every ragdoll part.
-const RAGDOLL_ARM: Group = Group::GROUP_31;
+const RAGDOLL_ARM: Group = Group::from_bits_retain(super::physics_gameplay::RAGDOLL_ARM_BIT);
 
 /// The collider of one part, in its body's frame.
 #[derive(Clone, Copy, Debug)]

@@ -160,7 +160,7 @@ pub use particles::{
 };
 pub use physics::{
     Body, BodyHit, BodyId, BodyImpact, BodyKind, BodyShape, BuildingColliders, Impact,
-    PhysicsGround, PhysicsSettings, PhysicsWorld, RayHit,
+    PhysicsGround, PhysicsSettings, PhysicsWorld, RayHit, Trigger, TriggerEvent, TriggerShape,
 };
 pub use place::{GlobalPlace, MeshInstance, Place};
 pub use portal::{Portal, PortalId, PortalSettings, SpaceId};
