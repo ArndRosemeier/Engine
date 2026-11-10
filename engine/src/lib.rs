@@ -38,6 +38,7 @@
 
 pub mod advanced;
 pub mod anim;
+pub mod anim_graph;
 pub mod audio;
 pub mod building;
 pub mod camera;
@@ -126,6 +127,7 @@ pub use anim::{
     AnimatedModel, AnimationAction, AnimationClip, AnimationProfile, Animator, FootIk, Locomotion,
     PoseScratch,
 };
+pub use anim_graph::{AnimEvent, AnimGraph, AnimState, When};
 pub use audio::{
     Acoustics, Audio, AudioScene, Bus, ClipId, MusicLayer, MusicTrack, Play, PlaySound, Reverb,
     Sound, SoundId, Stock, VoiceId,

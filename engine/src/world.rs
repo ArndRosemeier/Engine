@@ -1,4 +1,5 @@
 use crate::anim::{AnimatedModel, AnimationAction, AnimationProfile, Animator, Locomotion};
+use crate::anim_graph::{AnimEvent, AnimGraph};
 use crate::camera::Camera;
 use crate::collision::{ActorBody, ActorMove, CollisionWorld};
 use crate::color::Color;
@@ -760,6 +761,8 @@ struct AnchoredChunk {
 #[derive(Clone, Debug)]
 pub struct AnimatedEntity {
     pub(crate) animator: Animator,
+    /// A state machine choosing the clips (`World::set_anim_graph`).
+    pub(crate) graph: Option<Box<crate::anim_graph::AnimGraphRun>>,
     pub(crate) transform: Mat4,
     pub(crate) space: SpaceId,
 }
@@ -970,6 +973,8 @@ pub struct World {
     particles: ParticleWorld,
     /// Text rising from points (`float_text`).
     float_texts: Vec<crate::labels::FloatText>,
+    /// Clip events since `take_anim_events` was last called.
+    anim_events: Vec<crate::anim_graph::AnimEvent>,
     labels_on_screen: usize,
     /// Dust and flying chunks when things are dug, shattered or hit.
     destruction_effects: bool,
@@ -1106,6 +1111,7 @@ impl Default for World {
             travel_gate: None,
             particles: ParticleWorld::default(),
             float_texts: Vec::new(),
+            anim_events: Vec::new(),
             labels_on_screen: 0,
             destruction_effects: true,
             audio: crate::audio::AudioScene::new(),

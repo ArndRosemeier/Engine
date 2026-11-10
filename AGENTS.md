@@ -178,6 +178,7 @@ python tools/verify.py <package> --reference refs/<package>.png
 | Doors, ropes, hinges, sliders | README "Joints", `examples/gameplay` |
 | HUD text, health bars, menus, crosshair | README "Game UI (HUD)", `examples/gameplay` |
 | Names over things, damage numbers | README "Text in the world", `examples/gameplay` |
+| Animation states (idle/walk/attack rules, footstep events) | README "Animation state machines", `examples/anim_states` |
 | Characters, animation, foot IK | README "Character animation", `examples/characters` |
 | AI walking around obstacles | README "Navigation", `examples/navigation` |
 | Many people | README "Crowds", `examples/crowds` |

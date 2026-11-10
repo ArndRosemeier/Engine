@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.040 (2026-11-10)
+
+- Animation state machines: states, rules on speed, flags and triggers, and clip events like footsteps; new anim_states example
+
 ## 0.039 (2026-11-10)
 
 - Game UI in one call each: corner text, bars, a pause menu and a crosshair; names hanging over things and floating text like "+1"
