@@ -7,9 +7,13 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
-## 0.044 (2026-11-10)
+## 0.045 (2026-11-10)
 
 - Fixes from a fresh-agent test: look_follow_entity keeps the follow camera out of walls and the player, cast_ray/cast_sphere_ignoring, an API-at-a-glance page and a door recipe in AGENTS.md, and tools/new_example.py to start an example listed everywhere
+
+## 0.044 (2026-11-10)
+
+- Tab and the arrow keys belong to the game unless a UI text field has focus; a pointer resting on a panel no longer swallows the game's keys
 
 ## 0.043 (2026-11-10)
 
