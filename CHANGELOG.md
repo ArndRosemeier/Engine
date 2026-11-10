@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.034 (2026-11-10)
+
+- Settings: everything a game sets at startup in one typed struct, Engine::run_with_settings("my game", Settings::default().window(1280, 720).vsync(false).quality(Quality::Medium), update). Bad values are named before the window opens; ENGINE_* variables stay as debug overrides, and world.env_overrides() and verify reports list them. AGENTS.md gains a rule on building meshes around the origin (its skeleton had that bug; a verify run caught it).
+
 ## 0.033 (2026-11-10)
 
 - Game data on entities (typed components): world.insert(orc, Health(100)), get, get_mut, remove, has, query, query_mut, query2, query2_mut and ids_with. Components go away with their entity, queries list entities oldest first, verify reports count them, and save_component makes saves keep a type.

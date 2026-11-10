@@ -967,7 +967,8 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub async fn new(window: std::sync::Arc<winit::window::Window>) -> Self {
+    /// `msaa`: the game's [`crate::Settings::msaa`] (`ENGINE_MSAA` wins).
+    pub async fn new(window: std::sync::Arc<winit::window::Window>, msaa: Option<u32>) -> Self {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             // `WGPU_BACKEND=dx12|vulkan|metal` picks one (a driver test).
@@ -1063,7 +1064,7 @@ impl Renderer {
             .expect("failed to create device");
 
         let hdr_features = adapter.get_texture_format_features(HDR_FORMAT);
-        stencil::init_scene_samples(choose_scene_samples(&adapter));
+        stencil::init_scene_samples(choose_scene_samples(&adapter, msaa));
         let hdr_usages =
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
         if !hdr_features.allowed_usages.contains(hdr_usages)
@@ -6494,27 +6495,24 @@ impl SkyLight {
     }
 }
 
-/// World-pass MSAA: `ENGINE_MSAA=1` or `4`. WebGPU guarantees 4x for both
-/// scene formats; other counts would need adapter-specific features.
+/// World-pass MSAA: the game's setting, or `ENGINE_MSAA=1` or `4` over it.
+/// WebGPU guarantees 4x for both scene formats; other counts would need
+/// adapter-specific features.
 ///
 /// Default 1 while TAA is on: TAA already smooths edges, and leaf cut-outs
 /// dither their coverage for it, which looks the same as 4x MSAA in stills at
-/// 10-15% more frame rate at 4K (RTX 5070). With `ENGINE_TAA=0` the default
-/// is 4x so edges stay smooth.
-fn choose_scene_samples(adapter: &wgpu::Adapter) -> u32 {
+/// 10-15% more frame rate at 4K (RTX 5070). With TAA off (`ENGINE_TAA=0` or
+/// `Settings::taa(false)`) the default is 4x so edges stay smooth.
+fn choose_scene_samples(adapter: &wgpu::Adapter, setting: Option<u32>) -> u32 {
     let requested = match std::env::var("ENGINE_MSAA") {
         Ok(raw) => match raw.parse::<u32>() {
             Ok(n @ (1 | 4)) => n,
-            _ => panic!("ENGINE_MSAA must be 1 or 4, got {raw:?}"),
-        },
-        Err(std::env::VarError::NotPresent) => {
-            if taa_env_enabled() {
-                1
-            } else {
-                4
+            _ => {
+                eprintln!("[engine] ENGINE_MSAA must be 1 or 4, got {raw:?}; ignoring it");
+                setting.unwrap_or(if taa_env_enabled() { 1 } else { 4 })
             }
-        }
-        Err(std::env::VarError::NotUnicode(_)) => panic!("ENGINE_MSAA must be valid Unicode"),
+        },
+        Err(_) => setting.unwrap_or(if taa_env_enabled() { 1 } else { 4 }),
     };
     let color = adapter.get_texture_format_features(HDR_FORMAT).flags;
     let depth = adapter.get_texture_format_features(depth_format()).flags;

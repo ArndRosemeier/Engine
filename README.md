@@ -82,6 +82,14 @@ fn main() -> EngineResult<()> {
 }
 ```
 
+Startup settings go in one value: `Engine::run_with_settings("my game",
+Settings::default().window(1280, 720).vsync(false).quality(Quality::Medium),
+update)`. `Settings` holds the window size, vsync, quality preset, TAA, MSAA,
+tone map, render scale, frame-rate target, view distance, audio, a fixed time
+step and resource limits; each is documented on the struct, and bad values
+are reported by name before the window opens. The `World` setters change them
+while the game runs.
+
 The quickest real start is to copy [`examples/starter`](examples/starter) into
 your project: it is about a hundred lines and shows terrain, scattering, LOD,
 the sky, quality settings and the fly camera together.
@@ -667,7 +675,9 @@ cargo run --release -p <name>
 
 ## Environment variables
 
-Every program built on the engine understands these:
+Every program built on the engine understands these. They are debug and
+comparison switches that override the game's `Settings` (a game should not
+depend on them); `world.env_overrides()` and verify reports list the ones set:
 
 | Variable | Effect |
 |---|---|

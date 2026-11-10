@@ -214,6 +214,8 @@ impl Verify {
             image,
             checks: &log.checks,
             values: &log.values,
+            settings: world.settings(),
+            env_overrides: world.env_overrides(),
             world: WorldSummary {
                 entities: world.entity_count(),
                 animated: world.animated_entities().count(),
@@ -273,6 +275,9 @@ struct Report<'a> {
     image: Option<ImageDiff>,
     checks: &'a std::collections::BTreeMap<String, crate::world::world_verify::CheckState>,
     values: &'a std::collections::BTreeMap<String, serde_json::Value>,
+    /// The game's startup settings, and the `ENGINE_*` variables over them.
+    settings: &'a crate::settings::Settings,
+    env_overrides: &'a [String],
     world: WorldSummary,
 }
 

@@ -22,6 +22,12 @@ below are compiled by `cargo test -p engine`, so they match the real API.
   the entity as a component: `world.insert(orc, Health(100))?`,
   `world.get_mut::<Health>(orc)`, `world.query::<Health>()`. It is removed
   when the entity is despawned. No side `HashMap<EntityId, _>` needed.
+- Startup choices (window size, vsync, quality, TAA, MSAA, audio, a fixed
+  time step) go in one `Settings` value passed to
+  `Engine::run_with_settings`; `World` setters change them while running.
+  `ENGINE_*` environment variables are debug overrides on top: don't make a
+  game depend on them. `world.env_overrides()` and verify reports show
+  which were set.
 - Every call that can fail returns `EngineResult`; use `?` inside the closure.
   Returning an error ends the program and prints it.
 - Units: metres, Y up, yaw in degrees (0 faces +Z, 90 faces +X), colours sRGB
@@ -48,7 +54,9 @@ struct Game {
 
 fn main() -> EngineResult<()> {
     let mut game = Game::default();
-    Engine::run("my game", move |world, frame| {
+    // Startup settings in one place (Engine::run uses the defaults).
+    let settings = Settings::default().window(1280, 720).quality(Quality::High);
+    Engine::run_with_settings("my game", settings, move |world, frame| {
         if frame.first {
             // Setup runs once. Spawning here, not every frame.
             world.set_physical_sky(Some(PhysicalSky::at_hour(15.0)));
@@ -56,7 +64,10 @@ fn main() -> EngineResult<()> {
             let player = world.spawn(Shape::box_at((0.0, 0.5, 0.0), (1.0, 1.0, 1.0), rgb(220, 160, 100))?);
             game.player = Some(player);
             // Game data on an entity: any struct of yours.
-            let coin = world.spawn(Shape::box_at((3.0, 0.3, 3.0), (0.4, 0.4, 0.4), rgb(240, 200, 40))?);
+            // Build the mesh around the origin and place the entity, so the
+            // entity's position is where the coin is.
+            let coin = world.spawn(Shape::box_at((0.0, 0.0, 0.0), (0.4, 0.4, 0.4), rgb(240, 200, 40))?);
+            world.set_place(coin, Place::new(3.0, 0.3, 3.0))?;
             world.insert(coin, Coin { value: 10 })?;
         }
 
@@ -73,7 +84,7 @@ fn main() -> EngineResult<()> {
         // Pick up coins within a metre; despawning removes their Coin too.
         for coin in world.ids_with::<Coin>() {
             let at = world.entity(coin)?.transform().w_axis.truncate();
-            if at.distance(game.position + Vec3::Y * 0.3) < 1.0 {
+            if at.distance(Vec3::new(game.position.x, 0.3, game.position.z)) < 1.0 {
                 game.score += world.get::<Coin>(coin).map_or(0, |c| c.value);
                 world.despawn(coin);
             }
@@ -148,7 +159,11 @@ python tools/verify.py <package> --reference refs/<package>.png
 9. **Loop over a list of ids when the loop changes the world.**
    `for id in world.ids_with::<Health>() { ... world.despawn(id); }`, not
    `for (id, h) in world.query::<Health>()` (that borrows the world).
-10. **Ground height comes from the terrain you made.** Use your height
+10. **Build meshes around the origin and place the entity.** A mesh made
+    at `(3, 0, 3)` (`Shape::box_at((3.0, 0.0, 3.0), ...)`) still has its
+    entity at `(0, 0, 0)`: `transform()` and distance checks see the
+    origin. Make it at `(0, 0, 0)`, then `set_place` it.
+11. **Ground height comes from the terrain you made.** Use your height
    function (`HeightField::height_at`, your own noise) or
    `world.cast_ray(...)` to place things on the ground.
 

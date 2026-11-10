@@ -82,6 +82,7 @@ pub mod ribbons;
 pub mod rocks;
 pub mod rooms;
 pub mod scatter;
+pub mod settings;
 pub mod sim;
 pub mod sky;
 pub mod space;
@@ -173,6 +174,7 @@ pub use rooms::{Opening, OpeningId, Room, RoomId};
 /// For your save data: `#[derive(engine::serde::Serialize, engine::serde::Deserialize)]`
 /// with `#[serde(crate = "engine::serde")]`, or add serde to your own crate.
 pub use serde;
+pub use settings::Settings;
 pub use sim::{Headless, HeadlessRun, SimClock, SimSteps};
 pub use space::{
     ChunkCoord, ChunkId, ChunkLayer, ChunkLevel, ChunkSpan, GlobalPosition, GlobalXZ, RenderOrigin,
@@ -216,6 +218,24 @@ impl Engine {
         update: impl FnMut(&mut World, &Frame) -> EngineResult<()> + 'static,
     ) -> EngineResult<()> {
         app::run_with(title, limits, update)
+    }
+
+    /// Run with startup [`Settings`]: window size, vsync, quality, TAA,
+    /// MSAA, tone map, render scale, frame-rate target, view distance,
+    /// audio, a fixed time step, limits.
+    ///
+    /// ```no_run
+    /// use engine::prelude::*;
+    /// let settings = Settings::default().window(1280, 720).vsync(false).quality(Quality::Medium);
+    /// Engine::run_with_settings("my game", settings, |world, frame| Ok(()))
+    /// # .unwrap();
+    /// ```
+    pub fn run_with_settings(
+        title: impl Into<String>,
+        settings: Settings,
+        update: impl FnMut(&mut World, &Frame) -> EngineResult<()> + 'static,
+    ) -> EngineResult<()> {
+        app::run_with_settings(title, settings, update)
     }
 }
 

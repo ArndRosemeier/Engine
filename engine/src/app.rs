@@ -32,6 +32,8 @@ macro_rules! timed {
 
 struct App {
     title: String,
+    /// The game's startup settings (see `crate::settings`).
+    settings: crate::settings::Settings,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     ui_backend: Option<UiBackend>,
@@ -70,13 +72,21 @@ struct App {
 }
 
 impl App {
-    fn new(title: String, limits: EngineLimits, update: UpdateFn) -> EngineResult<Self> {
+    fn new(
+        title: String,
+        settings: crate::settings::Settings,
+        update: UpdateFn,
+    ) -> EngineResult<Self> {
+        settings.validate()?;
         let now = Instant::now();
         let mut screenshot_path = optional_path_env("ENGINE_SCREENSHOT")?;
         let mut screenshot_frame = optional_parsed_env("ENGINE_SCREENSHOT_FRAME")?.unwrap_or(3);
         let mut screenshot_wait = optional_bool_env("ENGINE_SCREENSHOT_WAIT")?.unwrap_or(false);
         let verify = crate::verify::Verify::from_env(&title)?;
         let mut clock = crate::frame_clock::FrameClock::from_env();
+        if clock.fixed.is_none() {
+            clock.fixed = settings.fixed_dt;
+        }
         if let Some(v) = verify.as_ref() {
             // A verify run is a screenshot run of a set length, on a fixed
             // step so two runs show the same frame.
@@ -86,16 +96,20 @@ impl App {
             clock.fixed.get_or_insert(1.0 / 60.0);
             v.install_panic_hook();
         }
+        // Validate the size now, so a bad ENGINE_WIDTH is an error, not a panic.
+        Self::window_inner_size(&settings)?;
         Ok(Self {
             title,
             window: None,
             renderer: None,
             ui_backend: None,
             world: {
-                let mut world = World::new().with_limits(limits);
+                let mut world = World::new().with_limits(settings.limits.clone());
+                world.apply_startup_settings(&settings)?;
                 world.watch_z_fighting_from_env();
                 world
             },
+            settings,
             update,
             input: Input::new(),
             start: now,
@@ -151,9 +165,11 @@ impl App {
         self.pointer_locked = wanted;
     }
 
-    fn window_inner_size() -> EngineResult<winit::dpi::LogicalSize<u32>> {
-        let w: u32 = optional_parsed_env("ENGINE_WIDTH")?.unwrap_or(1920);
-        let h: u32 = optional_parsed_env("ENGINE_HEIGHT")?.unwrap_or(1080);
+    fn window_inner_size(
+        settings: &crate::settings::Settings,
+    ) -> EngineResult<winit::dpi::LogicalSize<u32>> {
+        let w: u32 = optional_parsed_env("ENGINE_WIDTH")?.unwrap_or(settings.width);
+        let h: u32 = optional_parsed_env("ENGINE_HEIGHT")?.unwrap_or(settings.height);
         if w < 320 || h < 180 {
             return Err(EngineError::InvalidValue(format!(
                 "ENGINE_WIDTH and ENGINE_HEIGHT must be at least 320x180, got {w}x{h}"
@@ -548,7 +564,9 @@ impl ApplicationHandler for App {
                 self.title,
                 crate::version::version()
             ))
-            .with_inner_size(Self::window_inner_size().expect("validated window size"))
+            .with_inner_size(
+                Self::window_inner_size(&self.settings).expect("validated window size"),
+            )
             // Hidden while the renderer compiles its pipelines: this callback
             // holds the event loop, and a shown window that cannot answer
             // stands still and cannot be dragged. Shown once it can.
@@ -560,11 +578,13 @@ impl ApplicationHandler for App {
         );
         // Sound starts while the pipelines build: the device opens and the
         // engine's own sounds are synthesised on worker threads.
-        if self.screenshot_path.is_none() {
+        if self.screenshot_path.is_none() && self.settings.audio {
             crate::audio::bank::warm();
             self._audio_out = crate::audio::scene::AudioOutput::start(self.world.audio());
         }
-        let renderer = pollster::block_on(Renderer::new(window.clone()));
+        // Without TAA, edges need MSAA unless the game chose otherwise.
+        let msaa = self.settings.msaa.or((!self.settings.taa).then_some(4));
+        let renderer = pollster::block_on(Renderer::new(window.clone(), msaa));
         let gpu = renderer.gpu_info();
         if let Some(warning) = gpu.driver_warning() {
             eprintln!("[engine] {warning}");
@@ -842,9 +862,22 @@ pub fn run_with(
     limits: EngineLimits,
     update: impl FnMut(&mut World, &Frame) -> EngineResult<()> + 'static,
 ) -> EngineResult<()> {
+    run_with_settings(
+        title,
+        crate::settings::Settings::default().limits(limits),
+        update,
+    )
+}
+
+/// Run with startup settings (window size, quality, MSAA, audio, ...).
+pub fn run_with_settings(
+    title: impl Into<String>,
+    settings: crate::settings::Settings,
+    update: impl FnMut(&mut World, &Frame) -> EngineResult<()> + 'static,
+) -> EngineResult<()> {
+    let mut app = App::new(title.into(), settings, Box::new(update))?;
     let event_loop = EventLoop::new().map_err(EngineError::EventLoopCreation)?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new(title.into(), limits, Box::new(update))?;
     event_loop
         .run_app(&mut app)
         .map_err(EngineError::EventLoopRun)?;

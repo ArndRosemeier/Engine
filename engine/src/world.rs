@@ -898,6 +898,10 @@ pub struct World {
     verify: world_verify::VerifyLog,
     /// Game data on entities: see [`World::insert`].
     components: world_components::Components,
+    /// What the game started with ([`World::settings`]).
+    settings: crate::settings::Settings,
+    /// `ENGINE_*` variables set at startup ([`World::env_overrides`]).
+    env_overrides: Vec<String>,
     /// What feet stand on: see [`World::ground_below`].
     ground: world_ground::GroundState,
     /// Which CPU copies of meshes go once uploaded: see [`CpuMeshes`].
@@ -1045,6 +1049,8 @@ impl Default for World {
             zfight: Default::default(),
             verify: Default::default(),
             components: Default::default(),
+            settings: Default::default(),
+            env_overrides: Vec::new(),
             ground: Default::default(),
             cpu_meshes: Default::default(),
             entity_names: HashMap::new(),
@@ -1399,6 +1405,40 @@ impl World {
 
     pub fn lod_bias(&self) -> f32 {
         self.lod_bias
+    }
+
+    /// Take a game's startup [`Settings`](crate::Settings): quality first,
+    /// then the single switches, so they win over the preset.
+    pub(crate) fn apply_startup_settings(
+        &mut self,
+        settings: &crate::settings::Settings,
+    ) -> EngineResult<()> {
+        self.set_quality(settings.quality);
+        self.set_taa(settings.taa);
+        self.set_tone_map(settings.tone_map);
+        self.set_render_scale(settings.render_scale);
+        self.set_target_fps(settings.target_fps)?;
+        if let Some(m) = settings.view_distance {
+            self.set_view_distance(m)?;
+        }
+        self.set_vsync(settings.vsync);
+        self.set_whats_new_button(settings.whats_new_button);
+        self.settings = settings.clone();
+        self.env_overrides = crate::settings::Settings::env_overrides();
+        Ok(())
+    }
+
+    /// The settings the game started with (`Engine::run_with_settings`;
+    /// defaults for `Engine::run`). Changes made later with the setters
+    /// (`set_quality`, `set_taa`, ...) are not reflected here.
+    pub fn settings(&self) -> &crate::settings::Settings {
+        &self.settings
+    }
+
+    /// The `ENGINE_*` environment variables this run started with, as
+    /// `NAME=value`. They override the game's settings (debug switches).
+    pub fn env_overrides(&self) -> &[String] {
+        &self.env_overrides
     }
 
     /// Apply a quality preset: shadows, ambient occlusion, GI and LOD bias.
