@@ -14,6 +14,8 @@ pub struct UiFrame {
     textures: Rc<RefCell<HashMap<String, TextureHandle>>>,
     modal_open: Rc<Cell<bool>>,
     bind_listen: Rc<Cell<bool>>,
+    /// How far each HUD corner is filled this frame (see `hud.rs`).
+    pub(crate) hud_stacks: Rc<RefCell<HashMap<crate::hud::Anchor, f32>>>,
 }
 
 impl std::fmt::Debug for UiFrame {
@@ -38,6 +40,7 @@ impl UiFrame {
             textures,
             modal_open: Rc::new(Cell::new(false)),
             bind_listen: Rc::new(Cell::new(false)),
+            hud_stacks: Rc::default(),
         }
     }
 

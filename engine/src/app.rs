@@ -363,6 +363,9 @@ impl App {
                 {
                     world.set_pointer_lock(false);
                 }
+                if self.fatal_error.is_none() {
+                    world.draw_labels(ui.ctx(), dt);
+                }
                 if whats_new_env.as_deref() == Some("open") && first {
                     crate::version::set_whats_new_open(ui.ctx(), true);
                 }

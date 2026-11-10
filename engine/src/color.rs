@@ -97,6 +97,16 @@ impl Color {
     pub fn to_vec4(self) -> Vec4 {
         Vec4::new(self.r, self.g, self.b, self.a)
     }
+
+    /// Back to sRGB bytes `[r, g, b, a]`, as [`Color::rgba`] takes them.
+    pub fn to_srgba8(self) -> [u8; 4] {
+        [
+            linear_to_srgb(self.r),
+            linear_to_srgb(self.g),
+            linear_to_srgb(self.b),
+            (self.a.clamp(0.0, 1.0) * 255.0).round() as u8,
+        ]
+    }
 }
 
 impl From<Color> for Vec3 {
@@ -119,6 +129,17 @@ fn srgb_to_linear(c: u8) -> f32 {
     } else {
         ((s + 0.055) / 1.055).powf(2.4)
     }
+}
+
+/// The sRGB transfer curve, linear in, byte out.
+fn linear_to_srgb(c: f32) -> u8 {
+    let c = c.clamp(0.0, 1.0);
+    let s = if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (s * 255.0).round() as u8
 }
 
 /// Shorthand for [`Color::rgb`].

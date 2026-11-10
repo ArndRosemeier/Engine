@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.039 (2026-11-10)
+
+- Game UI in one call each: corner text, bars, a pause menu and a crosshair; names hanging over things and floating text like "+1"
+
 ## 0.038 (2026-11-10)
 
 - Character controller (walk, jump, steps, slopes, pushes crates) and joints (hinge, ball, slider, rope, weld), with a new gameplay example.

@@ -23,7 +23,7 @@ use crate::texture::{
     WaterMaterialId,
 };
 use crate::ui::UiFrame;
-use glam::{IVec3, Mat4, Vec3};
+use glam::{IVec3, Mat4, Vec2, Vec3};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -64,6 +64,8 @@ mod world_rooms;
 mod world_animation;
 #[path = "world_hierarchy.rs"]
 mod world_hierarchy;
+#[path = "world_labels.rs"]
+mod world_labels;
 #[path = "world_lamps.rs"]
 mod world_lamps;
 #[path = "world_lighting.rs"]
@@ -966,6 +968,9 @@ pub struct World {
     /// Destination opening ignored for one frame after crossing (prevents ping-pong).
     travel_gate: Option<EntityId>,
     particles: ParticleWorld,
+    /// Text rising from points (`float_text`).
+    float_texts: Vec<crate::labels::FloatText>,
+    labels_on_screen: usize,
     /// Dust and flying chunks when things are dug, shattered or hit.
     destruction_effects: bool,
     audio: crate::audio::AudioScene,
@@ -1100,6 +1105,8 @@ impl Default for World {
             travel_prev: None,
             travel_gate: None,
             particles: ParticleWorld::default(),
+            float_texts: Vec::new(),
+            labels_on_screen: 0,
             destruction_effects: true,
             audio: crate::audio::AudioScene::new(),
             auto_audio: Default::default(),
