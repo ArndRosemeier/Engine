@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.043 (2026-11-10)
+
+- Tab and the arrow keys belong to the game unless a UI text field has focus; a pointer resting on a panel no longer swallows the game's keys
+
 ## 0.042 (2026-11-10)
 
 - Custom materials: a game writes a small WGSL function for a surface (lava, holograms, force fields), with time and params it sets each frame; it is lit and shadowed like any mesh, and mistakes name the line

@@ -77,6 +77,16 @@ impl UiBackend {
         {
             self.escape_pressed = true;
         }
+        // Tab and the arrow keys move egui's keyboard focus from widget to
+        // widget. In a game they are game keys (Tab picks a target, arrows
+        // steer): they reach the UI only while a widget already has the
+        // keyboard (typing in a field). Otherwise one Tab would hand the
+        // keyboard to a button, and the game would get no keys at all.
+        if let WindowEvent::KeyboardInput { event: key, .. } = event {
+            if focus_key(&key.physical_key) && self.ctx.memory(|m| m.focused()).is_none() {
+                return false;
+            }
+        }
         self.state.on_window_event(window, event).consumed
     }
 
@@ -178,5 +188,63 @@ impl UiBackend {
         // Freed at the next paint, after this frame is submitted.
         self.free_next
             .extend(full_output.textures_delta.free.iter().copied());
+    }
+}
+
+/// Keys egui uses to move keyboard focus between widgets.
+fn focus_key(key: &winit::keyboard::PhysicalKey) -> bool {
+    use winit::keyboard::{KeyCode, PhysicalKey};
+    matches!(
+        key,
+        PhysicalKey::Code(
+            KeyCode::Tab
+                | KeyCode::ArrowUp
+                | KeyCode::ArrowDown
+                | KeyCode::ArrowLeft
+                | KeyCode::ArrowRight
+        )
+    )
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use winit::keyboard::{KeyCode, PhysicalKey};
+
+    #[test]
+    fn tab_and_arrows_are_focus_keys_and_letters_are_not() {
+        for k in [KeyCode::Tab, KeyCode::ArrowUp, KeyCode::ArrowLeft] {
+            assert!(super::focus_key(&PhysicalKey::Code(k)));
+        }
+        for k in [KeyCode::Digit2, KeyCode::KeyQ, KeyCode::Enter] {
+            assert!(!super::focus_key(&PhysicalKey::Code(k)));
+        }
+    }
+
+    /// Why the keys are held back: with no widget focused, one Tab in egui
+    /// focuses a button, and egui then wants the keyboard.
+    #[test]
+    fn one_tab_hands_egui_the_keyboard() {
+        let ctx = egui::Context::default();
+        let pass = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::Area::new(egui::Id::new("a")).show(ctx, |ui| {
+                    let _ = ui.button("What's new");
+                });
+            });
+        };
+        pass(vec![]);
+        pass(vec![egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        }]);
+        pass(vec![]);
+        assert!(ctx.wants_keyboard_input());
     }
 }

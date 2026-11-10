@@ -295,6 +295,20 @@ impl Input {
     }
 
     /// Forget one frame's edges and motion, keeping what is still held.
+    /// Forgets the keys (the UI has them this frame: a text field has focus).
+    pub(crate) fn clear_keys(&mut self) {
+        self.down.clear();
+        self.pressed.clear();
+        self.last_key_down = None;
+    }
+
+    /// Forgets the mouse buttons and motion (the pointer is over the UI).
+    pub(crate) fn clear_pointer(&mut self) {
+        self.mouse_down.clear();
+        self.mouse_clicked.clear();
+        self.mouse_delta = Vec2::ZERO;
+    }
+
     pub(crate) fn end_frame(&mut self) {
         self.pressed.clear();
         self.mouse_clicked.clear();
@@ -397,5 +411,26 @@ impl Input {
             s -= 1.0;
         }
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::keyboard::{KeyCode, PhysicalKey};
+
+    #[test]
+    fn the_pointer_over_the_ui_leaves_the_keys_alone() {
+        let mut i = Input::new();
+        i.set_key(PhysicalKey::Code(KeyCode::Digit2), true);
+        i.set_mouse_button(winit::event::MouseButton::Left, true);
+        i.clear_pointer();
+        assert!(
+            i.pressed(Key::Digit2),
+            "a key pressed with the pointer on a label"
+        );
+        assert!(!i.mouse_down(MouseButton::Left));
+        i.clear_keys();
+        assert!(!i.pressed(Key::Digit2) && !i.down(Key::Digit2));
     }
 }
