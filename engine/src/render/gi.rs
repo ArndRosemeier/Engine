@@ -697,22 +697,23 @@ fn cs_update(@builtin(global_invocation_id) id: vec3<u32>) {
         var t_max = select(frac, vec3<f32>(1.0) - frac, dir > vec3<f32>(0.0)) * inv;
         var radiance = gi_sky(dir);
         for (var s = 0u; s < MAX_STEPS; s++) {
-            var axis = 0;
+            // The axis to step along, as a 0/1 mask: DirectX's FXC compiler
+            // cannot write vector components picked by a runtime index.
+            var mask = vec3<f32>(1.0, 0.0, 0.0);
             if t_max.y < t_max.x && t_max.y <= t_max.z {
-                axis = 1;
+                mask = vec3<f32>(0.0, 1.0, 0.0);
             } else if t_max.z < t_max.x && t_max.z < t_max.y {
-                axis = 2;
+                mask = vec3<f32>(0.0, 0.0, 1.0);
             }
-            let t = t_max[axis];
-            cell[axis] += step[axis];
-            t_max[axis] += inv[axis];
+            let t = dot(t_max, mask);
+            cell += step * vec3<i32>(mask);
+            t_max += inv * mask;
             if !inside(cell) {
                 break;
             }
             let v = voxel_at(cell);
             if v.a > 0.5 {
-                var n = vec3<f32>(0.0);
-                n[axis] = -f32(step[axis]);
+                let n = -vec3<f32>(step) * mask;
                 let hit = gi.origin + (start + dir * t) * gi.voxel;
                 radiance = hit_radiance(v.rgb, hit + n * 0.05, n);
                 break;

@@ -1007,6 +1007,13 @@ impl Renderer {
                 ))
             })?;
 
+        if adapter.get_info().backend == wgpu::Backend::Gl {
+            return Err(EngineError::Gpu(
+                "OpenGL is not supported (WGPU_BACKEND=gl?). The engine runs on Vulkan, \
+                 DirectX 12 or Metal: unset WGPU_BACKEND or pick one of those"
+                    .into(),
+            ));
+        }
         let mut gpu_profile_interval = GpuProfiler::requested_interval();
         let portal_depth = wgpu::Features::DEPTH32FLOAT_STENCIL8;
         // Portals and room culling need a stencil next to 32-bit depth. A GPU
@@ -1184,8 +1191,16 @@ impl Renderer {
             panic!("requested present mode {present_mode:?} is unsupported by this surface");
         }
 
+        // Screenshots copy the finished frame out of the surface; a surface
+        // that cannot be copied still runs, without screenshots.
+        let surface_usage = if caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+        } else {
+            eprintln!("[engine] this window surface cannot be copied; screenshots are off");
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+        };
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: surface_usage,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -2575,9 +2590,16 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("capture-encoder"),
             });
-        let src = self.last_color.as_ref().expect(
-            "capture_png needs request_capture before render_with so the HUD is in the shot",
-        );
+        let Some(src) = self.last_color.as_ref() else {
+            return Err(crate::EngineError::Gpu(
+                if self.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+                    "no frame to capture yet (request_capture comes before render_with)"
+                } else {
+                    "screenshots are off: this window surface cannot be copied"
+                }
+                .into(),
+            ));
+        };
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: src,
@@ -2644,6 +2666,9 @@ impl Renderer {
     }
 
     fn store_composited(&mut self, encoder: &mut wgpu::CommandEncoder, src: &wgpu::Texture) {
+        if !self.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+            return;
+        }
         let width = self.config.width.max(1);
         let height = self.config.height.max(1);
         let format = self.config.format;
@@ -3264,7 +3289,10 @@ impl Renderer {
             },
         );
 
-        if level >= world.portal_recursion() {
+        // Looking through portals needs the stencil to keep the far space
+        // inside the doorway. Without one (a GPU without Depth32FloatStencil8,
+        // or ENGINE_DEPTH_FORMAT=d32) doorways show nothing beyond them.
+        if level >= world.portal_recursion() || !stencil::has_stencil() {
             return;
         }
 
