@@ -36,6 +36,10 @@ render loop.
 - **Safe by default:** bad input (NaN positions, broken meshes, oversized
   files) is an `EngineError`, never a silent glitch or a crash.
 
+Writing a game with a coding agent? Point it at [AGENTS.md](AGENTS.md): the
+model in one minute, a game skeleton, the rules that avoid common mistakes,
+and how to check a game with `tools/verify.py`.
+
 ## Getting started
 
 Run the starter scene, a landscape with a wood you can fly through:
