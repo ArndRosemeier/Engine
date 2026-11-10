@@ -227,13 +227,16 @@ impl World {
                 if let Some(k) = key {
                     self.texture_by_content.insert(k, tid);
                 }
+                self.auto_textures.insert(tid);
                 tid
             }
         };
-        self.entities
-            .get_mut(&id)
-            .expect("entity was just spawned")
-            .albedo = Some(tid);
+        let entity = self.entities.get_mut(&id).expect("entity was just spawned");
+        if let Some(old) = entity.albedo.replace(tid) {
+            if old != tid && self.auto_textures.contains(&old) {
+                self.texture_sweep = true;
+            }
+        }
         self.bump_render_epoch();
         Ok(())
     }
@@ -267,7 +270,13 @@ impl World {
             self.despawn(child);
         }
         self.physics.remove(id);
-        let removed_static = self.entities.remove(&id).is_some();
+        let removed = self.entities.remove(&id);
+        let removed_static = removed.is_some();
+        if let Some(tid) = removed.and_then(|e| e.albedo) {
+            if self.auto_textures.contains(&tid) {
+                self.texture_sweep = true;
+            }
+        }
         if removed_static {
             // `entities()` skips ids that are gone; compact now and then.
             self.order_stale += 1;

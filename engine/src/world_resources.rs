@@ -277,6 +277,43 @@ impl World {
         self.time
     }
 
+    /// Textures the world holds (the game's own and those made from mesh
+    /// albedo maps). Stays flat in a streamed world: a map made for a mesh
+    /// is freed when no entity draws with it any more.
+    pub fn texture_count(&self) -> usize {
+        self.textures.len()
+    }
+
+    /// Free the textures made from mesh albedo maps that no entity draws
+    /// with any more (their entities were despawned or got a new map).
+    /// Runs once a frame, and only does work after such a change, so an
+    /// entity that is despawned and its pieces spawned in the same frame
+    /// (shatter) keeps its texture.
+    pub(crate) fn tick_textures(&mut self) {
+        if !std::mem::take(&mut self.texture_sweep) {
+            return;
+        }
+        let used: HashSet<TextureId> = self.entities.values().filter_map(|e| e.albedo).collect();
+        let gone: Vec<TextureId> = self
+            .auto_textures
+            .iter()
+            .copied()
+            .filter(|t| !used.contains(t))
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        for t in &gone {
+            self.auto_textures.remove(t);
+            self.textures.remove(t);
+            self.surface_maps.remove(t);
+        }
+        let textures = &self.textures;
+        self.texture_by_content
+            .retain(|_, t| textures.contains_key(t));
+        self.bump_resource_epoch();
+    }
+
     pub(crate) fn textures(&self) -> &HashMap<TextureId, CpuTexture> {
         &self.textures
     }

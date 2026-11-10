@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.048 (2026-11-10)
+
+- Long sessions stay fast: textures made for meshes are freed with the last mesh that uses them (a streamed world used to pile them up until the frame rate fell), and world.resource_census() counts what the world and GPU hold, to catch anything else that grows
+
 ## 0.047 (2026-11-10)
 
 - Instanced things no longer vanish up close on the software GPU used by verify runs and CI (it mishandled GPU draw counts, so they are off there)

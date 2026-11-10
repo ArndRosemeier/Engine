@@ -713,6 +713,23 @@ cached cascade draws only the moving casters live, and its cached layer is
 redrawn only when a static caster in its view changes.
 `ENGINE_GPU_SHADOWS=0` turns it off.
 
+**Long sessions: the resource census.** A frame rate that falls the longer
+one plays is almost always something made and never freed. Textures made
+from a mesh's albedo map are freed with the last entity that draws with
+them, so streaming cells in and out keeps their number flat (before 0.048
+they piled up: in a streamed city past the 4,096-slot material table, and
+video memory with them). `world.resource_census()` counts what the world
+and the renderer hold (entities, LOD sets, textures, lamps, decals, crowd
+agents, bodies, sounds, GPU meshes, batches, textures, table slots,
+characters, geometry pages, video memory in MiB); its `Display` is one
+`key=value` line for a log. The GPU side is counted about twice a
+second. Log it now and then, or at each lap of a route that goes over the
+same ground again: every number should level off.
+
+```rust,ignore
+eprintln!("holds: {}", world.resource_census());
+```
+
 Finer knobs: `set_shadows`, `set_grass_scale`, `set_ambient_occlusion`, `set_global_illumination`,
 `set_bloom`, `set_tone_map`, `set_haze`, `set_lod_bias`, `set_view_distance`.
 

@@ -4136,3 +4136,96 @@ fn material(m: MaterialIn, base: MaterialOut) -> MaterialOut {
         let _ = ghost;
     }
 }
+
+/// Textures made from mesh albedo maps go away with the last entity that
+/// draws with them, so a streamed world does not pile them up (FPS fell
+/// over a long play session as the texture table and video memory filled).
+mod texture_lifetime {
+    use super::*;
+    use crate::prelude::{EntityId, Shape, World};
+
+    fn textured(seed: u8, size: u32) -> Mesh {
+        let mut m = Shape::box_at((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), rgb(200, 200, 200)).unwrap();
+        let mut rgba = vec![seed; (size * size * 4) as usize];
+        rgba[0] = seed.wrapping_add(1);
+        m.set_albedo_rgba(size, size, rgba).unwrap();
+        m
+    }
+
+    #[test]
+    fn streamed_meshes_do_not_pile_up_textures() {
+        let mut world = World::new();
+        let own = world.create_texture_rgba(1, 1, vec![255; 4]).unwrap();
+        let base = world.texture_count();
+        // Stream cells in and out: small maps (one texture per mesh) and a
+        // large shared one (by content).
+        let mut live: Vec<EntityId> = Vec::new();
+        for round in 0..50u32 {
+            for id in live.drain(..) {
+                world.despawn(id);
+            }
+            for k in 0..8u8 {
+                live.push(world.spawn(textured(round as u8 ^ k, 16)));
+            }
+            live.push(world.spawn(textured(7, 512)));
+            live.push(world.spawn(textured(7, 512)));
+            world.tick_textures();
+            assert!(
+                world.texture_count() <= base + 9,
+                "round {round}: {} textures",
+                world.texture_count()
+            );
+        }
+        for id in live.drain(..) {
+            world.despawn(id);
+        }
+        world.tick_textures();
+        assert_eq!(world.texture_count(), base);
+        // The game's own texture stays.
+        assert!(world.textures().contains_key(&own));
+    }
+
+    #[test]
+    fn a_shattered_mesh_keeps_its_texture_for_its_pieces() {
+        let mut world = World::new();
+        let id = world.spawn(textured(3, 16));
+        world.set_place(id, Place::new(0.0, 0.5, 0.0)).unwrap();
+        let tid = world.entity(id).unwrap().albedo.unwrap();
+        let pieces = world
+            .shatter(
+                id,
+                Vec3::new(0.0, 0.8, 0.4),
+                crate::debris::Shatter::default(),
+            )
+            .unwrap();
+        world.tick_textures();
+        assert!(world.textures().contains_key(&tid));
+        assert_eq!(world.entity(pieces[0]).unwrap().albedo, Some(tid));
+        for p in pieces {
+            world.despawn(p);
+        }
+        world.tick_textures();
+        assert!(!world.textures().contains_key(&tid));
+    }
+
+    #[test]
+    fn a_shared_large_map_lives_while_any_entity_uses_it() {
+        let mut world = World::new();
+        let a = world.spawn(textured(9, 512));
+        let b = world.spawn(textured(9, 512));
+        let tid = world.entity(a).unwrap().albedo.unwrap();
+        assert_eq!(world.entity(b).unwrap().albedo, Some(tid));
+        world.despawn(a);
+        world.tick_textures();
+        assert!(world.textures().contains_key(&tid));
+        // A new mesh with the same map still finds it.
+        let c = world.spawn(textured(9, 512));
+        assert_eq!(world.entity(c).unwrap().albedo, Some(tid));
+        world.despawn(b);
+        world.despawn(c);
+        world.tick_textures();
+        assert!(!world.textures().contains_key(&tid));
+        let d = world.spawn(textured(9, 512));
+        assert!(world.entity(d).unwrap().albedo.is_some());
+    }
+}

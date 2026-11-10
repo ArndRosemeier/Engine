@@ -165,6 +165,11 @@ impl MaterialTable {
         }
     }
 
+    /// Materials in the table.
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
     pub fn slot(&self, key: Option<TextureId>) -> Option<u32> {
         self.slots.get(&key).copied()
     }

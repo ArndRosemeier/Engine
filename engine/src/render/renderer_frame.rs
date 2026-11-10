@@ -256,6 +256,32 @@ impl Renderer {
         )
     }
 
+    /// What the renderer holds now (see [`crate::census`]).
+    pub fn gpu_census(&self, frame: u64) -> crate::census::GpuCensus {
+        let (mesh_bytes, texture_bytes, _, _) = self.mesh_and_texture_bytes();
+        let (people, people_maps, character_maps) = self.character_bytes();
+        crate::census::GpuCensus {
+            frame,
+            meshes: self.gpu_meshes.len(),
+            batches: self.gpu_instance_batches.len(),
+            textures: self.gpu_textures.len(),
+            materials: self.gpu_mesh_albedo.len(),
+            table_slots: self.bindless.as_ref().map_or(0, |b| b.table.len()),
+            skinned: self.gpu_skinned.len(),
+            skinned_models: self.gpu_skinned_meshes.len(),
+            character_maps,
+            custom_materials: self.gpu_custom.len(),
+            geometry_pages: self.arenas.geometry.page_count(),
+            mesh_mib: mesh_bytes >> 20,
+            texture_mib: texture_bytes >> 20,
+            character_mib: (people + people_maps) >> 20,
+            allocated_mib: self
+                .device
+                .generate_allocator_report()
+                .map_or(0, |a| a.total_allocated_bytes >> 20),
+        }
+    }
+
     /// Rough video memory held by characters (bytes): (vertex and index
     /// buffers of animated models and crowds, maps, map count). Maps are
     /// shared by content, so a garment worn by many counts once.

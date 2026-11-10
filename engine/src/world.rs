@@ -41,6 +41,8 @@ mod nav;
 mod world_audio;
 #[path = "world_buildings.rs"]
 mod world_buildings;
+#[path = "world_census.rs"]
+mod world_census;
 #[path = "world_cpu_mesh.rs"]
 mod world_cpu_mesh;
 #[path = "world_crowds.rs"]
@@ -868,6 +870,14 @@ pub struct World {
     /// Albedo textures by content, so meshes that share an atlas (every
     /// generated tree) share one GPU texture.
     texture_by_content: HashMap<u64, TextureId>,
+    /// Textures the world made itself from a mesh's albedo map: freed once
+    /// no entity draws with them (see [`Self::tick_textures`]). Textures
+    /// the game creates (`create_texture_rgba`) are never in here.
+    auto_textures: HashSet<TextureId>,
+    /// The renderer's last count (see [`crate::census`]).
+    gpu_census: crate::census::GpuCensus,
+    /// An entity holding an auto texture went away: sweep next tick.
+    texture_sweep: bool,
     /// Light carried by the viewer (lantern / headlamp), when lit.
     torch: Option<TorchLight>,
     lamps: std::collections::BTreeMap<crate::lamps::LampId, (crate::lamps::Lamp, SpaceId)>,
@@ -1054,6 +1064,9 @@ impl Default for World {
             season: 0.0,
             glow: [[-1.0, 0.0, 0.0, 1.0]; crate::mesh::GLOW_CHANNELS],
             texture_by_content: HashMap::new(),
+            auto_textures: HashSet::new(),
+            gpu_census: Default::default(),
+            texture_sweep: false,
             torch: None,
             lamps: std::collections::BTreeMap::new(),
             next_lamp: 1,

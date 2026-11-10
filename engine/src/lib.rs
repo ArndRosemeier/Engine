@@ -42,6 +42,7 @@ pub mod anim_graph;
 pub mod audio;
 pub mod building;
 pub mod camera;
+pub mod census;
 pub mod chunk_stream;
 pub mod collision;
 pub mod color;
