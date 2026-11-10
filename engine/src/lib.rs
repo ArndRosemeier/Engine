@@ -48,6 +48,7 @@ pub mod color;
 pub mod contact;
 mod cpu_trace;
 pub mod crowd;
+pub mod custom_material;
 pub mod debris;
 pub mod decals;
 pub mod error;
@@ -139,6 +140,7 @@ pub use collision::{
 };
 pub use color::{rgb, rgba, Color};
 pub use contact::{ContactGrid, ContactSnapshot};
+pub use custom_material::{CustomMaterial, CustomMaterialId};
 pub use debris::Shatter;
 pub use error::{EngineError, EngineResult};
 /// The maths types the engine's API uses (`Vec3`, `Mat4`, `Quat`...).

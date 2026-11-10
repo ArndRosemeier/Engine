@@ -131,6 +131,43 @@ python tools/verify.py <package> --reference refs/<package>.png
 - No display (Linux CI, containers): `tools/verify.py` uses `xvfb-run`; a
   software Vulkan driver (Mesa lavapipe) is enough.
 
+## A custom material
+
+A surface's look can be a small WGSL function. It runs inside the engine's
+lit shader, so the result is still lit, shadowed and fogged. The code is
+checked by `add_material`: a WGSL mistake is an error naming the line.
+
+```rust,no_run
+use engine::prelude::*;
+
+const GLOW: &str = r#"
+fn material(m: MaterialIn, base: MaterialOut) -> MaterialOut {
+    var o = base; // what the mesh looks like without the material
+    let pulse = 0.5 + 0.5 * sin(m.time * 3.0 + m.world_pos.y * 4.0);
+    o.emission = vec3<f32>(0.2, 0.8, 1.0) * pulse * m.params[0].x;
+    return o;
+}
+"#;
+
+fn setup(world: &mut World) -> EngineResult<CustomMaterialId> {
+    let glow = world.add_material(CustomMaterial::new("glow", GLOW).param(0, [1.0, 0.0, 0.0, 0.0]))?;
+    let pillar = world.spawn(Shape::box_at((0.0, 1.0, 0.0), (0.5, 2.0, 0.5), rgb(40, 40, 50))?);
+    world.set_custom_material(pillar, glow)?;
+    Ok(glow)
+}
+
+fn every_frame(world: &mut World, glow: CustomMaterialId, power: f32) -> EngineResult<()> {
+    // params[0..4] are four vec4s the game may change any frame.
+    world.set_material_param(glow, 0, [power, 0.0, 0.0, 0.0])
+}
+# fn main() {}
+```
+
+`m` gives `world_pos`, `object_pos`, `normal`, `view_dir`, `uv`, `time`
+and `params`; return `color` (alpha used with `.see_through()`), `normal`,
+`roughness`, `metallic` and `emission`. The full list is on
+`engine::custom_material::MATERIAL_API`.
+
 ## Rules that save you a debugging session
 
 1. **Spawn in `if frame.first`, not every frame.** Spawning in the frame
@@ -180,6 +217,7 @@ python tools/verify.py <package> --reference refs/<package>.png
 | Names over things, damage numbers | README "Text in the world", `examples/gameplay` |
 | Animation states (idle/walk/attack rules, footstep events) | README "Animation state machines", `examples/anim_states` |
 | Glass and other see-through things | README "See-through things", `examples/glass` |
+| Lava, holograms, force fields: your own shader code | README "Custom materials", `examples/materials`, and below |
 | Characters, animation, foot IK | README "Character animation", `examples/characters` |
 | AI walking around obstacles | README "Navigation", `examples/navigation` |
 | Many people | README "Crowds", `examples/crowds` |

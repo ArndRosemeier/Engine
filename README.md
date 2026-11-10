@@ -344,6 +344,34 @@ entity (and per instanced spawn), not per triangle: for glass you look
 through from many sides, make each pane its own entity rather than one big
 mesh. See `examples/glass`.
 
+**Custom materials (lava, holograms, force fields):** write the surface's
+look as a small WGSL function and the engine runs it inside its lit shader,
+so it still gets sun, shadows, lamps, fog and AO:
+
+```rust,ignore
+let lava = world.add_material(CustomMaterial::new("lava", r#"
+    fn material(m: MaterialIn, base: MaterialOut) -> MaterialOut {
+        var o = base;
+        let flow = sin(m.world_pos.x * 2.0 + m.time) * 0.5 + 0.5;
+        o.color = vec4<f32>(0.1, 0.02, 0.0, 1.0);
+        o.emission = vec3<f32>(1.0, 0.4, 0.05) * flow * m.params[0].x;
+        return o;
+    }
+"#).param(0, [2.0, 0.0, 0.0, 0.0]))?;
+world.set_custom_material(pool, lava)?;
+world.set_material_param(lava, 0, [heat, 0.0, 0.0, 0.0])?; // any frame
+```
+
+`m` has `world_pos`, `object_pos` (moves with the entity), `normal`,
+`view_dir`, `uv`, `time` and `params` (four `vec4`s the game sets with
+`set_material_param`); `base` is what the mesh would look like without the
+material, so change only what you need. Return `color` (with alpha),
+`normal`, `roughness`, `metallic` and `emission` (light of its own).
+`.see_through()` blends it using the colour's alpha, sorted far to near
+like glass. The code is checked when it is added: a mistake is an error
+naming the line in your code and what is wrong. Up to 64 materials. See
+`examples/materials`.
+
 **Decals:** `world.spawn_decal(Decal::new(DecalKind::Scorch, hit.point,
 hit.normal, 1.5).on(hit.entity))?` paints a mark onto whatever is there:
 terrain, walls, moving bodies and animated characters (it sticks to the
@@ -734,6 +762,7 @@ cargo run --release -p <name>
 | `lamps` | A hamlet at night: street lamps, a camp fire, lit windows, a lantern walker and a sweeping searchlight, all casting shadows (L your own lantern, T shadows, N/M the hour) |
 | `anim_states` | An animation state machine: idle, walk, jog, sword attack and talk chosen by rules on speed, a flag and a trigger; footstep sounds from clip events |
 | `glass` | Coloured glass panes, a glass ball and glass cubes seen from every side, sorted far to near (`ENGINE_GLASS_YAW` holds the camera) |
+| `materials` | Custom WGSL materials: a flowing lava pool, a flickering hologram and a force-field dome that ripples when the game says it is hit |
 | `characters` | Walk, run and idle blending into each other, speed-matched; feet planted on stone steps by foot IK (I toggles IK, B blending) |
 | `navigation` | Villagers find their own way around houses, walls, a fountain and crates and up stairs to a terrace; click sends everyone there, N shows the walkable area |
 | `prefabs` | Carts built from parts driving with spinning wheels, a windmill turning its sails, a lantern carried in a hand; C drops carts that tumble whole, X removes them |

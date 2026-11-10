@@ -63,6 +63,8 @@ mod world_rooms;
 // `impl World`, by topic.
 #[path = "world_animation.rs"]
 mod world_animation;
+#[path = "world_custom_materials.rs"]
+mod world_custom_materials;
 #[path = "world_hierarchy.rs"]
 mod world_hierarchy;
 #[path = "world_labels.rs"]
@@ -647,6 +649,8 @@ pub enum SurfaceMaterialRef {
     Terrain(MaterialId),
     /// Animated water sheet.
     Water(WaterMaterialId),
+    /// A game's own shader code (`World::add_material`).
+    Custom(crate::custom_material::CustomMaterialId),
 }
 
 #[derive(Clone, Debug)]
@@ -973,6 +977,12 @@ pub struct World {
     particles: ParticleWorld,
     /// Text rising from points (`float_text`).
     float_texts: Vec<crate::labels::FloatText>,
+    /// Materials made of game shader code, with a revision per change.
+    pub(crate) custom_materials: std::collections::BTreeMap<
+        crate::custom_material::CustomMaterialId,
+        (crate::custom_material::CustomMaterial, u64),
+    >,
+    next_custom_material: u32,
     /// Clip events since `take_anim_events` was last called.
     anim_events: Vec<crate::anim_graph::AnimEvent>,
     labels_on_screen: usize,
@@ -1111,6 +1121,8 @@ impl Default for World {
             travel_gate: None,
             particles: ParticleWorld::default(),
             float_texts: Vec::new(),
+            custom_materials: Default::default(),
+            next_custom_material: 0,
             anim_events: Vec::new(),
             labels_on_screen: 0,
             destruction_effects: true,

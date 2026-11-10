@@ -90,6 +90,9 @@ jobs:
       - name: glass (see-through things sorted far to near)
         run: python3 tools/verify.py glass --frames 60 --width 640 --height 360
 
+      - name: materials (custom WGSL materials)
+        run: python3 tools/verify.py materials --frames 60 --width 640 --height 360
+
       - name: Keep the reports and screenshots
         if: always()
         uses: actions/upload-artifact@v4

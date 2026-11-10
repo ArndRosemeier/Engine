@@ -31,6 +31,7 @@ members = [
     "examples/characters",
     "examples/anim_states",
     "examples/glass",
+    "examples/materials",
     "examples/fixed_tick",
     "examples/ragdolls",
     "examples/crowds",

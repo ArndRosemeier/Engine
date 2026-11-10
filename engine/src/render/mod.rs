@@ -16,6 +16,7 @@ mod material_table;
 mod occlusion;
 mod particles_gpu;
 mod pipeline;
+pub(crate) use pipeline::{lit_shader_source, CUSTOM_CODE_MARK};
 pub(crate) mod pipeline_cache;
 mod portal;
 mod postprocess;
@@ -941,6 +942,11 @@ pub struct Renderer {
     batch_opaque: Vec<EntityId>,
     batch_terrain: Vec<EntityId>,
     batch_transparent: Vec<EntityId>,
+    /// Solid meshes and batches drawn with a game's custom material.
+    source_custom: Vec<TransparentDraw>,
+    draw_custom: Vec<TransparentDraw>,
+    gpu_custom: HashMap<crate::custom_material::CustomMaterialId, pipeline::GpuCustomMaterial>,
+    custom_params_layout: Option<wgpu::BindGroupLayout>,
     /// `draw_transparent` and `batch_transparent` together, farthest first.
     transparent_order: Vec<TransparentDraw>,
     batch_water: Vec<EntityId>,

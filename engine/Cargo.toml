@@ -27,6 +27,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 flate2 = { workspace = true }
 wgpu = { workspace = true }
+# Checks custom material shader code when it is added (same version wgpu uses).
+naga = { version = "25.0.1", features = ["wgsl-in"] }
 winit = { workspace = true }
 meshopt = { workspace = true }
 

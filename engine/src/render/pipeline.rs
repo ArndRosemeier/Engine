@@ -405,6 +405,66 @@ pub fn scene_shader_prefix() -> String {
     )
 }
 
+/// What a custom material function gets and gives back (see
+/// `crate::custom_material`). The part between the markers is replaced by
+/// the game's own code in a custom material's shader.
+pub(crate) const MATERIAL_HOOK_WGSL: &str = r#"
+// Set to 1 in a custom material's pipelines.
+override CUSTOM_MATERIAL: f32 = 0.0;
+
+struct MaterialIn {
+    world_pos: vec3<f32>,
+    object_pos: vec3<f32>,
+    normal: vec3<f32>,
+    view_dir: vec3<f32>,
+    uv: vec2<f32>,
+    time: f32,
+    params: array<vec4<f32>, 4>,
+};
+
+struct MaterialOut {
+    color: vec4<f32>,
+    normal: vec3<f32>,
+    roughness: f32,
+    metallic: f32,
+    emission: vec3<f32>,
+};
+"#;
+
+/// The stand-in when no custom material is set: changes nothing.
+pub(crate) const MATERIAL_STUB_WGSL: &str = r#"
+fn custom_params() -> array<vec4<f32>, 4> {
+    return array<vec4<f32>, 4>();
+}
+fn custom_material(m: MaterialIn, base: MaterialOut) -> MaterialOut {
+    return base;
+}
+"#;
+
+/// The lit mesh shader, with `custom` as the material code (the stub when
+/// `None`). Custom code defines `fn material(m: MaterialIn, base: MaterialOut) -> MaterialOut`.
+pub(crate) fn lit_shader_source(custom: Option<&str>) -> String {
+    let hook = match custom {
+        None => MATERIAL_STUB_WGSL.to_owned(),
+        Some(code) => format!(
+            "struct CustomParams {{ p: array<vec4<f32>, 4> }}\n\
+             @group(2) @binding(0) var<uniform> custom_material_params: CustomParams;\n\
+             fn custom_params() -> array<vec4<f32>, 4> {{ return custom_material_params.p; }}\n\
+             fn custom_material(m: MaterialIn, base: MaterialOut) -> MaterialOut {{ return material(m, base); }}\n\
+             {CUSTOM_CODE_MARK}\n{code}\n"
+        ),
+    };
+    format!(
+        "{}{MATERIAL_HOOK_WGSL}{hook}{SHADER}{}",
+        scene_shader_prefix(),
+        super::material::material_wgsl(1)
+    )
+}
+
+/// The line before a game's material code in [`lit_shader_source`]: error
+/// lines are counted from here.
+pub(crate) const CUSTOM_CODE_MARK: &str = "// ---- custom material code ----";
+
 const SHADER: &str = r#"
 @group(1) @binding(0) var albedo_tex: texture_2d<f32>;
 @group(1) @binding(1) var albedo_sampler: sampler;
@@ -944,7 +1004,7 @@ fn shade_main(in: VsOut) -> vec4<f32> {
     // Most world props use the default material. Keep them on the cheap,
     // conventional path; authored wood/dirt/grass/sand/snow/cave profiles
     // continue through the full procedural material evaluation below.
-    if in.surface3.w < 0.001 {
+    if in.surface3.w < 0.001 || CUSTOM_MATERIAL > 0.5 {
         let geo_n = normalize(in.world_n);
         // Normal, occlusion-roughness-metallic and emissive maps; neutral
         // 1x1 texels for meshes without them.
@@ -965,16 +1025,36 @@ fn shade_main(in: VsOut) -> vec4<f32> {
             orm = material_orm(in.uv);
             texel = textureSample(albedo_tex, albedo_sampler, in.uv);
         }
+        var surf: MaterialOut;
+        surf.color = in.color * texel;
+        surf.normal = n;
+        surf.roughness = in.surface.x * orm.y;
+        surf.metallic = in.surface.y * orm.z;
+        surf.emission = vec3<f32>(0.0);
+        if CUSTOM_MATERIAL > 0.5 {
+            // A game's own material function (World::add_material).
+            var m: MaterialIn;
+            m.world_pos = in.world_p;
+            m.object_pos = in.obj_p;
+            m.normal = n;
+            m.view_dir = normalize(u.eye - in.world_p);
+            m.uv = in.uv;
+            m.time = u.time;
+            m.params = custom_params();
+            surf = custom_material(m, surf);
+            surf.normal = normalize(surf.normal);
+        }
         let l = normalize(u.light_dir);
-        let ndl = max(dot(n, l), 0.0);
+        let ndl = max(dot(surf.normal, l), 0.0);
         let wrap = ndl * 0.65 + 0.35;
-        let base = in.color * texel;
+        let base = surf.color;
         let vis = sun_visibility(in.world_p, geo_n, u.eye);
-        let lit = shade_surface_occluded(base.rgb, n, in.world_p, in.surface.x * orm.y,
-                in.surface.y * orm.z, vis, wrap * wrap, orm.x)
-            + base.rgb * torch_light(in.world_p, n)
+        let lit = shade_surface_occluded(base.rgb, surf.normal, in.world_p, surf.roughness,
+                surf.metallic, vis, wrap * wrap, orm.x)
+            + base.rgb * torch_light(in.world_p, surf.normal)
             + select(in.glow.rgb, base.rgb, in.glow.r < 0.0) * (in.surface.z * 3.0 * in.glow.a)
-            + material_emission(in.uv);
+            + material_emission(in.uv)
+            + surf.emission;
         return vec4<f32>(haze(lit, in.world_p), base.a);
     }
 
@@ -1351,14 +1431,7 @@ pub fn create_pipelines(
 ) -> Pipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("lit-shader"),
-        source: wgpu::ShaderSource::Wgsl(
-            format!(
-                "{}{SHADER}{}",
-                scene_shader_prefix(),
-                super::material::material_wgsl(1)
-            )
-            .into(),
-        ),
+        source: wgpu::ShaderSource::Wgsl(lit_shader_source(None).into()),
     });
 
     let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1639,11 +1712,7 @@ pub fn create_bindless_pipelines(
     bind_layout: &wgpu::BindGroupLayout,
     table_layout: &wgpu::BindGroupLayout,
 ) -> BindlessPipelines {
-    let source = super::material_table::bindless_scene_source(&format!(
-        "{}{SHADER}{}",
-        scene_shader_prefix(),
-        super::material::material_wgsl(1)
-    ));
+    let source = super::material_table::bindless_scene_source(&lit_shader_source(None));
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("lit-shader-bindless"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -1710,5 +1779,119 @@ pub fn create_bindless_pipelines(
         opaque,
         opaque_nowrite,
         depth_prepass,
+    }
+}
+
+/// A custom material's GPU side: its two pipelines (solid and blended) and
+/// the uniform buffer holding its four params.
+pub struct GpuCustomMaterial {
+    pub revision: u64,
+    pub opaque: wgpu::RenderPipeline,
+    pub blend: wgpu::RenderPipeline,
+    pub params: wgpu::Buffer,
+    pub bind: wgpu::BindGroup,
+}
+
+pub fn custom_params_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("custom-material-params-layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    })
+}
+
+/// Build the pipelines for one custom material (code already checked by
+/// `CustomMaterial::check`).
+pub fn create_custom_material(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    pipelines: &Pipelines,
+    params_layout: &wgpu::BindGroupLayout,
+    material: &crate::custom_material::CustomMaterial,
+) -> GpuCustomMaterial {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(&format!("custom-material-{}", material.name)),
+        source: wgpu::ShaderSource::Wgsl(lit_shader_source(Some(&material.code)).into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("custom-material-layout"),
+        bind_group_layouts: &[
+            &pipelines.bind_layout,
+            &pipelines.albedo_layout,
+            params_layout,
+        ],
+        push_constant_ranges: &[],
+    });
+    let make = |blend: wgpu::BlendState, solid: bool| {
+        let constants: &[(&str, f64)] = if solid {
+            &[("CUSTOM_MATERIAL", 1.0)]
+        } else {
+            &[("CUSTOM_MATERIAL", 1.0), ("SCENE_AO", 0.0)]
+        };
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(&format!(
+                "custom-material-{}-{}",
+                material.name,
+                if solid { "solid" } else { "blend" }
+            )),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &MESH_BUFFERS,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(blend),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants,
+                    ..Default::default()
+                },
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: if solid { Some(wgpu::Face::Back) } else { None },
+                ..Default::default()
+            },
+            depth_stencil: Some(super::stencil::scene_depth_stencil_unmasked_write(solid)),
+            multisample: super::stencil::scene_multisample(false),
+            multiview: None,
+            cache: crate::render::pipeline_cache::get(device).as_ref(),
+        })
+    };
+    let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("custom-material-params"),
+        contents: bytemuck::cast_slice(&material.params),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("custom-material-params-bind"),
+        layout: params_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: params.as_entire_binding(),
+        }],
+    });
+    GpuCustomMaterial {
+        revision: 0,
+        opaque: make(wgpu::BlendState::REPLACE, true),
+        blend: make(wgpu::BlendState::ALPHA_BLENDING, false),
+        params,
+        bind,
     }
 }
