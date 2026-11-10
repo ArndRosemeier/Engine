@@ -57,6 +57,8 @@ pub use world_cpu_mesh::CpuMeshes;
 mod world_ragdolls;
 #[path = "world_rooms.rs"]
 mod world_rooms;
+#[path = "world_verify.rs"]
+pub(crate) mod world_verify;
 #[path = "world_zfight.rs"]
 mod world_zfight;
 pub use nav::{NavAgent, NavSettings, NavStats, NavStatus};
@@ -890,6 +892,8 @@ pub struct World {
     entity_rooms: HashMap<EntityId, crate::rooms::RoomId>,
     /// Z-fighting markers and the `ENGINE_ZFIGHT` watcher.
     zfight: world_zfight::ZFightState,
+    /// [`Self::check`] and [`Self::report`] results for verify runs.
+    verify: world_verify::VerifyLog,
     /// What feet stand on: see [`World::ground_below`].
     ground: world_ground::GroundState,
     /// Which CPU copies of meshes go once uploaded: see [`CpuMeshes`].
@@ -1035,6 +1039,7 @@ impl Default for World {
             ssr: Some(Default::default()),
             entity_rooms: HashMap::new(),
             zfight: Default::default(),
+            verify: Default::default(),
             ground: Default::default(),
             cpu_meshes: Default::default(),
             entity_names: HashMap::new(),

@@ -1160,10 +1160,21 @@ impl Physics {
                 if !changed.is_empty() || removed {
                     self.voxel_rev = v.rev();
                     let chunk_m = v.chunk_world_size();
+                    // Tiles reach one cell into their neighbours, so an edit
+                    // can change the tiles around a changed chunk too.
                     let mut stale: Vec<IVec3> = changed
                         .into_iter()
+                        .flat_map(|k| {
+                            (-1..=1).flat_map(move |x| {
+                                (-1..=1).flat_map(move |y| {
+                                    (-1..=1).map(move |z| k + IVec3::new(x, y, z))
+                                })
+                            })
+                        })
                         .filter(|k| self.tiles.contains_key(k))
                         .collect();
+                    stale.sort_by_key(|k| (k.x, k.y, k.z));
+                    stale.dedup();
                     if removed {
                         stale.extend(self.tiles.keys().filter(|k| !v.has_chunk(**k)));
                     }
@@ -1444,10 +1455,12 @@ fn missing_sorted(needed: &HashSet<IVec3>, tiles: &HashMap<IVec3, Tile>) -> Vec<
 
 /// Triangles of one height-terrain tile.
 fn height_tile(field: HeightFn, key: IVec3) -> (Vec<Vec3>, Vec<[u32; 3]>) {
-    let n = HEIGHT_TILE_SAMPLES;
-    let step = HEIGHT_TILE_M / (n - 1) as f32;
-    let x0 = key.x as f32 * HEIGHT_TILE_M;
-    let z0 = key.z as f32 * HEIGHT_TILE_M;
+    // One extra step on every side: neighbouring tiles overlap, so nothing
+    // rests on a tile's open border edge (see `Volume::collision_triangles`).
+    let n = HEIGHT_TILE_SAMPLES + 2;
+    let step = HEIGHT_TILE_M / (HEIGHT_TILE_SAMPLES - 1) as f32;
+    let x0 = key.x as f32 * HEIGHT_TILE_M - step;
+    let z0 = key.z as f32 * HEIGHT_TILE_M - step;
     let mut verts = Vec::with_capacity(n * n);
     for j in 0..n {
         for i in 0..n {

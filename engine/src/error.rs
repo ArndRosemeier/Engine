@@ -48,6 +48,10 @@ pub enum EngineError {
     #[error("event loop failed: {0}")]
     EventLoopRun(#[source] winit::error::EventLoopError),
 
+    /// A verify run (`ENGINE_VERIFY`) found problems; see its `report.json`.
+    #[error("verify run failed: {0}")]
+    Verify(String),
+
     #[error("failed to save screenshot {path}: {source}")]
     ScreenshotSave {
         path: std::path::PathBuf,

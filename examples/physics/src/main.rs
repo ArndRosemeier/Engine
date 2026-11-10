@@ -342,6 +342,23 @@ fn main() -> EngineResult<()> {
                 report = 2.0;
             }
         }
+
+        // Self-checks for verify runs (`python tools/verify.py physics`):
+        // every piece stays above the ground, and the counts go in the report.
+        let deepest = things
+            .everything
+            .iter()
+            .filter_map(|id| world.entity(*id).ok())
+            .map(|e| {
+                let p = e.transform().w_axis;
+                p.y - height(&noise, p.x, p.z)
+            })
+            .fold(f32::INFINITY, f32::min);
+        world.check("nothing sinks into the ground", deepest > -1.0);
+        world.report("deepest piece below ground (m)", -deepest.min(0.0));
+        let (bodies, awake) = world.body_count();
+        world.report("bodies", bodies);
+        world.report("moving", awake);
         Ok(())
     })
 }

@@ -107,6 +107,7 @@ pub(crate) mod app;
 pub(crate) mod marching_cubes;
 pub(crate) mod render;
 pub(crate) mod ui_backend;
+pub(crate) mod verify;
 pub(crate) mod volume;
 
 #[cfg(test)]

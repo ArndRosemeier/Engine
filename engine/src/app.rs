@@ -60,6 +60,11 @@ struct App {
     /// ENGINE_PRESENT_MODE or a screenshot run: never pace.
     no_pacing: bool,
     fatal_error: Option<String>,
+    /// `ENGINE_VERIFY` run settings, and how it ended.
+    verify: Option<crate::verify::Verify>,
+    verify_result: Option<EngineResult<()>>,
+    /// Game time on a fixed step: the steps so far.
+    fixed_time: f32,
     /// The sound device; `None` when there is none (the game runs silent).
     _audio_out: Option<crate::audio::scene::AudioOutput>,
 }
@@ -67,9 +72,20 @@ struct App {
 impl App {
     fn new(title: String, limits: EngineLimits, update: UpdateFn) -> EngineResult<Self> {
         let now = Instant::now();
-        let screenshot_path = optional_path_env("ENGINE_SCREENSHOT")?;
-        let screenshot_frame = optional_parsed_env("ENGINE_SCREENSHOT_FRAME")?.unwrap_or(3);
-        let screenshot_wait = optional_bool_env("ENGINE_SCREENSHOT_WAIT")?.unwrap_or(false);
+        let mut screenshot_path = optional_path_env("ENGINE_SCREENSHOT")?;
+        let mut screenshot_frame = optional_parsed_env("ENGINE_SCREENSHOT_FRAME")?.unwrap_or(3);
+        let mut screenshot_wait = optional_bool_env("ENGINE_SCREENSHOT_WAIT")?.unwrap_or(false);
+        let verify = crate::verify::Verify::from_env(&title)?;
+        let mut clock = crate::frame_clock::FrameClock::from_env();
+        if let Some(v) = verify.as_ref() {
+            // A verify run is a screenshot run of a set length, on a fixed
+            // step so two runs show the same frame.
+            screenshot_path = Some(v.screenshot_path());
+            screenshot_frame = v.frames;
+            screenshot_wait = false;
+            clock.fixed.get_or_insert(1.0 / 60.0);
+            v.install_panic_hook();
+        }
         Ok(Self {
             title,
             window: None,
@@ -96,14 +112,18 @@ impl App {
             hitch_ms: hitch_threshold_ms()?,
             tick_spans: Vec::new(),
             cpu_trace: crate::cpu_trace::CpuTrace::from_env(),
-            clock: crate::frame_clock::FrameClock::from_env(),
+            clock,
             frame_stats: crate::frame_clock::FrameStats::from_env(),
             pacer: crate::frame_clock::FramePacer::new(),
             refresh_hz: None,
             no_pacing: std::env::var_os("ENGINE_PRESENT_MODE").is_some()
                 || std::env::var_os("ENGINE_SCREENSHOT").is_some()
+                || verify.is_some()
                 || std::env::var("ENGINE_PACE").is_ok_and(|v| v.trim() == "0"),
             fatal_error: None,
+            verify,
+            verify_result: None,
+            fixed_time: 0.0,
             _audio_out: None,
         })
     }
@@ -169,10 +189,17 @@ impl App {
             .and_then(Renderer::acquire_interval)
             .filter(|d| d.is_finite() && *d > 0.0)
             .unwrap_or(cpu_dt);
-        let time = (now - self.start).as_secs_f32();
         // Movement uses a steady step; the raw one only counts FPS.
         let vsynced = self.world.vsync() && !self.no_pacing;
         let dt = self.clock.tick(raw_dt, self.refresh_hz.filter(|_| vsynced));
+        // On a fixed step (ENGINE_FIXED_DT, verify runs) the clock is the sum
+        // of the steps too, so two runs see the same time in every frame.
+        let time = if self.clock.fixed.is_some() {
+            self.fixed_time += dt;
+            self.fixed_time
+        } else {
+            (now - self.start).as_secs_f32()
+        };
         if let Some(stats) = self.frame_stats.as_mut() {
             if stats.add(raw_dt) {
                 // Video memory, to see a GPU running short.
@@ -371,6 +398,12 @@ impl App {
             let fixed_shot_due = !self.screenshot_wait
                 && self.screenshot_path.is_some()
                 && self.frame_index + 1 >= self.screenshot_frame;
+            if let Some(v) = self.verify.as_ref() {
+                if v.shots.contains(&(self.frame_index + 1)) {
+                    self.world
+                        .queue_screenshot(v.shot_path(self.frame_index + 1));
+                }
+            }
             if fixed_shot_due || self.world.has_screenshot_queued() {
                 renderer.request_capture();
             }
@@ -454,6 +487,7 @@ impl App {
                 }
             }
             self.frame_index += 1;
+            self.world.verify_next_frame();
             let queued = self.world.take_screenshot_queue();
             for path in queued {
                 if let Some(parent) = path.parent() {
@@ -470,7 +504,17 @@ impl App {
                     .unwrap_or_else(|error| panic!("{error}"));
                 eprintln!("wrote screenshot {}", path.display());
             }
+            if let (Some(v), Some(error)) = (self.verify.as_ref(), self.fatal_error.as_deref()) {
+                // The game failed: no need to run the remaining frames.
+                self.verify_result =
+                    Some(v.finish(&self.world, self.frame_index, Some(error), None));
+                event_loop.exit();
+                return;
+            }
             if self.world.take_exit_requested() {
+                if let Some(v) = self.verify.as_ref() {
+                    self.verify_result = Some(v.finish(&self.world, self.frame_index, None, None));
+                }
                 event_loop.exit();
                 return;
             }
@@ -481,6 +525,10 @@ impl App {
                             .capture_png(&self.world, &path)
                             .unwrap_or_else(|error| panic!("{error}"));
                         eprintln!("wrote screenshot {}", path.display());
+                        if let Some(v) = self.verify.as_ref() {
+                            self.verify_result =
+                                Some(v.finish(&self.world, self.frame_index, None, Some(&path)));
+                        }
                         event_loop.exit();
                     }
                 }
@@ -799,7 +847,8 @@ pub fn run_with(
     let mut app = App::new(title.into(), limits, Box::new(update))?;
     event_loop
         .run_app(&mut app)
-        .map_err(EngineError::EventLoopRun)
+        .map_err(EngineError::EventLoopRun)?;
+    app.verify_result.take().unwrap_or(Ok(()))
 }
 
 fn run_callback_until_fatal(

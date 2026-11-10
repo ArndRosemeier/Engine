@@ -677,6 +677,7 @@ Every program built on the engine understands these:
 | `ENGINE_FRAME_STATS=1` | Print frame-time statistics every 2 s (average, worst, spread: judges smoothness) |
 | `ENGINE_SMOOTH_DT=0` | Hand the raw frame time to `frame.dt` (by default it is smoothed so motion does not shake) |
 | `ENGINE_FIXED_DT=0.016` | Every frame steps exactly this long, so two runs show the same frame (for picture comparisons) |
+| `ENGINE_VERIFY=<folder>` | Verify run: fixed 1/60 s steps, run `ENGINE_VERIFY_FRAMES` frames (default 120), write `screenshot.png` and `report.json` into the folder, exit 1 if a `world.check` failed. `ENGINE_VERIFY_SHOTS=30,60` adds frames, `ENGINE_VERIFY_REFERENCE=<png>` compares the last frame (`ENGINE_VERIFY_TOLERANCE`, default 0.002 of the pixels). Easiest through `tools/verify.py` |
 | `ENGINE_AUTOFLY=1` | `FlyCamera` flies ahead in a slow curve by itself (for smoothness and speed checks) |
 | `ENGINE_GPU_PROFILE_EVERY=N` | Print GPU timings every N frames: shadow, AO, scene, water, TAA, post; plus a split of the scene pass (sky, land, grass, voxel, meshes, ...) where the GPU supports it |
 | `ENGINE_HITCH_MS` | Log frames whose work is slower than this (default 33) to the file set with `World::set_hitch_log`: phases, game spans, Engine's slow steps, GPU uploads |
@@ -728,6 +729,41 @@ Linux for every pull request, with the Rust version pinned in
 `.github/workflows/ci.yml`; raise it on purpose and fix the new lints. Screenshots work headless (for example
 under Xvfb with a software Vulkan driver), which is how renders are checked
 without a GPU.
+
+## Verify runs (checking a game without looking at it)
+
+A verify run plays a program headless-friendly for a fixed number of frames
+on a fixed time step, so two runs give the same result, and writes what
+happened into a folder. It is how an agent (or CI) checks that a change
+works:
+
+```bash
+python tools/verify.py physics                          # build, run 120 frames
+python tools/verify.py physics --frames 300 --shots 60,120
+python tools/verify.py starter --save-reference refs/starter.png
+python tools/verify.py starter --reference refs/starter.png
+```
+
+The exit code is 0 when the run passed. `target/verify/<package>/` then holds
+`screenshot.png` (the last frame), `shot-<N>.png` for `--shots`, and
+`report.json`: passed or failed with the reasons, the GPU, frames and
+seconds, the picture comparison, the game's checks and values, and a summary
+of the world (entities, bodies, lamps, camera). A panic or a fatal error also
+ends up in the report. On Linux without a display it runs under `xvfb-run`.
+
+The game states what must hold, every frame or whenever it matters:
+
+```rust
+world.check("player stays above ground", player_y > ground_y - 0.5);
+world.report("score", score);              // anything serde can serialize
+```
+
+A normal run only counts the checks (`world.failed_checks()` lists failures);
+a verify run fails when any check was ever false and names the first failing
+frame. The `physics` example checks that no piece sinks into the ground; that
+check found a bug where a boulder rolling along a collision-tile seam fell
+through the terrain. The `verify` CI job runs `hello_mesh` and `physics` this
+way on a software GPU.
 
 ## Materials in depth
 

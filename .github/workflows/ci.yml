@@ -50,3 +50,39 @@ jobs:
 
       - name: Tests
         run: cargo test -p engine
+
+  # Run examples headless on a software GPU (lavapipe) as verify runs: they
+  # must reach their last frame and every world.check() must hold. See
+  # "Verify runs" in README.md.
+  verify:
+    name: verify examples
+    runs-on: ubuntu-latest
+    env:
+      ENGINE_AUDIO: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux packages (audio, input, software Vulkan, virtual display)
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libudev-dev mesa-vulkan-drivers xvfb
+
+      - name: Rust ${{ env.RUST_TOOLCHAIN }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: hello_mesh
+        run: python3 tools/verify.py hello_mesh --width 640 --height 360
+
+      - name: physics (nothing sinks into the ground)
+        run: python3 tools/verify.py physics --frames 240 --width 640 --height 360
+
+      - name: Keep the reports and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify
+          path: target/verify/
