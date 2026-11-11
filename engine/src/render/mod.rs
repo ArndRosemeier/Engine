@@ -206,16 +206,19 @@ struct OpaqueDraw<'r> {
 impl<'r> OpaqueDraw<'r> {
     /// The buffers the draw reads: instances, and indirect args with their
     /// byte offset when the GPU decides the count.
-    fn sources(&self) -> (&'r wgpu::Buffer, Option<(&'r wgpu::Buffer, u64)>) {
+    fn sources(&self) -> ((&'r wgpu::Buffer, u64), Option<(&'r wgpu::Buffer, u64)>) {
         let g = self.gpu;
         match self.submit {
-            OpaqueSubmit::Mesh(MeshSubmit::Compacted) => (
-                &g.compact_buf,
-                Some((&g.indirect_buf, OPAQUE_INDIRECT_OFFSET)),
-            ),
-            OpaqueSubmit::Mesh(MeshSubmit::Direct) => (&g.instance_buf, None),
+            OpaqueSubmit::Mesh(MeshSubmit::Compacted) => {
+                let target = cull_target(g);
+                (
+                    target.compact_at(),
+                    Some(target.args(OPAQUE_INDIRECT_OFFSET)),
+                )
+            }
+            OpaqueSubmit::Mesh(MeshSubmit::Direct) => ((&g.instance_buf, 0), None),
             OpaqueSubmit::Occluded(args, slot) => (
-                &g.instance_buf,
+                (&g.instance_buf, 0),
                 Some((
                     args,
                     occlusion::OcclusionFrame::offset(slot, OPAQUE_INDIRECT_OFFSET),
@@ -228,12 +231,12 @@ impl<'r> OpaqueDraw<'r> {
     /// `submit_occluded_draw` give a pass.
     fn record(&self, bundle: &mut wgpu::RenderBundleEncoder<'r>) {
         let g = self.gpu;
-        let (instances, indirect) = self.sources();
+        let (_, indirect) = self.sources();
         bundle.set_bind_group(1, self.albedo, &[]);
         bundle.set_vertex_buffer(0, g.vertex_buf.slice(..));
         match self.submit {
             OpaqueSubmit::Mesh(MeshSubmit::Compacted) => {
-                bundle.set_vertex_buffer(1, instances.slice(..))
+                bundle.set_vertex_buffer(1, cull_target(g).compact_slice())
             }
             _ => bundle.set_vertex_buffer(1, g.instance_slice()),
         }
@@ -259,7 +262,8 @@ struct OpaqueKey {
     /// Where the mesh starts in the arena pages: first index, base vertex,
     /// first instance and instance room.
     offsets: (u32, i32, u32, usize),
-    instances: wgpu::Buffer,
+    /// The instance buffer and where the draw's instances start in it.
+    instances: (wgpu::Buffer, u64),
     /// Indirect args and offset, or the direct index and instance counts.
     indirect: Option<(wgpu::Buffer, u64)>,
     counts: (u32, u32),
@@ -279,7 +283,8 @@ impl OpaqueKey {
                     g.first_instance,
                     g.instance_capacity,
                 )
-            && self.instances == *instances
+            && self.instances.0 == *instances.0
+            && self.instances.1 == instances.1
             && match (&self.indirect, indirect) {
                 (Some((a, o)), Some((b, p))) => a == b && *o == p,
                 (None, None) => {
@@ -302,7 +307,7 @@ impl OpaqueKey {
                 g.first_instance,
                 g.instance_capacity,
             ),
-            instances: instances.clone(),
+            instances: (instances.0.clone(), instances.1),
             indirect: indirect.map(|(b, o)| (b.clone(), o)),
             counts: if indirect.is_some() {
                 (0, 0)
@@ -1135,8 +1140,10 @@ fn encode_shadow_bundle_draw<'a>(
     bundle.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
     match submit {
         MeshSubmit::Compacted => {
-            bundle.set_vertex_buffer(1, gpu.compact_buf.slice(..));
-            bundle.draw_indexed_indirect(&gpu.indirect_buf, OPAQUE_INDIRECT_OFFSET);
+            let target = cull_target(gpu);
+            let (args, offset) = target.args(OPAQUE_INDIRECT_OFFSET);
+            bundle.set_vertex_buffer(1, target.compact_slice());
+            bundle.draw_indexed_indirect(args, offset);
         }
         MeshSubmit::Direct => {
             let instance_count =
@@ -1149,6 +1156,14 @@ fn encode_shadow_bundle_draw<'a>(
             );
         }
     }
+}
+
+/// Where a batch drawn with [`MeshSubmit::Compacted`] finds its culled
+/// instances and draw args (placed at the start of the frame's culls).
+fn cull_target(gpu: &GpuMesh) -> &instance_cull::CullTarget {
+    gpu.cull_target
+        .as_ref()
+        .expect("a compacted draw's batch was placed for the GPU cull")
 }
 
 fn submit_batch_draw(
@@ -1187,8 +1202,10 @@ fn submit_mesh_draw(
     pass.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
     match submit {
         MeshSubmit::Compacted => {
-            pass.set_vertex_buffer(1, gpu.compact_buf.slice(..));
-            pass.draw_indexed_indirect(&gpu.indirect_buf, indirect_offset);
+            let target = cull_target(gpu);
+            let (args, offset) = target.args(indirect_offset);
+            pass.set_vertex_buffer(1, target.compact_slice());
+            pass.draw_indexed_indirect(args, offset);
             *indirect_draws += 1;
         }
         MeshSubmit::Direct => {

@@ -608,14 +608,8 @@ impl Renderer {
                     gpu.xform_rev = entity.xform_rev;
                 }
             } else if entity.instance_of.is_none() {
-                let mut gpu = GpuMesh::upload(
-                    &self.device,
-                    &self.queue,
-                    &self.arenas,
-                    entity.mesh(),
-                    &[],
-                    &self.instance_cull,
-                );
+                let mut gpu =
+                    GpuMesh::upload(&self.device, &self.queue, &self.arenas, entity.mesh(), &[]);
                 gpu.xform_rev = entity.xform_rev;
                 self.gpu_meshes.insert(id, gpu);
             }
@@ -660,7 +654,6 @@ impl Renderer {
                         &self.arenas,
                         entity.mesh(),
                         &self.instance_scratch,
-                        &self.instance_cull,
                     );
                     self.gpu_stats.mesh_rebuild += 1;
                     true
@@ -670,7 +663,6 @@ impl Renderer {
                         &self.queue,
                         &self.arenas,
                         &self.instance_scratch,
-                        &self.instance_cull,
                     );
                     self.gpu_stats.instance_rewrites += 1;
                     reallocated
@@ -690,7 +682,6 @@ impl Renderer {
                         &self.arenas,
                         proto_gpu,
                         &self.instance_scratch,
-                        &self.instance_cull,
                     )
                 } else {
                     GpuMesh::upload(
@@ -699,7 +690,6 @@ impl Renderer {
                         &self.arenas,
                         entity.mesh(),
                         &self.instance_scratch,
-                        &self.instance_cull,
                     )
                 };
                 gpu.xform_rev = entity.xform_rev;
@@ -1023,7 +1013,6 @@ impl Renderer {
                 &self.arenas,
                 prototype_gpu,
                 &self.instance_scratch,
-                &self.instance_cull,
             );
             gpu.bounds = slots
                 .iter()

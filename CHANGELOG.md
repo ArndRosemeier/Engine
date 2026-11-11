@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.051 (2026-11-11)
+
+- Instanced things (trees, rocks, props) are culled on the GPU in a few passes per view instead of one per kind of thing, which saves CPU time in busy scenes, and they no longer keep spare buffers each
+
 ## 0.050 (2026-11-11)
 
 - Faster towns that stream: only what moved, came or went is updated each frame, instead of every entity and GPU scene row
