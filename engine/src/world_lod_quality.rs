@@ -517,7 +517,9 @@ impl World {
     }
 
     /// Swap an instanced entity's list. Only an empty/non-empty change needs
-    /// a scene resync (draw and shadow source lists skip empty entities).
+    /// a scene resync (draw and shadow source lists skip empty entities),
+    /// and with GPU batches not even that (see `batched_instances`).
+    #[track_caller]
     pub(super) fn replace_instances(&mut self, id: EntityId, instances: Vec<MeshInstance>) {
         let Some(e) = self.entities.get_mut(&id) else {
             return;
@@ -529,7 +531,7 @@ impl World {
         }
         e.instances = instances;
         e.bump_xform();
-        if was_empty != now_empty {
+        if was_empty != now_empty && !self.batched_instances() {
             self.bump_render_epoch();
         } else {
             self.instance_epoch = self

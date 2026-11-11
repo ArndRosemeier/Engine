@@ -842,6 +842,20 @@ pub struct World {
     /// just these (their instance buffers and GPU scene rows) instead of
     /// walking every entity. May hold an id twice, or a despawned one.
     touched: Vec<EntityId>,
+    /// Plain meshes spawned since the renderer last synced (see
+    /// [`Self::take_members`]); the renderer adds just these instead of
+    /// rebuilding everything. Changes to one of them before that sync need
+    /// no render epoch: the renderer reads them when it adds it.
+    spawned: Vec<EntityId>,
+    /// `spawned` as a set, for those changes.
+    fresh: HashSet<EntityId>,
+    /// Plain meshes despawned since the renderer last synced.
+    despawned: Vec<EntityId>,
+    /// Moves with every change to what is drawn: the render epoch, touches,
+    /// meshes spawned or despawned (the z-fighting watch rescans).
+    scene_epoch: u64,
+    /// Where the render epoch last moved (`ENGINE_CPU_TRACE` lists them).
+    pub(crate) render_bump_site: Option<&'static std::panic::Location<'static>>,
     lods: std::collections::BTreeMap<LodId, LodSet>,
     next_lod: u64,
     /// LOD sets that follow an entity ([`Self::attach_lod`]): the parent
@@ -1051,6 +1065,11 @@ impl Default for World {
             debug_shading: 0,
             instance_epoch: 1,
             touched: Vec::new(),
+            spawned: Vec::new(),
+            fresh: HashSet::new(),
+            despawned: Vec::new(),
+            scene_epoch: 1,
+            render_bump_site: None,
             lods: std::collections::BTreeMap::new(),
             next_lod: 1,
             lod_follow: std::collections::BTreeMap::new(),
@@ -1225,7 +1244,15 @@ impl World {
         &self.limits
     }
 
+    #[track_caller]
     fn bump_render_epoch(&mut self) {
+        self.render_bump_site = Some(std::panic::Location::caller());
+        self.scene_epoch += 1;
+        // The renderer builds everything again: what it would add or remove
+        // one by one is in that.
+        self.spawned.clear();
+        self.fresh.clear();
+        self.despawned.clear();
         self.render_epoch = self
             .render_epoch
             .checked_add(1)
@@ -1250,6 +1277,7 @@ impl World {
     /// Notes that entity `id` moved or its instance list changed, and
     /// nothing that decides how or whether it is drawn (see `touched`).
     fn touch(&mut self, id: EntityId) {
+        self.scene_epoch += 1;
         // A world no renderer reads (tests, tools) must not pile them up:
         // past a bound, a full resync is cheaper anyway.
         if self.touched.len() >= TOUCHED_LIMIT {
@@ -1263,6 +1291,59 @@ impl World {
     /// The entities touched since the last call (see `touched`).
     pub(crate) fn take_touched(&mut self) -> Vec<EntityId> {
         std::mem::take(&mut self.touched)
+    }
+
+    /// Whether instanced entities are drawn in GPU batches: then the draw
+    /// and shadow source lists hold batches, not entities, and an entity's
+    /// list emptying or filling is only a touch (the renderer brings the
+    /// batches up to date for touched instanced entities).
+    pub(super) fn batched_instances(&self) -> bool {
+        self.instance_submit == InstanceSubmit::GpuIndirect
+    }
+
+    /// Notes a plain mesh just spawned (see `spawned`).
+    #[track_caller]
+    pub(super) fn spawned_plain(&mut self, id: EntityId) {
+        if self.spawned.len() >= TOUCHED_LIMIT {
+            self.bump_render_epoch();
+            return;
+        }
+        self.scene_epoch += 1;
+        self.spawned.push(id);
+        self.fresh.insert(id);
+    }
+
+    /// Notes a plain mesh just despawned (see `despawned`).
+    #[track_caller]
+    pub(super) fn despawned_plain(&mut self, id: EntityId) {
+        if self.despawned.len() >= TOUCHED_LIMIT {
+            self.bump_render_epoch();
+            return;
+        }
+        self.scene_epoch += 1;
+        self.fresh.remove(&id);
+        self.despawned.push(id);
+    }
+
+    /// Something that decides how entity `id` is drawn changed (its
+    /// texture, material, whether it casts a shadow): nothing to do if the
+    /// renderer has not seen it yet, else everything is synced again.
+    #[track_caller]
+    pub(super) fn redraw(&mut self, id: EntityId) {
+        self.scene_epoch += 1;
+        if !self.fresh.contains(&id) {
+            self.bump_render_epoch();
+        }
+    }
+
+    /// The plain meshes spawned and despawned since the last call, for the
+    /// renderer. An id may be in both (spawned, then despawned).
+    pub(crate) fn take_members(&mut self) -> (Vec<EntityId>, Vec<EntityId>) {
+        self.fresh.clear();
+        (
+            std::mem::take(&mut self.spawned),
+            std::mem::take(&mut self.despawned),
+        )
     }
 }
 

@@ -297,8 +297,8 @@ impl Renderer {
             ambient: world.light().ambient,
             sky: SkyLight::from_world(world),
         };
-        let epoch = world
-            .render_epoch()
+        let epoch = self
+            .scene_gen
             .wrapping_mul(0x9E37_79B9_7F4A_7C15)
             .wrapping_add(self.voxel.epoch());
         if self.gi.prepare(&self.queue, &frame, epoch) {
@@ -316,9 +316,9 @@ impl Renderer {
         world: &World,
         placement: gi::GiPlacement,
     ) {
-        if self.draw_source_epoch != world.render_epoch() {
+        if self.draw_source_epoch != self.full_syncs {
             self.rebuild_draw_sources(world);
-            self.draw_source_epoch = world.render_epoch();
+            self.draw_source_epoch = self.full_syncs;
         }
         let space = world.living_in();
         let half = placement.dims.as_vec3() * placement.spacing * 0.5;

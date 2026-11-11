@@ -8,7 +8,7 @@ use super::*;
 /// GPU shadow scene with what a rebuild from scratch would hold, and stop
 /// with the first difference (the rows patched for moved entities must
 /// never drift from the truth). Slow; for tests and verify runs.
-fn scene_check() -> bool {
+pub(super) fn scene_check() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("ENGINE_SCENE_CHECK").is_ok_and(|v| v.trim() == "1"))
 }
@@ -19,18 +19,58 @@ impl Renderer {
     pub(super) fn sync_gpu_scene(&mut self, world: &World, space: SpaceId) -> Option<usize> {
         let mut scene = self.gpu_scene.take()?;
         let stamp = gpu_scene::SceneStamp {
-            render: world.render_epoch(),
+            render: self.full_syncs,
             resource: self.materials_synced,
             table: self.bindless.as_ref().map_or(0, |b| b.table.version()),
             space,
         };
         // Rooms hide and show meshes from frame to frame.
         let mut rebuild = scene.stamp != Some(stamp) || world.rooms_culling();
+        let removed = std::mem::take(&mut self.scene_removed);
+        let added = std::mem::take(&mut self.scene_added);
+        let mut written = 0;
+        if !rebuild && (!removed.is_empty() || !added.is_empty()) {
+            // Plain meshes that came or went: drop and add just their rows.
+            let rows: Vec<gpu_scene::SceneRow> = added
+                .iter()
+                .filter(|id| !scene.slots.contains_key(id))
+                .filter_map(|&id| self.scene_row(world, space, id, 0))
+                .collect();
+            if scene.worn() || !self.occlusion.fits(scene.ids.len() + rows.len()) {
+                rebuild = true;
+            } else {
+                for id in removed {
+                    if let Some(slot) = scene.remove(id) {
+                        self.occlusion.write_rows(
+                            &self.queue,
+                            slot,
+                            &scene.rows[slot..slot + 1],
+                            false,
+                        );
+                        written += 1;
+                    }
+                }
+                let start = scene.ids.len();
+                for row in rows {
+                    scene.add(row);
+                }
+                let end = scene.ids.len();
+                if end > start {
+                    self.occlusion.write_row_groups_at(
+                        &self.queue,
+                        start,
+                        &scene.row_groups_from(start),
+                    );
+                    self.occlusion
+                        .write_rows(&self.queue, start, &scene.rows[start..end], true);
+                    written += end - start;
+                }
+            }
+        }
         if !rebuild {
             // Only moves and new instance lists since the last sync: patch
             // those rows (rebuilding every row each frame cost milliseconds
             // in a town where something moves every frame).
-            let mut written = 0;
             let mut touched = std::mem::take(&mut self.scene_touched);
             touched.sort_unstable();
             touched.dedup();
@@ -301,9 +341,9 @@ impl Renderer {
         world: &World,
         light_frustums: &[Frustum],
     ) -> Vec<ShadowCullSelection> {
-        if self.shadow_source_epoch != world.render_epoch() {
+        if self.shadow_source_epoch != self.full_syncs {
             self.rebuild_shadow_sources(world);
-            self.shadow_source_epoch = world.render_epoch();
+            self.shadow_source_epoch = self.full_syncs;
         }
         let mut selections: Vec<ShadowCullSelection> = light_frustums
             .iter()
@@ -410,12 +450,32 @@ impl Renderer {
         };
         let space = world.living_in();
         let stamp = shadow_scene::ShadowStamp {
-            render: world.render_epoch(),
+            render: self.full_syncs,
             resource: self.materials_synced,
             space,
         };
         let mut rebuild = scene.stamp != Some(stamp) || world.rooms_culling();
         let mut changed = Vec::new();
+        let removed = std::mem::take(&mut self.shadow_removed);
+        let added = std::mem::take(&mut self.shadow_added);
+        if !rebuild && (!removed.is_empty() || !added.is_empty()) {
+            // Casters that came or went: drop and add just their rows.
+            let rows: Vec<shadow_scene::ShadowRow> = added
+                .iter()
+                .filter(|&&id| !scene.has(id))
+                .filter_map(|&id| self.shadow_row(world, space, id, 0))
+                .collect();
+            if scene.worn() || !scene.fits(rows.len()) {
+                rebuild = true;
+            } else {
+                for id in removed {
+                    scene.remove(&self.queue, id, &mut changed);
+                }
+                for row in rows {
+                    scene.add(&self.queue, row, &mut changed);
+                }
+            }
+        }
         if !rebuild {
             // Only moves and new instance lists: patch those rows (see
             // `sync_gpu_scene`).
@@ -530,17 +590,24 @@ impl Renderer {
             }
         }
         if gpu_batches {
-            for (&prototype, batch) in &self.gpu_instance_batches {
-                let entity = world
-                    .entity(prototype)
-                    .unwrap_or_else(|_| panic!("instance batch prototype {prototype} disappeared"));
-                if entity.casts_shadow()
-                    && material_casts_shadow(entity.material())
-                    && batch.gpu.instance_count > 0
-                    && batch.gpu.opaque_index_count > 0
-                {
-                    self.shadow_batch_sources.push(prototype);
-                }
+            self.rebuild_shadow_batch_sources(world);
+        }
+    }
+
+    /// The instance batches that cast shadows (their instances change
+    /// without a full sync: see `World::batched_instances`).
+    pub(super) fn rebuild_shadow_batch_sources(&mut self, world: &World) {
+        self.shadow_batch_sources.clear();
+        for (&prototype, batch) in &self.gpu_instance_batches {
+            let entity = world
+                .entity(prototype)
+                .unwrap_or_else(|_| panic!("instance batch prototype {prototype} disappeared"));
+            if entity.casts_shadow()
+                && material_casts_shadow(entity.material())
+                && batch.gpu.instance_count > 0
+                && batch.gpu.opaque_index_count > 0
+            {
+                self.shadow_batch_sources.push(prototype);
             }
         }
     }
@@ -678,9 +745,9 @@ impl Renderer {
     }
 
     pub(super) fn collect_draws(&mut self, world: &World, space: SpaceId, frustum_cull: bool) {
-        if self.draw_source_epoch != world.render_epoch() {
+        if self.draw_source_epoch != self.full_syncs {
             self.rebuild_draw_sources(world);
-            self.draw_source_epoch = world.render_epoch();
+            self.draw_source_epoch = self.full_syncs;
         }
 
         self.draw_opaque.clear();

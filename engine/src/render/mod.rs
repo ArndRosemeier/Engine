@@ -914,6 +914,21 @@ pub struct Renderer {
     /// list when it syncs; a rebuild of that scene covers them too).
     scene_touched: Vec<EntityId>,
     shadow_touched: Vec<EntityId>,
+    /// Plain meshes a sync added or removed one by one (see
+    /// `World::take_members`), whose rows the GPU scene and the GPU shadow
+    /// scene still have to add or drop (like `scene_touched`).
+    scene_added: Vec<EntityId>,
+    scene_removed: Vec<EntityId>,
+    shadow_added: Vec<EntityId>,
+    shadow_removed: Vec<EntityId>,
+    /// Full syncs so far: the draw and shadow source lists and the GPU
+    /// scenes are built again when it moves.
+    full_syncs: u64,
+    /// Moves with every full sync and every mesh added or removed (GI
+    /// voxelises the scene again).
+    scene_gen: u64,
+    /// `ENGINE_CPU_TRACE`: where in the world the full syncs came from.
+    full_sync_sites: HashMap<Option<&'static std::panic::Location<'static>>, u32>,
     synced_resource_epoch: u64,
     /// Origin the terrain material phases were last written for.
     terrain_origin: crate::space::RenderOrigin,

@@ -131,7 +131,7 @@ impl World {
         );
         self.order.push(id);
         self.cpu_meshes.spawned(id);
-        self.bump_render_epoch();
+        self.spawned_plain(id);
         id
     }
 
@@ -176,7 +176,7 @@ impl World {
             return Ok(());
         }
         e.casts_shadow = casts;
-        self.bump_render_epoch();
+        self.redraw(id);
         Ok(())
     }
 
@@ -237,7 +237,7 @@ impl World {
                 self.texture_sweep = true;
             }
         }
-        self.bump_render_epoch();
+        self.redraw(id);
         Ok(())
     }
 
@@ -272,6 +272,10 @@ impl World {
         self.physics.remove(id);
         let removed = self.entities.remove(&id);
         let removed_static = removed.is_some();
+        // A plain mesh the renderer can drop on its own (see `despawned`).
+        let plain = removed
+            .as_ref()
+            .is_some_and(|e| !e.instanced && e.instance_of.is_none());
         if let Some(tid) = removed.and_then(|e| e.albedo) {
             if self.auto_textures.contains(&tid) {
                 self.texture_sweep = true;
@@ -293,7 +297,9 @@ impl World {
         self.anchored_chunks.retain(|_, c| c.entity != id);
         let linked = self.portals.iter().any(|p| p.a() == id || p.b() == id);
         self.portals.retain(|p| p.a() != id && p.b() != id);
-        if removed_static || linked {
+        if plain && !linked {
+            self.despawned_plain(id);
+        } else if removed_static || linked {
             self.bump_render_epoch();
         }
     }
@@ -377,7 +383,7 @@ impl World {
         e.transform = local.to_matrix();
         e.bump_xform();
         self.anchored_entities.insert(id, place);
-        self.bump_render_epoch();
+        self.touch(id);
         Ok(())
     }
 
