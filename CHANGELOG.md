@@ -7,9 +7,13 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
-## 0.056 (2026-11-11)
+## 0.057 (2026-11-11)
 
 - See-through particles (smoke, clouds of puffs) are drawn far to near every frame, so overlapping puffs no longer flicker
+
+## 0.056 (2026-11-11)
+
+- LOD sets from meshes prepared on worker threads (spawn_lod_prepared), for streamed far tiles
 
 ## 0.055 (2026-11-11)
 

@@ -1370,6 +1370,42 @@ fn lod_set_moves_instances_between_levels_with_the_camera() {
 }
 
 #[test]
+fn lod_set_from_prepared_meshes_draws_like_one_from_meshes() {
+    use crate::mesh::Shape;
+    use crate::world::World;
+    let mut world = World::new();
+    let cube = || {
+        Shape::box_at((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), rgb(200, 200, 200))
+            .unwrap()
+            .prepare()
+    };
+    // Distances must rise, as for spawn_lod.
+    assert!(world
+        .spawn_lod_prepared(vec![(cube(), 100.0), (cube(), 20.0)])
+        .is_err());
+    assert!(world.spawn_lod_prepared(Vec::new()).is_err());
+    let id = world
+        .spawn_lod_prepared(vec![(cube(), 20.0), (cube(), 100.0)])
+        .unwrap();
+    let places: Vec<Place> = [5.0, 50.0, 150.0]
+        .iter()
+        .map(|x| Place::new(*x, 0.0, 0.0))
+        .collect();
+    world.set_lod_places(id, &places).unwrap();
+    let levels = world.lod_levels(id).unwrap();
+    assert_eq!(levels.len(), 2);
+    world.look_first_person((0.0, 0.0, 0.0), 90.0, 0.0);
+    world.tick_lods();
+    let counts: Vec<usize> = levels
+        .iter()
+        .map(|e| world.entity(*e).unwrap().instances.len())
+        .collect();
+    assert_eq!(counts, vec![1, 1], "150 m is past the last level");
+    world.despawn_lod(id);
+    assert!(world.entity(levels[1]).is_err());
+}
+
+#[test]
 fn physical_sky_drives_light_and_sky() {
     use crate::sky::PhysicalSky;
     let mut world = crate::world::World::new();
