@@ -654,19 +654,20 @@ impl ShadowScene {
         Ok(())
     }
 
-    /// Recheck which rows count as static; returns the bounds of those that
-    /// changed (see [`Self::apply`]).
+    /// Recheck whether the rows of `ids` count as static; returns the
+    /// bounds of those that changed (see [`Self::apply`]).
     pub fn refresh_fixed(
         &mut self,
         queue: &wgpu::Queue,
+        ids: &[EntityId],
         mut fixed: impl FnMut(EntityId) -> bool,
     ) -> Vec<Bounds> {
         let mut changed = Vec::new();
         let stride = std::mem::size_of::<GpuRow>();
-        for (i, id) in self.ids.iter().enumerate() {
-            if self.slots.get(id) != Some(&i) {
-                continue; // removed
-            }
+        for id in ids {
+            let Some(&i) = self.slots.get(id) else {
+                continue;
+            };
             let now = fixed(*id);
             if now != self.meta[i].1 {
                 self.meta[i].1 = now;

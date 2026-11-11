@@ -608,14 +608,8 @@ impl Renderer {
                     gpu.xform_rev = entity.xform_rev;
                 }
             } else if entity.instance_of.is_none() {
-                let mut gpu = GpuMesh::upload(
-                    &self.device,
-                    &self.queue,
-                    &self.arenas,
-                    entity.mesh(),
-                    &[],
-                    &self.instance_cull,
-                );
+                let mut gpu =
+                    GpuMesh::upload(&self.device, &self.queue, &self.arenas, entity.mesh(), &[]);
                 gpu.xform_rev = entity.xform_rev;
                 self.gpu_meshes.insert(id, gpu);
             }
@@ -660,7 +654,6 @@ impl Renderer {
                         &self.arenas,
                         entity.mesh(),
                         &self.instance_scratch,
-                        &self.instance_cull,
                     );
                     self.gpu_stats.mesh_rebuild += 1;
                     true
@@ -670,7 +663,6 @@ impl Renderer {
                         &self.queue,
                         &self.arenas,
                         &self.instance_scratch,
-                        &self.instance_cull,
                     );
                     self.gpu_stats.instance_rewrites += 1;
                     reallocated
@@ -690,7 +682,6 @@ impl Renderer {
                         &self.arenas,
                         proto_gpu,
                         &self.instance_scratch,
-                        &self.instance_cull,
                     )
                 } else {
                     GpuMesh::upload(
@@ -699,7 +690,6 @@ impl Renderer {
                         &self.arenas,
                         entity.mesh(),
                         &self.instance_scratch,
-                        &self.instance_cull,
                     )
                 };
                 gpu.xform_rev = entity.xform_rev;
@@ -709,9 +699,26 @@ impl Renderer {
                 false
             }
         };
-        self.moved_at.insert(id, self.frame_no);
+        self.mark_moved(id);
         if shadow_buffers_changed {
             self.invalidate_shadow_bundles();
+        }
+    }
+
+    /// Entity `id` (a mesh or a batch prototype) changed on the GPU this
+    /// frame: its shadow is not cached as static for a while.
+    fn mark_moved(&mut self, id: EntityId) {
+        self.moved_at.insert(id, self.frame_no);
+        if self.shadow_scene.is_some() {
+            if self.settling.len() >= SETTLING_LIMIT {
+                // Not drained (the shadow scene was not synced for long):
+                // build it again instead of keeping more.
+                self.settling.clear();
+                if let Some(scene) = self.shadow_scene.as_mut() {
+                    scene.stamp = None;
+                }
+            }
+            self.settling.push_back((self.frame_no, id));
         }
     }
 
@@ -958,13 +965,13 @@ impl Renderer {
                 let (writes, slots) = (self.gpu_stats.batch_partial_writes, batch.slots.len());
                 if self.update_batch_in_place(world, &mut batch, &build) {
                     if writes != self.gpu_stats.batch_partial_writes || slots != batch.slots.len() {
-                        self.moved_at.insert(prototype, self.frame_no);
+                        self.mark_moved(prototype);
                     }
                     self.gpu_instance_batches.insert(prototype, batch);
                     continue;
                 }
             }
-            self.moved_at.insert(prototype, self.frame_no);
+            self.mark_moved(prototype);
 
             let prototype_gpu = self.gpu_meshes.get(&prototype).unwrap_or_else(|| {
                 panic!("instance batch has no GPU mesh for prototype {prototype}")
@@ -1006,7 +1013,6 @@ impl Renderer {
                 &self.arenas,
                 prototype_gpu,
                 &self.instance_scratch,
-                &self.instance_cull,
             );
             gpu.bounds = slots
                 .iter()

@@ -235,14 +235,8 @@ impl Renderer {
     /// buffers, textures, mesh count, texture count). For diagnostics.
     pub fn mesh_and_texture_bytes(&self) -> (u64, u64, usize, usize) {
         // Vertices, indices and instances: the arenas' pages.
-        let mesh = |g: &gpu_mesh::GpuMesh| g.compact_buf.size();
-        let meshes: u64 = self.arenas.reserved_bytes()
-            + self.gpu_meshes.values().map(mesh).sum::<u64>()
-            + self
-                .gpu_instance_batches
-                .values()
-                .map(|b| mesh(&b.gpu))
-                .sum::<u64>();
+        // The GPU cull's compact pages, args and tables.
+        let meshes: u64 = self.arenas.reserved_bytes() + self.instance_cull.reserved_bytes();
         let textures: u64 = self
             .gpu_textures
             .values()

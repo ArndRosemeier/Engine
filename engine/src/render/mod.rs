@@ -107,6 +107,10 @@ pub struct GpuFrameStats {
     pub animated: u32,
     pub instance_submit: InstanceSubmit,
     pub compute_culls: u32,
+    /// Instance-cull compute dispatches (one per active range per view).
+    pub cull_dispatches: u32,
+    /// Views whose instances were culled (main, cascades, lamp faces).
+    pub cull_views: u32,
     pub indirect_draws: u32,
     pub direct_inside_batches: u32,
     pub boundary_batches: u32,
@@ -202,16 +206,19 @@ struct OpaqueDraw<'r> {
 impl<'r> OpaqueDraw<'r> {
     /// The buffers the draw reads: instances, and indirect args with their
     /// byte offset when the GPU decides the count.
-    fn sources(&self) -> (&'r wgpu::Buffer, Option<(&'r wgpu::Buffer, u64)>) {
+    fn sources(&self) -> ((&'r wgpu::Buffer, u64), Option<(&'r wgpu::Buffer, u64)>) {
         let g = self.gpu;
         match self.submit {
-            OpaqueSubmit::Mesh(MeshSubmit::Compacted) => (
-                &g.compact_buf,
-                Some((&g.indirect_buf, OPAQUE_INDIRECT_OFFSET)),
-            ),
-            OpaqueSubmit::Mesh(MeshSubmit::Direct) => (&g.instance_buf, None),
+            OpaqueSubmit::Mesh(MeshSubmit::Compacted) => {
+                let target = cull_target(g);
+                (
+                    target.compact_at(),
+                    Some(target.args(OPAQUE_INDIRECT_OFFSET)),
+                )
+            }
+            OpaqueSubmit::Mesh(MeshSubmit::Direct) => ((&g.instance_buf, 0), None),
             OpaqueSubmit::Occluded(args, slot) => (
-                &g.instance_buf,
+                (&g.instance_buf, 0),
                 Some((
                     args,
                     occlusion::OcclusionFrame::offset(slot, OPAQUE_INDIRECT_OFFSET),
@@ -224,12 +231,12 @@ impl<'r> OpaqueDraw<'r> {
     /// `submit_occluded_draw` give a pass.
     fn record(&self, bundle: &mut wgpu::RenderBundleEncoder<'r>) {
         let g = self.gpu;
-        let (instances, indirect) = self.sources();
+        let (_, indirect) = self.sources();
         bundle.set_bind_group(1, self.albedo, &[]);
         bundle.set_vertex_buffer(0, g.vertex_buf.slice(..));
         match self.submit {
             OpaqueSubmit::Mesh(MeshSubmit::Compacted) => {
-                bundle.set_vertex_buffer(1, instances.slice(..))
+                bundle.set_vertex_buffer(1, cull_target(g).compact_slice())
             }
             _ => bundle.set_vertex_buffer(1, g.instance_slice()),
         }
@@ -255,7 +262,8 @@ struct OpaqueKey {
     /// Where the mesh starts in the arena pages: first index, base vertex,
     /// first instance and instance room.
     offsets: (u32, i32, u32, usize),
-    instances: wgpu::Buffer,
+    /// The instance buffer and where the draw's instances start in it.
+    instances: (wgpu::Buffer, u64),
     /// Indirect args and offset, or the direct index and instance counts.
     indirect: Option<(wgpu::Buffer, u64)>,
     counts: (u32, u32),
@@ -275,7 +283,8 @@ impl OpaqueKey {
                     g.first_instance,
                     g.instance_capacity,
                 )
-            && self.instances == *instances
+            && self.instances.0 == *instances.0
+            && self.instances.1 == instances.1
             && match (&self.indirect, indirect) {
                 (Some((a, o)), Some((b, p))) => a == b && *o == p,
                 (None, None) => {
@@ -298,7 +307,7 @@ impl OpaqueKey {
                 g.first_instance,
                 g.instance_capacity,
             ),
-            instances: instances.clone(),
+            instances: (instances.0.clone(), instances.1),
             indirect: indirect.map(|(b, o)| (b.clone(), o)),
             counts: if indirect.is_some() {
                 (0, 0)
@@ -548,6 +557,8 @@ const SHADOW_GROUP: usize = 128;
 const STATIC_SHADOW_SLOT: usize = 3 + lights::SHADOW_LAYERS;
 /// A caster counts as static once it has not changed for this many frames.
 const STATIC_SHADOW_SETTLE: u64 = 30;
+/// Most `settling` entries kept before the shadow scene is built again instead.
+const SETTLING_LIMIT: usize = 1 << 17;
 /// A cached static layer is drawn anew after this many frames regardless.
 const STATIC_SHADOW_MAX_AGE: u64 = 900;
 
@@ -834,6 +845,10 @@ pub struct Renderer {
     /// When each mesh entity or batch prototype last changed on the GPU
     /// (`frame_no`); casters changed lately are not cached as static.
     moved_at: HashMap<EntityId, u64>,
+    /// `moved_at` entries in the order they were made, while the GPU
+    /// shadow scene is on: when one settles, its caster may count as
+    /// static again (only those rows are rechecked, not every caster).
+    settling: std::collections::VecDeque<(u64, EntityId)>,
     /// Bumped by changes to static shadow content not tied to one caster
     /// (building elements, rebuilt bundles).
     static_shadow_epoch: u64,
@@ -928,6 +943,9 @@ pub struct Renderer {
     /// voxelises the scene again).
     scene_gen: u64,
     /// `ENGINE_CPU_TRACE`: where in the world the full syncs came from.
+    /// `ENGINE_CPU_TRACE`: instance-cull views, jobs, dispatches and
+    /// instances summed over frames, printed every 120 frames.
+    cull_trace: [u64; 5],
     full_sync_sites: HashMap<Option<&'static std::panic::Location<'static>>, u32>,
     synced_resource_epoch: u64,
     /// Origin the terrain material phases were last written for.
@@ -1122,8 +1140,10 @@ fn encode_shadow_bundle_draw<'a>(
     bundle.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
     match submit {
         MeshSubmit::Compacted => {
-            bundle.set_vertex_buffer(1, gpu.compact_buf.slice(..));
-            bundle.draw_indexed_indirect(&gpu.indirect_buf, OPAQUE_INDIRECT_OFFSET);
+            let target = cull_target(gpu);
+            let (args, offset) = target.args(OPAQUE_INDIRECT_OFFSET);
+            bundle.set_vertex_buffer(1, target.compact_slice());
+            bundle.draw_indexed_indirect(args, offset);
         }
         MeshSubmit::Direct => {
             let instance_count =
@@ -1136,6 +1156,14 @@ fn encode_shadow_bundle_draw<'a>(
             );
         }
     }
+}
+
+/// Where a batch drawn with [`MeshSubmit::Compacted`] finds its culled
+/// instances and draw args (placed at the start of the frame's culls).
+fn cull_target(gpu: &GpuMesh) -> &instance_cull::CullTarget {
+    gpu.cull_target
+        .as_ref()
+        .expect("a compacted draw's batch was placed for the GPU cull")
 }
 
 fn submit_batch_draw(
@@ -1174,8 +1202,10 @@ fn submit_mesh_draw(
     pass.set_index_buffer(gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
     match submit {
         MeshSubmit::Compacted => {
-            pass.set_vertex_buffer(1, gpu.compact_buf.slice(..));
-            pass.draw_indexed_indirect(&gpu.indirect_buf, indirect_offset);
+            let target = cull_target(gpu);
+            let (args, offset) = target.args(indirect_offset);
+            pass.set_vertex_buffer(1, target.compact_slice());
+            pass.draw_indexed_indirect(args, offset);
             *indirect_draws += 1;
         }
         MeshSubmit::Direct => {

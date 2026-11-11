@@ -1,19 +1,10 @@
 use super::frustum::{Aabb, Bounds};
 use super::geometry::{GpuGeometry, GpuInstances, MeshArenas};
-use super::instance_cull::{DrawIndexedArgs, InstanceCull};
+use super::instance_cull::CullTarget;
 use crate::mesh::{BuiltMesh, InstanceRaw};
 use glam::Mat4;
 use std::ops::Range;
 use std::sync::Arc;
-use wgpu::util::DeviceExt;
-
-const INSTANCE_USAGES: wgpu::BufferUsages = wgpu::BufferUsages::VERTEX
-    .union(wgpu::BufferUsages::STORAGE)
-    .union(wgpu::BufferUsages::COPY_DST);
-
-const INDIRECT_USAGES: wgpu::BufferUsages = wgpu::BufferUsages::INDIRECT
-    .union(wgpu::BufferUsages::STORAGE)
-    .union(wgpu::BufferUsages::COPY_DST);
 
 /// Geometry and counts one `GpuMesh` is built from.
 struct MeshGpuSource {
@@ -50,9 +41,9 @@ pub struct GpuMesh {
     pub instance_buf: wgpu::Buffer,
     pub first_instance: u32,
     instance_slots: GpuInstances,
-    pub compact_buf: wgpu::Buffer,
-    pub indirect_buf: wgpu::Buffer,
-    pub cull_bind: wgpu::BindGroup,
+    /// Where the GPU cull writes the instances it keeps and the draw args
+    /// (instance batches culled on the GPU; see `instance_cull.rs`).
+    pub cull_target: Option<CullTarget>,
     pub index_count: usize,
     pub opaque_index_count: usize,
     pub vertex_count: usize,
@@ -82,7 +73,6 @@ impl GpuMesh {
         arenas: &MeshArenas,
         mesh: &BuiltMesh,
         instances: &[InstanceRaw],
-        cull: &InstanceCull,
     ) -> Self {
         let vertices = mesh.to_interleaved();
         let geometry = arenas
@@ -95,7 +85,6 @@ impl GpuMesh {
             device,
             queue,
             arenas,
-            cull,
             MeshGpuSource {
                 geometry,
                 index_count: mesh.indices.len(),
@@ -116,13 +105,11 @@ impl GpuMesh {
         arenas: &MeshArenas,
         src: &Self,
         instances: &[InstanceRaw],
-        cull: &InstanceCull,
     ) -> Self {
         Self::with_buffers(
             device,
             queue,
             arenas,
-            cull,
             MeshGpuSource {
                 geometry: src.geometry.clone(),
                 index_count: src.index_count,
@@ -140,7 +127,6 @@ impl GpuMesh {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         arenas: &MeshArenas,
-        cull: &InstanceCull,
         mesh: MeshGpuSource,
         instances: &[InstanceRaw],
     ) -> Self {
@@ -156,9 +142,6 @@ impl GpuMesh {
         let instance_slots = arenas
             .instances
             .alloc(device, queue, instances, instances.len());
-        let compact_buf = instance_buffer(device, instances, "instances-compact");
-        let indirect_buf = indirect_buffer(device, &geometry, opaque_index_count, index_count);
-        let cull_bind = cull.mesh_bind(device, &instance_slots.buffer, &compact_buf, &indirect_buf);
         Self {
             vertex_buf: geometry.vertex_buf.clone(),
             index_buf: geometry.index_buf.clone(),
@@ -168,9 +151,7 @@ impl GpuMesh {
             instance_buf: instance_slots.buffer.clone(),
             first_instance: instance_slots.first,
             instance_slots,
-            compact_buf,
-            indirect_buf,
-            cull_bind,
+            cull_target: None,
             index_count,
             opaque_index_count,
             vertex_count,
@@ -184,6 +165,14 @@ impl GpuMesh {
             sways,
             material: None,
         }
+    }
+
+    /// Its instance slots in the arena page, in bytes (all of its room).
+    pub fn instance_bytes(&self) -> Range<u64> {
+        self.instance_slots.byte_offset(0)
+            ..self
+                .instance_slots
+                .byte_offset(self.instance_slots.capacity as usize)
     }
 
     /// Which instance arena page its instances are in.
@@ -257,7 +246,6 @@ impl GpuMesh {
         queue: &wgpu::Queue,
         arenas: &MeshArenas,
         instances: &[InstanceRaw],
-        cull: &InstanceCull,
     ) -> bool {
         let reallocated = instances.len() > self.instance_capacity;
         if reallocated {
@@ -266,13 +254,6 @@ impl GpuMesh {
                 .alloc(device, queue, instances, instances.len());
             self.instance_buf = self.instance_slots.buffer.clone();
             self.first_instance = self.instance_slots.first;
-            self.compact_buf = instance_buffer(device, instances, "instances-compact");
-            self.cull_bind = cull.mesh_bind(
-                device,
-                &self.instance_buf,
-                &self.compact_buf,
-                &self.indirect_buf,
-            );
             self.instance_capacity = instances.len();
         } else if !instances.is_empty() {
             queue.write_buffer(
@@ -286,45 +267,6 @@ impl GpuMesh {
         self.world_box = box_over(self.local_box, instances);
         reallocated
     }
-}
-
-fn instance_buffer(device: &wgpu::Device, instances: &[InstanceRaw], label: &str) -> wgpu::Buffer {
-    // wgpu rejects a zero-sized buffer. A prototype with nothing placed still
-    // needs its vertex mesh uploaded, so keep a dummy slot and draw zero instances.
-    if instances.is_empty() {
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: bytemuck::bytes_of(&InstanceRaw::from_matrix(Mat4::IDENTITY)),
-            usage: INSTANCE_USAGES,
-        })
-    } else {
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: bytemuck::cast_slice(instances),
-            usage: INSTANCE_USAGES,
-        })
-    }
-}
-
-fn indirect_buffer(
-    device: &wgpu::Device,
-    geometry: &GpuGeometry,
-    opaque_index_count: usize,
-    index_count: usize,
-) -> wgpu::Buffer {
-    let opaque =
-        u32::try_from(opaque_index_count).expect("opaque index count exceeds GPU u32 range");
-    let total = u32::try_from(index_count).expect("index count exceeds GPU u32 range");
-    let (first, base) = (geometry.first_index, geometry.base_vertex);
-    let empty = [
-        DrawIndexedArgs::empty_range(opaque, first, base),
-        DrawIndexedArgs::empty_range(total - opaque, first + opaque, base),
-    ];
-    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("instances-indirect"),
-        contents: bytemuck::bytes_of(&empty),
-        usage: INDIRECT_USAGES,
-    })
 }
 
 /// The sphere covering `local` placed at each instance.

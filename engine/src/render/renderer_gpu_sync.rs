@@ -500,7 +500,19 @@ impl Renderer {
             scene.stamp = Some(stamp);
             changed = scene.apply(&self.device, &self.queue, rows);
         } else {
-            changed.extend(scene.refresh_fixed(&self.queue, |id| {
+            // Only casters whose last change has just settled can turn
+            // static; one changed since is turned moving by its patch.
+            let mut due = Vec::new();
+            while let Some(&(at, id)) = self.settling.front() {
+                if self.frame_no.saturating_sub(at) <= STATIC_SHADOW_SETTLE {
+                    break;
+                }
+                self.settling.pop_front();
+                if self.moved_at.get(&id) == Some(&at) {
+                    due.push(id);
+                }
+            }
+            changed.extend(scene.refresh_fixed(&self.queue, &due, |id| {
                 self.caster_settled(id) && self.gpu_meshes.get(&id).is_some_and(|g| !g.sways)
             }));
         }
@@ -620,14 +632,17 @@ impl Renderer {
         view: CullView,
         hiz: Option<&wgpu::BindGroup>,
     ) {
+        // Each batch once: its args are reset once per view.
+        let mut seen = HashSet::with_capacity(ids.len());
         let jobs: Vec<CullJob<'_>> = ids
             .iter()
+            .filter(|id| seen.insert(**id))
             .map(|id| {
-                let gpu = &self
+                let batch = self
                     .gpu_instance_batches
                     .get(id)
-                    .expect("instance batch cull list is synced")
-                    .gpu;
+                    .expect("instance batch cull list is synced");
+                let gpu = &batch.gpu;
                 if gpu.instance_count == 0 {
                     panic!("instance cull list included batch {id} with no instances");
                 }
@@ -640,23 +655,24 @@ impl Renderer {
                     }
                     CullView::Main | CullView::Shadow => CullDraws::OpaqueOnly,
                 };
-                let active_ranges = &self
-                    .gpu_instance_batches
-                    .get(id)
-                    .expect("instance batch cull list is synced")
-                    .active_ranges;
                 CullJob {
                     gpu,
                     local,
                     draws,
-                    active_ranges,
+                    active_ranges: &batch.active_ranges,
                 }
             })
             .collect();
-        self.instance_cull
-            .dispatch(&self.queue, encoder, frustum, &jobs, hiz);
+        if jobs.is_empty() {
+            return;
+        }
+        let dispatches =
+            self.instance_cull
+                .dispatch(&self.device, &self.queue, encoder, frustum, &jobs, hiz);
         let job_count = u32::try_from(jobs.len()).expect("cull dispatch count exceeds u32");
         self.gpu_stats.compute_culls += job_count;
+        self.gpu_stats.cull_views += 1;
+        self.gpu_stats.cull_dispatches += dispatches;
         self.gpu_stats.boundary_batches += job_count;
         for job in jobs {
             for range in job.active_ranges {
@@ -666,6 +682,9 @@ impl Renderer {
         }
     }
 
+    /// Size this frame's cull tables and give every batch its place in the
+    /// shared compact pages and draw args. Runs before any bundle that
+    /// draws a culled batch is recorded.
     pub(super) fn begin_instance_cull_frame(&mut self, world: &World) {
         if world.instance_submit() != InstanceSubmit::GpuIndirect {
             return;
@@ -674,15 +693,23 @@ impl Renderer {
         // The main view culls twice with occlusion on: frustum, then depth.
         let main = if self.occlusion_active { 2 } else { 1 };
         let views = main + sun + self.shadow.lamps.frame_views.len();
-        let active_ranges = self
+        let ranges = self
             .gpu_instance_batches
             .values()
             .map(|batch| batch.active_ranges.len())
             .sum::<usize>();
-        let max_jobs = active_ranges
-            .checked_mul(views)
-            .expect("instance-cull frame job count overflow");
-        self.instance_cull.begin_frame(&self.device, max_jobs);
+        let mut batches: Vec<(EntityId, &mut GpuMesh)> = self
+            .gpu_instance_batches
+            .iter_mut()
+            .map(|(id, batch)| (*id, &mut batch.gpu))
+            .collect();
+        let count = batches.len();
+        let moved = self.instance_cull.place(&self.device, &mut batches);
+        self.instance_cull
+            .begin_frame(&self.device, views, count, ranges);
+        if moved {
+            self.invalidate_shadow_bundles();
+        }
     }
 
     pub(super) fn prepare_terrain_bundle(&mut self, world: &World) {

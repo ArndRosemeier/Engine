@@ -673,6 +673,16 @@ per frame on the world. Shadow maps (sun cascades, their static cache and
 lamps) draw their casters the same way. GPU-culled instanced props keep their
 own draws.
 
+**GPU instance culling** (automatic; `ENGINE_INSTANCE_SUBMIT=cpu` to compare):
+an instanced batch whose bounds cross a view's edge has its instances tested
+on the GPU, and only those in view are drawn. Each view culls all such
+batches with one reset and one compute dispatch per instance page: a job
+table lists every batch's ranges and each workgroup looks up its own, so the
+CPU cost does not grow with the number of batches. The kept instances go
+into compact pages that mirror the instance pages slot for slot, and every
+batch's draw arguments sit in one shared buffer. `ENGINE_CPU_TRACE=1`
+prints the views, batches, dispatches and instances culled per frame.
+
 **Texture arrays** (automatic where the GPU supports them; Vulkan and DX12
 cards do): every mesh texture set sits in one material table, the four maps
 of up to 4,096 materials in GPU texture arrays and their factors in a buffer.

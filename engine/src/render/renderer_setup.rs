@@ -442,6 +442,7 @@ impl Renderer {
             shadow_draw: [true; 3],
             frame_no: 0,
             moved_at: HashMap::new(),
+            settling: std::collections::VecDeque::new(),
             static_shadow_epoch: 0,
             clipmap: None,
             portal,
@@ -489,6 +490,7 @@ impl Renderer {
             shadow_removed: Vec::new(),
             full_syncs: 1,
             scene_gen: 1,
+            cull_trace: [0; 5],
             full_sync_sites: HashMap::new(),
             synced_resource_epoch: 0,
             terrain_origin: crate::space::RenderOrigin::default(),
@@ -689,6 +691,27 @@ impl Renderer {
     }
 
     pub fn take_gpu_stats(&mut self) -> GpuFrameStats {
+        if self.cpu_spans.on {
+            let s = &self.gpu_stats;
+            let t = &mut self.cull_trace;
+            t[0] += 1;
+            t[1] += u64::from(s.cull_views);
+            t[2] += u64::from(s.compute_culls);
+            t[3] += u64::from(s.cull_dispatches);
+            t[4] += s.cull_instances;
+            if t[0] >= 120 {
+                let n = t[0] as f64;
+                eprintln!(
+                    "instance cull per frame: {:.1} views, {:.0} batches, {:.0} dispatches, {:.0} instances; {} batches held",
+                    t[1] as f64 / n,
+                    t[2] as f64 / n,
+                    t[3] as f64 / n,
+                    t[4] as f64 / n,
+                    self.gpu_instance_batches.len()
+                );
+                *t = [0; 5];
+            }
+        }
         std::mem::take(&mut self.gpu_stats)
     }
 }
