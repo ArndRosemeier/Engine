@@ -1642,3 +1642,16 @@ pub(crate) fn back_to_front(eye: glam::Vec3, draws: &mut [(glam::Vec3, Transpare
             .then_with(|| key(&a.1).cmp(&key(&b.1)))
     });
 }
+
+/// Parse and validate a whole WGSL source, as the GPU's shader check would.
+#[cfg(test)]
+pub(crate) fn assert_valid_wgsl(source: &str) {
+    let module = naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|e| panic!("WGSL does not parse: {}", e.emit_to_string(source)));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|e| panic!("WGSL does not validate: {e:?}"));
+}

@@ -218,19 +218,7 @@ impl GiVolume {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gi-shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                format!(
-                    "{}{}{}{}{}{PARAMS_WGSL}{GI_WGSL}",
-                    super::pipeline::LIGHTING_WGSL,
-                    super::shadow::SHADOW_UNIFORMS_WGSL,
-                    shadow_resources_as_group1(),
-                    super::shadow::SHADOW_EVAL_WGSL,
-                    super::lights::LAMP_EVAL_WGSL,
-                )
-                .replace("RAYS", &RAYS.to_string())
-                .replace("MAX_STEPS", &MAX_STEPS.to_string())
-                .into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(gi_source().into()),
         });
         let voxel_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gi-voxelize-shader"),
@@ -568,6 +556,20 @@ impl GiVolume {
     }
 }
 
+/// The probe update shader with everything it includes.
+fn gi_source() -> String {
+    format!(
+        "{}{}{}{}{}{PARAMS_WGSL}{GI_WGSL}",
+        super::pipeline::LIGHTING_WGSL,
+        super::shadow::SHADOW_UNIFORMS_WGSL,
+        shadow_resources_as_group1(),
+        super::shadow::SHADOW_EVAL_WGSL,
+        super::lights::LAMP_EVAL_WGSL,
+    )
+    .replace("RAYS", &RAYS.to_string())
+    .replace("MAX_STEPS", &MAX_STEPS.to_string())
+}
+
 const PARAMS_WGSL: &str = r#"
 struct GiParams {
     origin: vec3<f32>,
@@ -733,13 +735,28 @@ fn cs_update(@builtin(global_invocation_id) id: vec3<u32>) {
     var old_r = textureLoad(gi_probe_r, c, 0);
     var old_g = textureLoad(gi_probe_g, c, 0);
     var old_b = textureLoad(gi_probe_b, c, 0);
+    // A NaN or infinite value must never stay in the history: it would
+    // spread to every probe and every lit pixel. A broken fresh value is
+    // dropped this frame; a broken old one is replaced. `mix` with a blend
+    // of 1 still multiplies the old value by 0, which keeps a NaN, so the
+    // fresh value is picked outright then.
+    if !(gi_finite4(fresh_r) && gi_finite4(fresh_g) && gi_finite4(fresh_b)) {
+        return;
+    }
     var blend = gi.blend;
-    if old_r.x < 0.0 {
+    if old_r.x < 0.0 || !(gi_finite4(old_r) && gi_finite4(old_g) && gi_finite4(old_b)) {
         blend = 1.0;
     }
-    textureStore(probe_r_out, id, mix(old_r, fresh_r, blend));
-    textureStore(probe_g_out, id, mix(old_g, fresh_g, blend));
-    textureStore(probe_b_out, id, mix(old_b, fresh_b, blend));
+    let fresh_only = blend >= 1.0;
+    textureStore(probe_r_out, id, select(mix(old_r, fresh_r, blend), fresh_r, fresh_only));
+    textureStore(probe_g_out, id, select(mix(old_g, fresh_g, blend), fresh_g, fresh_only));
+    textureStore(probe_b_out, id, select(mix(old_b, fresh_b, blend), fresh_b, fresh_only));
+}
+
+// Tested on the bits: a compiler may assume floats are finite.
+fn gi_finite4(v: vec4<f32>) -> bool {
+    let e = bitcast<vec4<u32>>(v) & vec4<u32>(0x7f800000u);
+    return all(e != vec4<u32>(0x7f800000u));
 }
 "#;
 
@@ -786,11 +803,21 @@ fn vs_voxel(v: VsIn) -> VsOut {
     return out;
 }
 
+fn gi_voxel_finite(v: vec3<f32>) -> bool {
+    let e = bitcast<vec3<u32>>(v) & vec3<u32>(0x7f800000u);
+    return all(e != vec3<u32>(0x7f800000u));
+}
+
 @fragment
 fn fs_voxel(in: VsOut) -> @location(0) vec4<f32> {
     let c = vec3<i32>(floor((in.world_p - gi.origin) / gi.voxel));
     if all(c >= vec3<i32>(0)) && all(c < vec3<i32>(gi.vox_dims)) {
-        textureStore(voxels_out, c, vec4<f32>(in.color, 1.0));
+        // A broken (NaN or infinite) colour would reach every probe.
+        var colour = in.color;
+        if !gi_voxel_finite(colour) {
+            colour = vec3<f32>(0.0);
+        }
+        textureStore(voxels_out, c, vec4<f32>(colour, 1.0));
     }
     return vec4<f32>(0.0);
 }
@@ -798,6 +825,12 @@ fn fs_voxel(in: VsOut) -> @location(0) vec4<f32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_probe_shader_is_valid_wgsl() {
+        crate::render::assert_valid_wgsl(&super::gi_source());
+        crate::render::assert_valid_wgsl(&format!("{}{}", super::PARAMS_WGSL, super::VOXEL_WGSL));
+    }
+
     use super::*;
 
     #[test]

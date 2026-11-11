@@ -92,6 +92,19 @@ fn probe_reflection(p: vec3<f32>, r: vec3<f32>, roughness: f32) -> vec4<f32> {
     return vec4<f32>(sum, w);
 }
 
+// Last frame's image is fed back here, so a NaN or infinite pixel in it
+// (tested on the bits) reads as black instead of spreading over every
+// glossy surface frame after frame.
+fn reflect_finite(x: f32) -> bool {
+    return (bitcast<u32>(x) & 0x7f800000u) != 0x7f800000u;
+}
+fn reflect_clean(c: vec3<f32>) -> vec3<f32> {
+    if reflect_finite(c.r) && reflect_finite(c.g) && reflect_finite(c.b) {
+        return c;
+    }
+    return vec3<f32>(0.0);
+}
+
 // The reflected ray from `p` along `r`, traced through last frame's image.
 // Alpha is how far to trust the hit (0 for a miss).
 fn ssr_trace(p: vec3<f32>, r: vec3<f32>, roughness: f32, noise: f32) -> vec4<f32> {
@@ -163,7 +176,7 @@ fn ssr_trace(p: vec3<f32>, r: vec3<f32>, roughness: f32, noise: f32) -> vec4<f32
     }
     let s = mix(s0, s1, hi);
     let uv = vec2<f32>(s.x * 0.5 + 0.5, 0.5 - s.y * 0.5);
-    let color = textureSampleLevel(ssr_tex, reflect_samp, uv, 0.0).rgb;
+    let color = reflect_clean(textureSampleLevel(ssr_tex, reflect_samp, uv, 0.0).rgb);
     // Fade near the screen edges and the end of the ray, where the image
     // runs out, so a reflection never ends in a line.
     let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));

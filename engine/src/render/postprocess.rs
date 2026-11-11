@@ -637,8 +637,15 @@ struct VOut { @builtin(position) clip:vec4<f32>, @location(0) uv:vec2<f32> };
     var o:VOut; o.clip=vec4(pos[i],0.0,1.0); o.uv=pos[i]*vec2(0.5,-0.5)+vec2(0.5); return o;
 }
 
+// NaN or infinite channels (tested on the bits) read as black, so one
+// broken pixel cannot blow a bloom level up across the screen.
+fn finite(x:f32)->bool { return (bitcast<u32>(x) & 0x7f800000u) != 0x7f800000u; }
+fn clean(c:vec3<f32>)->vec3<f32> {
+    if finite(c.r) && finite(c.g) && finite(c.b) { return c; }
+    return vec3(0.0);
+}
 fn tap(uv:vec2<f32>, x:f32, y:f32)->vec3<f32> {
-    return textureSampleLevel(primary_tex, linear_sampler, uv + vec2(x, y) * p.texel_size, 0.0).rgb;
+    return clean(textureSampleLevel(primary_tex, linear_sampler, uv + vec2(x, y) * p.texel_size, 0.0).rgb);
 }
 fn luma(c:vec3<f32>)->f32 { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 // Karis average weight: hot pixels count less, so they cannot flicker.
@@ -717,7 +724,7 @@ fn agx(color:vec3<f32>)->vec3<f32> {
 }
 
 @fragment fn fs_composite(v:VOut)->@location(0) vec4<f32> {
-    let scene=textureSampleLevel(primary_tex,linear_sampler,v.uv,0.0).rgb;
+    let scene=clean(textureSampleLevel(primary_tex,linear_sampler,v.uv,0.0).rgb);
     let bloom=textureSampleLevel(secondary_tex,linear_sampler,v.uv,0.0).rgb;
     let hdr=(scene+bloom*p.intensity)*p.exposure*p.balance;
     var c:vec3<f32>;
@@ -741,6 +748,10 @@ fn grade(c_in:vec3<f32>, uv:vec2<f32>)->vec3<f32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_post_shader_is_valid_wgsl() {
+        crate::render::assert_valid_wgsl(super::SHADER);
+    }
     use super::*;
 
     fn bounded_and_monotonic(curve: fn(glam::Vec3, f32) -> glam::Vec3) {
