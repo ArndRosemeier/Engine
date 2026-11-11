@@ -144,11 +144,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Sky reflection at grazing angles is what makes flat water read as water.
     // Capped well below a mirror: with no reflection buffer, a full fresnel
     // turns the far half of a lake into flat sky.
-    let fresnel = pow(1.0 - max(dot(n, view), 0.0), 4.0);
+    let fresnel = pow(max(1.0 - max(dot(n, view), 0.0), 0.0), 4.0);
     let sky = vec3<f32>(0.26, 0.44, 0.72);
     var color = mix(body * diffuse, sky, clamp(fresnel * 0.45, 0.0, 0.38));
 
-    let half_v = normalize(l + view);
+    let half_v = (l + view) * inverseSqrt(max(dot(l + view, l + view), 1e-12));
     let glint = pow(max(dot(n, half_v), 0.0), 220.0) * wp.glint;
     color += u.light_color * glint * vis;
 

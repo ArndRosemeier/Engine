@@ -1435,7 +1435,7 @@ fn wet_ground(in: VsOut, uv: vec2<f32>) -> vec4<f32> {
     let v = normalize(u.eye - ground);
     let r = reflect(-v, vec3<f32>(0.0, 1.0, 0.0));
     let sky = screen_sky(r);
-    let fresnel = 0.02 + 0.98 * pow(1.0 - max(v.y, 0.0), 5.0);
+    let fresnel = 0.02 + 0.98 * pow(max(1.0 - max(v.y, 0.0), 0.0), 5.0);
     if sky.w > 0.0 {
         color = mix(color, sky.rgb, fresnel * smoothstep(0.7, 1.0, wet) * 0.15);
     }
@@ -1518,13 +1518,13 @@ fn fs_surface(in: VsOut) -> @location(0) vec4<f32> {
         let nv = max(dot(n, v), 0.0);
         // A film over grass and stones is broken up, not a mirror.
         let sheet = smoothstep(0.02, 0.3, min(in.depth, pix_depth));
-        let fresnel = (0.02 + 0.98 * pow(1.0 - nv, 5.0)) * mix(0.25, 1.0, sheet);
+        let fresnel = (0.02 + 0.98 * pow(max(1.0 - nv, 0.0), 5.0)) * mix(0.25, 1.0, sheet);
 
         // Sun glint (GGX).
         var spec = vec3<f32>(0.0);
         let nl = dot(n, l);
         if nl > 0.0 {
-            let hv = normalize(l + v);
+            let hv = (l + v) * inverseSqrt(max(dot(l + v, l + v), 1e-12));
             let nh = max(dot(n, hv), 0.0);
             let a = max(rough * rough, 0.002);
             let a2 = a * a;
@@ -1569,7 +1569,7 @@ fn fs_surface(in: VsOut) -> @location(0) vec4<f32> {
             color = deep;
         } else {
             let nv = max(dot(nb, v), 0.0);
-            let fresnel = 0.02 + 0.98 * pow(1.0 - nv, 5.0);
+            let fresnel = 0.02 + 0.98 * pow(max(1.0 - nv, 0.0), 5.0);
             let uv_r = uv + n.xz * 0.04 * wp.look.y;
             let air = textureSampleLevel(refract_tex, lin, uv_r, 0.0).rgb;
             color = mix(air, deep, clamp(fresnel, 0.0, 1.0));

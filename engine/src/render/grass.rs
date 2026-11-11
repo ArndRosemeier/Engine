@@ -214,7 +214,7 @@ fn vs_grass(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) ->
         across = 0.0;
     }
     let width = (0.034 + 0.02 * r3) * widen * mix(1.0, 1.6, heathy) * sqrt(max(h / grass.height, 0.2));
-    let taper = pow(1.0 - t, 0.7);
+    let taper = pow(max(1.0 - t, 0.0), 0.7);
 
     // Lean and wind: gusts roll across the field along the wind direction.
     let wind_dir = vec3<f32>(0.9216, 0.0, 0.3871);

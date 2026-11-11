@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.055 (2026-11-11)
+
+- Lamp and sun highlights can no longer turn into broken pixels when a light lines up with the camera
+
 ## 0.054 (2026-11-11)
 
 - A few broken pixels can no longer spread over the whole picture: shading, reflections, bounce light, anti-aliasing and glow drop invalid values; static shadow casters are no longer missed by the shadow cache

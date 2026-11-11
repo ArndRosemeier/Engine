@@ -243,7 +243,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     snow_w *= 0.82 + 0.28 * (rock_luma - 0.28);
     snow_w = clamp(snow_w, 0.0, 1.0) * (1.0 - bed_w);
     let view = normalize(u.eye - in.world_p);
-    let half_v = normalize(l + view);
+    let half_v = (l + view) * inverseSqrt(max(dot(l + view, l + view), 1e-12));
     let sparkle = pow(max(dot(n, half_v), 0.0), 48.0) * (0.12 + 0.28 * rock_luma);
     let snow_sky = mix(vec3<f32>(0.70, 0.80, 0.96), vec3<f32>(1.04, 1.04, 1.06), ndl);
     let snow_light = u.ambient * 1.2 * snow_sky + wrap * (1.0 - u.ambient * 0.45) * u.light_color * vis;

@@ -571,7 +571,7 @@ fn fs_water(in: WaterVsOut) -> @location(0) vec4<f32> {
     let n = vec3(0.0, 1.0, 0.0);
     let l = normalize(frame.light_dir);
     let view = normalize(frame.eye - in.world_p);
-    let fresnel = pow(1.0 - max(dot(n, view), 0.0), 2.0);
+    let fresnel = pow(max(1.0 - max(dot(n, view), 0.0), 0.0), 2.0);
     let ndl = max(dot(n, l), 0.0);
     let wrap = ndl * 0.5 + 0.5;
     let vis = sun_visibility(in.world_p, n, frame.eye);
