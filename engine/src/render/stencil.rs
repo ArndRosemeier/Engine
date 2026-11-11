@@ -208,11 +208,17 @@ fn face_decr_on_pass() -> StencilFaceState {
     }
 }
 
-/// Restore stencil after a recursive portal sub-pass.
+/// Restore stencil after a recursive portal sub-pass, and the opening's
+/// own depth over the view drawn through it. The view was drawn with the
+/// linked (oblique) camera, so its depths mean nothing to this level's
+/// camera: left there, temporal AA reprojected the doorway's history from
+/// the wrong places (a ghost of the view flickering over the door while
+/// the camera moved), and later see-through things tested against them.
+/// The stencil limits the write to the doorway's own pixels.
 pub(crate) fn stencil_decr_depth_stencil() -> DepthStencilState {
     DepthStencilState {
         format: depth_format(),
-        depth_write_enabled: false,
+        depth_write_enabled: true,
         depth_compare: CompareFunction::Always,
         stencil: gate(StencilState {
             front: face_decr_on_pass(),
@@ -243,6 +249,13 @@ pub(crate) fn depth_clear_depth_stencil() -> DepthStencilState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leaving_a_portal_view_puts_back_the_openings_depth() {
+        let d = stencil_decr_depth_stencil();
+        assert!(d.depth_write_enabled, "the doorway gets its own depth back");
+        assert_eq!(d.depth_compare, CompareFunction::Always);
+    }
 
     #[test]
     fn stencil_incr_respects_scene_depth() {
