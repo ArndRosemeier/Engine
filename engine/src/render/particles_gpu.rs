@@ -10,10 +10,15 @@
 //!    sprites and additive sprites.
 //! 4. `cs_finish` writes the indirect draw counts.
 //!
+//! Before drawing, the alpha sprites are sorted far to near from this
+//! frame's camera ([`ParticleSort`]): the lists come out of the simulation
+//! in a new order every frame, and unsorted overlapping sprites flickered.
+//!
 //! Drawing happens after the world (and water) in a pass of its own that
 //! reads the scene depth: sprites fade where they touch geometry (soft
 //! particles) and chunks test depth by hand.
 
+use super::particle_sort::ParticleSort;
 use crate::particles::{
     EmitterId, ParticleBlend, ParticleCommand, ParticleEmitter, ParticleForce, ParticleMode,
     ParticleShape, ParticleSilhouette, SizeOverLife, MAX_PARTICLES, MAX_PARTICLE_EMITTERS,
@@ -132,6 +137,7 @@ pub struct ParticleGpu {
     chunk_render: wgpu::RenderPipeline,
     alpha_render: wgpu::RenderPipeline,
     additive_render: wgpu::RenderPipeline,
+    sort: ParticleSort,
     runtimes: Vec<Option<EmitterRuntime>>,
     /// Parity of the alive list the next simulation reads.
     cur: u32,
@@ -240,6 +246,7 @@ impl ParticleGpu {
                 storage_entry(1, vs, true),
                 uniform_entry(2, vs | fs),
                 depth_entry(3, fs),
+                storage_entry(4, vs, true),
             ],
         });
         let args_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -347,12 +354,15 @@ impl ParticleGpu {
                 alpha: wgpu::BlendComponent::REPLACE,
             }),
         );
+        let mut sort = ParticleSort::new(device, MAX_PARTICLES);
+        sort.bind(device, &particles, &lists, &args, &draw_uniform);
         let (compute_bind, render_bind) = make_binds(
             device,
             &compute_layout,
             &render_layout,
             [&particles, &emitters, &spawns, &lists, &counters, &sim],
             &draw_uniform,
+            sort.sorted(),
             depth,
         );
         Self {
@@ -376,6 +386,7 @@ impl ParticleGpu {
             chunk_render,
             alpha_render,
             additive_render,
+            sort,
             runtimes: vec![None; MAX_PARTICLE_EMITTERS],
             cur: 0,
             busy_until: 0.0,
@@ -405,6 +416,7 @@ impl ParticleGpu {
                 &self.sim,
             ],
             &self.draw_uniform,
+            self.sort.sorted(),
             depth,
         );
         self.compute_bind = c;
@@ -660,6 +672,7 @@ impl ParticleGpu {
                 _pad: 0.0,
             }),
         );
+        self.sort.encode(encoder);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("particles"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -691,6 +704,7 @@ fn make_binds(
     render_layout: &wgpu::BindGroupLayout,
     [particles, emitters, spawns, lists, counters, sim]: [&wgpu::Buffer; 6],
     draw_uniform: &wgpu::Buffer,
+    sorted: &wgpu::Buffer,
     depth: &wgpu::Texture,
 ) -> (wgpu::BindGroup, wgpu::BindGroup) {
     let depth_view = depth.create_view(&wgpu::TextureViewDescriptor {
@@ -722,6 +736,7 @@ fn make_binds(
             entry(1, lists.as_entire_binding()),
             entry(2, draw_uniform.as_entire_binding()),
             entry(3, wgpu::BindingResource::TextureView(&depth_view)),
+            entry(4, sorted.as_entire_binding()),
         ],
     });
     (compute, render)
@@ -1053,6 +1068,8 @@ struct DrawView { inv_vp:mat4x4<f32>, eye:vec3<f32>, pad:f32 };
 @group(1) @binding(1) var<storage,read> lists:array<u32>;
 @group(1) @binding(2) var<uniform> view:DrawView;
 @group(1) @binding(3) var depth_tex:DEPTH_TYPE;
+// Alpha sprites far to near: (key, particle id).
+@group(1) @binding(4) var<storage,read> sorted_alpha:array<vec2<u32>>;
 
 fn haze(color:vec3<f32>,world_p:vec3<f32>)->f32 {
   if(u.haze_density<=0.0){return 0.0;}
@@ -1123,7 +1140,7 @@ fn sprite(vi:u32,pid:u32)->SpriteOut {
   out.center=p.p0.xyz; out.radius=size; out.lighting=p.p7.y;
   return out;
 }
-@vertex fn vs_alpha(@builtin(vertex_index) vi:u32,@builtin(instance_index) ii:u32)->SpriteOut { return sprite(vi,lists[N*4u+ii]); }
+@vertex fn vs_alpha(@builtin(vertex_index) vi:u32,@builtin(instance_index) ii:u32)->SpriteOut { return sprite(vi,sorted_alpha[ii].y); }
 @vertex fn vs_additive(@builtin(vertex_index) vi:u32,@builtin(instance_index) ii:u32)->SpriteOut { return sprite(vi,lists[N*5u+ii]); }
 
 fn sd_circle(p:vec2<f32>,c:vec2<f32>,r:f32)->f32{return length(p-c)-r;}

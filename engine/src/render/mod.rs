@@ -15,6 +15,7 @@ mod material;
 mod material_table;
 mod mipgen;
 mod occlusion;
+mod particle_sort;
 mod particles_gpu;
 mod pipeline;
 pub(crate) use pipeline::{lit_shader_source, CUSTOM_CODE_MARK};

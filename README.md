@@ -525,7 +525,9 @@ change any of them with the `with_..()` setters.
 `world.particles_mut().start(emitter)?` runs one until `stop(id)`, and
 `burst(emitter)?` fires a one-off burst that needs no handle (impacts,
 explosions). Smoke and dust are lit by sun and sky and fade softly into the
-ground; `with_collision(..)` makes particles bounce off whatever is on screen.
+ground. Alpha-blended sprites (`ParticleBlend::Alpha`) are sorted far to near
+every frame, so big overlapping puffs (a cloud, thick smoke) blend the same
+way from frame to frame instead of flickering; `with_collision(..)` makes particles bounce off whatever is on screen.
 `world.start_fire(pos, size)?` lights a fire (flames, smoke, embers and a
 flickering lamp) and `world.explosion(pos, radius)?` sets one off.
 Destruction makes its own dust and chunks: `world.dig(pos, r)`,
