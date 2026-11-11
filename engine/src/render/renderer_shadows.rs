@@ -359,6 +359,7 @@ impl Renderer {
                     &compact,
                     CullView::Shadow,
                     None,
+                    None,
                 );
             }
             self.gpu_stats.indirect_draws += u32::try_from(

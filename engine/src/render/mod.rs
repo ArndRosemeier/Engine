@@ -201,6 +201,8 @@ struct OpaqueDraw<'r> {
     material: Option<u32>,
     gpu: &'r GpuMesh,
     submit: OpaqueSubmit<'r>,
+    /// Its row in the main view's packed cull args, for a compacted batch.
+    packed: Option<u32>,
 }
 
 impl<'r> OpaqueDraw<'r> {
@@ -331,14 +333,24 @@ struct MultiGroup {
     vertex: wgpu::Buffer,
     index: wgpu::Buffer,
     instances: wgpu::Buffer,
-    /// Its arguments are the occlusion pass's packed rows (else the
-    /// target's own buffer).
-    occluded: bool,
+    /// Where its arguments are.
+    source: GroupArgs,
     offset: u64,
     /// At most this many draws; the GPU says how many (GPU scene).
     count: u32,
     /// Where in `MultiDraw::draw_counts` the GPU wrote the draw count.
     draw_count: Option<u64>,
+}
+
+/// Where a multi-draw group's arguments are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupArgs {
+    /// The pass's own, written by the CPU (`MultiDraw::args`).
+    Own,
+    /// The occlusion pass's packed rows.
+    Occlusion,
+    /// The GPU instance cull's packed rows for the main view.
+    Culled,
 }
 
 /// A pass's opaque meshes as a few multi-draws, as professional engines
@@ -357,6 +369,8 @@ struct MultiDraw {
     args: Option<wgpu::Buffer>,
     written: Vec<DrawIndexedArgs>,
     occlusion_args: Option<wgpu::Buffer>,
+    /// The instance cull's packed rows.
+    culled_args: Option<wgpu::Buffer>,
     /// The GPU scene's draw counts.
     draw_counts: Option<wgpu::Buffer>,
     rest: Option<wgpu::RenderBundle>,
@@ -378,11 +392,13 @@ impl MultiDraw {
                     continue;
                 };
                 pass.set_pipeline(bindless);
+            } else if !g.bindless && bound.is_some_and(|b| b.bindless) {
+                pass.set_pipeline(pipeline);
             }
-            let args = if g.occluded {
-                self.occlusion_args.as_ref()
-            } else {
-                self.args.as_ref()
+            let args = match g.source {
+                GroupArgs::Own => self.args.as_ref(),
+                GroupArgs::Occlusion => self.occlusion_args.as_ref(),
+                GroupArgs::Culled => self.culled_args.as_ref(),
             };
             let Some(args) = args else {
                 continue;
@@ -422,6 +438,7 @@ struct MultiPlan {
     groups: Vec<MultiGroup>,
     args: Vec<DrawIndexedArgs>,
     occlusion_args: Option<wgpu::Buffer>,
+    culled_args: Option<wgpu::Buffer>,
     draw_counts: Option<wgpu::Buffer>,
     rest: Option<wgpu::RenderBundle>,
     indirect_draws: u32,
@@ -473,6 +490,16 @@ struct MainCullSelection {
     compacted: HashSet<EntityId>,
     /// This frame's occlusion draws, when occlusion culling is on.
     occlusion: Option<occlusion::OcclusionFrame>,
+    /// Where the cull packs the opaque batches' args for multi-draws.
+    pack: Option<MainPack>,
+}
+
+/// The main view's packed batch args: a row per opaque batch, in the
+/// order multi-draws group them (texture, then buffers), so a run of rows
+/// is one call.
+struct MainPack {
+    args: wgpu::Buffer,
+    rows: HashMap<EntityId, u32>,
 }
 
 impl MainCullSelection {
@@ -481,6 +508,7 @@ impl MainCullSelection {
             ids: Vec::new(),
             compacted: HashSet::new(),
             occlusion: None,
+            pack: None,
         }
     }
 
@@ -1254,7 +1282,7 @@ fn scene_groups<'a>(
             vertex: g.key.vertex.clone(),
             index: g.key.index.clone(),
             instances: g.key.instances.clone(),
-            occluded: true,
+            source: GroupArgs::Occlusion,
             offset: frame.region_offset(region, g.start),
             count: g.len,
             draw_count: frame

@@ -291,7 +291,11 @@ impl Renderer {
         self.occlusion.begin(&self.device, &self.queue, &rows)
     }
 
-    pub(super) fn select_main_culls(&mut self, frustum: &Frustum) -> MainCullSelection {
+    pub(super) fn select_main_culls(
+        &mut self,
+        world: &World,
+        frustum: &Frustum,
+    ) -> MainCullSelection {
         let mut seen = HashSet::new();
         let mut ids = Vec::new();
         let mut compacted = HashSet::new();
@@ -333,7 +337,69 @@ impl Renderer {
             ids,
             compacted,
             occlusion: None,
+            pack: self.main_pack(world),
         }
+    }
+
+    /// Rows for the opaque batches' args in the order multi-draws group
+    /// them (texture, vertex and index pages, compact page), so each group
+    /// is one run. Only with multi-draws.
+    fn main_pack(&mut self, world: &World) -> Option<MainPack> {
+        if !self.multi_draw || self.batch_opaque.is_empty() {
+            return None;
+        }
+        type Key = (wgpu::BindGroup, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer);
+        // wgpu handles hash by their id, which never changes.
+        #[allow(clippy::mutable_key_type)]
+        let mut groups: HashMap<Key, Vec<EntityId>> = HashMap::new();
+        let mut order: Vec<Key> = Vec::new();
+        let mut seen = HashSet::new();
+        for &prototype in &self.batch_opaque {
+            if !seen.insert(prototype) {
+                continue;
+            }
+            let gpu = &self
+                .gpu_instance_batches
+                .get(&prototype)
+                .expect("batch draw list is synced")
+                .gpu;
+            let Some(target) = gpu.cull_target.as_ref() else {
+                continue;
+            };
+            let albedo = world
+                .entity(prototype)
+                .ok()
+                .and_then(|e| e.albedo)
+                .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
+                .unwrap_or(&self.pipelines.white_albedo);
+            let key: Key = (
+                albedo.clone(),
+                gpu.vertex_buf.clone(),
+                gpu.index_buf.clone(),
+                target.compact_at().0.clone(),
+            );
+            groups
+                .entry(key.clone())
+                .or_insert_with(|| {
+                    order.push(key);
+                    Vec::new()
+                })
+                .push(prototype);
+        }
+        let count: usize = groups.values().map(Vec::len).sum();
+        if count == 0 {
+            return None;
+        }
+        let (args, first) = self.instance_cull.reserve_packed(&self.device, count);
+        let mut rows = HashMap::with_capacity(count);
+        let mut next = first;
+        for key in order {
+            for id in groups.remove(&key).expect("every key has its batches") {
+                rows.insert(id, next);
+                next += 1;
+            }
+        }
+        Some(MainPack { args, rows })
     }
 
     pub(super) fn select_shadow_culls(
@@ -631,6 +697,7 @@ impl Renderer {
         ids: &[EntityId],
         view: CullView,
         hiz: Option<&wgpu::BindGroup>,
+        pack: Option<&HashMap<EntityId, u32>>,
     ) {
         // Each batch once: its args are reset once per view.
         let mut seen = HashSet::with_capacity(ids.len());
@@ -660,6 +727,7 @@ impl Renderer {
                     local,
                     draws,
                     active_ranges: &batch.active_ranges,
+                    pack: pack.and_then(|rows| rows.get(id).copied()),
                 }
             })
             .collect();

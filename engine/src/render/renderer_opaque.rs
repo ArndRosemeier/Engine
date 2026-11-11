@@ -75,6 +75,7 @@ impl Renderer {
                     .filter(|&m| Some(m) == self.material_slot(entity.albedo)),
                 gpu,
                 submit,
+                packed: None,
             });
         }
         for &prototype in &self.batch_opaque {
@@ -93,6 +94,11 @@ impl Renderer {
                 material: None,
                 gpu: &batch.gpu,
                 submit: OpaqueSubmit::Mesh(mesh_submit(&main_cull.compacted, prototype)),
+                packed: main_cull
+                    .pack
+                    .as_ref()
+                    .filter(|_| main_cull.compacted.contains(&prototype))
+                    .and_then(|p| p.rows.get(&prototype).copied()),
             });
         }
         let cache = match target {
@@ -169,6 +175,7 @@ impl Renderer {
             });
             multi.groups = plan.groups;
             multi.occlusion_args = plan.occlusion_args;
+            multi.culled_args = plan.culled_args;
             multi.draw_counts = plan.draw_counts;
             multi.rest = plan.rest;
             cache.frame = Some(OpaqueFrame {
@@ -295,9 +302,32 @@ impl Renderer {
         let mut direct: Vec<Vec<DrawIndexedArgs>> = Vec::new();
         let mut occluded: Vec<Vec<u32>> = Vec::new();
         let mut rest: Vec<&OpaqueDraw<'_>> = Vec::new();
+        // Compacted batches with a packed row: grouped like the rest, each
+        // group's rows in runs (the cull packed them in this order).
+        #[allow(clippy::mutable_key_type)]
+        let mut culled: HashMap<Key, Vec<u32>> = HashMap::new();
+        let mut culled_keys: Vec<Key> = Vec::new();
         for d in draws {
             if matches!(d.submit, OpaqueSubmit::Mesh(MeshSubmit::Compacted)) {
-                rest.push(d);
+                match (d.packed, d.gpu.cull_target.as_ref()) {
+                    (Some(row), Some(target)) if main_cull.pack.is_some() => {
+                        let key: Key = (
+                            d.albedo.clone(),
+                            false,
+                            d.gpu.vertex_buf.clone(),
+                            d.gpu.index_buf.clone(),
+                            target.compact_at().0.clone(),
+                        );
+                        culled
+                            .entry(key.clone())
+                            .or_insert_with(|| {
+                                culled_keys.push(key);
+                                Vec::new()
+                            })
+                            .push(row);
+                    }
+                    _ => rest.push(d),
+                }
                 continue;
             }
             let g = d.gpu;
@@ -336,26 +366,62 @@ impl Renderer {
         for (((albedo, bindless, vertex, index, instances), own), mut slots) in
             keys.into_iter().zip(direct).zip(occluded)
         {
-            let group = |occluded, offset, count| MultiGroup {
+            let group = |source, offset, count| MultiGroup {
                 albedo: albedo.clone(),
                 bindless,
                 vertex: vertex.clone(),
                 index: index.clone(),
                 instances: instances.clone(),
-                occluded,
+                source,
                 offset,
                 count,
                 draw_count: None,
             };
             if !own.is_empty() {
-                groups.push(group(false, args.len() as u64 * stride, own.len() as u32));
+                groups.push(group(
+                    GroupArgs::Own,
+                    args.len() as u64 * stride,
+                    own.len() as u32,
+                ));
                 args.extend(own);
             }
             if let Some(frame) = occlusion.filter(|_| !slots.is_empty()) {
                 slots.sort_unstable();
                 for run in slots.chunk_by(|a, b| b == &(a + 1)) {
-                    groups.push(group(true, frame.packed_offset(run[0]), run.len() as u32));
+                    groups.push(group(
+                        GroupArgs::Occlusion,
+                        frame.packed_offset(run[0]),
+                        run.len() as u32,
+                    ));
                 }
+            }
+        }
+        let mut culled_draws = 0u32;
+        let mut culled_groups = Vec::new();
+        for (albedo, bindless, vertex, index, instances) in culled_keys {
+            let mut rows = culled
+                .remove(&(
+                    albedo.clone(),
+                    bindless,
+                    vertex.clone(),
+                    index.clone(),
+                    instances.clone(),
+                ))
+                .expect("every culled key has rows");
+            rows.sort_unstable();
+            for run in rows.chunk_by(|a, b| *b == a + 1) {
+                culled_draws += 1;
+                culled_groups.push(MultiGroup {
+                    albedo: albedo.clone(),
+                    bindless,
+                    vertex: vertex.clone(),
+                    index: index.clone(),
+                    instances: instances.clone(),
+                    source: GroupArgs::Culled,
+                    offset: u64::from(run[0]) * stride,
+                    count: run.len() as u32,
+                    draw_count: None,
+                });
             }
         }
         if let (Some(region), Some(scene), Some(frame)) =
@@ -366,7 +432,9 @@ impl Renderer {
         // Plain groups first, then the texture-array ones: one pipeline
         // switch.
         groups.sort_by_key(|g| g.bindless);
-        let indirect_draws = rest.len() as u32;
+        // GPU-culled batches last, where their own draws used to go.
+        groups.extend(culled_groups);
+        let indirect_draws = rest.len() as u32 + culled_draws;
         let rest = (!rest.is_empty()).then(|| {
             let color = [Some(HDR_FORMAT)];
             let mut bundle =
@@ -395,6 +463,7 @@ impl Renderer {
             groups,
             args,
             occlusion_args: occlusion.map(|f| f.args.clone()),
+            culled_args: main_cull.pack.as_ref().map(|p| p.args.clone()),
             draw_counts: occlusion
                 .filter(|_| scene_region.is_some())
                 .and_then(|f| f.draw_counts.clone()),
