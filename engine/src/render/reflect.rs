@@ -192,7 +192,7 @@ fn scene_reflection(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, roughness: f32,
     // work: they would not show.
     let f0 = mix(vec3<f32>(0.04), base, metallic);
     let nv = max(dot(n, v), 0.0);
-    let fres = max(f0.x, max(f0.y, f0.z)) + pow(1.0 - nv, 5.0) * (1.0 - roughness);
+    let fres = max(f0.x, max(f0.y, f0.z)) + pow(max(1.0 - nv, 0.0), 5.0) * (1.0 - roughness);
     let r = reflect(-v, n);
     var probe = vec4<f32>(0.0);
     if refl.probe_info.x > 0.0 {

@@ -251,6 +251,13 @@ fn haze(color: vec3<f32>, world_p: vec3<f32>) -> vec3<f32> {
 /// shaded sides pick up blue from above and warm bounce from below and glossy
 /// or metal surfaces reflect the sky instead of going black.
 pub const LIGHTING_WGSL: &str = r#"
+// The half vector between a light and the eye. When they point exactly
+// opposite ways the sum is zero and normalize() gives NaN; then this is zero
+// (no highlight) instead.
+fn safe_half(l: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
+    let s = l + v;
+    return s * inverseSqrt(max(dot(s, s), 1e-12));
+}
 const PI: f32 = 3.14159265;
 // Brightest a sun highlight gets (times the sun's colour); see pbr_shade.
 const SUN_SPEC_MAX: f32 = 120.0;
@@ -312,7 +319,7 @@ fn pbr_shade(
     var spec = vec3<f32>(0.0);
     let nl = dot(n, light.dir);
     if nl > 0.0 {
-        let h = normalize(light.dir + v);
+        let h = safe_half(light.dir, v);
         let nh = max(dot(n, h), 0.0);
         let lh = max(dot(light.dir, h), 0.0);
         let a = roughness * roughness;
@@ -321,7 +328,7 @@ fn pbr_shade(
         let d = a2 / (PI * d_den * d_den);
         let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
         let g = (nv / (nv * (1.0 - k) + k)) * (nl / (nl * (1.0 - k) + k));
-        let f = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - lh, 5.0);
+        let f = f0 + (vec3<f32>(1.0) - f0) * pow(max(1.0 - lh, 0.0), 5.0);
         // The sun is a disc, not a point, so its mirror image has a finite
         // brightness. Without the cap, chrome seen from above (normal, sun
         // and eye lined up) blew past half-float range: white glare
@@ -1248,7 +1255,7 @@ fn shade_main(in: VsOut) -> vec4<f32> {
     var alpha = base.a;
     if alpha < 0.999 {
         let view = normalize(u.eye - in.world_p);
-        let fresnel = pow(1.0 - max(dot(n, view), 0.0), 2.0);
+        let fresnel = pow(max(1.0 - max(dot(n, view), 0.0), 0.0), 2.0);
         alpha = mix(alpha, min(alpha + 0.18, 0.55), fresnel * 0.65);
     } else {
         alpha = 1.0;

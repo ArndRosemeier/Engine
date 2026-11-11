@@ -315,10 +315,10 @@ fn twilight(direction: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
     let flat_d = vec2<f32>(direction.x, direction.z);
     let flat_s = vec2<f32>(sun.x, sun.z);
     let toward = clamp(dot(flat_d / max(length(flat_d), 1e-4), flat_s / max(length(flat_s), 1e-4)) * 0.5 + 0.5, 0.0, 1.0);
-    let low = pow(1.0 - h, 6.0);
+    let low = pow(max(1.0 - h, 0.0), 6.0);
     let band = vec3<f32>(0.9, 0.38, 0.12) * low * (pow(toward, 3.0) * 0.85 + 0.15) * smoothstep(-0.18, -0.02, sy);
     let blue = mix(vec3<f32>(0.05, 0.08, 0.16), vec3<f32>(0.012, 0.03, 0.085), pow(h, 0.6)) * (smoothstep(-0.2, -0.04, sy) + 0.3);
-    let belt = vec3<f32>(0.12, 0.06, 0.09) * pow(1.0 - h, 3.0) * pow(1.0 - toward, 2.0);
+    let belt = vec3<f32>(0.12, 0.06, 0.09) * pow(max(1.0 - h, 0.0), 3.0) * pow(1.0 - toward, 2.0);
     return (band + blue + belt) * glow * 0.5 * smoothstep(-0.12, 0.0, direction.y);
 }
 

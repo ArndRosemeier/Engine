@@ -368,7 +368,7 @@ fn lamp_light(base: vec3<f32>, n: vec3<f32>, v: vec3<f32>, p: vec3<f32>,
                 continue;
             }
         }
-        let h = normalize(l + v);
+        let h = safe_half(l, v);
         let nh = max(dot(n, h), 0.0);
         let lh = max(dot(l, h), 0.0);
         let ar = roughness * roughness;
@@ -377,7 +377,7 @@ fn lamp_light(base: vec3<f32>, n: vec3<f32>, v: vec3<f32>, p: vec3<f32>,
         let dist = a2 / (PI * dd * dd);
         let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
         let g = (nv / (nv * (1.0 - k) + k)) * (nl / (nl * (1.0 - k) + k));
-        let f = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - lh, 5.0);
+        let f = f0 + (vec3<f32>(1.0) - f0) * pow(max(1.0 - lh, 0.0), 5.0);
         let spec = dist * g * f / (4.0 * nv) * PI;
         sum += (diffuse_color * nl + spec) * lamp.color.rgb * a;
     }
