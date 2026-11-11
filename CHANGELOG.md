@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.053 (2026-11-11)
+
+- Less CPU time per frame in scenes with many materials: binding the material table no longer rechecks thousands of textures each time (a fix in Engine's copy of the graphics library)
+
 ## 0.052 (2026-11-11)
 
 - Instanced things cut down to what is in view are drawn in a few combined draw calls instead of one per kind of thing, which saves CPU time in busy scenes
