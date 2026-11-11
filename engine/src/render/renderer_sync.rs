@@ -34,6 +34,27 @@ impl Renderer {
         self.particles
             .sync(&self.queue, particle_commands, particle_dt, particle_time);
         self.cpu_spans.mark("sync.effects", &mut t);
+        if self.cpu_spans.on {
+            let s = &self.gpu_stats;
+            let t = &mut self.cull_trace;
+            t[0] += 1;
+            t[1] += u64::from(s.cull_views);
+            t[2] += u64::from(s.compute_culls);
+            t[3] += u64::from(s.cull_dispatches);
+            t[4] += s.cull_instances;
+            if t[0] >= 120 {
+                let n = t[0] as f64;
+                eprintln!(
+                    "instance cull per frame: {:.1} views, {:.0} batches, {:.0} dispatches, {:.0} instances; {} batches held",
+                    t[1] as f64 / n,
+                    t[2] as f64 / n,
+                    t[3] as f64 / n,
+                    t[4] as f64 / n,
+                    self.gpu_instance_batches.len()
+                );
+                *t = [0; 5];
+            }
+        }
         self.gpu_stats = GpuFrameStats::default();
         self.gpu_stats.entities =
             u32::try_from(world.entity_count()).expect("entity count exceeds u32");
@@ -709,9 +730,26 @@ impl Renderer {
                 false
             }
         };
-        self.moved_at.insert(id, self.frame_no);
+        self.mark_moved(id);
         if shadow_buffers_changed {
             self.invalidate_shadow_bundles();
+        }
+    }
+
+    /// Entity `id` (a mesh or a batch prototype) changed on the GPU this
+    /// frame: its shadow is not cached as static for a while.
+    fn mark_moved(&mut self, id: EntityId) {
+        self.moved_at.insert(id, self.frame_no);
+        if self.shadow_scene.is_some() {
+            if self.settling.len() >= SETTLING_LIMIT {
+                // Not drained (the shadow scene was not synced for long):
+                // build it again instead of keeping more.
+                self.settling.clear();
+                if let Some(scene) = self.shadow_scene.as_mut() {
+                    scene.stamp = None;
+                }
+            }
+            self.settling.push_back((self.frame_no, id));
         }
     }
 
@@ -958,13 +996,13 @@ impl Renderer {
                 let (writes, slots) = (self.gpu_stats.batch_partial_writes, batch.slots.len());
                 if self.update_batch_in_place(world, &mut batch, &build) {
                     if writes != self.gpu_stats.batch_partial_writes || slots != batch.slots.len() {
-                        self.moved_at.insert(prototype, self.frame_no);
+                        self.mark_moved(prototype);
                     }
                     self.gpu_instance_batches.insert(prototype, batch);
                     continue;
                 }
             }
-            self.moved_at.insert(prototype, self.frame_no);
+            self.mark_moved(prototype);
 
             let prototype_gpu = self.gpu_meshes.get(&prototype).unwrap_or_else(|| {
                 panic!("instance batch has no GPU mesh for prototype {prototype}")

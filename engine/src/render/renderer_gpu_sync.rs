@@ -500,7 +500,19 @@ impl Renderer {
             scene.stamp = Some(stamp);
             changed = scene.apply(&self.device, &self.queue, rows);
         } else {
-            changed.extend(scene.refresh_fixed(&self.queue, |id| {
+            // Only casters whose last change has just settled can turn
+            // static; one changed since is turned moving by its patch.
+            let mut due = Vec::new();
+            while let Some(&(at, id)) = self.settling.front() {
+                if self.frame_no.saturating_sub(at) <= STATIC_SHADOW_SETTLE {
+                    break;
+                }
+                self.settling.pop_front();
+                if self.moved_at.get(&id) == Some(&at) {
+                    due.push(id);
+                }
+            }
+            changed.extend(scene.refresh_fixed(&self.queue, &due, |id| {
                 self.caster_settled(id) && self.gpu_meshes.get(&id).is_some_and(|g| !g.sways)
             }));
         }
@@ -657,6 +669,11 @@ impl Renderer {
             .dispatch(&self.queue, encoder, frustum, &jobs, hiz);
         let job_count = u32::try_from(jobs.len()).expect("cull dispatch count exceeds u32");
         self.gpu_stats.compute_culls += job_count;
+        self.gpu_stats.cull_views += 1;
+        self.gpu_stats.cull_dispatches += u32::try_from(
+            jobs.iter().map(|j| j.active_ranges.len()).sum::<usize>(),
+        )
+        .expect("cull dispatch count exceeds u32");
         self.gpu_stats.boundary_batches += job_count;
         for job in jobs {
             for range in job.active_ranges {

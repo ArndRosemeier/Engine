@@ -107,6 +107,10 @@ pub struct GpuFrameStats {
     pub animated: u32,
     pub instance_submit: InstanceSubmit,
     pub compute_culls: u32,
+    /// Instance-cull compute dispatches (one per active range per view).
+    pub cull_dispatches: u32,
+    /// Views whose instances were culled (main, cascades, lamp faces).
+    pub cull_views: u32,
     pub indirect_draws: u32,
     pub direct_inside_batches: u32,
     pub boundary_batches: u32,
@@ -548,6 +552,8 @@ const SHADOW_GROUP: usize = 128;
 const STATIC_SHADOW_SLOT: usize = 3 + lights::SHADOW_LAYERS;
 /// A caster counts as static once it has not changed for this many frames.
 const STATIC_SHADOW_SETTLE: u64 = 30;
+/// Most `settling` entries kept before the shadow scene is built again instead.
+const SETTLING_LIMIT: usize = 1 << 17;
 /// A cached static layer is drawn anew after this many frames regardless.
 const STATIC_SHADOW_MAX_AGE: u64 = 900;
 
@@ -834,6 +840,10 @@ pub struct Renderer {
     /// When each mesh entity or batch prototype last changed on the GPU
     /// (`frame_no`); casters changed lately are not cached as static.
     moved_at: HashMap<EntityId, u64>,
+    /// `moved_at` entries in the order they were made, while the GPU
+    /// shadow scene is on: when one settles, its caster may count as
+    /// static again (only those rows are rechecked, not every caster).
+    settling: std::collections::VecDeque<(u64, EntityId)>,
     /// Bumped by changes to static shadow content not tied to one caster
     /// (building elements, rebuilt bundles).
     static_shadow_epoch: u64,
@@ -928,6 +938,9 @@ pub struct Renderer {
     /// voxelises the scene again).
     scene_gen: u64,
     /// `ENGINE_CPU_TRACE`: where in the world the full syncs came from.
+    /// `ENGINE_CPU_TRACE`: instance-cull views, jobs, dispatches and
+    /// instances summed over frames, printed every 120 frames.
+    cull_trace: [u64; 5],
     full_sync_sites: HashMap<Option<&'static std::panic::Location<'static>>, u32>,
     synced_resource_epoch: u64,
     /// Origin the terrain material phases were last written for.
