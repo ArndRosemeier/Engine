@@ -544,6 +544,7 @@ struct PortalLevel {
 }
 
 /// How a portal level's scene is viewed: clip plane, environment, culling.
+#[derive(Clone, Copy)]
 struct PortalLevelView {
     clip_plane: Option<(glam::Vec3, glam::Vec3)>,
     draw_environment: bool,

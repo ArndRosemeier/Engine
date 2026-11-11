@@ -323,7 +323,32 @@ impl Renderer {
                 }
             }
         }
+    }
 
+    /// The see-through part of a space's scene: glass, see-through custom
+    /// materials, water, ribbons. Drawn after the views through this
+    /// level's portals, so a portal's rim or a pane in front of a doorway
+    /// shows over the view instead of under it.
+    pub(super) fn draw_space_see_through(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'_>,
+        world: &World,
+        space: SpaceId,
+        main_cull: &MainCullSelection,
+        view: PortalLevelView,
+        scene: ScenePass,
+    ) {
+        let ScenePass {
+            portal_mask,
+            uniform_slot,
+        } = scene;
+        let PortalLevelView {
+            clip_plane: _,
+            draw_environment,
+            use_cull,
+        } = view;
+        let stamp = !portal_mask && use_cull;
+        pass.set_bind_group(0, self.pipelines.scene_bind_group(uniform_slot), &[]);
         let transparent_pipeline = if portal_mask {
             &self.pipelines.transparent_portal
         } else {

@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.059 (2026-11-11)
+
+- Portals: glass and see-through materials in front of a doorway show over its view, and a portal's view draws only what fits through the opening (a big city drew everything again, unculled)
+
 ## 0.058 (2026-11-11)
 
 - Portals: no ghost of the view flickering over a doorway while the camera moves (the opening's depth is put back after its view)

@@ -69,21 +69,17 @@ impl Renderer {
                     pass.set_bind_group(0, self.sky.bind_group(slot), &[]);
                     pass.draw(0..3, 0..1);
                 }
-                self.draw_space_scene(
-                    &mut pass,
-                    world,
-                    live,
-                    &no_cull,
-                    PortalLevelView {
-                        clip_plane: None,
-                        draw_environment: false,
-                        use_cull: false,
-                    },
-                    ScenePass {
-                        portal_mask: false,
-                        uniform_slot: slot,
-                    },
-                );
+                let view = PortalLevelView {
+                    clip_plane: None,
+                    draw_environment: false,
+                    use_cull: false,
+                };
+                let scene = ScenePass {
+                    portal_mask: false,
+                    uniform_slot: slot,
+                };
+                self.draw_space_scene(&mut pass, world, live, &no_cull, view, scene);
+                self.draw_space_see_through(&mut pass, world, live, &no_cull, view, scene);
             }
             self.reflect.store_face(&self.device, encoder, job);
         }
@@ -144,34 +140,22 @@ impl Renderer {
         };
         pass.set_stencil_reference(u32::from(level));
 
-        self.draw_space_scene(
-            pass,
-            world,
-            space,
-            main_cull,
-            PortalLevelView {
-                clip_plane,
-                draw_environment,
-                use_cull,
-            },
-            ScenePass {
-                portal_mask: level > 0,
-                uniform_slot,
-            },
-        );
+        let view = PortalLevelView {
+            clip_plane,
+            draw_environment,
+            use_cull,
+        };
+        let scene = ScenePass {
+            portal_mask: level > 0,
+            uniform_slot,
+        };
+        self.draw_space_scene(pass, world, space, main_cull, view, scene);
 
         // Looking through portals needs the stencil to keep the far space
         // inside the doorway. Without one (a GPU without Depth32FloatStencil8,
         // or ENGINE_DEPTH_FORMAT=d32) doorways show nothing beyond them.
-        if level >= world.portal_recursion() || !stencil::has_stencil() {
-            return;
-        }
-
-        if portals.is_empty() {
-            return;
-        }
-
-        for visible in portals {
+        let looks_through = level < world.portal_recursion() && stencil::has_stencil();
+        for visible in portals.into_iter().filter(|_| looks_through) {
             if !self.portal_in_frustum(world, visible.src, camera.eye()) {
                 continue;
             }
@@ -193,10 +177,13 @@ impl Renderer {
             let virt = portal_view_camera(&render_cam, &visible, src_plane);
             let dest_clip = portal_destination_clip(&render_cam, &visible, src_plane);
             let dest_env = world.space_draws_environment(visible.dest_space);
-            // Cull destination draws with the virtual camera's normal frustum.
-            // Oblique clipping is applied when the pass actually draws; using it
-            // here over-tightens culling and drops the whole yard at doorways.
-            self.collect_draws(world, visible.dest_space, false);
+            // Cull destination draws to what can be seen through the opening:
+            // the virtual camera's normal frustum (oblique clipping is applied
+            // when the pass draws; culling with it dropped whole yards at
+            // doorways), narrowed to the opening's rectangle on the screen.
+            // Drawing the whole space unculled cost a big city 4x its frame.
+            self.frustum = self.through_frustum(&render_cam, &virt, visible.src);
+            self.collect_draws(world, visible.dest_space, true);
 
             self.render_portal_level(
                 pass,
@@ -225,6 +212,30 @@ impl Renderer {
                 restore_uniform_slot,
             );
         }
+
+        // See-through things last, over the views (a portal's rim, glass in
+        // front of a doorway): drawn into them they were painted over. Each
+        // view above put this level's draw lists back when it was done.
+        self.draw_space_see_through(pass, world, space, main_cull, view, scene);
+    }
+
+    /// The frustum of `virt` (the camera through a portal) narrowed to the
+    /// rectangle the opening `src` covers on the screen of `render_cam`
+    /// (both share the screen). The whole frustum when the opening is not
+    /// all in front of the camera.
+    fn through_frustum(&self, render_cam: &Camera, virt: &Camera, src: EntityId) -> Frustum {
+        let aspect = self
+            .view_aspect
+            .unwrap_or(self.config.width as f32 / self.config.height.max(1) as f32);
+        let vp_virt = virt.view_projection(aspect);
+        let whole = Frustum::from_view_projection(vp_virt);
+        let Some(b) = self.gpu_meshes.get(&src).and_then(|g| g.bounds) else {
+            return whole;
+        };
+        let Some(rect) = screen_rect(render_cam.view_projection(aspect), b) else {
+            return whole;
+        };
+        Frustum::from_view_projection(rect_matrix(rect) * vp_virt)
     }
 
     pub(super) fn portal_in_frustum(&self, world: &World, id: EntityId, eye: glam::Vec3) -> bool {
@@ -388,5 +399,82 @@ impl Renderer {
                 );
             }
         }
+    }
+}
+
+/// The rectangle (NDC: x0, y0, x1, y1) that `bounds` covers on the screen
+/// of `vp`, inside the screen; None when part of it is behind the camera or
+/// it covers nothing.
+fn screen_rect(vp: glam::Mat4, b: Bounds) -> Option<[f32; 4]> {
+    let (lo, hi) = (
+        b.centre - glam::Vec3::splat(b.radius),
+        b.centre + glam::Vec3::splat(b.radius),
+    );
+    let mut r = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for i in 0..8 {
+        let p = glam::Vec3::new(
+            if i & 1 == 0 { lo.x } else { hi.x },
+            if i & 2 == 0 { lo.y } else { hi.y },
+            if i & 4 == 0 { lo.z } else { hi.z },
+        );
+        let c = vp * p.extend(1.0);
+        if c.w <= 1e-4 {
+            return None;
+        }
+        let (x, y) = (c.x / c.w, c.y / c.w);
+        r = [r[0].min(x), r[1].min(y), r[2].max(x), r[3].max(y)];
+    }
+    let r = [r[0].max(-1.0), r[1].max(-1.0), r[2].min(1.0), r[3].min(1.0)];
+    (r[2] > r[0] && r[3] > r[1]).then_some(r)
+}
+
+/// Maps the NDC rectangle `r` onto the whole screen (applied after a
+/// view-projection: its frustum is the rectangle's).
+fn rect_matrix(r: [f32; 4]) -> glam::Mat4 {
+    let (cx, cy) = ((r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5);
+    let (hx, hy) = ((r[2] - r[0]) * 0.5, (r[3] - r[1]) * 0.5);
+    glam::Mat4::from_cols(
+        glam::Vec4::new(1.0 / hx, 0.0, 0.0, 0.0),
+        glam::Vec4::new(0.0, 1.0 / hy, 0.0, 0.0),
+        glam::Vec4::new(0.0, 0.0, 1.0, 0.0),
+        glam::Vec4::new(-cx / hx, -cy / hy, 0.0, 1.0),
+    )
+}
+
+#[cfg(test)]
+mod through_tests {
+    use super::*;
+
+    #[test]
+    fn a_doorway_view_is_culled_to_the_doorway() {
+        let cam = Camera::look_at((0.0, 1.6, -10.0), (0.0, 1.6, 0.0));
+        let vp = cam.view_projection(16.0 / 9.0);
+        // A 2 x 3 m doorway 10 m ahead covers a small part of the screen.
+        let door = Bounds {
+            centre: glam::Vec3::new(0.0, 1.5, 0.0),
+            radius: 1.8,
+        };
+        let r = screen_rect(vp, door).expect("in front");
+        assert!(r[2] - r[0] < 0.6 && r[3] - r[1] < 0.9, "{r:?}");
+        let f = Frustum::from_view_projection(rect_matrix(r) * vp);
+        // Straight through it: seen. Off to the side, though in the whole
+        // frustum: not.
+        let ahead = Bounds {
+            centre: glam::Vec3::new(0.0, 1.5, 30.0),
+            radius: 0.5,
+        };
+        let aside = Bounds {
+            centre: glam::Vec3::new(14.0, 1.5, 30.0),
+            radius: 0.5,
+        };
+        assert!(Frustum::from_view_projection(vp).intersects(aside));
+        assert!(f.intersects(ahead));
+        assert!(!f.intersects(aside));
+        // Behind the camera: no narrowing.
+        let behind = Bounds {
+            centre: glam::Vec3::new(0.0, 1.5, -12.0),
+            radius: 1.0,
+        };
+        assert!(screen_rect(vp, behind).is_none());
     }
 }
