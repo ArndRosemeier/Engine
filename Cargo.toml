@@ -91,3 +91,4 @@ opt-level = 3
 # wgpu 25 never frees render bundles; see third_party/README.md.
 [patch.crates-io]
 wgpu = { path = "third_party/wgpu-25.0.2" }
+wgpu-core = { path = "third_party/wgpu-core-25.0.2" }
