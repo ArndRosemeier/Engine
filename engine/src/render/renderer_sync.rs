@@ -520,7 +520,7 @@ impl Renderer {
         let total: u32 = self.full_sync_sites.values().sum();
         if total >= 120 {
             let mut sites: Vec<_> = self.full_sync_sites.drain().collect();
-            sites.sort_by(|a, b| b.1.cmp(&a.1));
+            sites.sort_by_key(|s| std::cmp::Reverse(s.1));
             let list: Vec<String> = sites
                 .iter()
                 .map(|(at, n)| match at {
