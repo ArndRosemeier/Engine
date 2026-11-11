@@ -670,10 +670,9 @@ impl Renderer {
         let job_count = u32::try_from(jobs.len()).expect("cull dispatch count exceeds u32");
         self.gpu_stats.compute_culls += job_count;
         self.gpu_stats.cull_views += 1;
-        self.gpu_stats.cull_dispatches += u32::try_from(
-            jobs.iter().map(|j| j.active_ranges.len()).sum::<usize>(),
-        )
-        .expect("cull dispatch count exceeds u32");
+        self.gpu_stats.cull_dispatches +=
+            u32::try_from(jobs.iter().map(|j| j.active_ranges.len()).sum::<usize>())
+                .expect("cull dispatch count exceeds u32");
         self.gpu_stats.boundary_batches += job_count;
         for job in jobs {
             for range in job.active_ranges {
