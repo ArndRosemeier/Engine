@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.058 (2026-11-11)
+
+- Portals: no ghost of the view flickering over a doorway while the camera moves (the opening's depth is put back after its view)
+
 ## 0.057 (2026-11-11)
 
 - See-through particles (smoke, clouds of puffs) are drawn far to near every frame, so overlapping puffs no longer flicker
