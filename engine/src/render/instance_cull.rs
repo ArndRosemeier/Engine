@@ -79,6 +79,18 @@ struct JobRaw {
     _pad: [u32; 2],
 }
 
+/// Copies one batch's opaque draw args to its place in a view's packed
+/// args, so batches that share buffers and a texture go out as one
+/// multi-draw (the instances start at the batch's compact slots).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct PackRaw {
+    src_args: u32,
+    dst_args: u32,
+    first_instance: u32,
+    _pad: u32,
+}
+
 /// The draw args of one batch, written afresh before a view's compact.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -128,6 +140,21 @@ struct Job {
     _p1: u32,
 };
 
+struct PlainArgs {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
+    first_instance: u32,
+};
+
+struct Pack {
+    src_args: u32,
+    dst_args: u32,
+    first_instance: u32,
+    _p0: u32,
+};
+
 struct Reset {
     args: u32,
     opaque: u32,
@@ -145,6 +172,8 @@ struct Reset {
 @group(1) @binding(2) var<storage, read_write> draws: array<DrawArgs>;
 @group(1) @binding(3) var<storage, read> jobs: array<Job>;
 @group(1) @binding(4) var<storage, read> resets: array<Reset>;
+@group(1) @binding(5) var<storage, read_write> packed: array<PlainArgs>;
+@group(1) @binding(6) var<storage, read> packs: array<Pack>;
 
 fn intersects_sphere(centre: vec3<f32>, radius: f32) -> bool {
     for (var i = 0; i < 6; i++) {
@@ -175,6 +204,24 @@ fn reset(@builtin(global_invocation_id) gid: vec3<u32>) {
     draws[o + 1u].first_index = r.first_index + r.opaque;
     draws[o + 1u].base_vertex = r.base_vertex;
     draws[o + 1u].first_instance = 0u;
+}
+
+// After the compact: each listed batch's opaque args to its packed place,
+// its instances starting at its compact slots.
+@compute @workgroup_size(64)
+fn pack(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if i >= params.count {
+        return;
+    }
+    let p = packs[params.first + i];
+    var a: PlainArgs;
+    a.index_count = draws[p.src_args].index_count;
+    a.instance_count = atomicLoad(&draws[p.src_args].instance_count);
+    a.first_index = draws[p.src_args].first_index;
+    a.base_vertex = draws[p.src_args].base_vertex;
+    a.first_instance = p.first_instance;
+    packed[p.dst_args] = a;
 }
 
 @compute @workgroup_size(64)
@@ -273,6 +320,9 @@ pub struct CullJob<'a> {
     pub local: Bounds,
     pub draws: CullDraws,
     pub active_ranges: &'a [ActiveInstanceRange],
+    /// Also copy its opaque args to this row of the packed args
+    /// ([`InstanceCull::reserve_packed`]), for multi-draws.
+    pub pack: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -391,6 +441,7 @@ pub struct InstanceCull {
     /// Frustum and occlusion test (main view after the depth pyramid).
     hiz_pipeline: wgpu::ComputePipeline,
     reset_pipeline: wgpu::ComputePipeline,
+    pack_pipeline: wgpu::ComputePipeline,
     hiz_layout: wgpu::BindGroupLayout,
     params_layout: wgpu::BindGroupLayout,
     tables_layout: wgpu::BindGroupLayout,
@@ -400,6 +451,11 @@ pub struct InstanceCull {
     params_scratch: Vec<u8>,
     jobs: FrameTable,
     resets: FrameTable,
+    /// Views' packed opaque args (written by the GPU) and the copies
+    /// that fill them.
+    packed: FrameTable,
+    packs: FrameTable,
+    pack_scratch: Vec<PackRaw>,
     job_scratch: Vec<JobRaw>,
     reset_scratch: Vec<ResetRaw>,
     /// Compact pages by instance arena page.
@@ -450,6 +506,8 @@ impl InstanceCull {
                 storage(2, false),
                 storage(3, true),
                 storage(4, true),
+                storage(5, false),
+                storage(6, true),
             ],
         });
         let hiz_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -505,8 +563,14 @@ impl InstanceCull {
         );
         let reset_pipeline = build(
             "instance-cull-reset-pipeline",
-            plain_src,
+            plain_src.clone(),
             "reset",
+            &[&params_layout, &tables_layout],
+        );
+        let pack_pipeline = build(
+            "instance-cull-pack-pipeline",
+            plain_src,
+            "pack",
             &[&params_layout, &tables_layout],
         );
         let hiz_src = format!(
@@ -540,11 +604,24 @@ impl InstanceCull {
             storage_usage,
             std::mem::size_of::<ResetRaw>() as u64,
         );
+        let packed = FrameTable::new(
+            device,
+            "instance-cull-packed-args",
+            wgpu::BufferUsages::INDIRECT | storage_usage,
+            INDIRECT_STRIDE,
+        );
+        let packs = FrameTable::new(
+            device,
+            "instance-cull-packs",
+            storage_usage,
+            std::mem::size_of::<PackRaw>() as u64,
+        );
         let args_capacity = 64;
         Self {
             pipeline,
             hiz_pipeline,
             reset_pipeline,
+            pack_pipeline,
             hiz_layout,
             params_layout,
             tables_layout,
@@ -553,6 +630,9 @@ impl InstanceCull {
             params_scratch: Vec::new(),
             jobs,
             resets,
+            packed,
+            packs,
+            pack_scratch: Vec::new(),
             job_scratch: Vec::new(),
             reset_scratch: Vec::new(),
             pages: HashMap::new(),
@@ -578,6 +658,8 @@ impl InstanceCull {
         self.params.cursor = 0;
         self.jobs.cursor = 0;
         self.resets.cursor = 0;
+        self.packed.cursor = 0;
+        self.packs.cursor = 0;
         let mut replaced = false;
         // A reset and about one compact dispatch per page and view.
         let pages = self.pages.len().max(1);
@@ -673,6 +755,21 @@ impl InstanceCull {
         moved
     }
 
+    /// `rows` packed draw args for a view this frame: their buffer and
+    /// first row. The GPU fills them ([`CullJob::pack`]); a multi-draw
+    /// reads a run of them. Not rewritten until the next frame.
+    pub fn reserve_packed(&mut self, device: &wgpu::Device, rows: usize) -> (wgpu::Buffer, u32) {
+        if self.packed.reserve(device, rows) {
+            self.bind_gen += 1;
+        }
+        let first = self.packed.cursor;
+        self.packed.cursor += rows;
+        (
+            self.packed.buf.clone(),
+            u32::try_from(first).expect("packed args row exceeds u32"),
+        )
+    }
+
     /// Video memory the cull holds (bytes): compact pages, args, tables.
     pub fn reserved_bytes(&self) -> u64 {
         self.pages.values().map(|p| p.dst.size()).sum::<u64>()
@@ -680,6 +777,8 @@ impl InstanceCull {
             + self.params.buf.size()
             + self.jobs.buf.size()
             + self.resets.buf.size()
+            + self.packed.buf.size()
+            + self.packs.buf.size()
     }
 
     /// The occlusion pass's uniform and depth pyramid, for [`Self::dispatch`].
@@ -741,6 +840,14 @@ impl InstanceCull {
                     binding: 4,
                     resource: self.resets.buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.packed.buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.packs.buf.as_entire_binding(),
+                },
             ],
         });
         p.bind = Some((gen, bind.clone()));
@@ -785,14 +892,29 @@ impl InstanceCull {
             })
             .collect();
         let page_runs = plan_tables(&plan, &mut self.reset_scratch, &mut self.job_scratch);
+        self.pack_scratch.clear();
+        for job in jobs {
+            if let Some(row) = job.pack {
+                let target = target_of(job.gpu);
+                self.pack_scratch.push(PackRaw {
+                    src_args: target.args_index * 2,
+                    dst_args: row,
+                    first_instance: target.out_base,
+                    _pad: 0,
+                });
+            }
+        }
+        let pack_count = u32::try_from(self.pack_scratch.len()).expect("pack rows exceed u32");
 
         // Room for the rows; a replaced table needs new bind groups.
-        let dispatches = 1 + page_runs
+        let compacts = page_runs
             .iter()
             .map(|run| run.groups.div_ceil(MAX_GROUPS) as usize)
             .sum::<usize>();
+        let dispatches = 1 + compacts + usize::from(pack_count > 0);
         let mut replaced = self.jobs.reserve(device, self.job_scratch.len());
         replaced |= self.resets.reserve(device, self.reset_scratch.len());
+        replaced |= self.packs.reserve(device, self.pack_scratch.len());
         if replaced {
             self.bind_gen += 1;
         }
@@ -852,6 +974,22 @@ impl InstanceCull {
                 base += chunk;
             }
         }
+        if pack_count > 0 {
+            let pack_first = self
+                .packs
+                .push(queue, bytemuck::cast_slice(&self.pack_scratch));
+            write_row(
+                &mut self.params_scratch,
+                1 + compacts,
+                CullParams {
+                    planes,
+                    first: u32::try_from(pack_first).expect("pack row exceeds u32"),
+                    count: pack_count,
+                    group_base: 0,
+                    _pad: 0,
+                },
+            );
+        }
         let params_first = self.params.push(queue, &self.params_scratch);
         let offset = |row: usize| {
             u32::try_from((params_first + row) as u64 * self.params.stride)
@@ -899,6 +1037,11 @@ impl InstanceCull {
             }
             pass.set_bind_group(0, &self.params_bind, &[offsets[1 + row]]);
             pass.dispatch_workgroups(groups, 1, 1);
+        }
+        if pack_count > 0 {
+            pass.set_pipeline(&self.pack_pipeline);
+            pass.set_bind_group(0, &self.params_bind, &[offsets[1 + compacts]]);
+            pass.dispatch_workgroups(pack_count.div_ceil(WORKGROUP), 1, 1);
         }
         drop(pass);
         u32::try_from(dispatches).expect("dispatch count exceeds u32")
@@ -1156,6 +1299,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<JobRaw>(), 48);
         assert_eq!(std::mem::size_of::<ResetRaw>(), 32);
         assert_eq!(std::mem::size_of::<CullParams>(), 112);
+        assert_eq!(std::mem::size_of::<PackRaw>(), 16);
         assert_eq!(INDIRECT_STRIDE, 20);
     }
 

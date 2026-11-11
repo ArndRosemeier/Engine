@@ -685,8 +685,15 @@ impl Renderer {
         let submit = world.instance_submit();
         let mut main_cull = if submit == InstanceSubmit::GpuIndirect {
             let frustum = self.frustum;
-            let selection = self.select_main_culls(&frustum);
-            self.dispatch_instance_cull(encoder, &frustum, &selection.ids, CullView::Main, None);
+            let selection = self.select_main_culls(world, &frustum);
+            self.dispatch_instance_cull(
+                encoder,
+                &frustum,
+                &selection.ids,
+                CullView::Main,
+                None,
+                selection.pack.as_ref().map(|p| &p.rows),
+            );
             selection
         } else {
             MainCullSelection::none()
@@ -796,6 +803,7 @@ impl Renderer {
                     &batches,
                     CullView::Main,
                     Some(&hiz),
+                    main_cull.pack.as_ref().map(|p| &p.rows),
                 );
                 main_cull.compacted.extend(batches);
                 self.cpu_spans.mark("prepass.instances", &mut tp);

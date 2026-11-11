@@ -670,8 +670,11 @@ per-mesh arguments in a GPU buffer. Meshes the occlusion test decides take
 their arguments straight from its output. In occlusion_city the 1,697 towers
 in view go out in 5 calls instead of 1,697, and the CPU spends about 2 ms less
 per frame on the world. Shadow maps (sun cascades, their static cache and
-lamps) draw their casters the same way. GPU-culled instanced props keep their
-own draws.
+lamps) draw their casters the same way. In the main view, GPU-culled
+instanced props join them: the cull copies each batch's draw arguments into
+a packed list ordered by texture and buffers, so batches that share them go
+out in one call (lod_forest: 38 batches in 4 calls). Shadow views still draw
+those one by one.
 
 **GPU instance culling** (automatic; `ENGINE_INSTANCE_SUBMIT=cpu` to compare):
 an instanced batch whose bounds cross a view's edge has its instances tested
