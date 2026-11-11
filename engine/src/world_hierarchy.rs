@@ -319,7 +319,7 @@ impl World {
             if !crate::hierarchy::same_up_to_rounding(e.transform, m) {
                 e.transform = m;
                 e.bump_xform();
-                self.bump_render_epoch();
+                self.touch(id);
             }
             return Ok(());
         }

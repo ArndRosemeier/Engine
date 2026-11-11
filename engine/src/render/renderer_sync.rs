@@ -108,9 +108,49 @@ impl Renderer {
         }
 
         self.cpu_spans.mark("sync.terrain", &mut t);
-        if self.synced_render_epoch != world.render_epoch()
-            || self.synced_instance_epoch != world.instance_epoch()
-        {
+        let mut touched = world.take_touched();
+        touched.sort_unstable();
+        touched.dedup();
+        let (spawned, despawned) = world.take_members();
+        let mut full = self.synced_render_epoch != world.render_epoch();
+        if !full && !self.sync_members(world, &spawned, &despawned) {
+            full = true;
+            // What the world last changed in full is not it this time.
+            self.note_full_sync(None);
+        }
+        if !full {
+            // Only moves, new instance lists and plain meshes that came or
+            // went: bring just those entities up to date (walking every
+            // entity cost milliseconds a frame in a town where something
+            // moves every frame and streams in every few).
+            self.sync_touched(world, &touched);
+            if self.gpu_scene.is_some() {
+                self.scene_touched.extend_from_slice(&touched);
+            }
+            if self.shadow_scene.is_some() {
+                self.shadow_touched.extend_from_slice(&touched);
+            }
+            self.synced_instance_epoch = world.instance_epoch();
+            if !spawned.is_empty() {
+                let gpu = &self.gpu_meshes;
+                world.release_uploaded(|id| gpu.contains_key(&id));
+            }
+            if super::renderer_gpu_sync::scene_check() {
+                self.check_sources(world);
+            }
+            self.gpu_stats.instance_batches = u32::try_from(self.gpu_instance_batches.len())
+                .expect("GPU instance batch count exceeds u32");
+            self.cpu_spans.mark("sync.touched", &mut t);
+        } else {
+            if self.synced_render_epoch != world.render_epoch() {
+                self.note_full_sync(world.render_bump_site);
+            }
+            self.full_syncs += 1;
+            self.scene_gen += 1;
+            self.scene_added.clear();
+            self.scene_removed.clear();
+            self.shadow_added.clear();
+            self.shadow_removed.clear();
             self.gpu_meshes.retain(|id, _| world.contains_entity(*id));
 
             // Prototypes first so like-entities can share their GPU vertex buffers.
@@ -135,14 +175,11 @@ impl Renderer {
             }
             self.synced_render_epoch = world.render_epoch();
             self.synced_instance_epoch = world.instance_epoch();
-            self.cpu_spans.mark("sync.meshes", &mut t);
+            self.cpu_spans.mark("sync.full", &mut t);
             // Meshes the world no longer needs in RAM go once they are here.
             let gpu = &self.gpu_meshes;
             world.release_uploaded(|id| gpu.contains_key(&id));
             self.cpu_spans.mark("sync.release", &mut t);
-        } else {
-            self.gpu_stats.instance_batches = u32::try_from(self.gpu_instance_batches.len())
-                .expect("GPU instance batch count exceeds u32");
         }
 
         self.cpu_spans.mark("sync.meshes", &mut t);
@@ -330,6 +367,237 @@ impl Renderer {
     /// drawing without it: fixed-step runs want the same frames every time.
     pub fn set_wait_for_workers(&mut self, wait: bool) {
         self.wait_for_workers = wait;
+    }
+
+    /// Brings the `touched` entities (moved, or with a new instance list of
+    /// the same emptiness) up to date: their instance buffers, and the
+    /// instance batches they belong to. Nothing else can have changed, or
+    /// the world's render epoch would have moved.
+    /// Adds the plain meshes the world spawned and drops those it
+    /// despawned (see `World::take_members`) without a full sync: their GPU
+    /// meshes, their places in the draw and shadow source lists, and (on
+    /// their next sync) their GPU scene rows. False, having changed
+    /// nothing, when one of them needs the full sync (a portal surface, a
+    /// custom or water material, an instance batch prototype).
+    fn sync_members(
+        &mut self,
+        world: &World,
+        spawned: &[EntityId],
+        despawned: &[EntityId],
+    ) -> bool {
+        if spawned.is_empty() && despawned.is_empty() {
+            return true;
+        }
+        let simple = spawned.iter().all(|&id| match world.entity(id) {
+            Ok(e) => {
+                !e.instanced
+                    && e.instance_of.is_none()
+                    && !world.is_portal_surface(id)
+                    && matches!(e.material, None | Some(SurfaceMaterialRef::Terrain(_)))
+            }
+            // Spawned and despawned again since the last sync.
+            Err(_) => true,
+        }) && despawned
+            .iter()
+            .all(|id| !self.gpu_instance_batches.contains_key(id));
+        if !simple {
+            return false;
+        }
+        self.scene_gen += 1;
+        let gone: HashSet<EntityId> = despawned
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.moved_at.remove(id);
+                self.gpu_meshes.remove(id).is_some()
+            })
+            .collect();
+        if !gone.is_empty() {
+            let keep = |id: &EntityId| !gone.contains(id);
+            self.source_opaque.retain(keep);
+            self.source_terrain.retain(keep);
+            self.source_transparent.retain(keep);
+            self.source_water.retain(keep);
+            let casters = self.shadow_mesh_sources.len();
+            self.shadow_mesh_sources.retain(keep);
+            if self.shadow_scene.is_none() && casters != self.shadow_mesh_sources.len() {
+                // The sun's cached static shadows may hold one of them.
+                self.static_shadow_epoch += 1;
+            }
+            if self.gpu_scene.is_some() {
+                self.scene_removed.extend(gone.iter().copied());
+            }
+            if self.shadow_scene.is_some() {
+                self.shadow_removed.extend(gone.iter().copied());
+            }
+        }
+        let gpu_batches = world.instance_submit() == InstanceSubmit::GpuIndirect;
+        for &id in spawned {
+            let Ok(entity) = world.entity(id) else {
+                continue;
+            };
+            self.sync_entity_mesh(id, entity);
+            let Some(gpu) = self.gpu_meshes.get(&id) else {
+                continue;
+            };
+            // As `rebuild_draw_sources` and `rebuild_shadow_sources` sort it.
+            let has_opaque = gpu.opaque_index_count > 0;
+            let has_xlucent = gpu.opaque_index_count < gpu.index_count;
+            let casts = entity.casts_shadow()
+                && material_casts_shadow(entity.material())
+                && gpu.instance_count > 0
+                && has_opaque
+                && !(gpu_batches && entity.instanced());
+            match entity.material {
+                Some(SurfaceMaterialRef::Terrain(_)) if has_opaque => {
+                    self.source_terrain.push(id);
+                }
+                None if has_opaque => {
+                    self.source_opaque.push(id);
+                    if self.gpu_scene.is_some() {
+                        self.scene_added.push(id);
+                    }
+                }
+                _ => {}
+            }
+            if has_xlucent {
+                self.source_transparent.push(id);
+            }
+            if casts {
+                self.shadow_mesh_sources.push(id);
+                if self.shadow_scene.is_some() {
+                    self.shadow_added.push(id);
+                }
+            }
+        }
+        true
+    }
+
+    /// `ENGINE_SCENE_CHECK=1`: the draw and shadow source lists, kept up to
+    /// date one entity at a time, must be what building them again gives.
+    fn check_sources(&mut self, world: &World) {
+        if world.instance_submit() == InstanceSubmit::GpuIndirect {
+            // Each batch holds its entities' current places.
+            let mut want: HashMap<EntityId, Vec<(EntityId, u64, usize)>> = HashMap::new();
+            for (id, e) in world.entities() {
+                if e.instanced {
+                    want.entry(e.instance_of.unwrap_or(id)).or_default().push((
+                        id,
+                        e.xform_rev,
+                        e.instances.len(),
+                    ));
+                }
+            }
+            assert_eq!(
+                want.len(),
+                self.gpu_instance_batches.len(),
+                "ENGINE_SCENE_CHECK: instance batches differ from the world's"
+            );
+            for (prototype, mut want) in want {
+                let batch = self
+                    .gpu_instance_batches
+                    .get(&prototype)
+                    .unwrap_or_else(|| {
+                        panic!("ENGINE_SCENE_CHECK: no instance batch for {prototype}")
+                    });
+                let mut held: Vec<_> = batch
+                    .slots
+                    .iter()
+                    .map(|s| (s.id, s.xform_rev, s.active_count))
+                    .collect();
+                want.sort_unstable();
+                held.sort_unstable();
+                assert!(
+                    want == held,
+                    "ENGINE_SCENE_CHECK: instance batch {prototype} is out of date"
+                );
+            }
+        }
+        if self.draw_source_epoch == self.full_syncs {
+            let held = (
+                self.source_opaque.clone(),
+                self.source_terrain.clone(),
+                self.source_transparent.clone(),
+                self.source_water.clone(),
+            );
+            self.rebuild_draw_sources(world);
+            let built = (
+                &self.source_opaque,
+                &self.source_terrain,
+                &self.source_transparent,
+                &self.source_water,
+            );
+            assert!(
+                (&held.0, &held.1, &held.2, &held.3) == built,
+                "ENGINE_SCENE_CHECK: the draw source lists differ from a rebuild"
+            );
+        }
+        if self.shadow_source_epoch == self.full_syncs {
+            let held = self.shadow_mesh_sources.clone();
+            let mut held_batches = self.shadow_batch_sources.clone();
+            self.rebuild_shadow_sources(world);
+            held_batches.sort_unstable();
+            let mut batches = self.shadow_batch_sources.clone();
+            batches.sort_unstable();
+            assert!(
+                held == self.shadow_mesh_sources && held_batches == batches,
+                "ENGINE_SCENE_CHECK: the shadow source lists differ from a rebuild"
+            );
+        }
+    }
+
+    /// `ENGINE_CPU_TRACE`: count a full sync by where the world asked for
+    /// it (`None`: something the renderer could not add one by one), and
+    /// list them every 120 full syncs.
+    fn note_full_sync(&mut self, site: Option<&'static std::panic::Location<'static>>) {
+        if !self.cpu_spans.on {
+            return;
+        }
+        *self.full_sync_sites.entry(site).or_insert(0) += 1;
+        let total: u32 = self.full_sync_sites.values().sum();
+        if total >= 120 {
+            let mut sites: Vec<_> = self.full_sync_sites.drain().collect();
+            sites.sort_by_key(|s| std::cmp::Reverse(s.1));
+            let list: Vec<String> = sites
+                .iter()
+                .map(|(at, n)| match at {
+                    Some(at) => format!("{at} x{n}"),
+                    None => format!("spawns the renderer cannot add alone x{n}"),
+                })
+                .collect();
+            eprintln!(
+                "full renderer syncs (frame {}): {}",
+                self.frame_no,
+                list.join(", ")
+            );
+        }
+    }
+
+    fn sync_touched(&mut self, world: &World, touched: &[EntityId]) {
+        let gpu_batches = world.instance_submit() == InstanceSubmit::GpuIndirect;
+        let mut prototypes = Vec::new();
+        for &id in touched {
+            let Ok(entity) = world.entity(id) else {
+                continue;
+            };
+            if entity.instance_of.is_none() || !gpu_batches {
+                self.sync_entity_mesh(id, entity);
+            }
+            if gpu_batches && entity.instanced {
+                prototypes.push(entity.instance_of.unwrap_or(id));
+            }
+        }
+        prototypes.sort_unstable();
+        prototypes.dedup();
+        if !prototypes.is_empty() {
+            if !self.sync_touched_batches(world, &prototypes) {
+                self.sync_gpu_instance_batches(world);
+            }
+            if self.shadow_source_epoch == self.full_syncs {
+                // A batch may have emptied or filled.
+                self.rebuild_shadow_batch_sources(world);
+            }
+        }
     }
 
     pub(super) fn sync_entity_mesh(&mut self, id: EntityId, entity: &Entity) {
@@ -637,7 +905,54 @@ impl Renderer {
         let batch_count_before = self.gpu_instance_batches.len();
         self.gpu_instance_batches
             .retain(|prototype, _| builds.contains_key(prototype));
-        let mut shadow_buffers_changed = self.gpu_instance_batches.len() != batch_count_before;
+        let removed = self.gpu_instance_batches.len() != batch_count_before;
+        if self.build_batches(world, builds) || removed {
+            self.invalidate_shadow_bundles();
+        }
+        std::mem::swap(
+            &mut self.gpu_batch_sources,
+            &mut self.gpu_batch_source_scratch,
+        );
+        self.gpu_stats.instance_batches = u32::try_from(self.gpu_instance_batches.len())
+            .expect("GPU instance batch count exceeds u32");
+    }
+
+    /// Brings just the batches of `prototypes` up to date (their entities'
+    /// places or instance lists changed, which entities they hold did not:
+    /// that is a full sync). False when one has no batch yet: then
+    /// [`Self::sync_gpu_instance_batches`] must run.
+    fn sync_touched_batches(&mut self, world: &World, prototypes: &[EntityId]) -> bool {
+        let mut builds: HashMap<EntityId, BatchBuild> = HashMap::new();
+        for prototype in prototypes {
+            let Some(batch) = self.gpu_instance_batches.get(prototype) else {
+                return false;
+            };
+            let mut build = BatchBuild::default();
+            for slot in &batch.slots {
+                let Ok(entity) = world.entity(slot.id) else {
+                    return false;
+                };
+                build.sources.push(BatchBuildSource {
+                    id: slot.id,
+                    xform_rev: entity.xform_rev,
+                    instance_count: entity.instances.len(),
+                    instance_reserve: entity.instance_reserve,
+                });
+            }
+            builds.insert(*prototype, build);
+        }
+        if self.build_batches(world, builds) {
+            self.invalidate_shadow_bundles();
+        }
+        // The list a full sync compares with is out of date now.
+        self.gpu_batch_sources.clear();
+        true
+    }
+
+    /// Updates (in place where they fit) or builds again the batches of
+    /// `builds`; true when a batch got new buffers.
+    fn build_batches(&mut self, world: &World, builds: HashMap<EntityId, BatchBuild>) -> bool {
+        let mut shadow_buffers_changed = false;
         for (prototype, build) in builds {
             if let Some(mut batch) = self.gpu_instance_batches.remove(&prototype) {
                 let (writes, slots) = (self.gpu_stats.batch_partial_writes, batch.slots.len());
@@ -714,14 +1029,6 @@ impl Renderer {
             self.gpu_stats.batch_rewrites += 1;
             shadow_buffers_changed = true;
         }
-        if shadow_buffers_changed {
-            self.invalidate_shadow_bundles();
-        }
-        std::mem::swap(
-            &mut self.gpu_batch_sources,
-            &mut self.gpu_batch_source_scratch,
-        );
-        self.gpu_stats.instance_batches = u32::try_from(self.gpu_instance_batches.len())
-            .expect("GPU instance batch count exceeds u32");
+        shadow_buffers_changed
     }
 }

@@ -476,23 +476,19 @@ impl World {
             let new = pending.get(impacts_before..).unwrap_or(pending).to_vec();
             self.sound_impacts(&new, dt);
         }
-        let mut changed = false;
         for (id, m) in result.moved {
             if let Some(e) = self.entities.get_mut(&id) {
                 e.transform = m;
                 e.bump_xform();
-                changed = true;
+                self.touch(id);
             }
         }
         for (id, dy) in result.sink {
             if let Some(e) = self.entities.get_mut(&id) {
                 e.transform.w_axis.y -= dy;
                 e.bump_xform();
-                changed = true;
+                self.touch(id);
             }
-        }
-        if changed {
-            self.bump_render_epoch();
         }
         for (id, feet) in result.characters {
             if let Some(mut m) = self.matrix_of(id) {

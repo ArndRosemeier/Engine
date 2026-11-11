@@ -58,7 +58,6 @@ pub struct SceneGroup {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SceneStamp {
     pub render: u64,
-    pub instance: u64,
     pub resource: u64,
     pub table: u64,
     pub space: SpaceId,
@@ -96,6 +95,12 @@ pub struct GpuScene {
     pub written: usize,
     /// The last sync changed which rows form which group.
     pub regrouped: bool,
+    /// Rows of meshes removed since the last [`Self::apply`]: they draw no
+    /// instances and no longer have a slot.
+    dead: usize,
+    /// Groups at the last [`Self::apply`] (rows added one by one may
+    /// start new ones).
+    base_groups: usize,
 }
 
 impl GpuScene {
@@ -162,7 +167,126 @@ impl GpuScene {
             }
         }
         self.rows = rows.into_iter().map(|r| r.mesh).collect();
+        self.dead = 0;
+        self.base_groups = self.groups.len();
         writes
+    }
+
+    /// Whether rows added and removed one by one have left it untidy
+    /// enough to build again (dead rows, groups split up).
+    pub fn worn(&self) -> bool {
+        self.dead * 4 > self.ids.len() || self.groups.len() > self.base_groups * 3 / 2 + 64
+    }
+
+    /// Adds a row after the others (in the last group if it shares its
+    /// key); its slot. The caller writes it and its row group.
+    pub fn add(&mut self, row: SceneRow) -> usize {
+        let slot = self.ids.len();
+        let at = u32::try_from(slot).expect("scene row exceeds u32");
+        match self.groups.last_mut() {
+            Some(g) if g.key == row.key => g.len += 1,
+            _ => self.groups.push(SceneGroup {
+                key: row.key.clone(),
+                start: at,
+                len: 1,
+            }),
+        }
+        self.ids.push(row.id);
+        Arc::make_mut(&mut self.slots).insert(row.id, at);
+        self.keys.push(row.key);
+        self.rows.push(row.mesh);
+        slot
+    }
+
+    /// Each row's group index and that group's first row from `start` (see
+    /// [`Self::row_groups`]).
+    pub fn row_groups_from(&self, start: usize) -> Vec<[u32; 2]> {
+        let mut out = Vec::with_capacity(self.ids.len().saturating_sub(start));
+        for (i, g) in self.groups.iter().enumerate() {
+            let end = (g.start + g.len) as usize;
+            if end <= start {
+                continue;
+            }
+            let at = [u32::try_from(i).expect("group count exceeds u32"), g.start];
+            let from = (g.start as usize).max(start);
+            out.extend(std::iter::repeat_n(at, end - from));
+        }
+        out
+    }
+
+    /// Drops entity `id`'s row: it stays in place drawing nothing until the
+    /// next [`Self::apply`]. Its slot, to write, if it had one.
+    pub fn remove(&mut self, id: EntityId) -> Option<usize> {
+        let slot = Arc::make_mut(&mut self.slots).remove(&id)? as usize;
+        self.rows[slot].instance_count = 0;
+        self.dead += 1;
+        Some(slot)
+    }
+
+    /// Updates the row of an entity that moved or got a new instance list
+    /// (see `World::touch`). `Err` when the row cannot be patched in place
+    /// (it now belongs to another group): the scene must be built again. `Ok(Some(slot))` when the row changed and must
+    /// be written, `Ok(None)` when it is the same.
+    pub fn patch(&mut self, row: &SceneRow) -> Result<Option<usize>, ()> {
+        // No row: not a mesh the scene draws (which meshes it draws changes
+        // only with the render epoch, and then the scene is built again).
+        let Some(&slot) = self.slots.get(&row.id) else {
+            return Ok(None);
+        };
+        let slot = slot as usize;
+        if self.keys.get(slot) != Some(&row.key) {
+            return Err(());
+        }
+        if self.rows[slot] == row.mesh {
+            return Ok(None);
+        }
+        self.rows[slot] = row.mesh;
+        Ok(Some(slot))
+    }
+
+    /// Whether the scene holds exactly `rows` (any order), as a rebuild from
+    /// them would: the check of `ENGINE_SCENE_CHECK=1`. Names the first
+    /// difference.
+    pub fn check(&self, rows: &[SceneRow]) -> Result<(), String> {
+        if rows.len() != self.slots.len() {
+            return Err(format!(
+                "{} rows held, {} wanted",
+                self.slots.len(),
+                rows.len()
+            ));
+        }
+        let mut next = 0;
+        for g in &self.groups {
+            let (start, end) = (g.start as usize, (g.start + g.len) as usize);
+            if start != next || self.keys[start..end].iter().any(|k| *k != g.key) {
+                return Err(format!("group at row {start} is not one run of its key"));
+            }
+            next = end;
+        }
+        if next != self.ids.len() {
+            return Err(format!("groups cover {next} of {} rows", self.ids.len()));
+        }
+        for (slot, (id, row)) in self.ids.iter().zip(&self.rows).enumerate() {
+            if self.slots.get(id) != Some(&(slot as u32)) && row.instance_count != 0 {
+                return Err(format!("dead row {slot} still draws"));
+            }
+        }
+        for r in rows {
+            let Some(&slot) = self.slots.get(&r.id) else {
+                return Err(format!("entity {} has no row", r.id));
+            };
+            let slot = slot as usize;
+            if self.keys[slot] != r.key {
+                return Err(format!("entity {}: another group", r.id));
+            }
+            if self.rows[slot] != r.mesh {
+                return Err(format!(
+                    "entity {}: row {:?}, wanted {:?}",
+                    r.id, self.rows[slot], r.mesh
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Each row's group index and that group's first row (for the GPU's

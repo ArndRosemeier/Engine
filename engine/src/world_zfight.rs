@@ -392,14 +392,14 @@ impl World {
             .scan
             .radius
             .is_some_and(|r| eye.distance(w.seen_eye) > r * 0.25);
-        if w.seen_epoch == Some(self.render_epoch) && !moved {
+        if w.seen_epoch == Some(self.scene_epoch) && !moved {
             return;
         }
         let scan = w.scan;
         let report = self.find_z_fighting_with(&scan);
         let spots = self.show_z_fighting(&report);
         let doubled = report.doubled().count();
-        let epoch = self.render_epoch;
+        let epoch = self.scene_epoch;
         let w = self.zfight.watch.as_mut().expect("watch still on");
         if w.last != Some((spots, doubled)) {
             println!("{}", report.summary(15));

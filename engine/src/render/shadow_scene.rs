@@ -172,7 +172,6 @@ pub struct ShadowGroup {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ShadowStamp {
     pub render: u64,
-    pub instance: u64,
     pub resource: u64,
     pub space: SpaceId,
 }
@@ -180,6 +179,8 @@ pub struct ShadowStamp {
 pub struct ShadowScene {
     pub stamp: Option<ShadowStamp>,
     ids: Vec<EntityId>,
+    /// Each id's row.
+    slots: HashMap<EntityId, usize>,
     /// Bounds and static flag per row, for the cache's change test.
     meta: Vec<(Bounds, bool)>,
     gpu_rows: Vec<GpuRow>,
@@ -190,6 +191,11 @@ pub struct ShadowScene {
     pub counts: wgpu::Buffer,
     /// Each view's mode at the last [`Self::encode`] (3: not drawn).
     view_modes: [u32; MAX_VIEWS],
+    /// Rows of casters removed since the last [`Self::apply`] (see
+    /// `GpuScene`): they draw nothing and have no slot.
+    dead: usize,
+    /// Groups at the last [`Self::apply`].
+    base_groups: usize,
     params: wgpu::Buffer,
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
@@ -258,6 +264,7 @@ impl ShadowScene {
         Self {
             stamp: None,
             ids: Vec::new(),
+            slots: HashMap::new(),
             meta: Vec::new(),
             gpu_rows: Vec::new(),
             groups: Vec::new(),
@@ -266,6 +273,8 @@ impl ShadowScene {
             args,
             counts,
             view_modes: [3; MAX_VIEWS],
+            dead: 0,
+            base_groups: 0,
             params,
             layout,
             pipeline,
@@ -401,10 +410,248 @@ impl ShadowScene {
             );
         }
         self.ids = rows.iter().map(|r| r.id).collect();
+        self.slots = self
+            .ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, i))
+            .collect();
         self.meta = rows.iter().map(|r| (r.bounds, r.fixed)).collect();
         self.gpu_rows = gpu_rows;
         self.groups = groups;
+        self.dead = 0;
+        self.base_groups = self.groups.len();
         changed
+    }
+
+    /// Whether casters added and removed one by one have left it untidy
+    /// enough to build again (see `GpuScene::worn`).
+    pub fn worn(&self) -> bool {
+        self.dead * 4 > self.ids.len() || self.groups.len() > self.base_groups * 3 / 2 + 64
+    }
+
+    /// Whether `more` rows fit without new buffers.
+    pub fn fits(&self, more: usize) -> bool {
+        self.ids.len() + more <= self.capacity
+    }
+
+    /// Adds a caster after the others (in the last group if it shares its
+    /// key) and writes its row; a static one adds its bounds to `changed`.
+    /// The caller checks [`Self::fits`] first.
+    pub fn add(&mut self, queue: &wgpu::Queue, row: ShadowRow, changed: &mut Vec<Bounds>) {
+        let slot = self.ids.len();
+        assert!(slot < self.capacity, "shadow scene add past its capacity");
+        let at = u32::try_from(slot).expect("shadow rows exceed u32");
+        match self.groups.last_mut() {
+            Some(g) if g.key == row.key => g.len += 1,
+            _ => self.groups.push(ShadowGroup {
+                key: row.key.clone(),
+                start: at,
+                len: 1,
+                fixed: 0,
+            }),
+        }
+        let group = self.groups.len() - 1;
+        let g = &mut self.groups[group];
+        g.fixed += u32::from(row.fixed);
+        let gpu = GpuRow {
+            sphere: [
+                row.bounds.centre.x,
+                row.bounds.centre.y,
+                row.bounds.centre.z,
+                row.bounds.radius,
+            ],
+            index_count: row.args.index_count,
+            instance_count: if row.visible {
+                row.args.instance_count
+            } else {
+                0
+            },
+            first_index: row.args.first_index,
+            base_vertex: row.args.base_vertex,
+            first_instance: row.args.first_instance,
+            fixed: u32::from(row.fixed),
+            group: u32::try_from(group).expect("shadow groups exceed u32"),
+            group_start: g.start,
+        };
+        if row.fixed {
+            changed.push(row.bounds);
+        }
+        let stride = std::mem::size_of::<GpuRow>();
+        queue.write_buffer(
+            &self.rows_buf,
+            (slot * stride) as u64,
+            bytemuck::bytes_of(&gpu),
+        );
+        self.ids.push(row.id);
+        self.slots.insert(row.id, slot);
+        self.meta.push((row.bounds, row.fixed));
+        self.gpu_rows.push(gpu);
+    }
+
+    /// Drops caster `id`'s row: it stays in place drawing nothing until the
+    /// next [`Self::apply`]. A static one adds its bounds to `changed`.
+    pub fn remove(&mut self, queue: &wgpu::Queue, id: EntityId, changed: &mut Vec<Bounds>) {
+        let Some(slot) = self.slots.remove(&id) else {
+            return;
+        };
+        let (bounds, fixed) = self.meta[slot];
+        let row = &mut self.gpu_rows[slot];
+        if fixed {
+            changed.push(bounds);
+            self.groups[row.group as usize].fixed -= 1;
+        }
+        self.meta[slot].1 = false;
+        row.fixed = 0;
+        row.instance_count = 0;
+        let stride = std::mem::size_of::<GpuRow>();
+        queue.write_buffer(
+            &self.rows_buf,
+            (slot * stride) as u64,
+            bytemuck::bytes_of(row),
+        );
+        self.dead += 1;
+    }
+
+    /// Whether the scene holds exactly `rows` (any order), as a rebuild from
+    /// them would: the check of `ENGINE_SCENE_CHECK=1`.
+    pub fn check(&self, rows: &[ShadowRow]) -> Result<(), String> {
+        if rows.len() != self.slots.len() {
+            return Err(format!(
+                "{} casters held, {} wanted",
+                self.slots.len(),
+                rows.len()
+            ));
+        }
+        let mut next = 0;
+        for (i, g) in self.groups.iter().enumerate() {
+            let (start, end) = (g.start as usize, (g.start + g.len) as usize);
+            let rows_ok = self.gpu_rows[start..end]
+                .iter()
+                .all(|r| r.group as usize == i && r.group_start == g.start);
+            let fixed: u32 = self.gpu_rows[start..end].iter().map(|r| r.fixed).sum();
+            if start != next || !rows_ok || fixed != g.fixed {
+                return Err(format!("group {i} at row {start} does not match its rows"));
+            }
+            next = end;
+        }
+        if next != self.ids.len() {
+            return Err(format!("groups cover {next} of {} rows", self.ids.len()));
+        }
+        for (slot, (id, row)) in self.ids.iter().zip(&self.gpu_rows).enumerate() {
+            if self.slots.get(id) != Some(&slot) && (row.instance_count != 0 || row.fixed != 0) {
+                return Err(format!("dead row {slot} still draws"));
+            }
+        }
+        for r in rows {
+            let Some(&slot) = self.slots.get(&r.id) else {
+                return Err(format!("caster {} has no row", r.id));
+            };
+            let g = self.gpu_rows[slot];
+            let group = &self.groups[g.group as usize];
+            if group.key != r.key {
+                return Err(format!("caster {}: another group", r.id));
+            }
+            let sphere = [
+                r.bounds.centre.x,
+                r.bounds.centre.y,
+                r.bounds.centre.z,
+                r.bounds.radius,
+            ];
+            let count = if r.visible { r.args.instance_count } else { 0 };
+            if g.sphere != sphere
+                || g.index_count != r.args.index_count
+                || g.instance_count != count
+                || g.first_index != r.args.first_index
+                || g.base_vertex != r.args.base_vertex
+                || g.first_instance != r.args.first_instance
+                || g.fixed != u32::from(r.fixed)
+                || self.meta[slot] != (r.bounds, r.fixed)
+            {
+                return Err(format!(
+                    "caster {}: row {g:?}, wanted {:?} fixed {}",
+                    r.id, r.bounds, r.fixed
+                ));
+            }
+        }
+        let fixed: u32 = self.groups.iter().map(|g| g.fixed).sum();
+        let want = rows.iter().filter(|r| r.fixed).count() as u32;
+        if fixed != want {
+            return Err(format!(
+                "groups count {fixed} static casters, {want} wanted"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether caster `id` has a row.
+    pub fn has(&self, id: EntityId) -> bool {
+        self.slots.contains_key(&id)
+    }
+
+    /// Updates the row of a caster that moved or got a new instance list
+    /// (see `World::touch`), and adds to `changed` the bounds it had and
+    /// has if it is or was a static caster. `Err` when the row cannot be
+    /// patched in place (another group now): build the scene again with
+    /// [`Self::apply`].
+    pub fn patch(
+        &mut self,
+        queue: &wgpu::Queue,
+        row: &ShadowRow,
+        changed: &mut Vec<Bounds>,
+    ) -> Result<(), ()> {
+        // No row: not a caster the scene holds (see `GpuScene::patch`).
+        let Some(&slot) = self.slots.get(&row.id) else {
+            return Ok(());
+        };
+        let was = self.gpu_rows[slot];
+        if self.groups[was.group as usize].key != row.key {
+            return Err(());
+        }
+        let now = GpuRow {
+            sphere: [
+                row.bounds.centre.x,
+                row.bounds.centre.y,
+                row.bounds.centre.z,
+                row.bounds.radius,
+            ],
+            index_count: row.args.index_count,
+            instance_count: if row.visible {
+                row.args.instance_count
+            } else {
+                0
+            },
+            first_index: row.args.first_index,
+            base_vertex: row.args.base_vertex,
+            first_instance: row.args.first_instance,
+            fixed: u32::from(row.fixed),
+            group: was.group,
+            group_start: was.group_start,
+        };
+        let (bounds, fixed) = self.meta[slot];
+        if (fixed || row.fixed) && (!drawn_same(&was, &now) || fixed != row.fixed) {
+            changed.push(bounds);
+            changed.push(row.bounds);
+        }
+        if fixed != row.fixed {
+            let g = &mut self.groups[was.group as usize];
+            if row.fixed {
+                g.fixed += 1;
+            } else {
+                g.fixed -= 1;
+            }
+        }
+        self.meta[slot] = (row.bounds, row.fixed);
+        if was != now {
+            self.gpu_rows[slot] = now;
+            let stride = std::mem::size_of::<GpuRow>();
+            queue.write_buffer(
+                &self.rows_buf,
+                (slot * stride) as u64,
+                bytemuck::bytes_of(&now),
+            );
+        }
+        Ok(())
     }
 
     /// Recheck which rows count as static; returns the bounds of those that
@@ -417,6 +664,9 @@ impl ShadowScene {
         let mut changed = Vec::new();
         let stride = std::mem::size_of::<GpuRow>();
         for (i, id) in self.ids.iter().enumerate() {
+            if self.slots.get(id) != Some(&i) {
+                continue; // removed
+            }
             let now = fixed(*id);
             if now != self.meta[i].1 {
                 self.meta[i].1 = now;

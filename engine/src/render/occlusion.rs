@@ -960,9 +960,23 @@ impl Occlusion {
 
     /// GPU scene: each row's multi-draw group and that group's first row.
     pub fn write_row_groups(&self, queue: &wgpu::Queue, groups: &[[u32; 2]]) {
+        self.write_row_groups_at(queue, 0, groups);
+    }
+
+    /// [`Self::write_row_groups`] for the rows from `start`.
+    pub fn write_row_groups_at(&self, queue: &wgpu::Queue, start: usize, groups: &[[u32; 2]]) {
         if !groups.is_empty() {
-            queue.write_buffer(&self.row_groups, 0, bytemuck::cast_slice(groups));
+            queue.write_buffer(
+                &self.row_groups,
+                start as u64 * 8,
+                bytemuck::cast_slice(groups),
+            );
         }
+    }
+
+    /// Whether `rows` rows fit without new buffers (see [`Self::reserve_rows`]).
+    pub fn fits(&self, rows: usize) -> bool {
+        rows <= self.capacity
     }
 
     fn ensure_cull_bind(&mut self, device: &wgpu::Device) {

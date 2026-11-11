@@ -205,7 +205,7 @@ impl World {
             return Ok(());
         }
         e.material = material;
-        self.bump_render_epoch();
+        self.redraw(id);
         Ok(())
     }
 
@@ -230,11 +230,19 @@ impl World {
                 "entity {id} was not spawned instanced; use set_place"
             )));
         }
+        let was_empty = e.instances.is_empty();
         e.instances.clear();
         e.instances
             .extend(places.iter().copied().map(Place::to_instance));
         e.bump_xform();
-        self.bump_render_epoch();
+        // Draw and shadow source lists skip empty entities: only coming or
+        // going from them is a change to what is drawn (with GPU batches
+        // not even that, see `batched_instances`).
+        if was_empty != e.instances.is_empty() && !self.batched_instances() {
+            self.bump_render_epoch();
+        } else {
+            self.touch(id);
+        }
         Ok(())
     }
 

@@ -23,7 +23,7 @@ impl Renderer {
         let gpu_batches = world.instance_submit() == InstanceSubmit::GpuIndirect;
         let synced = self.synced_render_epoch == world.render_epoch()
             && self.synced_instance_epoch == world.instance_epoch()
-            && self.draw_source_epoch == world.render_epoch();
+            && self.draw_source_epoch == self.full_syncs;
         if !synced {
             out.push(format!(
                 "epochs: render {} (synced {}, sources {}), instance {} (synced {})",
