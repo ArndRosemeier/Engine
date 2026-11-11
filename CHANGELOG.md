@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.054 (2026-11-11)
+
+- A few broken pixels can no longer spread over the whole picture: shading, reflections, bounce light, anti-aliasing and glow drop invalid values; static shadow casters are no longer missed by the shadow cache
+
 ## 0.053 (2026-11-11)
 
 - Less CPU time per frame in scenes with many materials: binding the material table no longer rechecks thousands of textures each time (a fix in Engine's copy of the graphics library)

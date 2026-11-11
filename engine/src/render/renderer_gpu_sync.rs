@@ -574,7 +574,11 @@ impl Renderer {
                     break;
                 }
                 self.settling.pop_front();
-                if self.moved_at.get(&id) == Some(&at) {
+                // Due unless it moved again since (a later entry follows).
+                // No entry: it was forgotten as long settled (`sync_world`
+                // prunes `moved_at` every 512 frames, possibly this very
+                // frame), so it is due too.
+                if self.moved_at.get(&id).is_none_or(|&m| m == at) {
                     due.push(id);
                 }
             }

@@ -951,8 +951,14 @@ override SCENE_ALPHA_DITHER: f32 = 0.0;
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var c = shade_main(in);
-    if dbg(64u) && (not_finite(c.r) || not_finite(c.g) || not_finite(c.b) || not_finite(c.a)) {
-        return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+    if not_finite(c.r) || not_finite(c.g) || not_finite(c.b) || not_finite(c.a) {
+        if dbg(64u) {
+            return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+        }
+        // A broken shading input (NaN or infinite) must not reach the
+        // image: reflections read last frame's image and would carry it
+        // to every glossy surface, frame after frame.
+        c = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
     if dbg(32u) {
         c.a = 1.0;

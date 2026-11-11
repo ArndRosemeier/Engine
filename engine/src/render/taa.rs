@@ -425,6 +425,20 @@ fn vs_main(@builtin(vertex_index) i: u32) -> VOut {
     return o;
 }
 
+// A colour with a NaN or infinite channel (a broken shader input upstream)
+// becomes black, so the history never keeps it and the neighbourhood range
+// never spreads it to the pixels around. Tested on the bits: a compiler
+// may assume floats are finite and drop an `x != x` test.
+fn finite(x: f32) -> bool {
+    return (bitcast<u32>(x) & 0x7f800000u) != 0x7f800000u;
+}
+fn clean(c: vec3<f32>) -> vec3<f32> {
+    if finite(c.r) && finite(c.g) && finite(c.b) {
+        return c;
+    }
+    return vec3<f32>(0.0);
+}
+
 // Blend in a tone-mapped space so one hot pixel cannot dominate the history.
 fn squash(c: vec3<f32>) -> vec3<f32> {
     return c / (1.0 + max(c.r, max(c.g, c.b)));
@@ -454,14 +468,14 @@ fn sample_history(uv: vec2<f32>) -> vec3<f32> {
         + textureSampleLevel(hist_tex, lin, vec2(tc3.x, tc12.y), 0.0).rgb * (w3.x * w12.y)
         + textureSampleLevel(hist_tex, lin, vec2(tc12.x, tc3.y), 0.0).rgb * (w12.x * w3.y);
     let wsum = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
-    return max(c / wsum, vec3<f32>(0.0));
+    return max(clean(c / wsum), vec3<f32>(0.0));
 }
 
 @fragment
 fn fs_taa(i: VOut) -> @location(0) vec4<f32> {
     let size = vec2<i32>(textureDimensions(cur_tex));
     let px = vec2<i32>(i.clip.xy);
-    let cur = textureLoad(cur_tex, px, 0).rgb;
+    let cur = clean(textureLoad(cur_tex, px, 0).rgb);
     if t.reset > 0.5 {
         return vec4(cur, 1.0);
     }
@@ -473,7 +487,7 @@ fn fs_taa(i: VOut) -> @location(0) vec4<f32> {
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
             let q = clamp(px + vec2<i32>(x, y), vec2<i32>(0), size - 1);
-            let c = squash(textureLoad(cur_tex, q, 0).rgb);
+            let c = squash(clean(textureLoad(cur_tex, q, 0).rgb));
             m1 += c;
             m2 += c * c;
             // Reversed Z: larger is nearer.
@@ -523,7 +537,7 @@ fn fs_taau(i: VOut) -> @location(0) vec4<f32> {
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
             let q = clamp(q0 + vec2<i32>(x, y), vec2<i32>(0), size - 1);
-            let c = squash(textureLoad(cur_tex, q, 0).rgb);
+            let c = squash(clean(textureLoad(cur_tex, q, 0).rgb));
             let d = vec2<f32>(q) + 0.5 - jit - p;
             let w = exp(-2.29 * dot(d, d));
             sum += c * w;
@@ -561,6 +575,12 @@ fn fs_taau(i: VOut) -> @location(0) vec4<f32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_resolve_shader_is_valid_wgsl() {
+        for depth in ["texture_depth_2d", "texture_depth_multisampled_2d"] {
+            crate::render::assert_valid_wgsl(&super::SHADER.replace("DEPTH_TYPE", depth));
+        }
+    }
     use super::*;
     use glam::{Vec3, Vec4};
 
