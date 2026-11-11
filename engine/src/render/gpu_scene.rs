@@ -58,7 +58,6 @@ pub struct SceneGroup {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SceneStamp {
     pub render: u64,
-    pub instance: u64,
     pub resource: u64,
     pub table: u64,
     pub space: SpaceId,
@@ -163,6 +162,56 @@ impl GpuScene {
         }
         self.rows = rows.into_iter().map(|r| r.mesh).collect();
         writes
+    }
+
+    /// Updates the row of an entity that moved or got a new instance list
+    /// (see `World::touch`). `Err` when the row cannot be patched in place
+    /// (it now belongs to another group): the scene must be built again. `Ok(Some(slot))` when the row changed and must
+    /// be written, `Ok(None)` when it is the same.
+    pub fn patch(&mut self, row: &SceneRow) -> Result<Option<usize>, ()> {
+        // No row: not a mesh the scene draws (which meshes it draws changes
+        // only with the render epoch, and then the scene is built again).
+        let Some(&slot) = self.slots.get(&row.id) else {
+            return Ok(None);
+        };
+        let slot = slot as usize;
+        if self.keys.get(slot) != Some(&row.key) {
+            return Err(());
+        }
+        if self.rows[slot] == row.mesh {
+            return Ok(None);
+        }
+        self.rows[slot] = row.mesh;
+        Ok(Some(slot))
+    }
+
+    /// Whether the scene holds exactly `rows` (any order), as a rebuild from
+    /// them would: the check of `ENGINE_SCENE_CHECK=1`. Names the first
+    /// difference.
+    pub fn check(&self, rows: &[SceneRow]) -> Result<(), String> {
+        if rows.len() != self.ids.len() {
+            return Err(format!(
+                "{} rows held, {} wanted",
+                self.ids.len(),
+                rows.len()
+            ));
+        }
+        for r in rows {
+            let Some(&slot) = self.slots.get(&r.id) else {
+                return Err(format!("entity {} has no row", r.id));
+            };
+            let slot = slot as usize;
+            if self.keys[slot] != r.key {
+                return Err(format!("entity {}: another group", r.id));
+            }
+            if self.rows[slot] != r.mesh {
+                return Err(format!(
+                    "entity {}: row {:?}, wanted {:?}",
+                    r.id, self.rows[slot], r.mesh
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Each row's group index and that group's first row (for the GPU's

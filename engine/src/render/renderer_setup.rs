@@ -481,6 +481,8 @@ impl Renderer {
             gpu_water_materials: HashMap::new(),
             synced_render_epoch: 0,
             synced_instance_epoch: 0,
+            scene_touched: Vec::new(),
+            shadow_touched: Vec::new(),
             synced_resource_epoch: 0,
             terrain_origin: crate::space::RenderOrigin::default(),
             frustum: Frustum::default(),

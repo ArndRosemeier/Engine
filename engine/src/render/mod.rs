@@ -908,6 +908,12 @@ pub struct Renderer {
     gpu_water_materials: HashMap<WaterMaterialId, GpuWaterMaterial>,
     synced_render_epoch: u64,
     synced_instance_epoch: u64,
+    /// Entities the world touched (moved, new instance list) that a sync
+    /// brought up to date without a full resync, whose rows the GPU scene
+    /// and the GPU shadow scene still have to patch (each drains its own
+    /// list when it syncs; a rebuild of that scene covers them too).
+    scene_touched: Vec<EntityId>,
+    shadow_touched: Vec<EntityId>,
     synced_resource_epoch: u64,
     /// Origin the terrain material phases were last written for.
     terrain_origin: crate::space::RenderOrigin,

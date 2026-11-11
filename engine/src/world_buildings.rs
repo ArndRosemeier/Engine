@@ -654,7 +654,7 @@ impl World {
             if let Some(e) = self.entities.get_mut(&id) {
                 e.transform = m;
                 e.bump_xform();
-                self.bump_render_epoch();
+                self.touch(id);
             }
         }
     }

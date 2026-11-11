@@ -108,9 +108,24 @@ impl Renderer {
         }
 
         self.cpu_spans.mark("sync.terrain", &mut t);
-        if self.synced_render_epoch != world.render_epoch()
-            || self.synced_instance_epoch != world.instance_epoch()
-        {
+        let mut touched = world.take_touched();
+        touched.sort_unstable();
+        touched.dedup();
+        if self.synced_render_epoch == world.render_epoch() {
+            // Only moves and new instance lists: bring just those entities
+            // up to date (walking every entity cost milliseconds a frame in
+            // a town where something moves every frame).
+            self.sync_touched(world, &touched);
+            if self.gpu_scene.is_some() {
+                self.scene_touched.extend_from_slice(&touched);
+            }
+            if self.shadow_scene.is_some() {
+                self.shadow_touched.extend_from_slice(&touched);
+            }
+            self.synced_instance_epoch = world.instance_epoch();
+            self.cpu_spans.mark("sync.touched", &mut t);
+        }
+        if self.synced_render_epoch != world.render_epoch() {
             self.gpu_meshes.retain(|id, _| world.contains_entity(*id));
 
             // Prototypes first so like-entities can share their GPU vertex buffers.
@@ -330,6 +345,27 @@ impl Renderer {
     /// drawing without it: fixed-step runs want the same frames every time.
     pub fn set_wait_for_workers(&mut self, wait: bool) {
         self.wait_for_workers = wait;
+    }
+
+    /// Brings the `touched` entities (moved, or with a new instance list of
+    /// the same emptiness) up to date: their instance buffers, and the
+    /// instance batches they belong to. Nothing else can have changed, or
+    /// the world's render epoch would have moved.
+    fn sync_touched(&mut self, world: &World, touched: &[EntityId]) {
+        let gpu_batches = world.instance_submit() == InstanceSubmit::GpuIndirect;
+        let mut batches = false;
+        for &id in touched {
+            let Ok(entity) = world.entity(id) else {
+                continue;
+            };
+            if entity.instance_of.is_none() || !gpu_batches {
+                self.sync_entity_mesh(id, entity);
+            }
+            batches |= gpu_batches && entity.instanced;
+        }
+        if batches {
+            self.sync_gpu_instance_batches(world);
+        }
     }
 
     pub(super) fn sync_entity_mesh(&mut self, id: EntityId, entity: &Entity) {

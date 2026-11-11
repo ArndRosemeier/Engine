@@ -837,6 +837,11 @@ pub struct World {
     /// Changes when only instance lists changed (LOD swaps): the renderer
     /// re-uploads instances without rebuilding GI or shadow sources.
     instance_epoch: u64,
+    /// Entities moved or given new instance lists since the renderer last
+    /// synced, with nothing else about them changed: the renderer updates
+    /// just these (their instance buffers and GPU scene rows) instead of
+    /// walking every entity. May hold an id twice, or a despawned one.
+    touched: Vec<EntityId>,
     lods: std::collections::BTreeMap<LodId, LodSet>,
     next_lod: u64,
     /// LOD sets that follow an entity ([`Self::attach_lod`]): the parent
@@ -1045,6 +1050,7 @@ impl Default for World {
             renderer_rebuild: (0, 0),
             debug_shading: 0,
             instance_epoch: 1,
+            touched: Vec::new(),
             lods: std::collections::BTreeMap::new(),
             next_lod: 1,
             lod_follow: std::collections::BTreeMap::new(),
@@ -1154,6 +1160,8 @@ impl Default for World {
     }
 }
 
+/// Most touched entities kept between renderer syncs (see `World::touch`).
+const TOUCHED_LIMIT: usize = 1 << 16;
 /// Below this many instances to reassign, LOD assignment runs on the
 /// calling thread instead of all cores.
 const LOD_PARALLEL_PLACES: usize = 8192;
@@ -1237,6 +1245,24 @@ impl World {
 
     pub(crate) fn instance_epoch(&self) -> u64 {
         self.instance_epoch
+    }
+
+    /// Notes that entity `id` moved or its instance list changed, and
+    /// nothing that decides how or whether it is drawn (see `touched`).
+    fn touch(&mut self, id: EntityId) {
+        // A world no renderer reads (tests, tools) must not pile them up:
+        // past a bound, a full resync is cheaper anyway.
+        if self.touched.len() >= TOUCHED_LIMIT {
+            self.touched.clear();
+            self.bump_render_epoch();
+            return;
+        }
+        self.touched.push(id);
+    }
+
+    /// The entities touched since the last call (see `touched`).
+    pub(crate) fn take_touched(&mut self) -> Vec<EntityId> {
+        std::mem::take(&mut self.touched)
     }
 }
 

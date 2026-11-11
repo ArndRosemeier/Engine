@@ -4,6 +4,15 @@
 
 use super::*;
 
+/// `ENGINE_SCENE_CHECK=1`: after each sync, compare the GPU scene and the
+/// GPU shadow scene with what a rebuild from scratch would hold, and stop
+/// with the first difference (the rows patched for moved entities must
+/// never drift from the truth). Slow; for tests and verify runs.
+fn scene_check() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ENGINE_SCENE_CHECK").is_ok_and(|v| v.trim() == "1"))
+}
+
 impl Renderer {
     /// Bring the GPU scene's rows up to date with the live space; its row
     /// count, or `None` without a GPU scene.
@@ -11,13 +20,49 @@ impl Renderer {
         let mut scene = self.gpu_scene.take()?;
         let stamp = gpu_scene::SceneStamp {
             render: world.render_epoch(),
-            instance: world.instance_epoch(),
             resource: self.materials_synced,
             table: self.bindless.as_ref().map_or(0, |b| b.table.version()),
             space,
         };
         // Rooms hide and show meshes from frame to frame.
-        if scene.stamp != Some(stamp) || world.rooms_culling() {
+        let mut rebuild = scene.stamp != Some(stamp) || world.rooms_culling();
+        if !rebuild {
+            // Only moves and new instance lists since the last sync: patch
+            // those rows (rebuilding every row each frame cost milliseconds
+            // in a town where something moves every frame).
+            let mut written = 0;
+            let mut touched = std::mem::take(&mut self.scene_touched);
+            touched.sort_unstable();
+            touched.dedup();
+            for &id in &touched {
+                let row = self.scene_row(world, space, id, 0);
+                let patched = match &row {
+                    Some(row) => scene.patch(row),
+                    // It has a row but no longer makes one: build again.
+                    None if scene.slots.contains_key(&id) => Err(()),
+                    None => Ok(None),
+                };
+                match patched {
+                    Ok(Some(slot)) => {
+                        self.occlusion.write_rows(
+                            &self.queue,
+                            slot,
+                            &scene.rows[slot..slot + 1],
+                            false,
+                        );
+                        written += 1;
+                    }
+                    Ok(None) => {}
+                    Err(()) => {
+                        rebuild = true;
+                        break;
+                    }
+                }
+            }
+            scene.written = written;
+        }
+        if rebuild {
+            self.scene_touched.clear();
             let rows = self.scene_rows(world, space);
             let all = self.occlusion.reserve_rows(&self.device, rows.len());
             let writes = scene.apply(rows, all);
@@ -34,8 +79,11 @@ impl Renderer {
                 );
             }
             scene.stamp = Some(stamp);
-        } else {
-            scene.written = 0;
+        }
+        if scene_check() {
+            if let Err(e) = scene.check(&self.scene_rows(world, space)) {
+                panic!("ENGINE_SCENE_CHECK: the GPU scene differs from a rebuild: {e}");
+            }
         }
         let rows = scene.ids.len();
         self.gpu_scene = Some(scene);
@@ -45,60 +93,76 @@ impl Renderer {
     /// Every opaque single mesh of `space` as a GPU scene row (a mesh a
     /// room hides draws no instances).
     pub(super) fn scene_rows(&self, world: &World, space: SpaceId) -> Vec<gpu_scene::SceneRow> {
-        let table = self.bindless.as_ref().map(|b| &b.table);
         self.source_opaque
             .iter()
             .enumerate()
             .filter_map(|(order, &id)| {
-                let entity = world.entity(id).ok()?;
-                if entity.space() != space {
-                    return None;
-                }
-                let gpu = self.gpu_meshes.get(&id)?;
-                let aabb = gpu.world_box?;
-                if gpu.instance_count == 0 {
-                    return None;
-                }
-                let table_bind = gpu
-                    .material
-                    .filter(|&m| Some(m) == self.material_slot(entity.albedo))
-                    .and_then(|slot| table.and_then(|t| t.bind_for(slot)));
-                let bind = table_bind.unwrap_or_else(|| {
-                    entity
-                        .albedo
-                        .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
-                        .unwrap_or(&self.pipelines.white_albedo)
-                });
-                let instance_count = if world.room_hidden(id) {
-                    0
-                } else {
-                    u32::try_from(gpu.instance_count).expect("instance count exceeds u32")
-                };
-                Some(gpu_scene::SceneRow {
+                self.scene_row(
+                    world,
+                    space,
                     id,
-                    order: u32::try_from(order).expect("scene row exceeds u32"),
-                    key: gpu_scene::GroupKey {
-                        bindless: table_bind.is_some(),
-                        bind: bind.clone(),
-                        vertex: gpu.vertex_buf.clone(),
-                        index: gpu.index_buf.clone(),
-                        instances: gpu.instance_buf.clone(),
-                    },
-                    mesh: occlusion::CandidateMesh {
-                        id,
-                        aabb,
-                        opaque_index_count: u32::try_from(gpu.opaque_index_count)
-                            .expect("index count exceeds u32"),
-                        index_count: u32::try_from(gpu.index_count)
-                            .expect("index count exceeds u32"),
-                        instance_count,
-                        first_index: gpu.first_index,
-                        base_vertex: gpu.base_vertex,
-                        first_instance: gpu.first_instance,
-                    },
-                })
+                    u32::try_from(order).expect("scene row exceeds u32"),
+                )
             })
             .collect()
+    }
+
+    /// Entity `id`'s GPU scene row (`order`: its place among the opaque
+    /// meshes), or `None` if it has none.
+    fn scene_row(
+        &self,
+        world: &World,
+        space: SpaceId,
+        id: EntityId,
+        order: u32,
+    ) -> Option<gpu_scene::SceneRow> {
+        let table = self.bindless.as_ref().map(|b| &b.table);
+        let entity = world.entity(id).ok()?;
+        if entity.space() != space {
+            return None;
+        }
+        let gpu = self.gpu_meshes.get(&id)?;
+        let aabb = gpu.world_box?;
+        if gpu.instance_count == 0 {
+            return None;
+        }
+        let table_bind = gpu
+            .material
+            .filter(|&m| Some(m) == self.material_slot(entity.albedo))
+            .and_then(|slot| table.and_then(|t| t.bind_for(slot)));
+        let bind = table_bind.unwrap_or_else(|| {
+            entity
+                .albedo
+                .and_then(|tid| self.gpu_mesh_albedo.get(&tid))
+                .unwrap_or(&self.pipelines.white_albedo)
+        });
+        let instance_count = if world.room_hidden(id) {
+            0
+        } else {
+            u32::try_from(gpu.instance_count).expect("instance count exceeds u32")
+        };
+        Some(gpu_scene::SceneRow {
+            id,
+            order,
+            key: gpu_scene::GroupKey {
+                bindless: table_bind.is_some(),
+                bind: bind.clone(),
+                vertex: gpu.vertex_buf.clone(),
+                index: gpu.index_buf.clone(),
+                instances: gpu.instance_buf.clone(),
+            },
+            mesh: occlusion::CandidateMesh {
+                id,
+                aabb,
+                opaque_index_count: u32::try_from(gpu.opaque_index_count)
+                    .expect("index count exceeds u32"),
+                index_count: u32::try_from(gpu.index_count).expect("index count exceeds u32"),
+                instance_count,
+                first_index: gpu.first_index,
+                base_vertex: gpu.base_vertex,
+                first_instance: gpu.first_instance,
+            },
+        })
     }
 
     /// The GPU scene's groups as depth-prepass multi-draws over `region`.
@@ -347,19 +411,44 @@ impl Renderer {
         let space = world.living_in();
         let stamp = shadow_scene::ShadowStamp {
             render: world.render_epoch(),
-            instance: world.instance_epoch(),
             resource: self.materials_synced,
             space,
         };
-        let changed = if scene.stamp != Some(stamp) || world.rooms_culling() {
+        let mut rebuild = scene.stamp != Some(stamp) || world.rooms_culling();
+        let mut changed = Vec::new();
+        if !rebuild {
+            // Only moves and new instance lists: patch those rows (see
+            // `sync_gpu_scene`).
+            let mut touched = std::mem::take(&mut self.shadow_touched);
+            touched.sort_unstable();
+            touched.dedup();
+            for &id in &touched {
+                let patched = match self.shadow_row(world, space, id, 0) {
+                    Some(row) => scene.patch(&self.queue, &row, &mut changed),
+                    None if scene.has(id) => Err(()),
+                    None => Ok(()),
+                };
+                if patched.is_err() {
+                    rebuild = true;
+                    break;
+                }
+            }
+        }
+        if rebuild {
+            self.shadow_touched.clear();
             let rows = self.shadow_rows(world, space);
             scene.stamp = Some(stamp);
-            scene.apply(&self.device, &self.queue, rows)
+            changed = scene.apply(&self.device, &self.queue, rows);
         } else {
-            scene.refresh_fixed(&self.queue, |id| {
+            changed.extend(scene.refresh_fixed(&self.queue, |id| {
                 self.caster_settled(id) && self.gpu_meshes.get(&id).is_some_and(|g| !g.sways)
-            })
-        };
+            }));
+        }
+        if scene_check() {
+            if let Err(e) = scene.check(&self.shadow_rows(world, space)) {
+                panic!("ENGINE_SCENE_CHECK: the GPU shadow scene differs from a rebuild: {e}");
+            }
+        }
         self.shadow_scene = Some(scene);
         changed
     }
@@ -374,38 +463,51 @@ impl Renderer {
             .iter()
             .enumerate()
             .filter_map(|(order, &id)| {
-                let entity = world.entity(id).ok()?;
-                if entity.space() != space {
-                    return None;
-                }
-                let gpu = self.gpu_meshes.get(&id)?;
-                let bounds = gpu.bounds?;
-                let albedo = entity.albedo.and_then(|tid| self.cutout_albedo.get(&tid));
-                Some(shadow_scene::ShadowRow {
-                    id,
-                    order: u32::try_from(order).expect("shadow source exceeds u32"),
-                    key: shadow_scene::ShadowKey {
-                        cutout: albedo.is_some(),
-                        albedo: albedo.cloned(),
-                        vertex: gpu.vertex_buf.clone(),
-                        index: gpu.index_buf.clone(),
-                        instances: gpu.instance_buf.clone(),
-                    },
-                    bounds,
-                    args: DrawIndexedArgs {
-                        index_count: u32::try_from(gpu.opaque_index_count)
-                            .expect("index count exceeds u32"),
-                        instance_count: u32::try_from(gpu.instance_count)
-                            .expect("instance count exceeds u32"),
-                        first_index: gpu.first_index,
-                        base_vertex: gpu.base_vertex,
-                        first_instance: gpu.first_instance,
-                    },
-                    visible: !world.room_hidden(id),
-                    fixed: self.caster_settled(id) && !gpu.sways,
-                })
+                let order = u32::try_from(order).expect("shadow source exceeds u32");
+                self.shadow_row(world, space, id, order)
             })
             .collect()
+    }
+
+    /// Caster `id`'s GPU shadow row (`order`: its place among the shadow
+    /// sources), or `None` if it has none.
+    fn shadow_row(
+        &self,
+        world: &World,
+        space: SpaceId,
+        id: EntityId,
+        order: u32,
+    ) -> Option<shadow_scene::ShadowRow> {
+        let entity = world.entity(id).ok()?;
+        if entity.space() != space {
+            return None;
+        }
+        let gpu = self.gpu_meshes.get(&id)?;
+        let bounds = gpu.bounds?;
+        let albedo = entity.albedo.and_then(|tid| self.cutout_albedo.get(&tid));
+        Some(shadow_scene::ShadowRow {
+            id,
+            order,
+            key: shadow_scene::ShadowKey {
+                cutout: albedo.is_some(),
+                albedo: albedo.cloned(),
+                vertex: gpu.vertex_buf.clone(),
+                index: gpu.index_buf.clone(),
+                instances: gpu.instance_buf.clone(),
+            },
+            bounds,
+            args: DrawIndexedArgs {
+                index_count: u32::try_from(gpu.opaque_index_count)
+                    .expect("index count exceeds u32"),
+                instance_count: u32::try_from(gpu.instance_count)
+                    .expect("instance count exceeds u32"),
+                first_index: gpu.first_index,
+                base_vertex: gpu.base_vertex,
+                first_instance: gpu.first_instance,
+            },
+            visible: !world.room_hidden(id),
+            fixed: self.caster_settled(id) && !gpu.sways,
+        })
     }
 
     pub(super) fn rebuild_shadow_sources(&mut self, world: &World) {

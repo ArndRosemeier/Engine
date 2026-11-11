@@ -536,6 +536,7 @@ impl World {
                 .instance_epoch
                 .checked_add(1)
                 .expect("world instance epoch overflow");
+            self.touch(id);
         }
     }
 

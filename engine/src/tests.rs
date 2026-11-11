@@ -4229,3 +4229,37 @@ mod texture_lifetime {
         assert!(world.entity(d).unwrap().albedo.is_some());
     }
 }
+
+#[test]
+fn moves_and_same_size_instance_lists_are_touches_not_render_changes() {
+    use crate::world::World;
+
+    let mut world = World::new();
+    let single = world.spawn(unit_quad());
+    let many = world.spawn_instanced(unit_quad());
+    world
+        .set_instances(many, &[Place::new(1.0, 0.0, 0.0)])
+        .expect("first places");
+    world.take_touched();
+    let epoch = world.render_epoch();
+
+    // Moving a mesh, or giving an instanced one other places, only touches it.
+    world
+        .set_place(single, Place::new(3.0, 0.0, 0.0))
+        .expect("move");
+    world
+        .set_instances(
+            many,
+            &[Place::new(2.0, 0.0, 0.0), Place::new(4.0, 0.0, 0.0)],
+        )
+        .expect("new places");
+    assert_eq!(world.render_epoch(), epoch);
+    let mut touched = world.take_touched();
+    touched.sort_unstable();
+    assert_eq!(touched, vec![single, many]);
+    assert!(world.take_touched().is_empty());
+
+    // Emptying a list changes what is drawn: a render change.
+    world.set_instances(many, &[]).expect("no places");
+    assert!(world.render_epoch() > epoch);
+}
