@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.050 (2026-11-11)
+
+- Faster towns that stream: only what moved, came or went is updated each frame, instead of every entity and GPU scene row
+
 ## 0.049 (2026-11-10)
 
 - Sun shadows keep their maps while the camera moves a little, so buildings are not drawn into them again every frame
