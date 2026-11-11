@@ -153,6 +153,13 @@ The set follows its pivot as it moves, picks its level by distance and shares
 the model's meshes and maps with every other copy; it goes when the pivot is
 despawned.
 
+**LOD sets made while the game runs:** build the levels on a worker thread
+and `prepare()` them there, then hand them over with
+`world.spawn_lod_prepared(vec![(near, 2500.0), (far, 6000.0)])?` and
+`set_lod_places`: the main thread does no vertex work, so streamed tiles (a
+distant city's skyline, say) come in without a hitch, and cross-fade between
+levels and out at the last distance like any LOD set.
+
 **Lights that switch with the hour:** put emissive surfaces on a glow channel
 (`SurfaceMaterial { emission: 1.2, ..SurfaceMaterial::DEFAULT }.on_glow_channel(3)`)
 and switch the channel any frame with `world.set_glow_channel(3, strength, Some(colour))`:

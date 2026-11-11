@@ -28,6 +28,51 @@ impl World {
             self.attach_albedo(id, albedo)?;
             ids.push((id, max_distance));
         }
+        Ok(self.add_lod_set(ids))
+    }
+
+    /// [`Self::spawn_lod`] from meshes made ready on another thread with
+    /// [`Mesh::prepare`]: `(mesh, max_distance)` per level, detailed first.
+    /// For LOD sets a game makes while it runs (streamed tiles of a distant
+    /// city, say), where building the vertices on the main thread would
+    /// cost a frame.
+    ///
+    /// ```no_run
+    /// # use engine::prelude::*;
+    /// # fn demo(world: &mut World) -> EngineResult<()> {
+    /// // On a worker: the meshes, prepared.
+    /// let near = Shape::box_at((0.0, 5.0, 0.0), (10.0, 10.0, 10.0), rgb(200, 190, 170))?.prepare();
+    /// let far = Shape::box_at((0.0, 5.0, 0.0), (10.0, 10.0, 10.0), rgb(200, 190, 170))?.prepare();
+    /// // On the main thread: only the hand-over.
+    /// let tile = world.spawn_lod_prepared(vec![(near, 800.0), (far, 3000.0)])?;
+    /// world.set_lod_places(tile, &[Place::new(0.0, 0.0, 0.0)])?;
+    /// # Ok(()) }
+    /// ```
+    pub fn spawn_lod_prepared(&mut self, levels: Vec<(PreparedMesh, f32)>) -> EngineResult<LodId> {
+        LodSet::validate_distances(levels.iter().map(|l| l.1))?;
+        let mut ids: Vec<(EntityId, f32)> = Vec::with_capacity(levels.len());
+        for (mesh, max_distance) in levels {
+            let PreparedMesh {
+                built,
+                albedo,
+                maps,
+                key,
+            } = mesh;
+            let id = self.spawn_built_instanced(built, Vec::new());
+            if let Err(e) = self.attach_albedo_keyed(id, (albedo, maps), key) {
+                self.despawn(id);
+                for (done, _) in ids {
+                    self.despawn(done);
+                }
+                return Err(e);
+            }
+            ids.push((id, max_distance));
+        }
+        Ok(self.add_lod_set(ids))
+    }
+
+    /// Registers spawned level entities as a new, empty LOD set.
+    fn add_lod_set(&mut self, ids: Vec<(EntityId, f32)>) -> LodId {
         let id = LodId(self.next_lod);
         self.next_lod += 1;
         self.lods.insert(
@@ -40,7 +85,7 @@ impl World {
                 assigned_zone: None,
             },
         );
-        Ok(id)
+        id
     }
 
     /// Another LOD set drawing the same model as `model` at `places`. Its

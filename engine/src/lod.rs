@@ -96,14 +96,18 @@ pub(crate) struct LodSet {
 
 impl LodSet {
     pub fn validate_levels(levels: &[LodLevel]) -> EngineResult<()> {
-        if levels.is_empty() {
+        Self::validate_distances(levels.iter().map(|l| l.max_distance))
+    }
+
+    /// Checks the levels' end distances: at least one, positive, rising.
+    pub fn validate_distances(ends: impl ExactSizeIterator<Item = f32>) -> EngineResult<()> {
+        if ends.len() == 0 {
             return Err(EngineError::InvalidValue(
                 "a LOD set needs at least one level".into(),
             ));
         }
         let mut last = 0.0;
-        for (i, level) in levels.iter().enumerate() {
-            let d = level.max_distance;
+        for (i, d) in ends.enumerate() {
             if d.is_nan() || d <= last {
                 return Err(EngineError::InvalidValue(format!(
                     "LOD level {i} ends at {d} m; distances must be positive and increasing"

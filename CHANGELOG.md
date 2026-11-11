@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.056 (2026-11-11)
+
+- LOD sets from meshes prepared on worker threads (spawn_lod_prepared), for streamed far tiles
+
 ## 0.055 (2026-11-11)
 
 - Lamp and sun highlights can no longer turn into broken pixels when a light lines up with the camera
