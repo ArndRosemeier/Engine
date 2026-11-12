@@ -631,6 +631,14 @@ world.set_target_fps(Some(60.0))?;    // keep 60 FPS: pull LOD and grass in, the
 world.set_vsync(false);               // uncapped frame rate (the title bar always shows FPS)
 ```
 
+**Your own threads.** Work that builds things over many frames (meshes,
+plans, textures) belongs on a worker thread: call
+`engine::parallel::background_thread()` first thing in it, so the frame
+always wins the cores. Work a frame needs every frame beside the calls on
+`world` (stepping a traffic simulation, say) runs on an idle frame thread
+with `engine::parallel::beside_frame(job, main)`: it starts at once, where a
+thread started each frame can wait many milliseconds for a core.
+
 **Occlusion culling** (automatic by default): meshes and instances hidden
 behind others, such as the blocks behind a street wall, are not drawn. In
 `OcclusionMode::Auto` Engine tries it whenever 32 or more meshes are in view,

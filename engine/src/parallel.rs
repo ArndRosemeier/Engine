@@ -46,6 +46,56 @@ pub(crate) fn frame_pool() -> &'static rayon::ThreadPool {
     })
 }
 
+/// Run `job` on a frame thread while `main` runs here, and return both
+/// results once both are done.
+///
+/// For work a frame needs every frame beside the calls that must stay on
+/// the main thread (the ones that take `&mut World`): stepping a traffic
+/// or crowd simulation while the last step's result is handed to the
+/// world. The frame threads are already running and idle while the game's
+/// closure runs, so `job` starts at once. A thread started for it each
+/// frame can wait many milliseconds for a core when background workers
+/// keep them all busy, and the frame waits with it.
+///
+/// ```
+/// # use engine::parallel::beside_frame;
+/// let mut cars = vec![1.0_f32, 2.0, 3.0];
+/// let (furthest, drawn) = beside_frame(
+///     || {
+///         cars.iter_mut().for_each(|c| *c += 0.5);
+///         cars.iter().copied().fold(0.0, f32::max)
+///     },
+///     || "the main thread's own work",
+/// );
+/// assert_eq!((furthest, drawn), (3.5, "the main thread's own work"));
+/// ```
+///
+/// Both closures have finished when this returns, so they may borrow from
+/// the caller. A panic in either is passed on.
+pub fn beside_frame<A, B>(job: impl FnOnce() -> A + Send, main: impl FnOnce() -> B) -> (A, B)
+where
+    A: Send,
+{
+    let mut made = None;
+    let here = frame_pool().in_place_scope(|scope| {
+        scope.spawn(|_| made = Some(job()));
+        main()
+    });
+    // The scope returns only after its job ran; had the job panicked, the
+    // scope would have passed the panic on instead.
+    (made.expect("the scope waited for its job"), here)
+}
+
+/// Mark the calling thread as a background worker: call it first thing in
+/// a thread that builds or loads things over many frames (meshes, plans,
+/// textures). It lowers the thread's priority, so the frame's own threads
+/// always win the cores. Without it a busy machine lets a build hold a
+/// core for a whole time slice (up to ~15 ms on Windows) while the frame
+/// waits. The engine's own streaming workers are marked the same way.
+pub fn background_thread() {
+    lower_thread_priority();
+}
+
 /// Lower the calling thread's priority, for background workers (world
 /// streaming). Frame work then always wins the cores: on a busy machine
 /// the OS would otherwise let a streaming job hold a core for a whole time
@@ -71,6 +121,24 @@ pub(crate) fn lower_thread_priority() {
 mod tests {
     use super::*;
     use crate::error::EngineError;
+
+    #[test]
+    fn a_job_beside_the_frame_borrows_and_passes_its_panic_on() {
+        let mut total = 0_u64;
+        let main_thread = std::thread::current().id();
+        let (other, here) = beside_frame(
+            || {
+                total = (1..=100).sum();
+                std::thread::current().id()
+            },
+            || std::thread::current().id(),
+        );
+        assert_eq!(total, 5050);
+        assert_eq!(here, main_thread, "the main half stays on the caller");
+        assert_ne!(other, main_thread, "the job runs on a frame thread");
+        let failed = std::panic::catch_unwind(|| beside_frame(|| panic!("job failed"), || 1));
+        assert!(failed.is_err());
+    }
 
     #[test]
     fn keeps_order_and_reports_errors() {

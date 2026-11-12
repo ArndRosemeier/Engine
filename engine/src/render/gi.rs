@@ -29,6 +29,31 @@ const RAYS: u32 = 16;
 const MAX_STEPS: u32 = 48;
 /// Weight of this frame's rays in the probes; history keeps the rest.
 const BLEND: f32 = 0.12;
+/// Frames a changed scene waits for new voxels after the last rebuild.
+const SCENE_CHANGE_WAIT: u32 = 8;
+/// Frames after which the voxels are rebuilt anyway, for props that moved.
+const REFRESH_FRAMES: u32 = 30;
+
+/// Whether the voxels must be rebuilt this frame: `built` is the box and
+/// scene they were last built for, `frames` ago.
+///
+/// A moved box needs its voxels at once. A changed scene waits a few
+/// frames: a streamed world spawns and drops something somewhere on most
+/// frames, nearly always far from the box, and each rebuild draws every
+/// mesh near it three times. The probes blend over many frames anyway, so
+/// the wait does not show.
+fn voxels_are_stale(
+    built: Option<(GiPlacement, u64)>,
+    placement: GiPlacement,
+    scene_epoch: u64,
+    frames: u32,
+) -> bool {
+    built.is_none_or(|(p, epoch)| {
+        p != placement
+            || (epoch != scene_epoch && frames >= SCENE_CHANGE_WAIT)
+            || frames >= REFRESH_FRAMES
+    })
+}
 const RASTER_SIZE: u32 = 128;
 const PROBE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const ALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -445,12 +470,7 @@ impl GiVolume {
     /// (box moved, scene changed, or a periodic refresh for moving props).
     pub fn prepare(&mut self, queue: &wgpu::Queue, frame: &GiFrame, scene_epoch: u64) -> bool {
         let placement = frame.placement;
-        let rebuild = match self.built {
-            Some((p, epoch)) => {
-                p != placement || epoch != scene_epoch || self.frames_since_build >= 30
-            }
-            None => true,
-        };
+        let rebuild = voxels_are_stale(self.built, placement, scene_epoch, self.frames_since_build);
         let moved = self.built.is_none_or(|(p, _)| p != placement);
         if rebuild {
             self.built = Some((placement, scene_epoch));
@@ -845,6 +865,30 @@ mod tests {
         // Small moves inside one probe cell keep the box (and its voxels).
         let nudged = GiPlacement::around(focus + Vec3::splat(0.01), spacing);
         assert_eq!(p, nudged);
+    }
+
+    #[test]
+    fn a_changed_scene_waits_for_voxels_and_a_moved_box_does_not() {
+        let here = GiPlacement::around(Vec3::ZERO, 2.0);
+        let there = GiPlacement::around(Vec3::splat(40.0), 2.0);
+        assert!(voxels_are_stale(None, here, 1, 0));
+        assert!(!voxels_are_stale(Some((here, 1)), here, 1, 5));
+        assert!(voxels_are_stale(Some((here, 1)), there, 1, 0));
+        // Something spawned: not on the very next frames, but soon.
+        assert!(!voxels_are_stale(
+            Some((here, 1)),
+            here,
+            2,
+            SCENE_CHANGE_WAIT - 1
+        ));
+        assert!(voxels_are_stale(
+            Some((here, 1)),
+            here,
+            2,
+            SCENE_CHANGE_WAIT
+        ));
+        // Nothing changed: still refreshed for things that moved.
+        assert!(voxels_are_stale(Some((here, 1)), here, 1, REFRESH_FRAMES));
     }
 
     #[test]
