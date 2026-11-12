@@ -700,8 +700,8 @@ impl Reflect {
         u
     }
 
-    /// The cube faces to draw this frame: a new or changed probe gets all
-    /// six at once (the first one found), dynamic probes one face each.
+    /// The cube faces to draw this frame: a new probe gets all six at once
+    /// (the first one found), changed and dynamic probes one face each.
     pub fn plan(
         &mut self,
         probes: &[(usize, crate::reflections::ReflectionProbe, u64)],
@@ -957,7 +957,12 @@ fn plan_slots(
             }
         }
         let stale = s.shown != version && s.capturing.is_none();
-        if stale && !whole_done && (s.shown == 0 || !probe.dynamic) {
+        // A probe never captured gets its six faces in one frame, so it
+        // never shows black. One that only changed (moved on with the
+        // camera, say) is redrawn a face a frame like a dynamic one: six
+        // scene passes in one frame are a hitch of 10 to 20 ms, and the old
+        // faces stand in for the five frames it takes.
+        if stale && !whole_done && s.shown == 0 {
             whole_done = true;
             for face in 0..6 {
                 jobs.push(FaceJob {
@@ -970,7 +975,11 @@ fn plan_slots(
             s.shown = version;
             continue;
         }
-        if probe.dynamic {
+        if stale && s.shown == 0 {
+            // Its turn for a whole capture comes in a later frame.
+            continue;
+        }
+        if probe.dynamic || stale || s.capturing.is_some() {
             let (v, face) = s.capturing.unwrap_or((version, 0));
             jobs.push(FaceJob {
                 slot,
@@ -1137,6 +1146,15 @@ mod tests {
             plan(&[(0, probe, 1), (1, probe, 2)]).is_empty(),
             "nothing changed"
         );
+        // A probe that changed is redrawn a face a frame, then rests.
+        let mut faces = Vec::new();
+        for _ in 0..8 {
+            let jobs = plan(&[(0, probe, 5), (1, probe, 2)]);
+            assert!(jobs.len() <= 1 && jobs.iter().all(|j| j.slot == 0));
+            faces.extend(jobs.iter().map(|j| (j.face, j.finish)));
+        }
+        let want: Vec<(u32, bool)> = (0..6).map(|f| (f, f == 5)).collect();
+        assert_eq!(faces, want);
         let dynamic = probe.dynamic();
         let mut faces = Vec::new();
         for _ in 0..7 {

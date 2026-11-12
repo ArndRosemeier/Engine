@@ -867,6 +867,7 @@ depend on them); `world.env_overrides()` and verify reports list the ones set:
 | `ENGINE_GPU_PROFILE_EVERY=N` | Print GPU timings every N frames: shadow, AO, scene, water, TAA, post; plus a split of the scene pass (sky, land, grass, voxel, meshes, ...) where the GPU supports it |
 | `ENGINE_HITCH_MS` | Log frames whose work is slower than this (default 33) to the file set with `World::set_hitch_log`: phases, game spans, Engine's slow steps, GPU uploads |
 | `ENGINE_CPU_TRACE=1` | Print every 2 s where the CPU time of a frame went: game update, each world tick, renderer sync and drawing (average and worst ms); also lists, every 120 full renderer syncs, which Engine calls asked for them (`sync.full` frames; moves, LOD switches and plain meshes spawned or despawned are synced one by one) |
+| `ENGINE_VOXEL_INLINE=1` / `0` | Sample new voxel ground within the frame (`1`; what verify runs do, so their frames repeat) or on background threads (`0`, the default outside verify runs) |
 | `ENGINE_SCENE_CHECK=1` | After each sync compare the GPU scene, the GPU shadow scene, the draw and shadow source lists and the instance batches with a rebuild from scratch, and stop at the first difference (slow; for tests) |
 | `ENGINE_AUDIO=0` | Run silent: do not open a sound device |
 | `ENGINE_LOG_PIPELINES=1` | Print how long pipeline building took, whether the disk pipeline cache was used, and the work time of the first 5 frames |

@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.064 (2026-11-12)
+
+- Fewer slow frames: new ground is worked out on background threads, and a reflection probe that moved is redrawn a face a frame instead of all at once
+
 ## 0.063 (2026-11-12)
 
 - Meshes beside or behind the camera are no longer drawn (the GPU view test kept every box with a corner behind the eye), and crowd people cast shadows only into the cascades they can reach

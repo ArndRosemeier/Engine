@@ -101,6 +101,45 @@ impl std::fmt::Debug for SourceRef {
     }
 }
 
+/// A block of a [`Volume`] to read from its source alone (see
+/// [`Volume::source_gather`]).
+#[derive(Clone, Debug)]
+pub(crate) struct SourceGather {
+    source: SourceRef,
+    origin: Vec3,
+    step: f32,
+    n: usize,
+}
+
+impl SourceGather {
+    /// The block as the source has it: exactly what [`Volume::gather`]
+    /// gives while no chunk is loaded there.
+    pub(crate) fn run(&self) -> Vec<f32> {
+        let n = self.n;
+        let mut filled = Vec::new();
+        self.source.0.fill(self.origin, self.step, n, &mut filled);
+        let mut out = Vec::with_capacity(n * n * n);
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    // `fill` runs x fastest, then z, then y.
+                    let d = filled[(y * n + z) * n + x];
+                    out.push(pack_material(if d.is_finite() { d } else { -1.0 }, 0));
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether `other` reads the same block of the same source.
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.source.0, &other.source.0)
+            && self.origin == other.origin
+            && self.step == other.step
+            && self.n == other.n
+    }
+}
+
 /// Removals remembered for [`Volume::removed_since`].
 const REMOVED_LOG: usize = 4096;
 
@@ -1052,6 +1091,78 @@ impl Volume {
                 }
             }
         }
+    }
+
+    /// The slow part of [`Self::gather`] for a block not wholly loaded, as
+    /// a job that needs only the source: it can run on another thread while
+    /// the volume goes on changing. Its result is the block as the source
+    /// has it; [`Self::overlay_loaded`] then puts in what is loaded.
+    /// `None` when every chunk of the block is loaded (then `gather` is a
+    /// plain copy) or there is no source.
+    pub(crate) fn source_gather(&self, origin: IVec3, stride: i32, n: i32) -> Option<SourceGather> {
+        let source = self.source.as_ref()?;
+        let cs = IVec3::splat(CHUNK_SIZE);
+        let lo = origin.div_euclid(cs);
+        let hi = (origin + IVec3::splat((n - 1) * stride)).div_euclid(cs);
+        let mut any_missing = false;
+        'scan: for z in lo.z..=hi.z {
+            for y in lo.y..=hi.y {
+                for x in lo.x..=hi.x {
+                    if !self.chunks.contains_key(&IVec3::new(x, y, z)) {
+                        any_missing = true;
+                        break 'scan;
+                    }
+                }
+            }
+        }
+        any_missing.then(|| SourceGather {
+            source: source.clone(),
+            origin: origin.as_vec3() * self.voxel_size,
+            step: stride as f32 * self.voxel_size,
+            n: n as usize,
+        })
+    }
+
+    /// Put the loaded chunks' corners into `out`, a block as
+    /// [`SourceGather::run`] gave it (same layout as [`Self::gather`]):
+    /// after this it is what `gather` gives now. Whether anything changed
+    /// (a loaded chunk that is only a copy of the source changes nothing).
+    pub(crate) fn overlay_loaded(
+        &self,
+        origin: IVec3,
+        stride: i32,
+        n: i32,
+        out: &mut [f32],
+    ) -> bool {
+        let cs = IVec3::splat(CHUNK_SIZE);
+        let mut changed = false;
+        let mut cached_key = IVec3::splat(i32::MIN);
+        let mut cached: Option<&Chunk> = None;
+        let mut i = 0;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let g = origin + IVec3::new(x, y, z) * stride;
+                    let key = g.div_euclid(cs);
+                    if key != cached_key {
+                        cached_key = key;
+                        cached = self.chunks.get(&key);
+                    }
+                    if let Some(c) = cached {
+                        let l = g - key * cs;
+                        let k = Chunk::index(l.x, l.y, l.z);
+                        let v =
+                            pack_material(c.samples[k], c.materials.as_ref().map_or(0, |m| m[k]));
+                        if out[i].to_bits() != v.to_bits() {
+                            out[i] = v;
+                            changed = true;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+        }
+        changed
     }
 
     /// Lower-detail extraction: sample every `stride` cells (LOD helper).
