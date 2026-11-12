@@ -1556,6 +1556,17 @@ mod tests {
         let mut volume = crate::volume::Volume::new(1.0).with_source(source.clone());
         // One chunk loaded (and edited), the rest of the region not.
         volume.dig_sphere(Vec3::new(8.0, 2.0, 8.0), 3.0);
+        // A block with no chunk loaded is read from the source alone (on
+        // another thread, in the renderer) and comes out the same; one
+        // that touches the edited chunk has to be read from the volume.
+        let far = IVec3::new(300, -6, 300);
+        let job = volume.source_gather(far, 2, 12).expect("no chunk there");
+        let mut here = Vec::new();
+        volume.gather(far, 2, 12, &mut here);
+        assert_eq!(job.run(), here);
+        assert!(volume
+            .source_gather(IVec3::new(-5, -6, -7), 1, 12)
+            .is_none());
         for stride in [1, 2, 4] {
             let origin = IVec3::new(-5, -6, -7) * stride;
             let mut fast = Vec::new();

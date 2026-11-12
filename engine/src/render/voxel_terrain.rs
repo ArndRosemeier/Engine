@@ -14,6 +14,7 @@
 
 use super::frustum::{Bounds, Frustum};
 use super::geometry::RangeAlloc;
+use crate::volume::SourceGather;
 use crate::voxel_terrain::{FarTileKey, FarTileMesh, VoxelTerrain};
 use glam::{IVec2, IVec3, Mat4, Vec3};
 use rayon::prelude::*;
@@ -411,6 +412,31 @@ struct NodeMesh {
 }
 
 /// CPU side of one meshing job: the samples plus exact output counts.
+/// Whether new ground is sampled within the frame instead of on background
+/// threads: in a verify run, or as `ENGINE_VOXEL_INLINE` says (`1` within
+/// the frame, `0` in the background even in a verify run).
+fn sample_inline() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("ENGINE_VOXEL_INLINE") {
+        Ok(v) if v.trim() == "1" => true,
+        Ok(v) if v.trim() == "0" => false,
+        _ => crate::verify::steady_frames(),
+    })
+}
+
+/// A region sampled on a background thread, with what it was asked for.
+struct Sampled {
+    gen: u64,
+    gather: SourceGather,
+    prepared: Prepared,
+}
+
+/// Regions sampled in the background at once, at most (half the cores,
+/// two at least). Each takes a core for a few to a few dozen milliseconds
+/// (a height-field source works out 38 x 38 columns); the frame's own
+/// threads are not among them.
+const SAMPLING_MOST: usize = 8;
+
 struct Prepared {
     node: NodeKey,
     faces: u32,
@@ -502,6 +528,12 @@ pub struct VoxelTerrainGpu {
     seen_layout_rev: u64,
     occupancy: Vec<HashSet<IVec3>>,
     dirty: HashSet<NodeKey>,
+    /// Regions being sampled from the volume's source on background
+    /// threads (what was asked for), and where their results come back.
+    sampling: HashMap<NodeKey, (u32, SourceGather)>,
+    sampled: std::sync::Arc<std::sync::Mutex<Vec<Sampled>>>,
+    /// Bumped by [`Self::clear`]: results asked for before it are dropped.
+    sample_gen: u64,
     instance_key: Option<[u32; 8]>,
     voxel_size: f32,
     /// Bumped whenever what is drawn changes (for the GI rebuild).
@@ -631,6 +663,9 @@ impl VoxelTerrainGpu {
             seen_layout_rev: u64::MAX,
             occupancy: Vec::new(),
             dirty: HashSet::new(),
+            sampling: HashMap::new(),
+            sampled: Default::default(),
+            sample_gen: 0,
             instance_key: None,
             voxel_size: 0.0,
             epoch: 0,
@@ -662,6 +697,8 @@ impl VoxelTerrainGpu {
         self.seen_far_rev = u64::MAX;
         self.drawn.clear();
         self.dirty.clear();
+        self.sampling.clear();
+        self.sample_gen += 1;
         self.occupancy.clear();
         self.seen_rev = 0;
         self.seen_layout_rev = u64::MAX;
@@ -1076,13 +1113,104 @@ impl VoxelTerrainGpu {
             }
         }
         work.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-        work.truncate(JOBS_PER_FRAME);
 
-        // Sample in rounds of one job per core until the frame's budget is
-        // spent, so flying fast never stalls a frame on meshing.
+        // Regions with no loaded chunk come from the volume's source alone
+        // (new ground coming into view, the usual case): those are sampled
+        // on background threads and taken up in the frame they arrive, so a
+        // slow source never holds a frame. Order is explicit: a result is
+        // used only if this frame still asks for exactly that region with
+        // those seams from that source; anything else is dropped and asked
+        // for again. A verify run samples them here instead, so its frames
+        // do not depend on thread timing.
+        let inline = sample_inline();
+        let at_once = (rayon::current_num_threads() / 2).clamp(2, SAMPLING_MOST);
+        let mut arrived: HashMap<NodeKey, Sampled> = HashMap::new();
+        let finished = std::mem::take(&mut *self.sampled.lock().expect("sampled regions"));
+        for s in finished {
+            if s.gen != self.sample_gen {
+                continue;
+            }
+            let node = s.prepared.node;
+            // It answers what is in flight for this region now (not an
+            // earlier, since replaced, request).
+            let current = self
+                .sampling
+                .get(&node)
+                .is_none_or(|(faces, g)| *faces == s.prepared.faces && g.same(&s.gather));
+            if current {
+                self.sampling.remove(&node);
+                arrived.insert(node, s);
+            }
+        }
+        let mut prepared: Vec<Prepared> = Vec::new();
+        let mut wanted: HashSet<NodeKey> = HashSet::new();
+        let mut direct: Vec<(u8, f32, NodeKey, u32)> = Vec::new();
+        for item in work {
+            let (_, _, node, faces) = item;
+            let s = node.stride();
+            let origin = node.key * CHUNK - IVec3::splat(PAD * s);
+            let Some(gather) = volume.source_gather(origin, s, GRID).filter(|_| !inline) else {
+                direct.push(item);
+                continue;
+            };
+            wanted.insert(node);
+            if let Some(done) = arrived.remove(&node) {
+                if done.prepared.faces == faces && done.gather.same(&gather) {
+                    if prepared.len() < JOBS_PER_FRAME {
+                        prepared.push(done.prepared);
+                    } else {
+                        // Over this frame's share: next frame.
+                        arrived.insert(node, done);
+                    }
+                    continue;
+                }
+            }
+            if let Some((asked, g)) = self.sampling.get(&node) {
+                if *asked == faces && g.same(&gather) {
+                    continue;
+                }
+            }
+            if self.sampling.len() >= at_once && !self.sampling.contains_key(&node) {
+                continue;
+            }
+            self.sampling.insert(node, (faces, gather.clone()));
+            let (tx, gen) = (self.sampled.clone(), self.sample_gen);
+            rayon::spawn(move || {
+                let samples = gather.run();
+                let (vertex_count, index_count, cells) = count_surface(&samples, faces);
+                tx.lock().expect("sampled regions").push(Sampled {
+                    gen,
+                    gather,
+                    prepared: Prepared {
+                        node,
+                        faces,
+                        samples,
+                        vertex_count,
+                        index_count,
+                        cells,
+                    },
+                });
+            });
+        }
+        // Results held over for next frame go back in the queue; ones
+        // nobody asks for any more are dropped.
+        {
+            let mut held = self.sampled.lock().expect("sampled regions");
+            held.extend(
+                arrived
+                    .into_values()
+                    .filter(|d| wanted.contains(&d.prepared.node)),
+            );
+        }
+        self.sampling.retain(|node, _| wanted.contains(node));
+        let mut work = direct;
+        work.truncate(JOBS_PER_FRAME.saturating_sub(prepared.len()));
+
+        // The rest (edited ground, read from the volume) is sampled here in
+        // rounds of one job per core until the frame's budget is spent, so
+        // flying fast never stalls a frame on meshing.
         let started = std::time::Instant::now();
         let round = rayon::current_num_threads().max(1);
-        let mut prepared: Vec<Prepared> = Vec::new();
         for batch in work.chunks(round) {
             prepared.par_extend(batch.par_iter().map(|&(_, _, node, faces)| {
                 let s = node.stride();

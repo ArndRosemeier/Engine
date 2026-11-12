@@ -101,6 +101,45 @@ impl std::fmt::Debug for SourceRef {
     }
 }
 
+/// A block of a [`Volume`] to read from its source alone (see
+/// [`Volume::source_gather`]).
+#[derive(Clone, Debug)]
+pub(crate) struct SourceGather {
+    source: SourceRef,
+    origin: Vec3,
+    step: f32,
+    n: usize,
+}
+
+impl SourceGather {
+    /// The block, exactly as [`Volume::gather`] gives it while no chunk is
+    /// loaded there.
+    pub(crate) fn run(&self) -> Vec<f32> {
+        let n = self.n;
+        let mut filled = Vec::new();
+        self.source.0.fill(self.origin, self.step, n, &mut filled);
+        let mut out = Vec::with_capacity(n * n * n);
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    // `fill` runs x fastest, then z, then y.
+                    let d = filled[(y * n + z) * n + x];
+                    out.push(pack_material(if d.is_finite() { d } else { -1.0 }, 0));
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether `other` reads the same block of the same source.
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.source.0, &other.source.0)
+            && self.origin == other.origin
+            && self.step == other.step
+            && self.n == other.n
+    }
+}
+
 /// Removals remembered for [`Volume::removed_since`].
 const REMOVED_LOG: usize = 4096;
 
@@ -1052,6 +1091,32 @@ impl Volume {
                 }
             }
         }
+    }
+
+    /// [`Self::gather`] of a block that holds no loaded chunk, as a job that
+    /// needs only the source: it can run on another thread while the volume
+    /// goes on changing. `None` when a chunk is loaded there (then the
+    /// block has to be read from the volume itself) or there is no source.
+    pub(crate) fn source_gather(&self, origin: IVec3, stride: i32, n: i32) -> Option<SourceGather> {
+        let source = self.source.as_ref()?;
+        let cs = IVec3::splat(CHUNK_SIZE);
+        let lo = origin.div_euclid(cs);
+        let hi = (origin + IVec3::splat((n - 1) * stride)).div_euclid(cs);
+        for z in lo.z..=hi.z {
+            for y in lo.y..=hi.y {
+                for x in lo.x..=hi.x {
+                    if self.chunks.contains_key(&IVec3::new(x, y, z)) {
+                        return None;
+                    }
+                }
+            }
+        }
+        Some(SourceGather {
+            source: source.clone(),
+            origin: origin.as_vec3() * self.voxel_size,
+            step: stride as f32 * self.voxel_size,
+            n: n as usize,
+        })
     }
 
     /// Lower-detail extraction: sample every `stride` cells (LOD helper).

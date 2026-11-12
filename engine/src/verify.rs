@@ -49,6 +49,14 @@ pub(crate) struct Verify {
     started: Instant,
 }
 
+/// Whether this is a verify run (`ENGINE_VERIFY` set): work that would
+/// arrive from background threads whenever it is done is then done within
+/// the frame, so the same program gives the same frames every time.
+pub(crate) fn steady_frames() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ENGINE_VERIFY").is_some_and(|v| !v.is_empty()))
+}
+
 impl Verify {
     /// `None` unless `ENGINE_VERIFY` is set.
     pub fn from_env(title: &str) -> EngineResult<Option<Self>> {
