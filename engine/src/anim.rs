@@ -68,6 +68,53 @@ pub struct SkinMesh {
     pub morphs: Vec<MeshMorph>,
 }
 
+impl SkinMesh {
+    /// The mesh's normals with the unusable ones repaired: a vertex whose
+    /// normal is zero or not a number gets the average normal of the faces
+    /// it belongs to (straight up when it belongs to none). A zero normal
+    /// cannot be lit: the shader's `normalize` of it is not a number, and
+    /// such a pixel spreads through reflections. Borrowed when every normal
+    /// is sound, which is the usual case.
+    pub fn sound_normals(&self) -> std::borrow::Cow<'_, [Vec3]> {
+        let bad = |n: &Vec3| !(n.is_finite() && n.length_squared() > 1e-12);
+        let count = self.positions.len();
+        if self.normals.len() == count && !self.normals.iter().any(bad) {
+            return std::borrow::Cow::Borrowed(&self.normals);
+        }
+        let mut out = self.normals.clone();
+        out.resize(count, Vec3::ZERO);
+        let mut face = vec![Vec3::ZERO; count];
+        for tri in self.indices.chunks_exact(3) {
+            let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+            if a >= count || b >= count || c >= count {
+                continue;
+            }
+            // Area-weighted: the cross product's length is twice the area.
+            let n = (self.positions[b] - self.positions[a])
+                .cross(self.positions[c] - self.positions[a]);
+            if n.is_finite() {
+                face[a] += n;
+                face[b] += n;
+                face[c] += n;
+            }
+        }
+        for (n, f) in out.iter_mut().zip(face) {
+            if bad(n) {
+                *n = if bad(&f) { Vec3::Y } else { f.normalize() };
+            }
+        }
+        std::borrow::Cow::Owned(out)
+    }
+
+    /// How many normals [`Self::sound_normals`] has to repair.
+    pub fn unusable_normals(&self) -> usize {
+        self.normals
+            .iter()
+            .filter(|n| !(n.is_finite() && n.length_squared() > 1e-12))
+            .count()
+    }
+}
+
 /// What one morph target of the model does to one mesh: offsets of the
 /// vertices it moves, in the mesh's bind pose (added before skinning). The
 /// GPU keeps them as half floats, so offsets of a few metres at most.
@@ -1950,6 +1997,26 @@ pub(crate) mod tests {
         );
         let mesh = &model.meshes[0];
         assert!(mesh.maps.normal.is_none() && mesh.maps.is_neutral());
+    }
+
+    #[test]
+    fn unusable_normals_are_repaired_from_the_faces() {
+        let mut model = morph_model(Vec::new(), &[]);
+        let mesh = &mut model.meshes[0];
+        assert!(matches!(
+            mesh.sound_normals(),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // A fourth vertex in no face, and two in the face without a normal.
+        mesh.positions.push(Vec3::ONE);
+        mesh.normals = vec![Vec3::ZERO, Vec3::splat(f32::NAN), Vec3::X, Vec3::ZERO];
+        assert_eq!(mesh.unusable_normals(), 3);
+        let sound = mesh.sound_normals();
+        assert_eq!(sound.len(), 4);
+        assert!((sound[0] - Vec3::Z).length() < 1e-6, "{:?}", sound[0]);
+        assert!((sound[1] - Vec3::Z).length() < 1e-6, "{:?}", sound[1]);
+        assert_eq!(sound[2], Vec3::X);
+        assert_eq!(sound[3], Vec3::Y);
     }
 
     /// One triangle on one joint with morph targets.

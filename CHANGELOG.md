@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.061 (2026-11-12)
+
+- Character models with a missing normal no longer make broken pixels: the shaders take a zero normal safely and the normals are repaired when a model is uploaded
+
 ## 0.060 (2026-11-12)
 
 - Very bright lamp glints no longer turn the picture dark: lamp highlights are capped like the sun's, stored brightness stays inside the image's range, and reflection probes drop broken values

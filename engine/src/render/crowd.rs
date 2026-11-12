@@ -127,7 +127,7 @@ fn vs_main(v: VsIn) -> VsOut {
     let n = apply_rows(skin, vec4<f32>(v.normal, 0.0));
     var out: VsOut;
     out.clip = u.view_proj * world;
-    out.world_n = normalize((model * vec4<f32>(n, 0.0)).xyz);
+    out.world_n = safe_normal((model * vec4<f32>(n, 0.0)).xyz);
     out.color = v.color;
     out.world_p = world.xyz;
     out.uv = v.uv;
@@ -137,7 +137,7 @@ fn vs_main(v: VsIn) -> VsOut {
 // The same shading as full characters, so a swap doesn't change the look.
 @fragment
 fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    var geo_n = normalize(in.world_n);
+    var geo_n = safe_normal(in.world_n);
     if (!front) {
         geo_n = -geo_n;
     }

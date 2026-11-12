@@ -258,6 +258,14 @@ fn safe_half(l: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
     let s = l + v;
     return s * inverseSqrt(max(dot(s, s), 1e-12));
 }
+// A unit normal from one that may be zero (a model vertex without a normal,
+// or two that cancel between vertices): normalize() of zero is NaN, which
+// would spread from that pixel. Zero becomes straight up.
+fn safe_normal(n: vec3<f32>) -> vec3<f32> {
+    let d = dot(n, n);
+    if !(d > 1e-12 && d < 1e30) { return vec3<f32>(0.0, 1.0, 0.0); }
+    return n * inverseSqrt(d);
+}
 const PI: f32 = 3.14159265;
 // Brightest a sun highlight gets (times the sun's colour); see pbr_shade.
 const SUN_SPEC_MAX: f32 = 120.0;
