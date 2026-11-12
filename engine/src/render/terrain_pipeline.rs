@@ -252,7 +252,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // A lantern at night should pool on the ground underfoot.
     lit += albedo * torch_light(in.world_p, n);
 
-    return vec4<f32>(haze(lit, in.world_p), 1.0);
+    return vec4<f32>(hdr_safe(haze(lit, in.world_p)), 1.0);
 }
 "#;
 

@@ -261,6 +261,21 @@ fn safe_half(l: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
 const PI: f32 = 3.14159265;
 // Brightest a sun highlight gets (times the sun's colour); see pbr_shade.
 const SUN_SPEC_MAX: f32 = 120.0;
+// Brightest colour the half-float scene image is given.
+const HDR_MAX: f32 = 60000.0;
+
+// A colour fit to store in the scene image: NaN or infinite (tested on the
+// bits) becomes black, and nothing is brighter than HDR_MAX, which a half
+// float would store as infinity. Every pass that writes lit colour ends
+// with this: reflections and probes read the image back, so one broken
+// pixel would otherwise spread.
+fn hdr_safe(c: vec3<f32>) -> vec3<f32> {
+    let e = bitcast<vec3<u32>>(c) & vec3<u32>(0x7f800000u);
+    if any(e == vec3<u32>(0x7f800000u)) {
+        return vec3<f32>(0.0);
+    }
+    return clamp(c, vec3<f32>(0.0), vec3<f32>(HDR_MAX));
+}
 
 struct SceneLight {
     dir: vec3<f32>,
@@ -967,6 +982,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // to every glossy surface, frame after frame.
         c = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
+    // The image holds half floats (largest 65504): anything brighter would
+    // be stored as infinity, which probes and reflections turn into NaN.
+    c = vec4<f32>(min(c.rgb, vec3<f32>(HDR_MAX)), c.a);
     if dbg(32u) {
         c.a = 1.0;
     }
@@ -1345,7 +1363,7 @@ fn fs_voxel(in: VsOut) -> @location(0) vec4<f32> {
     let vis = sun_visibility(p, n0, u.eye);
     let lit = shade_surface(base, n, p, roughness, in.surface.y, vis, wrap * wrap)
         + base * torch_light(p, n);
-    return vec4<f32>(haze(lit, p), 1.0);
+    return vec4<f32>(hdr_safe(haze(lit, p)), 1.0);
 }
 "#;
 

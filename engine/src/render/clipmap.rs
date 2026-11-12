@@ -532,13 +532,13 @@ fn fs_land(in: VsOut) -> @location(0) vec4<f32> {
         let lit = pbr_shade(ds.base, ds.n, v, light, ds.roughness, ds.metallic, vis, sun_diffuse)
             + ds.base * torch_light(in.world_p, ds.n)
             + lamp_light(ds.base, ds.n, v, in.world_p, ds.roughness, ds.metallic) + ds.emit;
-        return vec4(lit, 1.0);
+        return vec4(hdr_safe(lit), 1.0);
     }
     let ds = apply_decals(in.world_p, n, in.color.rgb, 0.92, 0.0, frame.eye);
     let lit = pbr_shade(ds.base, ds.n, v, light, ds.roughness, ds.metallic, vis, sun_diffuse)
         + ds.base * torch_light(in.world_p, ds.n)
         + lamp_light(ds.base, ds.n, v, in.world_p, ds.roughness, ds.metallic) + ds.emit;
-    return vec4(lit, 1.0);
+    return vec4(hdr_safe(lit), 1.0);
 }
 
 struct WaterVsOut {
@@ -580,7 +580,7 @@ fn fs_water(in: WaterVsOut) -> @location(0) vec4<f32> {
         + lamp_light(in.color.rgb, n, view, in.world_p, 0.1, 0.0);
     var alpha = in.color.a;
     alpha = mix(alpha, min(alpha + 0.18, 0.55), fresnel * 0.65);
-    return vec4(lit, alpha);
+    return vec4(hdr_safe(lit), alpha);
 }
 "#;
 
