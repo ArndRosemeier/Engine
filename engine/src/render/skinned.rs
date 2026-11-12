@@ -253,7 +253,7 @@ fn vs_main(v: VsIn) -> VsOut {
     let world = model * skinned_pos;
     var out: VsOut;
     out.clip = u.view_proj * world;
-    out.world_n = normalize((model * skinned_n).xyz);
+    out.world_n = safe_normal((model * skinned_n).xyz);
     out.color = v.color;
     out.world_p = world.xyz;
     out.uv = v.uv;
@@ -262,7 +262,7 @@ fn vs_main(v: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    var geo_n = normalize(in.world_n);
+    var geo_n = safe_normal(in.world_n);
     if (!front) {
         geo_n = -geo_n;
     }
@@ -462,11 +462,12 @@ impl GpuSkinnedMesh {
         material: &SkinMesh,
         morph_rows: Option<&[u32]>,
     ) -> Self {
+        let normals = mesh.sound_normals();
         let mut vertices = Vec::with_capacity(mesh.positions.len());
         for i in 0..mesh.positions.len() {
             vertices.push(SkinnedVertex {
                 position: mesh.positions[i].into(),
-                normal: mesh.normals[i].into(),
+                normal: normals[i].into(),
                 color: mesh.colors[i].into(),
                 uv: mesh.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
                 joints: mesh.joints[i],
