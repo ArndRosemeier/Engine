@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.066 (2026-11-12)
+
+- Saved static shadows survive a streamed mesh: a mesh getting new buffers no longer redraws all three cascades' static layers
+
 ## 0.065 (2026-11-12)
 
 - A job beside the frame (engine::parallel::beside_frame) and background_thread for a game's own workers; bounced light no longer rebuilds its voxels on every spawn

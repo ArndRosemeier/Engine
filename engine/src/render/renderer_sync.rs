@@ -707,7 +707,11 @@ impl Renderer {
         };
         self.mark_moved(id);
         if shadow_buffers_changed {
-            self.invalidate_shadow_bundles();
+            // New buffers, the same shadow or one that `mark_moved` above
+            // already reported: the cached static shadows stay. A streamed
+            // world brings such a mesh on most frames, and each used to
+            // throw away all three cascades' static layers.
+            self.drop_shadow_bundles();
         }
     }
 
@@ -730,13 +734,23 @@ impl Renderer {
 
     /// Mesh or instance buffers moved: record the bundles that bake them
     /// in anew (shadow views, and the terrain bundle, which is keyed by
-    /// its entities only).
-    pub(super) fn invalidate_shadow_bundles(&mut self) {
+    /// its entities only). The cached static shadow layers are pictures,
+    /// not buffers, and stay: what is drawn into them changing is told
+    /// apart per cascade (`mark_moved`, then the shadow scene's patch or
+    /// the caster hash).
+    pub(super) fn drop_shadow_bundles(&mut self) {
         for view in &mut self.shadow_bundles {
             *view = ShadowViewBundles::default();
         }
         self.terrain_bundle_ids.clear();
         self.terrain_bundle = None;
+    }
+
+    /// As [`Self::drop_shadow_bundles`], and the static shadow layers are
+    /// drawn again too: for changes that are not followed entity by entity
+    /// (batches built again, everything uploaded anew).
+    pub(super) fn invalidate_shadow_bundles(&mut self) {
+        self.drop_shadow_bundles();
         self.static_shadow_epoch += 1;
     }
 
