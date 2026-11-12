@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.065 (2026-11-12)
+
+- A job beside the frame (engine::parallel::beside_frame) and background_thread for a game's own workers; bounced light no longer rebuilds its voxels on every spawn
+
 ## 0.064 (2026-11-12)
 
 - Fewer slow frames: new ground is worked out on background threads, and a reflection probe that moved is redrawn a face a frame instead of all at once
