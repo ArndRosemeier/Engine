@@ -184,6 +184,11 @@ fn box_class(lo: vec3<f32>, hi: vec3<f32>) -> u32 {
     var mn = vec2<f32>(1e30);
     var mx = vec2<f32>(-1e30);
     var nearest = 0.0;
+    // Which of the view's six planes every corner is outside of. A box
+    // wholly outside one cannot show, wherever it is: beside the camera or
+    // behind it too, where the corners cannot be put on the screen.
+    var outside = 63u;
+    var reaches = false;
     for (var i = 0u; i < 8u; i++) {
         let corner = vec3<f32>(
             select(lo.x, hi.x, (i & 1u) != 0u),
@@ -191,16 +196,29 @@ fn box_class(lo: vec3<f32>, hi: vec3<f32>) -> u32 {
             select(lo.z, hi.z, (i & 4u) != 0u),
         );
         let clip = occ.view_proj * vec4<f32>(corner, 1.0);
+        var code = 0u;
+        if clip.x < -clip.w { code |= 1u; }
+        if clip.x > clip.w { code |= 2u; }
+        if clip.y < -clip.w { code |= 4u; }
+        if clip.y > clip.w { code |= 8u; }
+        // Reversed depth: 0 is the far plane, w the near one.
+        if clip.z < 0.0 { code |= 16u; }
+        if clip.z > clip.w { code |= 32u; }
+        outside &= code;
         // A corner at or behind the eye: the box reaches the camera.
         if clip.w <= 1e-5 {
-            return 1u;
+            reaches = true;
+            continue;
         }
         let ndc = clip.xyz / clip.w;
         mn = min(mn, ndc.xy);
         mx = max(mx, ndc.xy);
         nearest = max(nearest, ndc.z);
     }
-    if nearest >= 1.0 {
+    if outside != 0u {
+        return 2u;
+    }
+    if reaches || nearest >= 1.0 {
         return 1u;
     }
     // Wholly beyond the far plane or beside the screen: nothing can show.
@@ -1464,6 +1482,7 @@ impl CpuPyramid {
     pub(crate) fn box_may_show(&self, view_proj: Mat4, aabb: Aabb) -> bool {
         let (lo, hi) = (aabb.min, aabb.max);
         let (mut mn, mut mx, mut nearest) = (Vec2::splat(1e30), Vec2::splat(-1e30), 0.0f32);
+        let (mut outside, mut reaches) = (63u32, false);
         for i in 0..8u32 {
             let corner = Vec3::new(
                 if i & 1 != 0 { hi.x } else { lo.x },
@@ -1471,15 +1490,27 @@ impl CpuPyramid {
                 if i & 4 != 0 { hi.z } else { lo.z },
             );
             let clip = view_proj * corner.extend(1.0);
+            let mut code = 0;
+            code |= u32::from(clip.x < -clip.w);
+            code |= u32::from(clip.x > clip.w) << 1;
+            code |= u32::from(clip.y < -clip.w) << 2;
+            code |= u32::from(clip.y > clip.w) << 3;
+            code |= u32::from(clip.z < 0.0) << 4;
+            code |= u32::from(clip.z > clip.w) << 5;
+            outside &= code;
             if clip.w <= 1e-5 {
-                return true;
+                reaches = true;
+                continue;
             }
             let ndc = clip.truncate() / clip.w;
             mn = mn.min(ndc.truncate());
             mx = mx.max(ndc.truncate());
             nearest = nearest.max(ndc.z);
         }
-        if nearest >= 1.0 {
+        if outside != 0 {
+            return false;
+        }
+        if reaches || nearest >= 1.0 {
             return true;
         }
         if nearest <= 0.0 || mx.x < -1.0 || mn.x > 1.0 || mx.y < -1.0 || mn.y > 1.0 {
@@ -1682,9 +1713,17 @@ mod tests {
         // Around the eye: always kept.
         let around = cube(Vec3::new(0.0, 2.0, 0.0), Vec3::splat(3.0));
         assert!(pyramid.box_may_show(vp, around));
-        // Behind the eye the test keeps a box (the frustum test drops it).
+        // Behind the eye: outside the view.
         let behind = cube(Vec3::new(0.0, 2.0, 50.0), Vec3::splat(3.0));
-        assert!(pyramid.box_may_show(vp, behind));
+        assert!(!pyramid.box_may_show(vp, behind));
+        // A long block beside the camera, from behind the eye to far ahead
+        // but wholly left of the view (60 degrees upright, 16:9): its corners
+        // behind the eye must not keep it.
+        let beside = cube(Vec3::new(-400.0, 2.0, -20.0), Vec3::new(50.0, 2.0, 100.0));
+        assert!(!pyramid.box_may_show(vp, beside));
+        // The same block reaching into the view is kept.
+        let into = cube(Vec3::new(-40.0, 2.0, -20.0), Vec3::new(50.0, 2.0, 100.0));
+        assert!(pyramid.box_may_show(vp, into));
         // Over the 4 m wall: a balloon 30 m up shows.
         let balloon = cube(Vec3::new(0.0, 30.0, -100.0), Vec3::splat(3.0));
         assert!(pyramid.box_may_show(vp, balloon));

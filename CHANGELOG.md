@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.063 (2026-11-12)
+
+- Meshes beside or behind the camera are no longer drawn (the GPU view test kept every box with a corner behind the eye), and crowd people cast shadows only into the cascades they can reach
+
 ## 0.062 (2026-11-12)
 
 - Characters off screen or outside a shadow cascade are no longer drawn there, and the sky is shaded only where it shows

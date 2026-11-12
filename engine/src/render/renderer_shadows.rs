@@ -538,7 +538,7 @@ impl Renderer {
                 }
             }
             if slot < 3 && default_space {
-                this.crowd.draw_shadow(&mut pass, view_bind);
+                this.crowd.draw_shadow(&mut pass, view_bind, slot);
             }
             drop(pass);
             encoder.finish()

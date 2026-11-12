@@ -608,6 +608,22 @@ impl Renderer {
         let main_uniform_slot =
             self.write_scene_uniforms(world, &scene_camera, None, SceneUniformTarget::Main);
         self.main_uniform_slot = main_uniform_slot;
+        let gi_placement = world
+            .global_illumination()
+            .map(|gi| gi::GiPlacement::around(scene_camera.eye(), gi.probe_spacing_m()));
+        self.shadow.set_gi(gi_placement);
+        self.voxel.update(
+            &self.device,
+            &self.queue,
+            encoder,
+            world.voxel_terrain(),
+            scene_camera.eye(),
+        );
+        self.mark_gpu(encoder, Mark::VoxelDone);
+        self.cpu_spans.mark("world.voxel", &mut t);
+        self.write_shadows(world);
+        // After the shadows are placed: the crowd picks its casters by this
+        // frame's cascades.
         {
             let (device, queue, p) = (&self.device, &self.queue, &self.pipelines);
             let maps = &mut self.skinned_maps;
@@ -615,8 +631,11 @@ impl Renderer {
                 device,
                 queue,
                 world,
-                &self.frustum,
-                scene_camera.eye(),
+                &crowd::CrowdViews {
+                    frustum: self.frustum,
+                    cascades: self.shadow_vp.map(Frustum::from_view_projection),
+                    eye: scene_camera.eye(),
+                },
                 |m, material| {
                     GpuSkinnedMesh::upload(
                         device,
@@ -632,20 +651,7 @@ impl Renderer {
                 },
             );
         }
-        let gi_placement = world
-            .global_illumination()
-            .map(|gi| gi::GiPlacement::around(scene_camera.eye(), gi.probe_spacing_m()));
-        self.shadow.set_gi(gi_placement);
-        self.voxel.update(
-            &self.device,
-            &self.queue,
-            encoder,
-            world.voxel_terrain(),
-            scene_camera.eye(),
-        );
-        self.mark_gpu(encoder, Mark::VoxelDone);
-        self.cpu_spans.mark("world.crowd_voxel", &mut t);
-        self.write_shadows(world);
+        self.cpu_spans.mark("world.crowd", &mut t);
         self.begin_instance_cull_frame(world);
         if self.shadow.encode_horizon(encoder) {
             self.gpu_stats.terrain_horizon_rebuilds += 1;
