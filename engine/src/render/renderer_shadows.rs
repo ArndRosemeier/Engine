@@ -373,13 +373,18 @@ impl Renderer {
             let skinned = world
                 .animated_entities()
                 .filter(|(id, anim)| anim.space() == world.living_in() && !world.room_hidden(**id))
-                .filter(|(_, anim)| {
+                .filter(|(id, anim)| {
                     let t = anim.transform().w_axis.truncate();
-                    if slot < 3 {
-                        t.distance(focus) <= far + 16.0
-                    } else {
-                        frustum.intersects_sphere(t + glam::Vec3::Y, 1.5)
+                    // Not posed yet: nothing to draw this frame anyway.
+                    let Some(bounds) = self.gpu_skinned.get(*id).map(|g| g.bounds) else {
+                        return false;
+                    };
+                    if !frustum.intersects(bounds) {
+                        return false;
                     }
+                    // A caster outside a cascade's box cannot shade
+                    // anything inside it: the box runs along the light.
+                    slot >= 3 || t.distance(focus) <= far + 16.0
                 })
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>();

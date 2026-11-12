@@ -2,9 +2,10 @@
 
 use crate::anim::{AnimatedModel, SkinMesh, MAX_JOINTS, MAX_MORPH_TARGETS};
 use crate::mesh::InstanceRaw;
+use crate::render::frustum::Bounds;
 use crate::render::material::{GpuMaterial, MapCache, NeutralMaps, SharedMap};
 use bytemuck::{Pod, Zeroable};
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
@@ -513,7 +514,98 @@ impl GpuSkinnedMesh {
     }
 }
 
+/// How far a model's skin reaches from its joints, to bound a posed
+/// character for culling without touching its vertices.
+pub struct SkinReach {
+    /// Each joint's place in the bind pose (model space).
+    joints: Vec<Vec3>,
+    /// The farthest any vertex is from a joint that moves it, with a margin.
+    pad: f32,
+    /// A sphere around the bind pose, for a model without joints.
+    bind: Bounds,
+}
+
+impl SkinReach {
+    pub fn of(model: &AnimatedModel) -> Self {
+        let joints: Vec<Vec3> = model
+            .skeleton
+            .inverse_bind
+            .iter()
+            .map(|ib| ib.inverse().w_axis.truncate())
+            .map(|p| if p.is_finite() { p } else { Vec3::ZERO })
+            .collect();
+        let mut pad = 0.0f32;
+        let mut all = Vec::new();
+        for mesh in &model.meshes {
+            // A morph target can push a vertex further out.
+            let mut morph = vec![0.0f32; mesh.positions.len()];
+            for m in &mesh.morphs {
+                for (k, &v) in m.vertices.iter().enumerate() {
+                    if let (Some(slot), Some(d)) = (morph.get_mut(v as usize), m.positions.get(k)) {
+                        *slot += d.length();
+                    }
+                }
+            }
+            for (i, &p) in mesh.positions.iter().enumerate() {
+                all.push(p);
+                let (Some(js), Some(ws)) = (mesh.joints.get(i), mesh.weights.get(i)) else {
+                    continue;
+                };
+                for (j, w) in js.iter().zip(ws) {
+                    if *w > 0.0 {
+                        if let Some(at) = joints.get(*j as usize) {
+                            pad = pad.max(p.distance(*at) + morph[i]);
+                        }
+                    }
+                }
+            }
+        }
+        Self {
+            joints,
+            pad: pad * 1.1 + 0.05,
+            bind: Bounds::around(&all).unwrap_or(Bounds {
+                centre: Vec3::ZERO,
+                radius: 1.0,
+            }),
+        }
+    }
+
+    /// A sphere that holds the character in `pose` (skinning matrices, as
+    /// the GPU gets them) at `transform`. Every vertex is a blend of points
+    /// that each stay within `pad` of a posed joint, so the joints' box
+    /// grown by `pad` holds them all: also for a ragdoll or a lunge that
+    /// carries the body away from the entity's place.
+    pub fn bounds(&self, pose: &[Mat4], transform: Mat4) -> Bounds {
+        let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for (m, at) in pose.iter().zip(&self.joints) {
+            let p = m.transform_point3(*at);
+            if !p.is_finite() {
+                // Never cull on a broken pose.
+                return Bounds {
+                    centre: transform.w_axis.truncate(),
+                    radius: f32::MAX,
+                };
+            }
+            min = min.min(p);
+            max = max.max(p);
+        }
+        let local = if min.x > max.x {
+            self.bind
+        } else {
+            let centre = 0.5 * (min + max);
+            Bounds {
+                centre,
+                radius: (max - centre).length() + self.pad,
+            }
+        };
+        local.transformed(transform)
+    }
+}
+
 pub struct GpuSkinnedEntity {
+    /// A sphere around the posed character in the world, renewed with
+    /// every pose; what the views cull it by.
+    pub bounds: Bounds,
     pub meshes: Vec<GpuSkinnedMesh>,
     pub instance_buf: wgpu::Buffer,
     pub joint_buf: wgpu::Buffer,
@@ -558,6 +650,10 @@ impl GpuSkinnedEntity {
             ],
         });
         Self {
+            bounds: Bounds {
+                centre: transform.w_axis.truncate(),
+                radius: f32::MAX,
+            },
             meshes,
             instance_buf,
             joint_buf,
@@ -583,7 +679,32 @@ impl GpuSkinnedEntity {
 mod tests {
     use super::*;
     use crate::anim::MeshMorph;
-    use glam::Vec3;
+
+    #[test]
+    fn a_posed_character_stays_inside_its_bounds() {
+        // The one-triangle model on one joint: (0,0,0), (1,0,0), (0,1,0).
+        let model = crate::anim::tests::morph_model(Vec::new(), &[]);
+        let reach = SkinReach::of(&model);
+        let hold = |b: Bounds, p: Vec3| b.centre.distance(p) <= b.radius;
+        // In place, and carried 50 m off by the pose (a ragdoll thrown away
+        // from the entity's place): the bounds follow the joints.
+        for pose in [
+            Mat4::IDENTITY,
+            Mat4::from_translation(Vec3::new(50.0, 3.0, 0.0)),
+        ] {
+            let at = Mat4::from_translation(Vec3::new(10.0, 0.0, -4.0))
+                * Mat4::from_scale(Vec3::splat(2.0));
+            let b = reach.bounds(&[pose], at);
+            for v in &model.meshes[0].positions {
+                let world = at.transform_point3(pose.transform_point3(*v));
+                assert!(hold(b, world), "{world:?} outside {b:?}");
+            }
+            assert!(b.radius < 10.0, "tight enough to cull by: {b:?}");
+        }
+        // A broken pose is never culled.
+        let b = reach.bounds(&[Mat4::from_scale(Vec3::splat(f32::NAN))], Mat4::IDENTITY);
+        assert_eq!(b.radius, f32::MAX);
+    }
 
     fn half(bits: u16) -> f32 {
         let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };

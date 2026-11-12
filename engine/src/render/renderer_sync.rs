@@ -191,6 +191,7 @@ impl Renderer {
             .collect();
         self.gpu_skinned_meshes
             .retain(|k, _| live_models.contains(k));
+        self.skinned_reach.retain(|k, _| live_models.contains(k));
 
         // Every pose first, on the frame's threads when there are several
         // (each reads only its own animator), then the uploads in order.
@@ -224,8 +225,15 @@ impl Renderer {
         self.cpu_spans.mark("sync.poses", &mut t);
         for (i, (id, anim)) in animated.into_iter().enumerate() {
             let joints = std::mem::take(&mut self.poses[i]);
+            let key = Arc::as_ptr(anim.animator.model()) as usize;
+            let bounds = self
+                .skinned_reach
+                .entry(key)
+                .or_insert_with(|| Arc::new(skinned::SkinReach::of(anim.animator.model())))
+                .bounds(&joints, anim.transform);
             match self.gpu_skinned.get_mut(id) {
                 Some(gpu) => {
+                    gpu.bounds = bounds;
                     gpu.update(
                         &self.queue,
                         anim.transform,
@@ -235,7 +243,6 @@ impl Renderer {
                     self.gpu_stats.skinned_pose_writes += 1;
                 }
                 None => {
-                    let key = Arc::as_ptr(anim.animator.model()) as usize;
                     let (meshes, morphs) = if let Some(shared) = self.gpu_skinned_meshes.get(&key) {
                         shared.clone()
                     } else {
@@ -265,18 +272,17 @@ impl Renderer {
                         shared
                     };
                     self.gpu_stats.skinned_new += 1;
-                    self.gpu_skinned.insert(
-                        *id,
-                        GpuSkinnedEntity::from_shared_meshes(
-                            &self.device,
-                            &self.skinned.joint_bind_layout,
-                            meshes,
-                            &morphs,
-                            anim.transform,
-                            &joints,
-                            anim.animator.morph_weights(),
-                        ),
+                    let mut gpu = GpuSkinnedEntity::from_shared_meshes(
+                        &self.device,
+                        &self.skinned.joint_bind_layout,
+                        meshes,
+                        &morphs,
+                        anim.transform,
+                        &joints,
+                        anim.animator.morph_weights(),
                     );
+                    gpu.bounds = bounds;
+                    self.gpu_skinned.insert(*id, gpu);
                 }
             }
             self.poses[i] = joints;
