@@ -231,6 +231,15 @@ impl Bake {
     }
 }
 
+/// What a frame's crowds are picked by.
+pub struct CrowdViews {
+    /// The camera's view.
+    pub frustum: Frustum,
+    /// The sun cascades' boxes, as placed for this frame.
+    pub cascades: [Frustum; 3],
+    pub eye: Vec3,
+}
+
 struct CrowdDraw {
     key: (usize, usize, Vec<usize>),
     meshes: Vec<GpuSkinnedMesh>,
@@ -239,9 +248,10 @@ struct CrowdDraw {
     anim_bind: wgpu::BindGroup,
     instances: wgpu::Buffer,
     capacity: usize,
-    /// Instances seen by the camera, then those casting shadows.
+    /// Instances seen by the camera, then those casting shadows into each
+    /// sun cascade in turn (`shadow[c]` of them for cascade `c`).
     visible: u32,
-    shadow: u32,
+    shadow: [u32; 3],
 }
 
 pub(crate) struct CrowdGpu {
@@ -394,10 +404,14 @@ impl CrowdGpu {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         world: &World,
-        frustum: &Frustum,
-        eye: Vec3,
+        views: &CrowdViews,
         mut upload: impl FnMut(&SkinMesh, &SkinMesh) -> GpuSkinnedMesh,
     ) {
+        let CrowdViews {
+            frustum,
+            cascades,
+            eye,
+        } = *views;
         let live: Vec<u32> = world.crowds().map(|(id, _)| id.0).collect();
         self.draws.retain(|id, _| live.contains(id));
         for (id, crowd) in world.crowds() {
@@ -467,14 +481,16 @@ impl CrowdGpu {
                         instances: instance_buffer(device, capacity),
                         capacity,
                         visible: 0,
-                        shadow: 0,
+                        shadow: [0; 3],
                     },
                 );
             }
             let draw = self.draws.get_mut(&id.0).expect("just made");
             self.scratch.clear();
             let p = &crowd.profile;
-            let mut shadow = Vec::new();
+            // Per cascade: a caster outside a cascade's box cannot shade
+            // anything inside it (the box runs along the light).
+            let mut shadow: [Vec<CrowdInstanceRaw>; 3] = Default::default();
             for a in crowd.agents.iter().flatten().filter(|a| a.near.is_none()) {
                 let at = a.place.position;
                 let d = at.distance(eye);
@@ -483,16 +499,23 @@ impl CrowdGpu {
                 }
                 let raw = || draw.bake.raw(crowd, &CrowdInstance::of(crowd, a));
                 let s = a.place.scale.max(0.01);
-                if frustum.intersects_sphere(at + Vec3::Y * 0.9 * s, 1.3 * s) {
+                let (centre, radius) = (at + Vec3::Y * 0.9 * s, 1.3 * s);
+                if frustum.intersects_sphere(centre, radius) {
                     self.scratch.push(raw());
                 }
                 if d <= p.shadow_m {
-                    shadow.push(raw());
+                    for (list, cascade) in shadow.iter_mut().zip(cascades) {
+                        if cascade.intersects_sphere(centre, radius) {
+                            list.push(raw());
+                        }
+                    }
                 }
             }
             draw.visible = self.scratch.len() as u32;
-            draw.shadow = shadow.len() as u32;
-            self.scratch.extend(shadow);
+            draw.shadow = [0, 1, 2].map(|c| shadow[c].len() as u32);
+            for list in shadow {
+                self.scratch.extend(list);
+            }
             if self.scratch.len() > draw.capacity {
                 draw.capacity = self.scratch.len().next_power_of_two();
                 draw.instances = instance_buffer(device, draw.capacity);
@@ -524,17 +547,23 @@ impl CrowdGpu {
         }
     }
 
-    /// Into a sun cascade (group 0 already holds its view).
-    pub fn draw_shadow(&self, pass: &mut wgpu::RenderPass<'_>, view_bind: &wgpu::BindGroup) {
-        if self.draws.values().all(|d| d.shadow == 0) {
+    /// Into sun cascade `cascade` (group 0 already holds its view).
+    pub fn draw_shadow(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        view_bind: &wgpu::BindGroup,
+        cascade: usize,
+    ) {
+        if self.draws.values().all(|d| d.shadow[cascade] == 0) {
             return;
         }
         pass.set_pipeline(&self.shadow);
         pass.set_bind_group(0, view_bind, &[]);
-        for d in self.draws.values().filter(|d| d.shadow > 0) {
+        for d in self.draws.values().filter(|d| d.shadow[cascade] > 0) {
             pass.set_bind_group(1, &d.anim_bind, &[]);
             pass.set_vertex_buffer(1, d.instances.slice(..));
-            let range = d.visible..d.visible + d.shadow;
+            let start = d.visible + d.shadow[..cascade].iter().sum::<u32>();
+            let range = start..start + d.shadow[cascade];
             for mesh in &d.meshes {
                 pass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
                 pass.set_index_buffer(mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
