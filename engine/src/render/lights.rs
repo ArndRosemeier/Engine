@@ -378,7 +378,10 @@ fn lamp_light(base: vec3<f32>, n: vec3<f32>, v: vec3<f32>, p: vec3<f32>,
         let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
         let g = (nv / (nv * (1.0 - k) + k)) * (nl / (nl * (1.0 - k) + k));
         let f = f0 + (vec3<f32>(1.0) - f0) * pow(max(1.0 - lh, 0.0), 5.0);
-        let spec = dist * g * f / (4.0 * nv) * PI;
+        // Capped like the sun's highlight (see pbr_shade): a point lamp's
+        // mirror image on smooth paint or glass has no upper bound, and a
+        // value past the half-float range is stored as infinity.
+        let spec = min(dist * g * f / (4.0 * nv) * PI, vec3<f32>(SUN_SPEC_MAX));
         sum += (diffuse_color * nl + spec) * lamp.color.rgb * a;
     }
     return sum;

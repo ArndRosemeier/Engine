@@ -255,7 +255,11 @@ fn vs_full(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 @fragment
 fn fs_capture(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let uv = frag.xy / p.out_size;
-    let color = textureSampleLevel(scene, samp, uv, 0.0).rgb;
+    let raw = textureSampleLevel(scene, samp, uv, 0.0).rgb;
+    let raw_e = bitcast<vec3<u32>>(raw) & vec3<u32>(0x7f800000u);
+    // Infinity (half-float overflow) or NaN reads as black: the cap below
+    // would turn infinity into NaN.
+    let color = select(max(raw, vec3<f32>(0.0)), vec3<f32>(0.0), any(raw_e == vec3<u32>(0x7f800000u)));
     let px = clamp(vec2<i32>(uv * p.full_size), vec2<i32>(0), vec2<i32>(p.full_size) - vec2<i32>(1));
     let d = textureLoad(depth_tex, px, 0);
     // Reversed-Z: the sky is at 0, beyond everything.
@@ -303,13 +307,25 @@ fn face_dir(face: u32, uv: vec2<f32>) -> vec3<f32> {
     }
 }
 
+// Non-finite colours (a half-float overflow stored as infinity, or NaN)
+// read as black, and one bright texel may not outweigh the rest: a probe
+// keeps what it captured and every surface near it reads the result.
+fn probe_clean(c: vec3<f32>) -> vec3<f32> {
+    let e = bitcast<vec3<u32>>(c) & vec3<u32>(0x7f800000u);
+    if any(e == vec3<u32>(0x7f800000u)) {
+        return vec3<f32>(0.0);
+    }
+    let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return max(c, vec3<f32>(0.0)) * min(1.0, 64.0 / max(lum, 1e-4));
+}
+
 // A captured face, mirrored left to right: the camera saw it from inside.
 @fragment
 fn fs_copy(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let size = i32(f.size);
     let px = vec2<i32>(frag.xy);
     let c = textureLoad(src_face, vec2<i32>(size - 1 - px.x, px.y), 0);
-    return vec4<f32>(c.rgb, 1.0);
+    return vec4<f32>(probe_clean(c.rgb), 1.0);
 }
 
 // One mip: the mip above, blurred over a cone.
@@ -1052,6 +1068,13 @@ impl super::shadow::ReflectResources {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_capture_and_filter_shaders_are_valid_wgsl() {
+        for depth in ["texture_depth_2d", "texture_depth_multisampled_2d"] {
+            crate::render::assert_valid_wgsl(&super::CAPTURE_WGSL.replace("DEPTH_TYPE", depth));
+        }
+        crate::render::assert_valid_wgsl(super::FILTER_WGSL);
+    }
     use super::*;
 
     /// The capture cameras, mirrored, must give the cube map's layout: the

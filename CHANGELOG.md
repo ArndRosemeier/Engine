@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.060 (2026-11-12)
+
+- Very bright lamp glints no longer turn the picture dark: lamp highlights are capped like the sun's, stored brightness stays inside the image's range, and reflection probes drop broken values
+
 ## 0.059 (2026-11-11)
 
 - Portals: glass and see-through materials in front of a doorway show over its view, and a portal's view draws only what fits through the opening (a big city drew everything again, unculled)

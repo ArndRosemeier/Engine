@@ -261,6 +261,8 @@ fn safe_half(l: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
 const PI: f32 = 3.14159265;
 // Brightest a sun highlight gets (times the sun's colour); see pbr_shade.
 const SUN_SPEC_MAX: f32 = 120.0;
+// Brightest colour the half-float scene image is given.
+const HDR_MAX: f32 = 60000.0;
 
 struct SceneLight {
     dir: vec3<f32>,
@@ -967,6 +969,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // to every glossy surface, frame after frame.
         c = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
+    // The image holds half floats (largest 65504): anything brighter would
+    // be stored as infinity, which probes and reflections turn into NaN.
+    c = vec4<f32>(min(c.rgb, vec3<f32>(HDR_MAX)), c.a);
     if dbg(32u) {
         c.a = 1.0;
     }
