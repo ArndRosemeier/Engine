@@ -165,6 +165,7 @@ impl Renderer {
             self.gpu_meshes
                 .retain(|id, _| world.entity(*id).is_ok_and(|e| !e.has_cpu_mesh()));
             self.gpu_instance_batches.clear();
+            self.gpu_batch_sources_stale = true;
             self.synced_render_epoch = u64::MAX;
             self.draw_source_epoch = u64::MAX;
             self.terrain_bundle_ids.clear();

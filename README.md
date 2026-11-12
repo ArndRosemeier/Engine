@@ -836,6 +836,7 @@ cargo run --release -p <name>
 | `particles` | A camp fire, a forge throwing sparks and explosions that dig craters and blow towers apart into dust and chunks (click: explosion, 1/2/3: sparks, dust, debris, F: fire) |
 | `audio` | Sound: a camp fire crackling from its direction, a cave and a stone hall that echo differently, a bell muffled by walls, explosions, and music in layers (click: explosion, 1-4: music intensity, M: music, K: knock, F: fire) |
 | `vfx_showcase` | Particles, ribbons and spell effects |
+| `batch_churn` | Instance batches that change, vanish and come back (a city size switch) |
 | `procedural_caves`, `populate_world`, `gpu_field_demo`, `ui_modal` | Caves, prop scattering, GPU density fields, UI |
 
 `run_examples.py` (or `run_examples.bat` on Windows) opens a launcher with a button per example, plus ready-made variants (texture families, the Actors character, sunset, storm...). Add new variants to its `VARIANTS` list.

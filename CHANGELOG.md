@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.067 (2026-11-12)
+
+- Switching city size no longer crashes: instance batches of despawned things are dropped (new batch_churn example checks it)
+
 ## 0.066 (2026-11-12)
 
 - Saved static shadows survive a streamed mesh: a mesh getting new buffers no longer redraws all three cascades' static layers
