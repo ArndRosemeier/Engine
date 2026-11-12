@@ -934,6 +934,8 @@ pub struct Renderer {
     /// Vertex/index buffers keyed by `Arc::as_ptr` of the shared [`AnimatedModel`].
     /// Per model: its uploaded meshes and morph table, shared by every entity of it.
     gpu_skinned_meshes: HashMap<usize, (Vec<GpuSkinnedMesh>, wgpu::Buffer)>,
+    /// Per model (same key): how far its skin reaches from its joints.
+    skinned_reach: HashMap<usize, Arc<skinned::SkinReach>>,
     /// Characters' maps, one GPU copy per content (see [`material::MapCache`]).
     skinned_maps: material::MapCache,
     /// Keeps the GPU mip generator registered for this device.

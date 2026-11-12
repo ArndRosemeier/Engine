@@ -738,6 +738,10 @@ impl Renderer {
             let Some(gpu) = self.gpu_skinned.get(id) else {
                 continue;
             };
+            // The same test as the world pass, which only tests this depth.
+            if !self.frustum.intersects(gpu.bounds) {
+                continue;
+            }
             pass.set_bind_group(1, &gpu.joint_bind, &[]);
             pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
             for mesh in &gpu.meshes {

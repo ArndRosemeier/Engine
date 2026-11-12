@@ -258,6 +258,10 @@ impl Renderer {
             let Some(gpu) = self.gpu_skinned.get(id) else {
                 continue;
             };
+            // Off screen in the top-level view (portal views look elsewhere).
+            if stamp && !self.frustum.intersects(gpu.bounds) {
+                continue;
+            }
             pass.set_bind_group(1, &gpu.joint_bind, &[]);
             pass.set_vertex_buffer(1, gpu.instance_buf.slice(..));
             for mesh in &gpu.meshes {

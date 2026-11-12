@@ -469,6 +469,7 @@ impl Renderer {
             gpu_batch_source_scratch: Vec::new(),
             gpu_skinned: HashMap::new(),
             gpu_skinned_meshes: HashMap::new(),
+            skinned_reach: HashMap::new(),
             skinned_maps: material::MapCache::default(),
             _mipgen: mipgen,
             gpu_textures: HashMap::new(),
