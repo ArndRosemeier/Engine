@@ -112,8 +112,8 @@ pub(crate) struct SourceGather {
 }
 
 impl SourceGather {
-    /// The block, exactly as [`Volume::gather`] gives it while no chunk is
-    /// loaded there.
+    /// The block as the source has it: exactly what [`Volume::gather`]
+    /// gives while no chunk is loaded there.
     pub(crate) fn run(&self) -> Vec<f32> {
         let n = self.n;
         let mut filled = Vec::new();
@@ -1093,30 +1093,76 @@ impl Volume {
         }
     }
 
-    /// [`Self::gather`] of a block that holds no loaded chunk, as a job that
-    /// needs only the source: it can run on another thread while the volume
-    /// goes on changing. `None` when a chunk is loaded there (then the
-    /// block has to be read from the volume itself) or there is no source.
+    /// The slow part of [`Self::gather`] for a block not wholly loaded, as
+    /// a job that needs only the source: it can run on another thread while
+    /// the volume goes on changing. Its result is the block as the source
+    /// has it; [`Self::overlay_loaded`] then puts in what is loaded.
+    /// `None` when every chunk of the block is loaded (then `gather` is a
+    /// plain copy) or there is no source.
     pub(crate) fn source_gather(&self, origin: IVec3, stride: i32, n: i32) -> Option<SourceGather> {
         let source = self.source.as_ref()?;
         let cs = IVec3::splat(CHUNK_SIZE);
         let lo = origin.div_euclid(cs);
         let hi = (origin + IVec3::splat((n - 1) * stride)).div_euclid(cs);
-        for z in lo.z..=hi.z {
+        let mut any_missing = false;
+        'scan: for z in lo.z..=hi.z {
             for y in lo.y..=hi.y {
                 for x in lo.x..=hi.x {
-                    if self.chunks.contains_key(&IVec3::new(x, y, z)) {
-                        return None;
+                    if !self.chunks.contains_key(&IVec3::new(x, y, z)) {
+                        any_missing = true;
+                        break 'scan;
                     }
                 }
             }
         }
-        Some(SourceGather {
+        any_missing.then(|| SourceGather {
             source: source.clone(),
             origin: origin.as_vec3() * self.voxel_size,
             step: stride as f32 * self.voxel_size,
             n: n as usize,
         })
+    }
+
+    /// Put the loaded chunks' corners into `out`, a block as
+    /// [`SourceGather::run`] gave it (same layout as [`Self::gather`]):
+    /// after this it is what `gather` gives now. Whether anything changed
+    /// (a loaded chunk that is only a copy of the source changes nothing).
+    pub(crate) fn overlay_loaded(
+        &self,
+        origin: IVec3,
+        stride: i32,
+        n: i32,
+        out: &mut [f32],
+    ) -> bool {
+        let cs = IVec3::splat(CHUNK_SIZE);
+        let mut changed = false;
+        let mut cached_key = IVec3::splat(i32::MIN);
+        let mut cached: Option<&Chunk> = None;
+        let mut i = 0;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let g = origin + IVec3::new(x, y, z) * stride;
+                    let key = g.div_euclid(cs);
+                    if key != cached_key {
+                        cached_key = key;
+                        cached = self.chunks.get(&key);
+                    }
+                    if let Some(c) = cached {
+                        let l = g - key * cs;
+                        let k = Chunk::index(l.x, l.y, l.z);
+                        let v =
+                            pack_material(c.samples[k], c.materials.as_ref().map_or(0, |m| m[k]));
+                        if out[i].to_bits() != v.to_bits() {
+                            out[i] = v;
+                            changed = true;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+        }
+        changed
     }
 
     /// Lower-detail extraction: sample every `stride` cells (LOD helper).

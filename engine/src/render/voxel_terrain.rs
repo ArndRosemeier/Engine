@@ -1114,9 +1114,10 @@ impl VoxelTerrainGpu {
         }
         work.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
 
-        // Regions with no loaded chunk come from the volume's source alone
-        // (new ground coming into view, the usual case): those are sampled
-        // on background threads and taken up in the frame they arrive, so a
+        // Regions not wholly loaded need the volume's source (new ground
+        // coming into view, the usual case; a height-field source takes
+        // some 20 ms a region): the source's part is sampled on background
+        // threads and taken up in the frame they arrive, so a
         // slow source never holds a frame. Order is explicit: a result is
         // used only if this frame still asks for exactly that region with
         // those seams from that source; anything else is dropped and asked
@@ -1157,7 +1158,15 @@ impl VoxelTerrainGpu {
             if let Some(done) = arrived.remove(&node) {
                 if done.prepared.faces == faces && done.gather.same(&gather) {
                     if prepared.len() < JOBS_PER_FRAME {
-                        prepared.push(done.prepared);
+                        // What is loaded there now (edits; a copy of the
+                        // source changes nothing) goes over the source's
+                        // values, here, so it is the volume as it is now.
+                        let mut p = done.prepared;
+                        if volume.overlay_loaded(origin, s, GRID, &mut p.samples) {
+                            (p.vertex_count, p.index_count, p.cells) =
+                                count_surface(&p.samples, faces);
+                        }
+                        prepared.push(p);
                     } else {
                         // Over this frame's share: next frame.
                         arrived.insert(node, done);
@@ -1206,7 +1215,7 @@ impl VoxelTerrainGpu {
         let mut work = direct;
         work.truncate(JOBS_PER_FRAME.saturating_sub(prepared.len()));
 
-        // The rest (edited ground, read from the volume) is sampled here in
+        // The rest (wholly loaded ground, a plain copy) is read here in
         // rounds of one job per core until the frame's budget is spent, so
         // flying fast never stalls a frame on meshing.
         let started = std::time::Instant::now();
