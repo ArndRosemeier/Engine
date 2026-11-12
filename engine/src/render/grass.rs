@@ -287,7 +287,7 @@ fn fs_grass(in: GrassOut, @builtin(front_facing) front: bool) -> @location(0) ve
     // Lamps light the blades from either side.
     lit += lamp_light(albedo, n, v, in.world_p, 0.75, 0.0)
         + lamp_light(albedo, -n, v, in.world_p, 0.75, 0.0) * 0.6;
-    return vec4<f32>(lit, 1.0);
+    return vec4<f32>(hdr_safe(lit), 1.0);
 }
 "#;
 

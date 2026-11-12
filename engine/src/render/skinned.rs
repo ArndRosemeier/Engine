@@ -284,7 +284,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
             mat.metallic * orm.z, vis, sun_diffuse, orm.x)
         + base.rgb * torch_light(in.world_p, n)
         + material_emission(in.uv);
-    return vec4<f32>(haze(lit, in.world_p), base.a);
+    return vec4<f32>(hdr_safe(haze(lit, in.world_p)), base.a);
 }
 
 // Depth prepass: only texels the shaded pass covers on every sample, so
