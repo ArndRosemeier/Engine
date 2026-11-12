@@ -909,7 +909,8 @@ impl Renderer {
             });
         }
 
-        if self.gpu_batch_source_scratch == self.gpu_batch_sources {
+        if !self.gpu_batch_sources_stale && self.gpu_batch_source_scratch == self.gpu_batch_sources
+        {
             self.gpu_stats.instance_batches = u32::try_from(self.gpu_instance_batches.len())
                 .expect("GPU instance batch count exceeds u32");
             return;
@@ -940,6 +941,7 @@ impl Renderer {
             &mut self.gpu_batch_sources,
             &mut self.gpu_batch_source_scratch,
         );
+        self.gpu_batch_sources_stale = false;
         self.gpu_stats.instance_batches = u32::try_from(self.gpu_instance_batches.len())
             .expect("GPU instance batch count exceeds u32");
     }
@@ -971,8 +973,10 @@ impl Renderer {
         if self.build_batches(world, builds) {
             self.invalidate_shadow_bundles();
         }
-        // The list a full sync compares with is out of date now.
-        self.gpu_batch_sources.clear();
+        // The list a full sync compares with is out of date now. (Emptying
+        // it would not do: a world that then lost every instanced entity
+        // also gives an empty list, and its batches would never be dropped.)
+        self.gpu_batch_sources_stale = true;
         true
     }
 

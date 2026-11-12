@@ -46,6 +46,7 @@ members = [
     "examples/open_world",
     "examples/particles",
     "examples/audio",
+    "examples/batch_churn",
 ]
 default-members = ["engine"]
 

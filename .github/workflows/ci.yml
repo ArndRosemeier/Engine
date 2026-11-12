@@ -93,6 +93,9 @@ jobs:
       - name: materials (custom WGSL materials)
         run: python3 tools/verify.py materials --frames 60 --width 640 --height 360
 
+      - name: batch_churn (Instance batches that change, vanish and come back (a city s)
+        run: python3 tools/verify.py batch_churn --frames 90 --width 640 --height 360
+
       - name: Keep the reports and screenshots
         if: always()
         uses: actions/upload-artifact@v4

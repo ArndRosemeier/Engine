@@ -929,6 +929,9 @@ pub struct Renderer {
     /// GPU-mode instance buffers, one per prototype instead of one per spatial bin.
     gpu_instance_batches: HashMap<EntityId, GpuInstanceBatch>,
     gpu_batch_sources: Vec<BatchSourceState>,
+    /// `gpu_batch_sources` no longer describes the batches (a touch updated
+    /// some in place): the next full sync must compare nothing and rebuild.
+    gpu_batch_sources_stale: bool,
     gpu_batch_source_scratch: Vec<BatchSourceState>,
     gpu_skinned: HashMap<EntityId, GpuSkinnedEntity>,
     /// Vertex/index buffers keyed by `Arc::as_ptr` of the shared [`AnimatedModel`].

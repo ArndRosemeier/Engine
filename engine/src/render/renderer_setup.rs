@@ -466,6 +466,7 @@ impl Renderer {
             bindless,
             gpu_instance_batches: HashMap::new(),
             gpu_batch_sources: Vec::new(),
+            gpu_batch_sources_stale: false,
             gpu_batch_source_scratch: Vec::new(),
             gpu_skinned: HashMap::new(),
             gpu_skinned_meshes: HashMap::new(),
