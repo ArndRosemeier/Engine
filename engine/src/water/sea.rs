@@ -132,7 +132,7 @@ impl Water {
 
     pub(crate) fn rebuild_boundary(&mut self) {
         self.boundary.clear();
-        self.boundary_rev += 1;
+        self.boundary_rev = super::sim::next_rev();
         let Some(sea) = self.sea.as_ref() else {
             return;
         };

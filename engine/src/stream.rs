@@ -1464,6 +1464,20 @@ impl crate::water::WaterTerrain for GenShape<'_> {
     fn density(&self, p: Vec3) -> f32 {
         self.gen.density(p, self.gen.height(p.x, p.z))
     }
+
+    /// The ground height is asked for once per column, not once per sample
+    /// up it: a generator's height can be costly (a whole planet's relief),
+    /// and a window has a hundred thousand columns.
+    fn column(&self, x: f32, z: f32, y_min: f32, y_max: f32, out: &mut Vec<crate::water::Span>) {
+        let ground = self.gen.height(x, z);
+        crate::water::scan_column(
+            |y| self.gen.density(Vec3::new(x, y, z), ground),
+            y_min,
+            y_max,
+            self.scan_step(),
+            out,
+        );
+    }
 }
 
 fn water_height_range(gen: &dyn WorldGenerator, min: Vec2, max: Vec2) -> (f32, f32) {
