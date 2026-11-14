@@ -452,6 +452,18 @@ impl World {
         self.pointer_lock = locked;
     }
 
+    /// Ask for the window to be borderless fullscreen (`true`) or windowed
+    /// again. Applied by the window loop after the frame; a game usually
+    /// flips it on Alt+Enter: `world.set_fullscreen(!world.fullscreen())`.
+    /// Headless runs only remember it.
+    pub fn set_fullscreen(&mut self, on: bool) {
+        self.fullscreen = on;
+    }
+
+    pub fn fullscreen(&self) -> bool {
+        self.fullscreen
+    }
+
     pub fn pointer_lock(&self) -> bool {
         self.pointer_lock
     }

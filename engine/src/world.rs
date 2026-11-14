@@ -869,6 +869,8 @@ pub struct World {
     pub(crate) default_water_material: Option<WaterMaterialId>,
     /// Whether the game wants the pointer pinned for mouse-look.
     pointer_lock: bool,
+    /// Whether the game wants the window borderless fullscreen.
+    fullscreen: bool,
     /// Settings bind-listen: Esc cancels listen only (no close / unlock / quit).
     bind_listen: bool,
     /// Seconds since start, for animated materials.
@@ -1078,6 +1080,7 @@ impl Default for World {
             default_terrain_material: None,
             default_water_material: None,
             pointer_lock: false,
+            fullscreen: false,
             bind_listen: false,
             time: 0.0,
             view_distance: Camera::default().far(),

@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.068 (2026-11-14)
+
+- World::set_fullscreen / fullscreen: a game can toggle borderless fullscreen (e.g. on Alt+Enter)
+
 ## 0.067 (2026-11-12)
 
 - Switching city size no longer crashes: instance batches of despawned things are dropped (new batch_churn example checks it)

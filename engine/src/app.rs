@@ -56,6 +56,8 @@ struct App {
     fps_accum_s: f32,
     fps_frames: u32,
     pointer_locked: bool,
+    /// The window is borderless fullscreen right now.
+    fullscreen: bool,
     hitch_ms: f32,
     /// This frame's `tick.*` timings, kept for the hitch log.
     tick_spans: Vec<(&'static str, f32)>,
@@ -134,6 +136,7 @@ impl App {
             fps_accum_s: 0.0,
             fps_frames: 0,
             pointer_locked: false,
+            fullscreen: false,
             hitch_ms: hitch_threshold_ms()?,
             tick_spans: Vec::new(),
             cpu_trace: crate::cpu_trace::CpuTrace::from_env(),
@@ -178,6 +181,16 @@ impl App {
         }
         window.set_cursor_visible(!wanted);
         self.pointer_locked = wanted;
+    }
+
+    /// Match the window to `world.set_fullscreen`: borderless on the
+    /// current monitor, so the game keeps its resolution handling.
+    fn apply_fullscreen(&mut self, window: &Window, wanted: bool) {
+        if wanted == self.fullscreen {
+            return;
+        }
+        window.set_fullscreen(wanted.then(|| winit::window::Fullscreen::Borderless(None)));
+        self.fullscreen = wanted;
     }
 
     fn window_inner_size(
@@ -419,6 +432,8 @@ impl App {
 
         let wants_lock = self.world.pointer_lock();
         self.apply_pointer_lock(&window, wants_lock);
+        let wants_fullscreen = self.world.fullscreen();
+        self.apply_fullscreen(&window, wants_fullscreen);
 
         let anim_t = Instant::now();
         if self.fatal_error.is_none() {
