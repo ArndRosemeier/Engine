@@ -16,8 +16,8 @@ render loop.
 - **Big worlds:** grass blades grown on the GPU around the camera, per-instance LOD with dithered cross-fades, GPU frustum
   culling, an endless GPU clipmap terrain, chunk streaming, a floating origin
   for kilometre-scale coordinates, portals between separate spaces.
-- **Generated assets:** ten tree species and shrubs that sway in the wind and
-  turn with the seasons, four rock shapes, 61 tileable PBR texture layers
+- **Generated assets:** fourteen tree species and shrubs that sway in the wind,
+  turn with the seasons and can stand in blossom of any colour, four rock shapes, 61 tileable PBR texture layers
   (ground, cliffs, facades, roofs, paving, medieval), procedural surface
   materials, caves and landscapes.
 - **Destruction:** smooth voxel terrain you can dig into (meshed on the GPU),
@@ -215,7 +215,11 @@ instead of the camera; `stream.stats()` counts what is loaded;
 snowy peaks: return a `GroundCover { green, snow_line }` from the generator's
 `ground_cover(x, z)` (`green` 1 is grass, 0 bare ground in the colour set with
 `t.with_dry_ground(rgb(196, 170, 120))`; snow lies above `snow_line`), and
-near and far ground both show it. Coordinates stay
+near and far ground both show it. `t.with_flowers(1.0)` grows wildflower
+fields on the grass (a wash of scarlet, gold, violet, pink or cream from afar,
+dots close by; `flower_field(x, z)` gives the same amount and colour on the CPU,
+so a game can stand real flowers in them), and `t.with_painted_rock(1.0)` bands
+the rock's level beds red, ochre and cream. Coordinates stay
 plain metres (fine for worlds tens of kilometres across). See
 `examples/open_world`.
 
@@ -784,7 +788,7 @@ driver compile. Nothing to call: it is automatic.
 
 | Module | Makes |
 |---|---|
-| `vegetation` | `tree_model(species, variant)`, `shrub_model(variant)`: three LOD meshes, wind, seasons |
+| `vegetation` | `tree_model(species, variant)`, `shrub_model(variant)`: three LOD meshes, wind, seasons. Fourteen species (`TreeSpecies::ALL`: street and forest trees, palm, and umbrella-crowned `Acacia`, gnarled `Juniper`, weeping `Willow`, bottle-trunked `Baobab`). `tree_model_in_bloom(species, variant, Bloom::new(rgb(150, 90, 230), 1.0))` colours the crown (blossom, or leaves of another world), near and far, all year |
 | `rocks` | `rock_model(shape, seed)`: boulders, blocks, slabs, spires with LOD |
 | `texgen` | `texture_layer(layer)`: 61 tileable albedo/normal/roughness layers |
 | `scatter` | `Scatter`: deterministic places with clumping, ground snapping, filters |

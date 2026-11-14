@@ -12,7 +12,8 @@
 //!
 //! `ENGINE_AUTOFLY=1` flies on its own; `ENGINE_OPEN_WORLD_SPEED=300` sets
 //! the speed (m/s) for that; `ENGINE_SKY_HOUR=19` sets the time of day;
-//! `ENGINE_OPEN_WORLD_SEED=7` another world. `ENGINE_OPEN_WORLD_BENCH=30`
+//! `ENGINE_OPEN_WORLD_SEED=7` another world; `ENGINE_OPEN_WORLD_COLOUR=1`
+//! grows wildflowers and paints the rock. `ENGINE_OPEN_WORLD_BENCH=30`
 //! records frame times for 30 seconds (best with `ENGINE_AUTOFLY=1`), prints
 //! them and quits.
 use engine::prelude::*;
@@ -280,6 +281,8 @@ fn main() -> EngineResult<()> {
     let seed = setting("ENGINE_OPEN_WORLD_SEED")
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(3);
+    // Wildflower fields on the grass and rock banded red, ochre and cream.
+    let colourful = setting("ENGINE_OPEN_WORLD_COLOUR").is_some();
     let hour = setting("ENGINE_SKY_HOUR")
         .and_then(|h| h.parse::<f32>().ok())
         .unwrap_or(15.5);
@@ -327,8 +330,15 @@ fn main() -> EngineResult<()> {
                 peaks: Noise::new(seed + 2),
                 models: models(world)?,
             };
-            let stream = WorldStream::new(generator, StreamSettings::default())
-                .with_terrain(|t| t.with_beach(2.5));
+            let stream =
+                WorldStream::new(generator, StreamSettings::default()).with_terrain(move |t| {
+                    let t = t.with_beach(2.5);
+                    if colourful {
+                        t.with_flowers(1.0).with_painted_rock(1.0)
+                    } else {
+                        t
+                    }
+                });
             world.set_stream(Some(stream))?;
             world.look_first_person(camera.position, camera.yaw_deg, camera.pitch_deg);
             let t = std::time::Instant::now();

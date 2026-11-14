@@ -15,10 +15,18 @@ pub enum TreeSpecies {
     Cypress,
     Chestnut,
     Ginkgo,
+    /// Umbrella thorn: a forked trunk under a wide, flat crown.
+    Acacia,
+    /// A low, gnarled, twisted evergreen of dry heights.
+    Juniper,
+    /// Weeping willow: long branchlets hanging to the ground.
+    Willow,
+    /// Bottle tree: a swollen trunk under a small crown of stubby limbs.
+    Baobab,
 }
 
 impl TreeSpecies {
-    pub const ALL: [TreeSpecies; 10] = [
+    pub const ALL: [TreeSpecies; 14] = [
         TreeSpecies::Plane,
         TreeSpecies::Linden,
         TreeSpecies::Maple,
@@ -29,6 +37,10 @@ impl TreeSpecies {
         TreeSpecies::Cypress,
         TreeSpecies::Chestnut,
         TreeSpecies::Ginkgo,
+        TreeSpecies::Acacia,
+        TreeSpecies::Juniper,
+        TreeSpecies::Willow,
+        TreeSpecies::Baobab,
     ];
 
     pub fn name(self) -> &'static str {
@@ -43,12 +55,19 @@ impl TreeSpecies {
             TreeSpecies::Cypress => "cypress",
             TreeSpecies::Chestnut => "chestnut",
             TreeSpecies::Ginkgo => "ginkgo",
+            TreeSpecies::Acacia => "acacia",
+            TreeSpecies::Juniper => "juniper",
+            TreeSpecies::Willow => "willow",
+            TreeSpecies::Baobab => "baobab",
         }
     }
 
     /// Needle and scale-leaf trees let less light through their crowns.
     pub fn is_conifer(self) -> bool {
-        matches!(self, TreeSpecies::Pine | TreeSpecies::Cypress)
+        matches!(
+            self,
+            TreeSpecies::Pine | TreeSpecies::Cypress | TreeSpecies::Juniper
+        )
     }
 }
 
@@ -735,6 +754,289 @@ pub(crate) fn species_cfg(kind: Kind, variant: u32) -> SpeciesCfg {
             leaf_levels: Some(vec![1, 2]),
             far_color: [0.36, 0.48, 0.2],
             autumn: [0.98, 0.78, 0.12],
+            ..base
+        },
+        Kind::Tree(TreeSpecies::Acacia) => SpeciesCfg {
+            // Umbrella thorn: the trunk forks low into a few long limbs that
+            // spread into a wide, flat-topped crown.
+            height: (7.5, 9.5),
+            trunk_r: 0.3,
+            bark: 1,
+            leaf_cell: 11,
+            cards: Some(1500),
+            leaf_size: 0.95,
+            density: 7.0,
+            leaf_start: 0.45,
+            card_mode: CardMode::Flat,
+            width: 7.4,
+            crown_base: 0.3,
+            // A dish on a stem: narrow where the limbs leave the trunk, full
+            // width just under the flat top.
+            prof: |t| (0.1 + 0.9 * t.powf(1.7)).min(1.0) * (1.0 - t.powf(10.0)).max(0.0).powf(0.35),
+            trunk_top: 0.34,
+            trunk_up: 0.0,
+            trunk_curve: 0.16,
+            lean: 0.12,
+            flare: 0.3,
+            lobes: 0.05,
+            levels: vec![
+                Level {
+                    start: 1.0,
+                    end: 1.0,
+                    whorl: Some(4),
+                    angle: 40.0,
+                    angle_var: 9.0,
+                    len: 1.25,
+                    len_ref: LenRef::Width,
+                    rr: 0.7,
+                    segs: 8,
+                    radial: 7,
+                    up: 0.03,
+                    curve: 0.3,
+                    ..lv((3, 4))
+                },
+                Level {
+                    start: 0.3,
+                    end: 0.98,
+                    angle: 55.0,
+                    angle_var: 16.0,
+                    len: 0.6,
+                    rr: 0.5,
+                    segs: 4,
+                    radial: 4,
+                    up: 0.0,
+                    curve: 0.4,
+                    ..lv((7, 9))
+                },
+                Level {
+                    start: 0.25,
+                    end: 1.0,
+                    angle: 55.0,
+                    angle_var: 16.0,
+                    len: 0.5,
+                    rr: 0.55,
+                    segs: 2,
+                    radial: 3,
+                    up: -0.04,
+                    curve: 0.4,
+                    ..lv((4, 5))
+                },
+            ],
+            far_color: [0.3, 0.42, 0.16],
+            autumn: [0.3, 0.42, 0.16],
+            evergreen: true,
+            ..base
+        },
+        Kind::Tree(TreeSpecies::Juniper) => SpeciesCfg {
+            // Low and gnarled: a twisted, leaning trunk, dense dark sprays.
+            height: (5.2, 7.0),
+            trunk_r: 0.3,
+            bark: 6,
+            leaf_cell: 9,
+            cards: Some(1100),
+            leaf_size: 0.8,
+            density: 8.0,
+            leaf_start: 0.25,
+            card_mode: CardMode::Tuft,
+            width: 3.3,
+            crown_base: 0.22,
+            prof: |t| sin_prof(t, 0.7, 0.5) * (1.0 - 0.2 * t),
+            trunk_top: 0.5,
+            trunk_up: 0.0,
+            trunk_curve: 0.5,
+            lean: 0.3,
+            flare: 0.45,
+            lobes: 0.12,
+            levels: vec![
+                Level {
+                    start: 0.3,
+                    end: 1.0,
+                    angle: 55.0,
+                    angle_var: 22.0,
+                    len: 1.3,
+                    len_ref: LenRef::Width,
+                    rr: 0.6,
+                    segs: 6,
+                    radial: 6,
+                    up: 0.12,
+                    curve: 0.9,
+                    ..lv((7, 9))
+                },
+                Level {
+                    start: 0.25,
+                    end: 0.98,
+                    angle: 50.0,
+                    angle_var: 20.0,
+                    len: 0.55,
+                    rr: 0.5,
+                    segs: 3,
+                    radial: 4,
+                    up: 0.1,
+                    curve: 0.6,
+                    ..lv((5, 7))
+                },
+                Level {
+                    start: 0.3,
+                    end: 1.0,
+                    angle: 45.0,
+                    angle_var: 16.0,
+                    len: 0.45,
+                    rr: 0.55,
+                    segs: 2,
+                    radial: 3,
+                    up: 0.1,
+                    curve: 0.4,
+                    ..lv((3, 4))
+                },
+            ],
+            far_color: [0.16, 0.27, 0.15],
+            autumn: [0.16, 0.27, 0.15],
+            evergreen: true,
+            cross: 2,
+            ..base
+        },
+        Kind::Tree(TreeSpecies::Willow) => SpeciesCfg {
+            // Weeping: stout limbs arch out, long thin branchlets hang from
+            // them in curtains nearly to the ground.
+            height: (10.0, 13.0),
+            trunk_r: 0.4,
+            bark: 1,
+            leaf_cell: 4,
+            cards: Some(2300),
+            leaf_size: 1.0,
+            density: 7.5,
+            leaf_start: 0.1,
+            width: 6.4,
+            crown_base: 0.05,
+            // A dome whose sides hang straight down.
+            prof: |t| {
+                if t < 0.55 {
+                    1.0
+                } else {
+                    (1.0 - ((t - 0.55) / 0.45).powi(2)).max(0.0).sqrt()
+                }
+            },
+            trunk_top: 0.4,
+            trunk_up: 0.0,
+            trunk_curve: 0.12,
+            lean: 0.06,
+            flare: 0.4,
+            lobes: 0.08,
+            levels: vec![
+                Level {
+                    start: 1.0,
+                    end: 1.0,
+                    whorl: Some(5),
+                    angle: 38.0,
+                    angle_var: 10.0,
+                    len: 1.1,
+                    len_ref: LenRef::Width,
+                    rr: 0.68,
+                    segs: 8,
+                    radial: 7,
+                    up: 0.02,
+                    curve: 0.25,
+                    ..lv((4, 5))
+                },
+                Level {
+                    start: 0.3,
+                    end: 1.0,
+                    angle: 60.0,
+                    angle_var: 16.0,
+                    len: 0.5,
+                    rr: 0.45,
+                    segs: 4,
+                    radial: 4,
+                    up: -0.05,
+                    curve: 0.3,
+                    ..lv((7, 9))
+                },
+                // The curtains.
+                Level {
+                    start: 0.15,
+                    end: 1.0,
+                    angle: 82.0,
+                    angle_var: 10.0,
+                    len: 1.5,
+                    len_ref: LenRef::Width,
+                    rr: 0.4,
+                    segs: 9,
+                    radial: 3,
+                    up: -1.6,
+                    curve: 0.05,
+                    ..lv((10, 13))
+                },
+            ],
+            leaf_levels: Some(vec![3]),
+            far_color: [0.4, 0.5, 0.2],
+            autumn: [0.86, 0.74, 0.24],
+            ..base
+        },
+        Kind::Tree(TreeSpecies::Baobab) => SpeciesCfg {
+            // Bottle tree: a swollen, smooth trunk, a few stubby limbs and a
+            // small crown on top.
+            height: (10.0, 13.0),
+            trunk_r: 1.0,
+            bark: 0,
+            leaf_cell: 7,
+            cards: Some(900),
+            leaf_size: 1.0,
+            density: 5.0,
+            leaf_start: 0.4,
+            width: 4.6,
+            crown_base: 0.58,
+            prof: |t| sin_prof(t, 0.7, 0.5),
+            trunk_top: 0.62,
+            trunk_up: 0.0,
+            trunk_curve: 0.03,
+            lean: 0.02,
+            flare: 0.55,
+            lobes: 0.1,
+            levels: vec![
+                Level {
+                    start: 1.0,
+                    end: 1.0,
+                    whorl: Some(6),
+                    angle: 50.0,
+                    angle_var: 12.0,
+                    len: 1.1,
+                    len_ref: LenRef::Width,
+                    rr: 0.3,
+                    segs: 6,
+                    radial: 7,
+                    up: 0.1,
+                    curve: 0.35,
+                    ..lv((5, 6))
+                },
+                Level {
+                    start: 0.35,
+                    end: 1.0,
+                    angle: 50.0,
+                    angle_var: 18.0,
+                    len: 0.55,
+                    rr: 0.5,
+                    segs: 3,
+                    radial: 4,
+                    up: 0.1,
+                    curve: 0.4,
+                    ..lv((5, 6))
+                },
+                Level {
+                    start: 0.3,
+                    end: 1.0,
+                    angle: 45.0,
+                    angle_var: 16.0,
+                    len: 0.45,
+                    rr: 0.55,
+                    segs: 2,
+                    radial: 3,
+                    up: 0.08,
+                    curve: 0.4,
+                    ..lv((3, 4))
+                },
+            ],
+            far_color: [0.3, 0.44, 0.17],
+            autumn: [0.78, 0.6, 0.2],
             ..base
         },
         Kind::Shrub => {

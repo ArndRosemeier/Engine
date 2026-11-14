@@ -1,4 +1,4 @@
-//! The vegetation port: ten tree species and shrubs, swaying in the wind.
+//! The vegetation port: fourteen tree species and shrubs, swaying in the wind.
 //!
 //! A row of every species stands in front of a mixed wood of about 3000
 //! trees (per-instance LOD: full detail, mid, far canopy hulls). The camera
@@ -6,7 +6,8 @@
 //!
 //! `ENGINE_WIND=1.5` blows harder (0 calm .. 2 storm), `ENGINE_SEASON=0.8`
 //! turns the leaves, `ENGINE_SKY_HOUR=17.5` sets the time of day,
-//! `ENGINE_ROCKS_CLOSE=1` looks at the rocks up close.
+//! `ENGINE_ROCKS_CLOSE=1` looks at the rocks up close, `ENGINE_VEG_NEW=1` at
+//! the newest species and `ENGINE_VEG_NEW=2` at the trees in bloom.
 use engine::prelude::*;
 
 fn env(name: &str, default: f32) -> f32 {
@@ -42,6 +43,19 @@ fn main() -> EngineResult<()> {
                         &[Place::at(x, 0.0, z)?.yaw_deg(i as f32 * 41.0 + v as f32 * 97.0)?],
                     )?;
                 }
+            }
+            // In bloom: the same species in colour, near the row's right end.
+            let blooms = [
+                (TreeSpecies::Acacia, rgb(150, 90, 230), 1.0),
+                (TreeSpecies::Acacia, rgb(255, 80, 40), 0.8),
+                (TreeSpecies::Linden, rgb(255, 150, 190), 0.9),
+                (TreeSpecies::Willow, rgb(255, 210, 60), 0.7),
+                (TreeSpecies::Baobab, rgb(60, 220, 210), 1.0),
+            ];
+            for (i, (species, color, share)) in blooms.into_iter().enumerate() {
+                let model = tree_model_in_bloom(species, 3, Bloom::new(color, share))?;
+                let id = world.spawn_lod(model.lod_levels())?;
+                world.set_lod_places(id, &[Place::at(160.0 + i as f32 * 15.0, 0.0, 34.0)?])?;
             }
             let shrubs = (0..24)
                 .map(|i| {
@@ -144,7 +158,11 @@ fn main() -> EngineResult<()> {
         let t = if screenshot { 0.0 } else { frame.time };
         let close = std::env::var_os("ENGINE_VEG_CLOSE").is_some();
         let x = -70.0 + (t * 0.03).sin() * 60.0;
-        if std::env::var_os("ENGINE_ROCKS_CLOSE").is_some() {
+        if let Some(which) = std::env::var_os("ENGINE_VEG_NEW") {
+            // The four newest species (1), or the trees in bloom (2).
+            let x = if which == "2" { 190.0 } else { 114.0 };
+            world.look_first_person(Vec3::new(x, 5.0, 2.0), 0.0, 4.0);
+        } else if std::env::var_os("ENGINE_ROCKS_CLOSE").is_some() {
             world.look_first_person(Vec3::new(-44.0, 1.6, 6.5), 0.0, -12.0);
         } else if close {
             world.look_first_person(Vec3::new(-40.0, 3.0, 8.0), 20.0, 12.0);

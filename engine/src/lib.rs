@@ -201,7 +201,7 @@ pub use tree::{BranchNode, LeafKind, TreeAsset, TreeKind, TreeLod, TreeProfile, 
 pub use ui::{egui, UiFrame, UiPanel};
 pub use version::{version, whats_new_ui};
 pub use vfx::{Delivery, EffectHandle, EffectSpec, VfxPalette, VfxSystem, VisualKind};
-pub use voxel_terrain::{GroundCover, VoxelTerrain, VOXEL_MAX_LOD};
+pub use voxel_terrain::{flower_field, GroundCover, VoxelTerrain, FLOWER_COLORS, VOXEL_MAX_LOD};
 pub use world::world_effects::Fire;
 
 pub use water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};

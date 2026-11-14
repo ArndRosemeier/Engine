@@ -69,23 +69,89 @@ impl TreeModel {
 
 /// Grow `species`; `variant` picks one of 64 individuals.
 pub fn tree_model(species: TreeSpecies, variant: u32) -> EngineResult<TreeModel> {
-    model(Kind::Tree(species), variant % 64, species.is_conifer())
+    model(
+        Kind::Tree(species),
+        variant % 64,
+        species.is_conifer(),
+        None,
+    )
 }
 
 /// Grow a shrub (odd variants are evergreen boxwood).
 pub fn shrub_model(variant: u32) -> EngineResult<TreeModel> {
-    model(Kind::Shrub, variant % 64, false)
+    model(Kind::Shrub, variant % 64, false, None)
 }
 
-fn model(kind: Kind, variant: u32, conifer: bool) -> EngineResult<TreeModel> {
-    let g = grow::grow(kind, variant);
+/// A crown in colour: blossom, or leaves that are not green at all.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bloom {
+    /// The colour (sRGB, 0 to 1). The leaf's own light and dark stay, so
+    /// the crown keeps its texture.
+    pub color: [f32; 3],
+    /// How much of the crown wears it: 1 all of it, 0.6 six tufts in ten
+    /// with green between.
+    pub share: f32,
+}
+
+impl Bloom {
+    pub fn new(color: Color, share: f32) -> Self {
+        Self {
+            color: [color.r, color.g, color.b],
+            share,
+        }
+    }
+}
+
+/// [`tree_model`] with its crown in `bloom`: a cherry in pink, a jacaranda
+/// in violet, a tree of another world in teal. The colour stays all year
+/// (such a tree does not turn in autumn), near and far alike.
+pub fn tree_model_in_bloom(
+    species: TreeSpecies,
+    variant: u32,
+    bloom: Bloom,
+) -> EngineResult<TreeModel> {
+    model(
+        Kind::Tree(species),
+        variant % 64,
+        species.is_conifer(),
+        Some(bloom),
+    )
+}
+
+/// [`shrub_model`] in `bloom`: a flowering bush.
+pub fn shrub_model_in_bloom(variant: u32, bloom: Bloom) -> EngineResult<TreeModel> {
+    model(Kind::Shrub, variant % 64, false, Some(bloom))
+}
+
+fn model(kind: Kind, variant: u32, conifer: bool, bloom: Option<Bloom>) -> EngineResult<TreeModel> {
+    let bloom = bloom
+        .filter(|b| b.share.is_finite() && b.share > 0.0 && b.color.iter().all(|c| c.is_finite()))
+        .map(|b| Bloom {
+            color: b.color.map(|c| c.clamp(0.0, 1.0)),
+            share: b.share.min(1.0),
+        });
+    let mut g = grow::grow(kind, variant);
+    if let Some(b) = bloom {
+        // The far hull is plain vertex colour: paint its canopy (kind 1).
+        let lum = |c: [f32; 3]| 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
+        let paint = b.color.map(linear);
+        let green = species::species_cfg(kind, variant).far_color.map(linear);
+        let k = 0.85 * lum(green).max(1e-3).recip();
+        for v in g.near.far.verts.iter_mut().filter(|v| v.kind > 0.5) {
+            let light = (lum(v.color) * k).min(1.6);
+            for (c, p) in v.color.iter_mut().zip(paint) {
+                *c += (p * light - *c) * b.share;
+            }
+            v.deciduous = 0.0;
+        }
+    }
     let leaf_cell = match kind {
         Kind::Tree(TreeSpecies::Palm) => 12,
         _ => species::species_cfg(kind, variant).leaf_cell,
     };
     let translucency = if conifer { 0.35 } else { 0.85 };
-    let near = textured_mesh(&g.near.wood, &g.near.leaves, leaf_cell, translucency)?;
-    let mid = textured_mesh(&g.mid_wood, &g.mid_leaves, leaf_cell, translucency)?;
+    let near = textured_mesh(&g.near.wood, &g.near.leaves, leaf_cell, translucency, bloom)?;
+    let mid = textured_mesh(&g.mid_wood, &g.mid_leaves, leaf_cell, translucency, bloom)?;
     let far = far_mesh(&g.near.far)?;
     Ok(TreeModel {
         near,
@@ -169,6 +235,7 @@ fn textured_mesh(
     leaves: &Part,
     leaf_cell: u32,
     translucency: f32,
+    bloom: Option<Bloom>,
 ) -> EngineResult<Mesh> {
     let mut mesh = Mesh::new();
     let mut surfaces = Vec::new();
@@ -179,7 +246,13 @@ fn textured_mesh(
         |v| v.uv,
         |v| surface(PROFILE_BARK, v, 0.92, 0.0, [0.0; 3], 0.0),
     )?;
-    let aut = atlas::AUTUMN[leaf_cell as usize % 16];
+    // In bloom: the colour rides where the autumn colour does, and "turns"
+    // of 2 + share tells the shader it is worn all year by that share of
+    // the tufts.
+    let aut = match bloom {
+        Some(b) => [b.color[0], b.color[1], b.color[2], 2.0 + b.share],
+        None => atlas::AUTUMN[leaf_cell as usize % 16],
+    };
     let autumn = [linear(aut[0]), linear(aut[1]), linear(aut[2])];
     push_part(
         &mut mesh,
@@ -229,13 +302,51 @@ mod tests {
             let (near, mid, far) = (m.near.face_count(), m.mid.face_count(), m.far.face_count());
             assert!(near > mid && mid > far, "{s:?}: {near} > {mid} > {far}");
             assert!(far < 400, "{s:?} far hull has {far} faces");
-            assert!((6.0..25.0).contains(&m.height), "{s:?} height {}", m.height);
+            assert!((4.5..25.0).contains(&m.height), "{s:?} height {}", m.height);
             assert!(m.near.albedo().is_some() && m.far.albedo().is_none());
             let (lo, hi) = m.near.bounds().expect("bounds");
-            assert!(lo.y < 0.0 && hi.y > 5.0, "{s:?} spans the ground up");
+            assert!(lo.y < 0.0 && hi.y > 4.0, "{s:?} spans the ground up");
         }
         let shrub = shrub_model(0).expect("shrub grows");
         assert!(shrub.height < 3.0);
+    }
+
+    #[test]
+    fn a_tree_in_bloom_wears_its_colour_near_and_far() {
+        let plain = tree_model(TreeSpecies::Acacia, 2).expect("acacia");
+        let bloom = Bloom::new(Color::rgb(150, 90, 230), 1.0);
+        let violet = tree_model_in_bloom(TreeSpecies::Acacia, 2, bloom).expect("in bloom");
+        // The same tree: only its colour differs.
+        assert_eq!(plain.near.face_count(), violet.near.face_count());
+        assert_eq!(plain.far.bounds(), violet.far.bounds());
+        // Far hull: the canopy is violet (more blue than green), the plain one green.
+        let canopy = |m: &Mesh| {
+            m.point_colors()
+                .iter()
+                .fold([0.0f32; 3], |s, c| [s[0] + c.x, s[1] + c.y, s[2] + c.z])
+        };
+        let (p, v) = (canopy(&plain.far), canopy(&violet.far));
+        assert!(p[1] > p[2], "plain is green: {p:?}");
+        assert!(v[2] > v[1], "in bloom is violet: {v:?}");
+        // Near: the leaves' surfaces say "in bloom" (2 + share).
+        let in_bloom = violet
+            .near
+            .surface_overrides()
+            .iter()
+            .filter(|s| s.coverage_level == 3.0)
+            .count();
+        assert!(in_bloom > 1000, "{in_bloom} leaf vertices in bloom");
+        // A bloom of nothing is the plain tree.
+        let none = tree_model_in_bloom(
+            TreeSpecies::Acacia,
+            2,
+            Bloom {
+                share: 0.0,
+                ..bloom
+            },
+        )
+        .expect("no bloom");
+        assert_eq!(canopy(&none.far), p);
     }
 
     #[test]

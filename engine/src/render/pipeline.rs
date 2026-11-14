@@ -744,7 +744,8 @@ fn vs_main(v: VsIn) -> VsOut {
 
 // ---- Vegetation (crate::vegetation): leaf cards, bark, far canopy hulls ----
 // surface2 = (wind weight, per-tuft random, crown occlusion, far part kind),
-// surface3.xyz = linear autumn colour, surface4.w = turns in autumn,
+// surface3.xyz = linear autumn (or bloom) colour, surface4.w = turns in autumn
+// (1) or wears the colour all year (2 + share of the tufts),
 // surface.w = leaf translucency.
 const VEG_ATLAS: vec2<f32> = vec2<f32>(1024.0, 1536.0);
 const VEG_LEAF_V: f32 = 0.6666667;
@@ -819,8 +820,15 @@ fn vegetation_shade(in: VsOut) -> vec4<f32> {
         c *= 1.0 + tv * 0.4;
         c = mix(c, c * vec3<f32>(1.12, 1.06, 0.7), max(tv, 0.0) * 0.5);
         let lum = dot(c, vec3<f32>(0.3, 0.59, 0.11));
-        let turn = clamp(u.season * 1.6 - in.surface2.y * 0.6, 0.0, 1.0) * in.surface4.w;
-        c = mix(c, in.surface3.xyz * (lum * 3.2 + 0.015), turn);
+        // surface4.w: 0 evergreen, 1 turns in autumn, 2 + share in bloom
+        // (that share of the tufts wears the colour all year).
+        var turn = clamp(u.season * 1.6 - in.surface2.y * 0.6, 0.0, 1.0) * min(in.surface4.w, 1.0);
+        if in.surface4.w >= 2.0 {
+            turn = step(in.surface2.y, in.surface4.w - 2.0);
+        }
+        // Blossom is lighter than a turned leaf.
+        let glow = select(vec2<f32>(3.2, 0.015), vec2<f32>(6.0, 0.16), in.surface4.w >= 2.0);
+        c = mix(c, in.surface3.xyz * (lum * glow.x + glow.y), turn);
         c *= 1.0 - occ * 0.62;
         let vis = sun_visibility(in.world_p, geo_n, u.eye);
         let ndl = max(dot(geo_n, l), 0.0);
@@ -1318,6 +1326,54 @@ fn shade_main(in: VsOut) -> vec4<f32> {
     return vec4<f32>(haze(mix(lit, overlay_lit, overlay_mix) + overlay_specular + snow_sparkle + emission, in.world_p), alpha);
 }
 
+// Wildflowers (VoxelTerrain::with_flowers): the same numbers as
+// voxel_terrain::flower_field on the CPU, so planted flowers stand in the
+// coloured fields. Integer hashing, exact on both sides.
+fn flower_hash(x: i32, z: i32, salt: u32) -> f32 {
+    var h = (u32(x) * 0x9E3779B1u) ^ (u32(z) * 0x85EBCA77u) ^ (salt * 0xC2B2AE3Du);
+    h = h ^ (h >> 15u);
+    h = h * 0x2C1B3C6Du;
+    h = h ^ (h >> 12u);
+    h = h * 0x297A2D39u;
+    h = h ^ (h >> 15u);
+    return f32(h >> 8u) / 16777216.0;
+}
+
+fn flower_noise(q: vec2<f32>, salt: u32) -> f32 {
+    let f = floor(q);
+    let i = vec2<i32>(f);
+    let t = q - f;
+    let s = t * t * (3.0 - 2.0 * t);
+    let a = flower_hash(i.x, i.y, salt);
+    let b = flower_hash(i.x + 1, i.y, salt);
+    let c = flower_hash(i.x, i.y + 1, salt);
+    let d = flower_hash(i.x + 1, i.y + 1, salt);
+    return mix(mix(a, b, s.x), mix(c, d, s.x), s.y);
+}
+
+fn flower_color(i: i32) -> vec3<f32> {
+    // voxel_terrain::FLOWER_COLORS, linear.
+    switch i {
+        case 0 { return vec3<f32>(0.847, 0.033, 0.010); }
+        case 1 { return vec3<f32>(0.956, 0.571, 0.010); }
+        case 2 { return vec3<f32>(0.233, 0.073, 0.787); }
+        case 3 { return vec3<f32>(0.956, 0.171, 0.420); }
+        default { return vec3<f32>(0.934, 0.871, 0.604); }
+    }
+}
+
+// (amount 0..1, colour) of the flowers at ground position q.
+fn flower_field(q: vec2<f32>) -> vec4<f32> {
+    let field = 0.65 * flower_noise(q / 64.0, 1u) + 0.35 * flower_noise(q / 23.0, 2u);
+    let amount = smoothstep(0.5, 0.66, field);
+    var pick = flower_noise(q / 190.0, 3u) * 2.0 + flower_noise(q / 71.0, 4u) * 0.5;
+    pick = pick * 5.0;
+    pick = pick - 5.0 * floor(pick / 5.0);
+    let i = i32(floor(pick)) % 5;
+    let t = clamp((fract(pick) - 0.4) / 0.2, 0.0, 1.0);
+    return vec4<f32>(mix(flower_color(i), flower_color((i + 1) % 5), t), amount);
+}
+
 // Voxel terrain: grass on flat ground, earth on moderate slopes, layered rock
 // on steep faces, overhangs and cave walls. Everything is sampled in world
 // space, so crater sides and tunnels never show stretched texture.
@@ -1356,7 +1412,25 @@ fn fs_voxel(in: VsOut) -> @location(0) vec4<f32> {
         grass = mix(grass, sand, s);
         earth = mix(earth, sand * 0.88, s);
     }
+    // Painted rock (the fraction of surface5.w): the level beds banded red,
+    // ochre and cream, each bed its own colour along the whole cliff.
+    let painted = fract(in.surface5.w) / 0.99;
+    if painted > 0.0 {
+        let bed = p.y * 0.045 + (fbm3_lod(p * 0.013 + vec3<f32>(seed, 2.0, 7.0), 0.5, foot * 0.013) - 0.5) * 0.9;
+        let k = fract(bed);
+        let band = floor(bed);
+        let h1 = fract(sin(band * 12.9898 + seed) * 43758.5453);
+        let h2 = fract(sin((band + 1.0) * 12.9898 + seed) * 43758.5453);
+        let red = vec3<f32>(0.62, 0.2, 0.11);
+        let ochre = vec3<f32>(0.72, 0.43, 0.16);
+        let cream = vec3<f32>(0.8, 0.66, 0.46);
+        let c1 = mix(mix(red, ochre, smoothstep(0.2, 0.5, h1)), cream, smoothstep(0.6, 0.9, h1));
+        let c2 = mix(mix(red, ochre, smoothstep(0.2, 0.5, h2)), cream, smoothstep(0.6, 0.9, h2));
+        let beds = mix(c1, c2, smoothstep(0.82, 1.0, k));
+        rock = mix(rock, beds * (0.7 + 0.45 * strata) * (0.86 + 0.28 * fine), painted);
+    }
     let up = n0.y + (broad - 0.5) * 0.3;
+    var green_f = 1.0;
     // Ground cover from the terrain (VoxelTerrain::with_ground_cover): how
     // green the natural ground is and where the snow line lies. The instance
     // carries both at its four corners (surface.w < 0 says so, and holds
@@ -1371,12 +1445,33 @@ fn fs_voxel(in: VsOut) -> @location(0) vec4<f32> {
         // The edge between green and dry ground wanders with the noise.
         green = smoothstep(0.0, 1.0, clamp(green + (broad - 0.5) * 0.35 * (1.0 - abs(2.0 * green - 1.0)), 0.0, 1.0));
         let dry = in.surface3.xyz * (0.9 + 0.2 * broad) * (0.9 + 0.2 * fine);
+        green_f = green;
+        // (The flowers go in below, on the grass before it dries.)
         grass = mix(dry, grass, green);
         earth = mix(dry * 0.82, earth, green);
         let snow_line = mix(mix(in.surface2.x, in.surface2.z, t.x), mix(in.surface2.w, in.surface5.z, t.x), t.y);
         // Snow lies on what is not too steep, lower in the hollows of the noise.
         snow_w = smoothstep(snow_line - 40.0, snow_line + 40.0, p.y + (broad - 0.5) * 90.0)
             * smoothstep(0.3, 0.62, up);
+    }
+    // Wildflowers (the whole part of surface5.w, in hundredths): fields of
+    // one colour on the grass. From afar a wash of colour; close by, dots.
+    let flowers = floor(in.surface5.w) * 0.01;
+    if flowers > 0.0 {
+        let ff = flower_field(p.xz);
+        var amount = ff.w * flowers * green_f;
+        if in.surface5.y > 0.5 {
+            // Not on the beach.
+            amount *= smoothstep(in.surface5.x, in.surface5.x + 1.5, p.y);
+        }
+        if amount > 0.0 {
+            let near = 1.0 - smoothstep(0.01, 0.12, foot);
+            let dots = smoothstep(0.5, 0.62, fbm3_lod(p * 13.0 + vec3<f32>(seed, 1.0, 4.0), 0.5, foot * 13.0));
+            // Never a coat of paint: grass shows between the drifts.
+            let drifts = smoothstep(0.3, 0.7, fbm3_lod(p * 0.45 + vec3<f32>(7.0, seed, 2.0), 0.5, foot * 0.45));
+            let cover = mix(0.22 + 0.45 * drifts, (dots * 0.9 + 0.1) * (0.4 + 0.6 * drifts), near);
+            grass = mix(grass, ff.rgb * (0.8 + 0.3 * fine), amount * cover);
+        }
     }
     let grass_w = smoothstep(0.72, 0.84, up);
     let earth_w = smoothstep(0.42, 0.62, up);

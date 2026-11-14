@@ -933,6 +933,16 @@ impl Mesh {
         self.surface
     }
 
+    #[cfg(test)]
+    pub(crate) fn surface_overrides(&self) -> &[SurfaceMaterial] {
+        &self.surface_overrides
+    }
+
+    #[cfg(test)]
+    pub(crate) fn point_colors(&self) -> &[Vec4] {
+        &self.colors
+    }
+
     pub(crate) fn set_surface_overrides(&mut self, overrides: Vec<SurfaceMaterial>) {
         assert_eq!(
             overrides.len(),
