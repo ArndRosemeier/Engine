@@ -1357,13 +1357,36 @@ fn fs_voxel(in: VsOut) -> @location(0) vec4<f32> {
         earth = mix(earth, sand * 0.88, s);
     }
     let up = n0.y + (broad - 0.5) * 0.3;
+    // Ground cover from the terrain (VoxelTerrain::with_ground_cover): how
+    // green the natural ground is and where the snow line lies. The instance
+    // carries both at its four corners (surface.w < 0 says so, and holds
+    // -1 / size); far tiles also store the green per vertex, in uv.y below 0.
+    var snow_w = 0.0;
+    if in.surface.w < 0.0 {
+        let t = clamp(in.obj_p.xz * -in.surface.w, vec2<f32>(0.0), vec2<f32>(1.0));
+        var green = mix(mix(in.surface4.x, in.surface4.y, t.x), mix(in.surface4.z, in.surface4.w, t.x), t.y);
+        if in.uv.y < 0.0 {
+            green = 1.0 + in.uv.y;
+        }
+        // The edge between green and dry ground wanders with the noise.
+        green = smoothstep(0.0, 1.0, clamp(green + (broad - 0.5) * 0.35 * (1.0 - abs(2.0 * green - 1.0)), 0.0, 1.0));
+        let dry = in.surface3.xyz * (0.9 + 0.2 * broad) * (0.9 + 0.2 * fine);
+        grass = mix(dry, grass, green);
+        earth = mix(dry * 0.82, earth, green);
+        let snow_line = mix(mix(in.surface2.x, in.surface2.z, t.x), mix(in.surface2.w, in.surface5.z, t.x), t.y);
+        // Snow lies on what is not too steep, lower in the hollows of the noise.
+        snow_w = smoothstep(snow_line - 40.0, snow_line + 40.0, p.y + (broad - 0.5) * 90.0)
+            * smoothstep(0.3, 0.62, up);
+    }
     let grass_w = smoothstep(0.72, 0.84, up);
     let earth_w = smoothstep(0.42, 0.62, up);
     // Surfaces opened up by digging (or built) show bare earth and rock.
     let bare = mix(rock, earth * 0.85, smoothstep(0.35, 0.8, up));
-    let natural = mix(mix(rock, earth, earth_w), grass, grass_w);
-    let base = mix(natural, bare, clamp(in.uv.y, 0.0, 1.0));
-    let roughness = mix(in.surface.x, 0.95, grass_w * (1.0 - in.uv.y));
+    let snow = vec3<f32>(0.86, 0.89, 0.94) * (0.94 + 0.08 * fine);
+    let natural = mix(mix(mix(rock, earth, earth_w), grass, grass_w), snow, snow_w);
+    let dug = clamp(in.uv.y, 0.0, 1.0);
+    let base = mix(natural, bare, dug);
+    let roughness = mix(in.surface.x, 0.95, max(grass_w, snow_w) * (1.0 - dug));
 
     let l = normalize(u.light_dir);
     let ndl = max(dot(n, l), 0.0);

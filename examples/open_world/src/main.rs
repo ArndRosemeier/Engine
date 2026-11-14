@@ -69,6 +69,17 @@ impl WorldGenerator for Continents {
         base + hills + peaks
     }
 
+    /// Dry plains in broad patches, and snow on the mountains.
+    fn ground_cover(&self, x: f32, z: f32) -> Option<GroundCover> {
+        let rain = self
+            .shape
+            .fbm2(x * 0.0005 + 40.0, z * 0.0005 - 17.0, 3, 2.0, 0.5);
+        Some(GroundCover {
+            green: smoothstep(-0.25, 0.05, rain),
+            snow_line: 210.0,
+        })
+    }
+
     fn populate(&self, tile: &mut Tile) -> EngineResult<()> {
         let (min, max) = (tile.min(), tile.max());
         let seed = tile.seed();
@@ -365,6 +376,15 @@ fn main() -> EngineResult<()> {
                 world.request_exit();
             }
         }
+
+        // The generator's ground cover is what the terrain draws with.
+        let cover = world
+            .voxel_terrain()
+            .and_then(|t| t.ground_cover(camera.position.x, camera.position.z));
+        world.check(
+            "the ground has the generator's cover",
+            frame.first || cover.is_some_and(|c| (0.0..=1.0).contains(&c.green)),
+        );
 
         if let Some(stream) = world.stream() {
             let s = stream.stats();

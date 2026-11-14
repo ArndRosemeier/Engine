@@ -25,7 +25,40 @@ pub struct VoxelTerrain {
     detail_distance: f32,
     max_lod: u32,
     beach: Option<f32>,
+    dry_ground: Color,
+    cover: Option<GroundCoverFn>,
     far: FarTiles,
+}
+
+/// What grows on the natural ground at a point (see
+/// [`VoxelTerrain::with_ground_cover`] and
+/// [`crate::stream::WorldGenerator::ground_cover`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroundCover {
+    /// 1: the usual grass. 0: bare dry ground in the terrain's dry colour
+    /// ([`VoxelTerrain::with_dry_ground`]): sand, steppe, scree. Between: a mix.
+    pub green: f32,
+    /// Height (world y) above which the ground lies under snow; a very
+    /// large value for no snow.
+    pub snow_line: f32,
+}
+
+impl GroundCover {
+    /// Grass everywhere and no snow: what a terrain without cover shows.
+    pub const GRASS: Self = Self {
+        green: 1.0,
+        snow_line: 1.0e9,
+    };
+}
+
+/// A function from ground position `(x, z)` to its cover.
+#[derive(Clone)]
+pub struct GroundCoverFn(pub Arc<dyn Fn(f32, f32) -> GroundCover + Send + Sync>);
+
+impl std::fmt::Debug for GroundCoverFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GroundCoverFn")
+    }
 }
 
 /// Address of a far terrain tile: quadtree level and tile index. A tile at
@@ -69,14 +102,47 @@ impl FarTileMesh {
         sink: f32,
         skirt: f32,
     ) -> Self {
+        Self::from_heights_and_cover(x0, z0, cell, n, heights, None, sink, skirt)
+    }
+
+    /// [`Self::from_heights`] with how green the ground is at each of the
+    /// same `(n + 3)`² corners (1 grass .. 0 bare dry ground, see
+    /// [`GroundCover::green`]), stored per vertex.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_heights_and_cover(
+        x0: f32,
+        z0: f32,
+        cell: f32,
+        n: usize,
+        heights: &[f32],
+        green: Option<&[f32]>,
+        sink: f32,
+        skirt: f32,
+    ) -> Self {
         let w = n + 3;
         assert_eq!(heights.len(), w * w, "far tile needs (n + 3)^2 heights");
+        if let Some(g) = green {
+            assert_eq!(g.len(), w * w, "far tile needs (n + 3)^2 cover values");
+        }
         let h = |x: usize, z: usize| heights[z * w + x] - sink;
+        // The vertex's spare half word: 0 for grass, down to -1 for bare
+        // ground (the shader reads uv.y >= 0 as "dug open").
+        let bare_at = |x: usize, z: usize| -> f32 {
+            green.map_or(0.0, |g| {
+                let v = g[z * w + x];
+                -(1.0
+                    - if v.is_finite() {
+                        v.clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    })
+            })
+        };
         let origin = Vec3::new(x0, 0.0, z0);
         let mut vertices = Vec::with_capacity(((n + 1) * (n + 1) + 4 * (n + 1)) * 5);
         let mut min = Vec3::splat(f32::INFINITY);
         let mut max = Vec3::splat(f32::NEG_INFINITY);
-        let mut push = |p: Vec3, normal: Vec3, vertices: &mut Vec<u32>| {
+        let mut push = |p: Vec3, normal: Vec3, bare: f32, vertices: &mut Vec<u32>| {
             min = min.min(p + origin);
             max = max.max(p + origin);
             let q = |v: f32| ((v.clamp(-1.0, 1.0) * 32767.0).round() as i16) as u16 as u32;
@@ -84,7 +150,7 @@ impl FarTileMesh {
             vertices.push(p.y.to_bits());
             vertices.push(p.z.to_bits());
             vertices.push(q(normal.x) | (q(normal.y) << 16));
-            vertices.push(q(normal.z));
+            vertices.push(q(normal.z) | (q(bare) << 16));
         };
         let normal_at = |x: usize, z: usize| {
             let dx = h(x + 2, z + 1) - h(x, z + 1);
@@ -94,7 +160,7 @@ impl FarTileMesh {
         for z in 0..=n {
             for x in 0..=n {
                 let p = Vec3::new(x as f32 * cell, h(x + 1, z + 1), z as f32 * cell);
-                push(p, normal_at(x, z), &mut vertices);
+                push(p, normal_at(x, z), bare_at(x + 1, z + 1), &mut vertices);
             }
         }
         let mut indices = Vec::with_capacity(n * n * 6 + 4 * n * 6);
@@ -121,7 +187,7 @@ impl FarTileMesh {
             let base = (vertices.len() / 5) as u32;
             for &(x, z) in edge {
                 let p = Vec3::new(x as f32 * cell, h(x + 1, z + 1) - skirt, z as f32 * cell);
-                push(p, normal_at(x, z), &mut vertices);
+                push(p, normal_at(x, z), bare_at(x + 1, z + 1), &mut vertices);
             }
             for i in 0..n {
                 let (x, z) = edge[i];
@@ -171,6 +237,8 @@ impl VoxelTerrain {
             detail_distance: 1.0,
             max_lod: VOXEL_MAX_LOD,
             beach: None,
+            dry_ground: Color::rgb(196, 170, 120),
+            cover: None,
             far: FarTiles::default(),
         }
     }
@@ -220,6 +288,33 @@ impl VoxelTerrain {
     /// Top of the sand beaches, if set ([`Self::with_beach`]).
     pub fn beach(&self) -> Option<f32> {
         self.beach
+    }
+
+    /// What grows where: `cover(x, z)` says how green the natural ground is
+    /// and where the snow line lies. Without it, grass everywhere.
+    /// [`crate::stream::WorldStream`] sets it from its generator.
+    pub fn with_ground_cover(
+        mut self,
+        cover: impl Fn(f32, f32) -> GroundCover + Send + Sync + 'static,
+    ) -> Self {
+        self.cover = Some(GroundCoverFn(Arc::new(cover)));
+        self
+    }
+
+    /// The ground cover at a point, if the terrain has one.
+    pub fn ground_cover(&self, x: f32, z: f32) -> Option<GroundCover> {
+        self.cover.as_ref().map(|c| (c.0)(x, z))
+    }
+
+    /// Colour of bare dry ground, shown where the cover is not green
+    /// (sand by default).
+    pub fn with_dry_ground(mut self, color: Color) -> Self {
+        self.dry_ground = color;
+        self
+    }
+
+    pub fn dry_ground(&self) -> Color {
+        self.dry_ground
     }
 
     pub fn with_color(mut self, color: Color) -> Self {

@@ -68,7 +68,7 @@ use crate::lod::LodId;
 use crate::mesh::{BuiltMesh, Mesh};
 use crate::place::Place;
 use crate::volume::{EditedChunk, Volume, VolumeSource, CHUNK_SIZE};
-use crate::voxel_terrain::{FarTileKey, FarTileMesh, VoxelTerrain};
+use crate::voxel_terrain::{FarTileKey, FarTileMesh, GroundCover, VoxelTerrain};
 use crate::world::{EntityId, World};
 use glam::{IVec2, IVec3, Vec2, Vec3};
 use std::collections::{HashMap, HashSet};
@@ -113,6 +113,16 @@ pub trait WorldGenerator: Send + Sync + 'static {
     fn water_level(&self, x: f32, z: f32) -> Option<f32> {
         let _ = (x, z);
         self.sea().map(|s| s.level)
+    }
+
+    /// What grows on the ground at a point: how green it is (grass, or the
+    /// bare dry ground of deserts, steppe and scree) and where the snow line
+    /// lies. `None` (the default) is grass everywhere and no snow. Answer
+    /// `Some` everywhere or `None` everywhere. The dry ground's colour is
+    /// [`VoxelTerrain::with_dry_ground`], through [`WorldStream::with_terrain`].
+    fn ground_cover(&self, x: f32, z: f32) -> Option<GroundCover> {
+        let _ = (x, z);
+        None
     }
 
     /// Whether this world has water at all (skips the water window when
@@ -523,17 +533,32 @@ fn build_far(gen: &dyn WorldGenerator, settings: &StreamSettings, key: FarTileKe
     let (x0, z0) = (key.x as f32 * size, key.z as f32 * size);
     let w = n + 3;
     let mut heights = Vec::with_capacity(w * w);
+    let covered = gen.ground_cover(x0, z0).is_some();
+    let mut green = Vec::with_capacity(if covered { w * w } else { 0 });
     for z in 0..w {
         for x in 0..w {
-            let h = gen.height(x0 + (x as f32 - 1.0) * cell, z0 + (z as f32 - 1.0) * cell);
+            let (px, pz) = (x0 + (x as f32 - 1.0) * cell, z0 + (z as f32 - 1.0) * cell);
+            let h = gen.height(px, pz);
             heights.push(if h.is_finite() { h } else { 0.0 });
+            if covered {
+                green.push(gen.ground_cover(px, pz).map_or(1.0, |c| c.green));
+            }
         }
     }
     // Sunk a little so voxels win wherever both draw; skirts cover the
     // steps between tiles of different detail.
     let sink = 0.04 * cell;
     let skirt = 2.0 + cell * 1.5;
-    FarTileMesh::from_heights(x0, z0, cell, n, &heights, sink, skirt)
+    FarTileMesh::from_heights_and_cover(
+        x0,
+        z0,
+        cell,
+        n,
+        &heights,
+        covered.then_some(green.as_slice()),
+        sink,
+        skirt,
+    )
 }
 
 fn build_tile(gen: &dyn WorldGenerator, coord: IVec2, size: f32) -> EngineResult<Tile> {
@@ -723,6 +748,12 @@ impl WorldStream {
         });
         let volume = Volume::try_new(self.settings.voxel_size)?.with_source(source);
         let mut terrain = VoxelTerrain::new(volume).with_max_lod(self.settings.voxel_lod);
+        if self.gen.ground_cover(0.0, 0.0).is_some() {
+            let gen = self.gen.clone();
+            terrain = terrain.with_ground_cover(move |x, z| {
+                gen.ground_cover(x, z).unwrap_or(GroundCover::GRASS)
+            });
+        }
         if let Some(style) = &self.terrain_style {
             terrain = style(terrain);
         }
@@ -1541,6 +1572,84 @@ mod tests {
 
     fn pump(world: &mut World) {
         assert!(world.prepare_stream(30.0), "stream got ready");
+    }
+
+    /// [`TestWorld`]'s hills, dry towards +x, snow above 5 m.
+    struct DryWorld;
+
+    impl WorldGenerator for DryWorld {
+        fn height(&self, x: f32, z: f32) -> f32 {
+            (x * 0.01).sin() * 6.0 + (z * 0.013).cos() * 4.0 + 2.0
+        }
+
+        fn populate(&self, _tile: &mut Tile) -> EngineResult<()> {
+            Ok(())
+        }
+
+        fn ground_cover(&self, x: f32, _z: f32) -> Option<GroundCover> {
+            Some(GroundCover {
+                green: (1.0 - x / 1000.0).clamp(0.0, 1.0),
+                snow_line: 5.0,
+            })
+        }
+    }
+
+    #[test]
+    fn a_generators_ground_cover_reaches_the_terrain_and_the_far_tiles() {
+        let mut world = World::new();
+        world
+            .set_stream(Some(WorldStream::new(DryWorld, small())))
+            .unwrap();
+        look(&mut world, 0.0, 0.0);
+        pump(&mut world);
+        let terrain = world.voxel_terrain().expect("streamed ground");
+        let here = terrain.ground_cover(0.0, 0.0).expect("cover");
+        assert_eq!(here.green, 1.0);
+        assert_eq!(here.snow_line, 5.0);
+        assert_eq!(terrain.ground_cover(1000.0, 0.0).unwrap().green, 0.0);
+
+        // A far tile carries how bare each vertex is in its spare half word:
+        // 0 where it is green, -1 where it is dry.
+        let gen: Arc<dyn WorldGenerator> = Arc::new(DryWorld);
+        let bare = |tile: &FarTileMesh, i: usize| {
+            ((tile.vertices[i * 5 + 4] >> 16) as u16 as i16) as f32 / 32767.0
+        };
+        let green_tile = build_far(
+            &*gen,
+            &small(),
+            FarTileKey {
+                level: 0,
+                x: -2,
+                z: 0,
+            },
+        );
+        let dry_tile = build_far(
+            &*gen,
+            &small(),
+            FarTileKey {
+                level: 0,
+                x: 20,
+                z: 0,
+            },
+        );
+        assert_eq!(bare(&green_tile, 0), 0.0);
+        assert_eq!(bare(&dry_tile, 0), -1.0);
+
+        // A world without cover leaves the half word at 0, as before.
+        let plain: Arc<dyn WorldGenerator> = Arc::new(TestWorld {
+            model: None,
+            water: false,
+        });
+        let tile = build_far(
+            &*plain,
+            &small(),
+            FarTileKey {
+                level: 0,
+                x: 20,
+                z: 0,
+            },
+        );
+        assert!((0..tile.vertices.len() / 5).all(|i| bare(&tile, i) == 0.0));
     }
 
     #[test]
