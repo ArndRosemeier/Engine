@@ -182,7 +182,8 @@ after `keep_seconds`.
 
 **Huge streamed worlds:** implement `WorldGenerator` (in `engine::stream`):
 `height(x, z)` for the ground, optionally `density(p, ground)` for caves and
-overhangs, `populate(tile)` for what stands on each tile, and `sea()` /
+overhangs (with `carved_below(min, max)` saying how deep the caves reach, so
+the rock is made down to them under any hill), `populate(tile)` for what stands on each tile, and `sea()` /
 `water_level(x, z)` for water. Then
 `world.set_stream(Some(WorldStream::new(my_world, StreamSettings::default())))?`
 and the engine does the rest on worker threads, a little per frame so moving

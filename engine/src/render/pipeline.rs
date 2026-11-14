@@ -1365,13 +1365,11 @@ fn flower_color(i: i32) -> vec3<f32> {
 // (amount 0..1, colour) of the flowers at ground position q.
 fn flower_field(q: vec2<f32>) -> vec4<f32> {
     let field = 0.65 * flower_noise(q / 64.0, 1u) + 0.35 * flower_noise(q / 23.0, 2u);
-    let amount = smoothstep(0.5, 0.66, field);
-    var pick = flower_noise(q / 190.0, 3u) * 2.0 + flower_noise(q / 71.0, 4u) * 0.5;
-    pick = pick * 5.0;
-    pick = pick - 5.0 * floor(pick / 5.0);
-    let i = i32(floor(pick)) % 5;
-    let t = clamp((fract(pick) - 0.4) / 0.2, 0.0, 1.0);
-    return vec4<f32>(mix(flower_color(i), flower_color((i + 1) % 5), t), amount);
+    let amount = smoothstep(0.57, 0.7, field);
+    let w = q + 60.0 * (vec2<f32>(flower_noise(q / 90.0, 3u), flower_noise(q / 90.0, 4u)) - 0.5);
+    let c = vec2<i32>(floor(w / 170.0));
+    let i = min(i32(flower_hash(c.x, c.y, 5u) * 5.0), 4);
+    return vec4<f32>(flower_color(i), amount);
 }
 
 // Voxel terrain: grass on flat ground, earth on moderate slopes, layered rock
@@ -1469,7 +1467,11 @@ fn fs_voxel(in: VsOut) -> @location(0) vec4<f32> {
             let dots = smoothstep(0.5, 0.62, fbm3_lod(p * 13.0 + vec3<f32>(seed, 1.0, 4.0), 0.5, foot * 13.0));
             // Never a coat of paint: grass shows between the drifts.
             let drifts = smoothstep(0.3, 0.7, fbm3_lod(p * 0.45 + vec3<f32>(7.0, seed, 2.0), 0.5, foot * 0.45));
-            let cover = mix(0.22 + 0.45 * drifts, (dots * 0.9 + 0.1) * (0.4 + 0.6 * drifts), near);
+            // Far off the colour thins into the haze of the grass.
+            let far = 1.0 - 0.5 * smoothstep(1.5, 8.0, foot);
+            // Mottled, not a flat coat: thick here, thin there.
+            let mottle = smoothstep(0.38, 0.68, broad);
+            let cover = mix((0.05 + 0.3 * drifts + 0.3 * mottle) * far, (dots * 0.9 + 0.1) * (0.4 + 0.6 * drifts), near);
             grass = mix(grass, ff.rgb * (0.8 + 0.3 * fine), amount * cover);
         }
     }

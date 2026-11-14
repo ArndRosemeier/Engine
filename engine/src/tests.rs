@@ -4370,10 +4370,10 @@ fn wildflowers_grow_in_fields_of_the_palette() {
             }
         }
     }
-    // Fields, not a carpet: flowers on a good part of the land, open grass
-    // on at least as much, and every colour of the palette somewhere.
+    // Fields, not a carpet: flowers here and there, open grass on most of
+    // the land, and every colour of the palette somewhere.
     assert!(
-        thick * 8 > n && none * 3 > n,
+        thick * 20 > n && none * 2 > n,
         "{thick} thick, {none} none of {n}"
     );
     assert!(seen.iter().all(|s| *s), "{seen:?}");

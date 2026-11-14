@@ -95,23 +95,16 @@ fn flower_noise(x: f32, z: f32, salt: u32) -> f32 {
 pub fn flower_field(x: f32, z: f32) -> (f32, [f32; 3]) {
     let field =
         0.65 * flower_noise(x / 64.0, z / 64.0, 1) + 0.35 * flower_noise(x / 23.0, z / 23.0, 2);
-    let amount = ((field - 0.5) / 0.16).clamp(0.0, 1.0);
+    // Fields here and there in the grass, not half the land.
+    let amount = ((field - 0.57) / 0.13).clamp(0.0, 1.0);
     let amount = amount * amount * (3.0 - 2.0 * amount);
-    // The colour changes slowly, so one field is mostly one colour.
-    let pick =
-        flower_noise(x / 190.0, z / 190.0, 3) * 2.0 + flower_noise(x / 71.0, z / 71.0, 4) * 0.5;
-    let pick = (pick * 5.0).rem_euclid(5.0);
-    let (i, f) = (pick.floor() as usize % 5, pick.fract());
-    let t = ((f - 0.4) / 0.2).clamp(0.0, 1.0);
-    let (a, b) = (FLOWER_COLORS[i], FLOWER_COLORS[(i + 1) % 5]);
-    (
-        amount,
-        [
-            a[0] + (b[0] - a[0]) * t,
-            a[1] + (b[1] - a[1]) * t,
-            a[2] + (b[2] - a[2]) * t,
-        ],
-    )
+    // One colour to a stretch of country: cells some 170 m across with
+    // wandering edges, so a field is one colour and never a rainbow.
+    let wx = x + 60.0 * (flower_noise(x / 90.0, z / 90.0, 3) - 0.5);
+    let wz = z + 60.0 * (flower_noise(x / 90.0, z / 90.0, 4) - 0.5);
+    let cell = flower_hash((wx / 170.0).floor() as i32, (wz / 170.0).floor() as i32, 5);
+    let i = ((cell * 5.0) as usize).min(4);
+    (amount, FLOWER_COLORS[i])
 }
 
 /// A function from ground position `(x, z)` to its cover.

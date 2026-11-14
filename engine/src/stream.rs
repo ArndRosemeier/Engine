@@ -94,6 +94,18 @@ pub trait WorldGenerator: Send + Sync + 'static {
         ground - p.y
     }
 
+    /// The lowest height [`Self::density`] opens anything under the
+    /// rectangle `min` to `max` (x and z): the floor of the deepest cave
+    /// there, or `None` when nothing is carved. The rock is generated down
+    /// to it, however far that is below the ground, so a cave under a hill
+    /// or a cliff keeps its walls: [`StreamSettings::voxel_below`] alone
+    /// counts from the lowest ground of a column, which only reaches a cave
+    /// hanging a known depth under level land.
+    fn carved_below(&self, min: Vec2, max: Vec2) -> Option<f32> {
+        let _ = (min, max);
+        None
+    }
+
     /// Put things on one tile of ground: models (with LOD), meshes, lamps.
     /// See [`Tile`]. Runs on a worker thread whenever the tile comes into
     /// range, so it may take a while; keep it deterministic.
@@ -497,6 +509,10 @@ fn fill_with_ground(
     }
 }
 
+/// The deepest a generator's caves are followed below the ground (m): a
+/// wrong answer must not make a column of a thousand chunks.
+const MAX_CARVED: f32 = 2000.0;
+
 /// Generate the voxel chunks of one block that hold some surface.
 fn build_block(
     gen: &dyn WorldGenerator,
@@ -525,7 +541,13 @@ fn build_block(
                     hi = hi.max(h);
                 }
             }
-            let y0 = ((lo - settings.voxel_below - 2.0 * vs) / cw).floor() as i32;
+            // Down to what the generator carves, wherever that lies.
+            let carved = gen
+                .carved_below(Vec2::new(ox, oz), Vec2::new(ox + cw, oz + cw))
+                .filter(|c| c.is_finite())
+                .map_or(f32::INFINITY, |c| c.max(lo - MAX_CARVED));
+            let bottom = (lo - settings.voxel_below).min(carved);
+            let y0 = ((bottom - 2.0 * vs) / cw).floor() as i32;
             let y1 = ((hi + settings.voxel_above + 2.0 * vs) / cw).floor() as i32;
             for cy in y0..=y1 {
                 let origin = Vec3::new(ox, cy as f32 * cw, oz);
@@ -1608,6 +1630,54 @@ mod tests {
         fn water_level(&self, _x: f32, _z: f32) -> Option<f32> {
             self.water.then_some(6.0)
         }
+    }
+
+    /// A hill 300 m high with a cave under it at sea level: far deeper
+    /// below the ground than `voxel_below` reaches.
+    struct CaveUnderAHill {
+        tells: bool,
+    }
+
+    impl WorldGenerator for CaveUnderAHill {
+        fn height(&self, _x: f32, _z: f32) -> f32 {
+            300.0
+        }
+
+        fn density(&self, p: Vec3, ground: f32) -> f32 {
+            let cave = (p - Vec3::new(16.0, 4.0, 16.0)).length() - 6.0;
+            (ground - p.y).min(cave)
+        }
+
+        fn carved_below(&self, min: Vec2, max: Vec2) -> Option<f32> {
+            let near = min.x < 22.0 && max.x > 10.0 && min.y < 22.0 && max.y > 10.0;
+            (self.tells && near).then_some(-2.0)
+        }
+    }
+
+    #[test]
+    fn rock_is_generated_down_to_a_cave_far_under_the_ground() {
+        let settings = small();
+        let cave_chunks = |tells: bool| {
+            build_block(&CaveUnderAHill { tells }, &settings, IVec2::ZERO)
+                .iter()
+                .filter(|(c, _)| c.y == 0)
+                .count()
+        };
+        // Without the generator's word the cave has no walls: nothing is
+        // generated 300 m under the ground.
+        assert_eq!(cave_chunks(false), 0);
+        assert!(cave_chunks(true) > 0);
+        // A wild answer does not build to the centre of the earth.
+        struct Wild;
+        impl WorldGenerator for Wild {
+            fn height(&self, _x: f32, _z: f32) -> f32 {
+                0.0
+            }
+            fn carved_below(&self, _min: Vec2, _max: Vec2) -> Option<f32> {
+                Some(-1e9)
+            }
+        }
+        assert!(build_block(&Wild, &settings, IVec2::ZERO).len() < 64);
     }
 
     fn small() -> StreamSettings {
