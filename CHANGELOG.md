@@ -7,6 +7,13 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.072 (2026-11-14)
+
+- Four more tree species: umbrella-crowned acacia, gnarled juniper, weeping willow and bottle-trunked baobab
+- Trees and shrubs in blossom of any colour (tree_model_in_bloom)
+- Wildflower fields on streamed ground, near and far (with_flowers, flower_field), and rock banded red, ochre and cream (with_painted_rock)
+- `WorldGenerator::carved_below`: the world says how deep it is carved under a column, and the rock is generated down to that. A cave far under a hill or a cliff keeps its walls (before, only `voxel_below` under the lowest ground was made).
+
 ## 0.071 (2026-11-14)
 
 - Lakes and rivers above the sea in streamed worlds: rivers flow through the water around the camera and fall from pool to pool, springs feed them, and far away they are drawn as sheets of water on the ground.

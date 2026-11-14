@@ -4350,3 +4350,37 @@ fn plain_spawns_and_despawns_are_listed_not_render_changes() {
     assert_eq!(world.take_members(), (vec![], vec![]));
     assert!(world.entity(gone).is_ok());
 }
+
+#[test]
+fn wildflowers_grow_in_fields_of_the_palette() {
+    use crate::voxel_terrain::{flower_field, FLOWER_COLORS};
+    let (mut thick, mut none, n) = (0, 0, 200 * 200);
+    let mut seen = [false; 5];
+    for i in 0..200 {
+        for j in 0..200 {
+            let (x, z) = (i as f32 * 13.0 - 1300.0, j as f32 * 13.0 - 1300.0);
+            let (amount, color) = flower_field(x, z);
+            assert_eq!((amount, color), flower_field(x, z));
+            assert!((0.0..=1.0).contains(&amount));
+            assert!(color.iter().all(|c| (0.0..=1.0).contains(c)));
+            thick += (amount > 0.9) as u32;
+            none += (amount == 0.0) as u32;
+            for (k, c) in FLOWER_COLORS.iter().enumerate() {
+                seen[k] |= amount > 0.9 && *c == color;
+            }
+        }
+    }
+    // Fields, not a carpet: flowers here and there, open grass on most of
+    // the land, and every colour of the palette somewhere.
+    assert!(
+        thick * 20 > n && none * 2 > n,
+        "{thick} thick, {none} none of {n}"
+    );
+    assert!(seen.iter().all(|s| *s), "{seen:?}");
+    // The field is smooth: a metre on, the amount has hardly changed.
+    for i in 0..500 {
+        let x = i as f32 * 7.3;
+        let (a, b) = (flower_field(x, 40.0).0, flower_field(x + 1.0, 40.0).0);
+        assert!((a - b).abs() < 0.25, "{a} {b}");
+    }
+}

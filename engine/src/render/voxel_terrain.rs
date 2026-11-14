@@ -906,6 +906,10 @@ impl VoxelTerrainGpu {
                 None => [0.0; 4],
             },
         ];
+        // The row's last number: flowers in hundredths (the whole part) and
+        // painted rock (the fraction).
+        surface[4][3] =
+            (terrain.flowers() * 100.0).round() + terrain.painted_rock().clamp(0.0, 1.0) * 0.99;
         if size > 0.0 && terrain.ground_cover(origin.x, origin.z).is_some() {
             let at = |dx: f32, dz: f32| {
                 let c = terrain
@@ -1124,6 +1128,8 @@ impl VoxelTerrainGpu {
                         ^ d.y.to_bits().rotate_left(13)
                         ^ d.z.to_bits().rotate_left(19)
                         ^ terrain.ground_cover(0.0, 0.0).is_some() as u32
+                        ^ terrain.flowers().to_bits().rotate_left(3)
+                        ^ terrain.painted_rock().to_bits().rotate_left(23)
                 },
             ]
         };

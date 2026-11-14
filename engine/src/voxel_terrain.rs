@@ -26,6 +26,8 @@ pub struct VoxelTerrain {
     max_lod: u32,
     beach: Option<f32>,
     dry_ground: Color,
+    flowers: f32,
+    painted_rock: f32,
     cover: Option<GroundCoverFn>,
     far: FarTiles,
 }
@@ -49,6 +51,60 @@ impl GroundCover {
         green: 1.0,
         snow_line: 1.0e9,
     };
+}
+
+/// The colours wildflowers come in ([`VoxelTerrain::with_flowers`]), sRGB.
+pub const FLOWER_COLORS: [[f32; 3]; 5] = [
+    [0.93, 0.2, 0.1],
+    [0.98, 0.78, 0.1],
+    [0.52, 0.3, 0.9],
+    [0.98, 0.45, 0.68],
+    [0.97, 0.94, 0.8],
+];
+
+fn flower_hash(x: i32, z: i32, salt: u32) -> f32 {
+    let mut h = (x as u32).wrapping_mul(0x9E37_79B1)
+        ^ (z as u32).wrapping_mul(0x85EB_CA77)
+        ^ salt.wrapping_mul(0xC2B2_AE3D);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 12;
+    h = h.wrapping_mul(0x297A_2D39);
+    h ^= h >> 15;
+    (h >> 8) as f32 / 16_777_216.0
+}
+
+/// Value noise on the integer lattice, 0 to 1 (the shader's `flower_noise`).
+fn flower_noise(x: f32, z: f32, salt: u32) -> f32 {
+    let (fx, fz) = (x.floor(), z.floor());
+    let (ix, iz) = (fx as i32, fz as i32);
+    let (tx, tz) = (x - fx, z - fz);
+    let (sx, sz) = (tx * tx * (3.0 - 2.0 * tx), tz * tz * (3.0 - 2.0 * tz));
+    let a = flower_hash(ix, iz, salt);
+    let b = flower_hash(ix + 1, iz, salt);
+    let c = flower_hash(ix, iz + 1, salt);
+    let d = flower_hash(ix + 1, iz + 1, salt);
+    (a + (b - a) * sx) + ((c + (d - c) * sx) - (a + (b - a) * sx)) * sz
+}
+
+/// Where wildflowers grow ([`VoxelTerrain::with_flowers`]) and in which
+/// colour: how thick they stand at ground position `(x, z)`, 0 (none) to 1
+/// (before the terrain's `amount` and its grass), and their colour (sRGB).
+/// The terrain shader draws from the same numbers, so flowers a game plants
+/// by this stand in the coloured fields.
+pub fn flower_field(x: f32, z: f32) -> (f32, [f32; 3]) {
+    let field =
+        0.65 * flower_noise(x / 64.0, z / 64.0, 1) + 0.35 * flower_noise(x / 23.0, z / 23.0, 2);
+    // Fields here and there in the grass, not half the land.
+    let amount = ((field - 0.57) / 0.13).clamp(0.0, 1.0);
+    let amount = amount * amount * (3.0 - 2.0 * amount);
+    // One colour to a stretch of country: cells some 170 m across with
+    // wandering edges, so a field is one colour and never a rainbow.
+    let wx = x + 60.0 * (flower_noise(x / 90.0, z / 90.0, 3) - 0.5);
+    let wz = z + 60.0 * (flower_noise(x / 90.0, z / 90.0, 4) - 0.5);
+    let cell = flower_hash((wx / 170.0).floor() as i32, (wz / 170.0).floor() as i32, 5);
+    let i = ((cell * 5.0) as usize).min(4);
+    (amount, FLOWER_COLORS[i])
 }
 
 /// A function from ground position `(x, z)` to its cover.
@@ -343,6 +399,8 @@ impl VoxelTerrain {
             max_lod: VOXEL_MAX_LOD,
             beach: None,
             dry_ground: Color::rgb(196, 170, 120),
+            flowers: 0.0,
+            painted_rock: 0.0,
             cover: None,
             far: FarTiles::default(),
         }
@@ -388,6 +446,44 @@ impl VoxelTerrain {
     pub fn with_beach(mut self, top_y: f32) -> Self {
         self.beach = top_y.is_finite().then_some(top_y);
         self
+    }
+
+    /// Wildflowers on the grass: fields of them some tens of metres across,
+    /// each mostly one colour (scarlet, gold, violet, pink, cream), washing
+    /// the ground with colour from afar and speckling it close by.
+    /// `amount` 0 (none, the default) to 1 (as much as there is); where they
+    /// grow and in which colour is [`flower_field`], the same on the CPU, so
+    /// a game can stand real flowers in them. They follow the grass: none on
+    /// dry ground, snow, sand or rock.
+    pub fn with_flowers(mut self, amount: f32) -> Self {
+        self.flowers = if amount.is_finite() {
+            amount.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self
+    }
+
+    /// How much the grass flowers ([`Self::with_flowers`]).
+    pub fn flowers(&self) -> f32 {
+        self.flowers
+    }
+
+    /// Rock in the colours of a painted desert: its level beds banded
+    /// red, ochre and cream. `amount` 0 (the terrain's own rock colour, the
+    /// default) to 1.
+    pub fn with_painted_rock(mut self, amount: f32) -> Self {
+        self.painted_rock = if amount.is_finite() {
+            amount.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self
+    }
+
+    /// How much the rock is painted ([`Self::with_painted_rock`]).
+    pub fn painted_rock(&self) -> f32 {
+        self.painted_rock
     }
 
     /// Top of the sand beaches, if set ([`Self::with_beach`]).

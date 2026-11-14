@@ -76,9 +76,12 @@ pub use crate::texture::{
     TerrainMaterialDesc, TextureId,
 };
 pub use crate::ui::{UiFrame, UiPanel};
-pub use crate::vegetation::{shrub_model, tree_model, TreeModel, TreeSpecies};
+pub use crate::vegetation::{
+    shrub_model, shrub_model_in_bloom, tree_model, tree_model_in_bloom, Bloom, TreeModel,
+    TreeSpecies,
+};
 pub use crate::vfx::{Delivery, EffectHandle, EffectSpec, VfxPalette, VfxSystem, VisualKind};
-pub use crate::voxel_terrain::{GroundCover, VoxelTerrain};
+pub use crate::voxel_terrain::{flower_field, GroundCover, VoxelTerrain, FLOWER_COLORS};
 pub use crate::water::{Water, WaterRegion, WaterSample, WaterSource};
 pub use crate::water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use crate::world::world_effects::Fire;
