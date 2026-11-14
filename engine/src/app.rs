@@ -189,7 +189,7 @@ impl App {
         if wanted == self.fullscreen {
             return;
         }
-        window.set_fullscreen(wanted.then(|| winit::window::Fullscreen::Borderless(None)));
+        window.set_fullscreen(wanted.then_some(winit::window::Fullscreen::Borderless(None)));
         self.fullscreen = wanted;
     }
 
