@@ -93,10 +93,16 @@ fn flower_noise(x: f32, z: f32, salt: u32) -> f32 {
 /// The terrain shader draws from the same numbers, so flowers a game plants
 /// by this stand in the coloured fields.
 pub fn flower_field(x: f32, z: f32) -> (f32, [f32; 3]) {
-    let field =
-        0.65 * flower_noise(x / 64.0, z / 64.0, 1) + 0.35 * flower_noise(x / 23.0, z / 23.0, 2);
-    // Fields here and there in the grass, not half the land.
-    let amount = ((field - 0.57) / 0.13).clamp(0.0, 1.0);
+    // Bent out of the noise's own grid, so a field has a wandering edge
+    // and no straight sides.
+    let bx = x + 34.0 * (flower_noise(x / 47.0, z / 47.0, 7) - 0.5);
+    let bz = z + 34.0 * (flower_noise(x / 47.0, z / 47.0, 8) - 0.5);
+    let field = 0.58 * flower_noise(bx / 64.0, bz / 64.0, 1)
+        + 0.3 * flower_noise(bx / 23.0, bz / 23.0, 2)
+        + 0.12 * flower_noise(bx / 9.0, bz / 9.0, 6);
+    // Fields here and there in the grass, not half the land, thinning out
+    // at their edges.
+    let amount = ((field - 0.55) / 0.2).clamp(0.0, 1.0);
     let amount = amount * amount * (3.0 - 2.0 * amount);
     // One colour to a stretch of country: cells some 170 m across with
     // wandering edges, so a field is one colour and never a rainbow.
