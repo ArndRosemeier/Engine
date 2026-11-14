@@ -816,7 +816,11 @@ impl VoxelTerrainGpu {
             queue.write_buffer(
                 &self.instances,
                 slot as u64 * std::mem::size_of::<VoxelInstance>() as u64,
-                bytemuck::bytes_of(&Self::instance_for(terrain, mesh.origin)),
+                bytemuck::bytes_of(&Self::instance_for(
+                    terrain,
+                    mesh.origin,
+                    mesh.footprint[2] - mesh.footprint[0],
+                )),
             );
             self.far.insert(
                 key,
@@ -873,36 +877,72 @@ impl VoxelTerrainGpu {
         }
     }
 
-    fn instance_for(terrain: &VoxelTerrain, origin: Vec3) -> VoxelInstance {
+    /// The instance of a region or far tile at `origin`, `size` metres
+    /// square. With a ground cover the rows the voxel shader does not
+    /// otherwise read carry it: the cover at the four corners (the shader
+    /// blends between them, so neighbours meet), the dry colour, and
+    /// `-1 / size` in `surface.w` as the sign that it is there.
+    fn instance_for(terrain: &VoxelTerrain, origin: Vec3, size: f32) -> VoxelInstance {
         let m = terrain.material();
+        let mut surface = [
+            [m.roughness, m.metallic, m.emission, m.detail_scale],
+            [m.strata_strength, m.seed, m.warp_strength, m.noise_gain],
+            [
+                m.orientation[0],
+                m.orientation[1],
+                m.orientation[2],
+                m.profile,
+            ],
+            [
+                m.coverage_direction[0],
+                m.coverage_direction[1],
+                m.coverage_direction[2],
+                m.coverage_level,
+            ],
+            // The voxel shader has no snow cover; this row carries the
+            // beach instead: top height and an on flag.
+            match terrain.beach() {
+                Some(top) => [top, 1.0, 0.0, 0.0],
+                None => [0.0; 4],
+            },
+        ];
+        if size > 0.0 && terrain.ground_cover(origin.x, origin.z).is_some() {
+            let at = |dx: f32, dz: f32| {
+                let c = terrain
+                    .ground_cover(origin.x + dx, origin.z + dz)
+                    .unwrap_or(crate::voxel_terrain::GroundCover::GRASS);
+                let green = if c.green.is_finite() {
+                    c.green.clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                // Kept small enough to blend in f32 without losing the metres.
+                let snow = if c.snow_line.is_finite() {
+                    c.snow_line.clamp(-1.0e5, 1.0e5)
+                } else {
+                    1.0e5
+                };
+                (green, snow)
+            };
+            let corners = [at(0.0, 0.0), at(size, 0.0), at(0.0, size), at(size, size)];
+            let dry = terrain.dry_ground().to_vec4();
+            surface[0][3] = -1.0 / size;
+            surface[1][0] = corners[0].1;
+            surface[1][2] = corners[1].1;
+            surface[1][3] = corners[2].1;
+            surface[4][2] = corners[3].1;
+            surface[2][0] = dry.x;
+            surface[2][1] = dry.y;
+            surface[2][2] = dry.z;
+            surface[3] = [corners[0].0, corners[1].0, corners[2].0, corners[3].0];
+        }
         VoxelInstance {
             model: Mat4::from_translation(origin).to_cols_array_2d(),
             tint: [1.0; 4],
             color: terrain.color().to_vec4().into(),
             uv: [0.0, 0.0],
             _pad: [0.0; 2],
-            surface: [
-                [m.roughness, m.metallic, m.emission, m.detail_scale],
-                [m.strata_strength, m.seed, m.warp_strength, m.noise_gain],
-                [
-                    m.orientation[0],
-                    m.orientation[1],
-                    m.orientation[2],
-                    m.profile,
-                ],
-                [
-                    m.coverage_direction[0],
-                    m.coverage_direction[1],
-                    m.coverage_direction[2],
-                    m.coverage_level,
-                ],
-                // The voxel shader has no snow cover; this row carries the
-                // beach instead: top height and an on flag.
-                match terrain.beach() {
-                    Some(top) => [top, 1.0, 0.0, 0.0],
-                    None => [0.0; 4],
-                },
-            ],
+            surface,
         }
     }
 
@@ -1078,7 +1118,13 @@ impl VoxelTerrainGpu {
                 c.x.to_bits(),
                 c.y.to_bits(),
                 c.z.to_bits(),
-                m.detail_scale.to_bits() ^ terrain.beach().unwrap_or(f32::NAN).to_bits(),
+                m.detail_scale.to_bits() ^ terrain.beach().unwrap_or(f32::NAN).to_bits() ^ {
+                    let d = terrain.dry_ground().to_vec4();
+                    d.x.to_bits().rotate_left(7)
+                        ^ d.y.to_bits().rotate_left(13)
+                        ^ d.z.to_bits().rotate_left(19)
+                        ^ terrain.ground_cover(0.0, 0.0).is_some() as u32
+                },
             ]
         };
         let rewrite_instances = self.instance_key != Some(instance_key);
@@ -1281,7 +1327,11 @@ impl VoxelTerrainGpu {
             queue.write_buffer(
                 &self.instances,
                 slot as u64 * std::mem::size_of::<VoxelInstance>() as u64,
-                bytemuck::bytes_of(&Self::instance_for(terrain, origin)),
+                bytemuck::bytes_of(&Self::instance_for(
+                    terrain,
+                    origin,
+                    chunk_world * job.node.chunks() as f32,
+                )),
             );
             let bounds = job.cells.map(|(lo, hi)| {
                 let min = origin + lo.as_vec3() * cell;
@@ -1328,7 +1378,11 @@ impl VoxelTerrainGpu {
                 queue.write_buffer(
                     &self.instances,
                     node.slot as u64 * std::mem::size_of::<VoxelInstance>() as u64,
-                    bytemuck::bytes_of(&Self::instance_for(terrain, node.origin)),
+                    bytemuck::bytes_of(&Self::instance_for(
+                        terrain,
+                        node.origin,
+                        node.footprint[2] - node.footprint[0],
+                    )),
                 );
             }
             for (key, node) in &self.nodes {
@@ -1336,7 +1390,11 @@ impl VoxelTerrainGpu {
                 queue.write_buffer(
                     &self.instances,
                     node.slot as u64 * std::mem::size_of::<VoxelInstance>() as u64,
-                    bytemuck::bytes_of(&Self::instance_for(terrain, origin)),
+                    bytemuck::bytes_of(&Self::instance_for(
+                        terrain,
+                        origin,
+                        chunk_world * key.chunks() as f32,
+                    )),
                 );
             }
             self.epoch += 1;

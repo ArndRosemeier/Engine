@@ -206,7 +206,11 @@ GI, shadows, physics and navigation see the streamed ground like any other.
 `world.prepare_stream(10.0)` on the first frame waits until the ground under
 the camera is there; `stream.set_focus(Some(player))` loads around a player
 instead of the camera; `stream.stats()` counts what is loaded;
-`.with_terrain(|t| t.with_beach(2.0))` styles the ground. Coordinates stay
+`.with_terrain(|t| t.with_beach(2.0))` styles the ground. Deserts, steppe and
+snowy peaks: return a `GroundCover { green, snow_line }` from the generator's
+`ground_cover(x, z)` (`green` 1 is grass, 0 bare ground in the colour set with
+`t.with_dry_ground(rgb(196, 170, 120))`; snow lies above `snow_line`), and
+near and far ground both show it. Coordinates stay
 plain metres (fine for worlds tens of kilometres across). See
 `examples/open_world`.
 

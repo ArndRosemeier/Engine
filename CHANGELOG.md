@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.069 (2026-11-14)
+
+- Streamed worlds can have dry ground and snow: a generator's ground_cover says how green each place is and where the snow line lies
+
 ## 0.068 (2026-11-14)
 
 - World::set_fullscreen / fullscreen: a game can toggle borderless fullscreen (e.g. on Alt+Enter)
