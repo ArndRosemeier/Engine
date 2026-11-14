@@ -1364,8 +1364,10 @@ fn flower_color(i: i32) -> vec3<f32> {
 
 // (amount 0..1, colour) of the flowers at ground position q.
 fn flower_field(q: vec2<f32>) -> vec4<f32> {
-    let field = 0.65 * flower_noise(q / 64.0, 1u) + 0.35 * flower_noise(q / 23.0, 2u);
-    let amount = smoothstep(0.57, 0.7, field);
+    let b = q + 34.0 * (vec2<f32>(flower_noise(q / 47.0, 7u), flower_noise(q / 47.0, 8u)) - 0.5);
+    let field = 0.58 * flower_noise(b / 64.0, 1u) + 0.3 * flower_noise(b / 23.0, 2u)
+        + 0.12 * flower_noise(b / 9.0, 6u);
+    let amount = smoothstep(0.55, 0.75, field);
     let w = q + 60.0 * (vec2<f32>(flower_noise(q / 90.0, 3u), flower_noise(q / 90.0, 4u)) - 0.5);
     let c = vec2<i32>(floor(w / 170.0));
     let i = min(i32(flower_hash(c.x, c.y, 5u) * 5.0), 4);
@@ -1471,7 +1473,7 @@ fn fs_voxel(in: VsOut) -> @location(0) vec4<f32> {
             let far = 1.0 - 0.5 * smoothstep(1.5, 8.0, foot);
             // Mottled, not a flat coat: thick here, thin there.
             let mottle = smoothstep(0.38, 0.68, broad);
-            let cover = mix((0.05 + 0.3 * drifts + 0.3 * mottle) * far, (dots * 0.9 + 0.1) * (0.4 + 0.6 * drifts), near);
+            let cover = mix((0.04 + 0.22 * drifts + 0.22 * mottle) * far, (dots * 0.9 + 0.1) * (0.4 + 0.6 * drifts), near);
             grass = mix(grass, ff.rgb * (0.8 + 0.3 * fine), amount * cover);
         }
     }

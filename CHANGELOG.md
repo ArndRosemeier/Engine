@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.073 (2026-11-14)
+
+- Wildflower fields with wandering, soft edges that thin out far off
+
 ## 0.072 (2026-11-14)
 
 - Four more tree species: umbrella-crowned acacia, gnarled juniper, weeping willow and bottle-trunked baobab
