@@ -47,6 +47,16 @@ pub struct WaterRegion {
     pub y_max: f32,
 }
 
+/// A revision number no other water has had: the renderer and the GPU
+/// simulation keep what they uploaded by these numbers, so a new [`Water`]
+/// (a streamed window that replaced the last one) must never repeat the
+/// numbers of the one before, or its cells would be drawn with the old
+/// one's layout.
+pub(crate) fn next_rev() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl WaterRegion {
     /// A region covering `[min_xz, max_xz]` with columns `cell_size` wide.
     pub fn new(min_xz: Vec2, max_xz: Vec2, cell_size: f32, y_min: f32, y_max: f32) -> Self {
@@ -305,11 +315,11 @@ impl Water {
             backend: Default::default(),
             gpu: Default::default(),
             state_rev: 0,
-            boundary_rev: 0,
+            boundary_rev: next_rev(),
             next_dt: 1.0 / 120.0,
             time: 0.0,
             stats: WaterStats::default(),
-            topology_rev: 1,
+            topology_rev: next_rev(),
             gpu_running: 0,
         };
         water.set_cells(
@@ -1134,7 +1144,7 @@ impl Water {
                 }
             }
         }
-        self.topology_rev += 1;
+        self.topology_rev = next_rev();
         self.state_rev += 1;
     }
 
@@ -1269,7 +1279,7 @@ impl Water {
             self.region.cells_z as usize,
         );
         self.activity.never_sleep = never_sleep;
-        self.topology_rev += 1;
+        self.topology_rev = next_rev();
     }
 
     /// Re-read the terrain under the XZ rectangle `[min, max]` (plus one

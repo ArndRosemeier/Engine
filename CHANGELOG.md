@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.070 (2026-11-14)
+
+- Water that follows the camera is drawn in the right place: a river no longer shows as patches over a dry bed after the window moved. Worlds with costly ground heights build faster.
+
 ## 0.069 (2026-11-14)
 
 - Streamed worlds can have dry ground and snow: a generator's ground_cover says how green each place is and where the snow line lies

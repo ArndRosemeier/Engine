@@ -804,3 +804,22 @@ fn sleeping_tiles_leave_no_step_in_the_sea_surface() {
     }
     assert!(worst < 0.02, "step of {worst} m in the surface");
 }
+
+/// A streamed world replaces its water window with a new [`Water`] as the
+/// camera moves. The renderer keeps the cell layout it uploaded by these
+/// numbers: two waters with the same ones drew the new window's cells in
+/// the old window's places (patches of water over a dry-looking bed).
+#[test]
+fn two_waters_never_share_a_revision() {
+    let flat = HeightMapTerrain(|_, _| -2.0);
+    let region =
+        |x: f32| WaterRegion::new(Vec2::new(x, 0.0), Vec2::new(x + 32.0, 32.0), 1.0, -4.0, 4.0);
+    let a = Water::new(region(0.0), &flat);
+    let mut b = Water::new(region(8.0), &flat);
+    assert_ne!(a.topology_rev, b.topology_rev);
+    assert_ne!(a.boundary_rev, b.boundary_rev);
+    let before = b.boundary_rev;
+    b.set_sea(Some(Sea::calm(0.0)));
+    assert_ne!(b.boundary_rev, before);
+    assert_ne!(b.boundary_rev, a.boundary_rev);
+}
