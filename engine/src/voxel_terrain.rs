@@ -85,6 +85,17 @@ pub struct FarTileMesh {
     pub(crate) max: Vec3,
     /// Ground area it covers (x, z min and max), for hiding under voxels.
     pub(crate) footprint: [f32; 4],
+    /// Lakes and rivers that stand on this ground (see [`Self::with_water`]).
+    pub(crate) water: Option<FarWater>,
+}
+
+/// Water surfaces of a far tile: what is drawn of lakes and rivers beyond
+/// the simulated water. World-space triangles.
+#[derive(Debug)]
+pub(crate) struct FarWater {
+    /// Position xyz and the water's depth there.
+    pub(crate) vertices: Vec<[f32; 4]>,
+    pub(crate) indices: Vec<u32>,
 }
 
 impl FarTileMesh {
@@ -209,7 +220,101 @@ impl FarTileMesh {
             min,
             max,
             footprint: [x0, z0, x0 + size, z0 + size],
+            water: None,
         }
+    }
+
+    /// Add the water that stands on this ground: `levels` is the surface
+    /// height of the water at each of the same `(n + 3)`² corners the patch
+    /// was built from (`None` for dry land; leave the sea out, it is drawn
+    /// on its own). A sheet is laid wherever a level lies above the ground;
+    /// neighbouring corners at different levels (a waterfall, a river
+    /// running downhill) are joined by a sloping sheet.
+    pub fn with_water(
+        mut self,
+        cell: f32,
+        n: usize,
+        heights: &[f32],
+        levels: &[Option<f32>],
+    ) -> Self {
+        let w = n + 3;
+        assert_eq!(heights.len(), w * w, "far tile needs (n + 3)^2 heights");
+        assert_eq!(levels.len(), w * w, "far tile needs (n + 3)^2 water levels");
+        let [x0, z0, ..] = self.footprint;
+        let wet = |x: usize, z: usize| {
+            levels[z * w + x].filter(|l| l.is_finite() && *l > heights[z * w + x])
+        };
+        if !(0..w * w).any(|i| wet(i % w, i / w).is_some()) {
+            return self;
+        }
+        // Each corner's sheet height: its own water, or for a dry corner the
+        // water next to it, kept under the ground where the ground is lower
+        // than that (the far side of a dam or a bank).
+        let mut sheet: Vec<Option<[f32; 2]>> = Vec::with_capacity((n + 1) * (n + 1));
+        for z in 1..=n + 1 {
+            for x in 1..=n + 1 {
+                let h = heights[z * w + x];
+                sheet.push(match wet(x, z) {
+                    Some(l) => Some([l, l - h]),
+                    None => {
+                        let (mut sum, mut count) = (0.0, 0);
+                        for (nx, nz) in [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)] {
+                            if let Some(l) = wet(nx, nz) {
+                                sum += l;
+                                count += 1;
+                            }
+                        }
+                        (count > 0).then(|| [(sum / count as f32).min(h - 0.3), 0.0])
+                    }
+                });
+            }
+        }
+        let row = n + 1;
+        let mut slot = vec![u32::MAX; row * row];
+        let mut water = FarWater {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        };
+        for z in 0..n {
+            for x in 0..n {
+                let corners = [
+                    z * row + x,
+                    z * row + x + 1,
+                    (z + 1) * row + x,
+                    (z + 1) * row + x + 1,
+                ];
+                let any_wet = corners
+                    .iter()
+                    .any(|&c| sheet[c].is_some_and(|s| s[1] > 0.0));
+                if !any_wet || corners.iter().any(|&c| sheet[c].is_none()) {
+                    continue;
+                }
+                let mut ids = [0u32; 4];
+                for (id, &c) in ids.iter_mut().zip(&corners) {
+                    if slot[c] == u32::MAX {
+                        slot[c] = water.vertices.len() as u32;
+                        let [y, depth] = sheet[c].expect("checked");
+                        let (cx, cz) = ((c % row) as f32, (c / row) as f32);
+                        water
+                            .vertices
+                            .push([x0 + cx * cell, y, z0 + cz * cell, depth]);
+                        self.max.y = self.max.y.max(y);
+                    }
+                    *id = slot[c];
+                }
+                let [a, b, c, d] = ids;
+                water.indices.extend_from_slice(&[a, c, b, b, c, d]);
+            }
+        }
+        if !water.indices.is_empty() {
+            self.water = Some(water);
+        }
+        self
+    }
+
+    /// Triangles of lake and river surface on this tile.
+    pub fn water_triangle_count(&self) -> usize {
+        self.water.as_ref().map_or(0, |w| w.indices.len() / 3)
     }
 
     pub fn vertex_count(&self) -> usize {

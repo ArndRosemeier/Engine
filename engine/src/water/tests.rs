@@ -823,3 +823,66 @@ fn two_waters_never_share_a_revision() {
     assert_ne!(b.boundary_rev, before);
     assert_ne!(b.boundary_rev, a.boundary_rev);
 }
+
+/// A river in a trough along x: an upper pool (level 3) behind a sill at
+/// x 40..44, a lower pool (level 1) below it.
+fn stepped_river() -> (HeightMapTerrain<impl Fn(f32, f32) -> f32 + Sync>, Water) {
+    let terrain = HeightMapTerrain(|x: f32, z: f32| {
+        if !(4.0..12.0).contains(&z) {
+            8.0 // banks
+        } else if x < 40.0 {
+            1.0 // upper bed
+        } else if x < 44.0 {
+            2.7 // the sill
+        } else {
+            -1.0 // lower bed
+        }
+    });
+    let region = WaterRegion::new(Vec2::ZERO, Vec2::new(96.0, 16.0), 2.0, -3.0, 20.0);
+    let mut water = Water::new(region, &terrain);
+    water.fill_levels(river_level);
+    (terrain, water)
+}
+
+fn river_level(x: f32, z: f32) -> Option<f32> {
+    (4.0..12.0)
+        .contains(&z)
+        .then_some(if x < 44.0 { 3.0 } else { 1.0 })
+}
+
+#[test]
+fn a_river_runs_through_open_edges_and_keeps_its_levels() {
+    // Closed edges: the upper pool spills over the sill until it stands at
+    // the crest, and the lower pool rises with what it took.
+    let (_t, mut closed) = stepped_river();
+    run(&mut closed, 120.0);
+    let upper = closed.surface_at(Vec3::new(10.0, 2.0, 8.0)).unwrap();
+    let lower = closed.surface_at(Vec3::new(80.0, 0.0, 8.0)).unwrap();
+    assert!(
+        upper < 2.8,
+        "closed: the upper pool drains to its sill, {upper}"
+    );
+    assert!(lower > 1.1, "closed: the lower pool fills up, {lower}");
+
+    // Open edges: the river comes in at the top at its level and leaves at
+    // the bottom, so both pools keep their levels and the fall keeps running.
+    let (_t, mut open) = stepped_river();
+    open.set_open_edges(river_level);
+    assert!(open.sea().is_none());
+    run(&mut open, 120.0);
+    assert_sane(&open);
+    let upper = open.surface_at(Vec3::new(10.0, 2.0, 8.0)).unwrap();
+    let lower = open.surface_at(Vec3::new(80.0, 0.0, 8.0)).unwrap();
+    assert!((upper - 3.0).abs() < 0.2, "open: upper pool at {upper}");
+    assert!((lower - 1.0).abs() < 0.2, "open: lower pool at {lower}");
+    let over_sill = open
+        .sample(Vec3::new(42.0, 2.8, 8.0))
+        .expect("water on the sill");
+    assert!(
+        over_sill.current.x > 0.05,
+        "water runs over the sill, current {:?}",
+        over_sill.current
+    );
+    // The dry banks did not open.
+    assert!(open.surface_at(Vec3::new(10.0, 9.0, 1.0)).is_none());
+}

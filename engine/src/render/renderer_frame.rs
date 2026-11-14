@@ -88,6 +88,7 @@ impl Renderer {
                     eye: camera.eye(),
                     time: world.time(),
                     wind: world.wind(),
+                    far: world.voxel_terrain().map(|t| t.far_tiles()),
                 },
             );
         }

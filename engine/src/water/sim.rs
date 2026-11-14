@@ -230,6 +230,8 @@ pub struct Water {
     pub(crate) sources: Vec<(SourceId, WaterSource)>,
     next_source: u64,
     pub(crate) sea: Option<super::Sea>,
+    /// Faces opened by [`Water::set_open_edges`] (instead of the sea's edges).
+    pub(crate) open_edges: Option<Vec<super::sea::EdgeFace>>,
     pub(crate) sea_clock: f64,
     pub(crate) boundary: Vec<super::sea::Boundary>,
     pub(crate) boundary_q: Vec<f32>,
@@ -305,6 +307,7 @@ impl Water {
             sources: Vec::new(),
             next_source: 1,
             sea: None,
+            open_edges: None,
             sea_clock: 0.0,
             boundary: Vec::new(),
             boundary_q: Vec::new(),

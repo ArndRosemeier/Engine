@@ -18,6 +18,9 @@
 //!   ([`Swell`]) comes in through them and runs up the beaches; waves going
 //!   out pass through instead of bouncing back. The renderer draws the sea on
 //!   past the region to the horizon.
+//! - Rivers and lakes that reach past the region: [`Water::set_open_edges`]
+//!   opens the edges onto the water outside at its own level, so a river
+//!   flows in at the top and out at the bottom and keeps its falls running.
 //! - Flooded tunnels are pressurised, so water rises in the far shaft of a
 //!   U-bend and springs up where a cave opens below a lake's level.
 //!
@@ -54,6 +57,7 @@ mod tests;
 
 pub use backend::WaterBackend;
 pub use look::WaterLook;
+pub(crate) use sea::at_sea;
 pub use sea::{Sea, SeaEdges, Swell};
 pub(crate) use sim::mark_columns;
 pub use sim::{SourceId, Water, WaterRegion, WaterSample, WaterSettings, WaterSource, WaterStats};

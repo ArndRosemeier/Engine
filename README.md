@@ -200,7 +200,12 @@ never stalls:
   mesh (with a collider), `tile.add_lamp(lamp)` a light. `tile.seed()` and
   `Scatter::rect` make this a few lines;
 - a water simulation window that follows the camera and opens onto your sea,
-  drawn on to the horizon.
+  drawn on to the horizon. Lakes and rivers above the sea: return their
+  surface height from `water_level(x, z)`. Near the camera they are simulated
+  (a river whose level steps down runs over the step as a waterfall, flowing
+  in and out through the window's edges; give its head a spring with
+  `water_sources(min, max)` so it never runs dry), further off they are drawn
+  as still sheets on the far ground.
 
 GI, shadows, physics and navigation see the streamed ground like any other.
 `world.prepare_stream(10.0)` on the first frame waits until the ground under
