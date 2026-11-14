@@ -92,6 +92,8 @@ struct GpuBoundary {
     x: f32,
     z: f32,
     q: f32,
+    /// Still level of the water outside the face.
+    level: f32,
 }
 
 /// Sim buffer header: remaining, dt, max speed (bits), next dt, steps,
@@ -745,7 +747,11 @@ impl GpuWaterSim {
             storage("water-sim-q0", links * 4, none),
             storage("water-sim-q1", links * 4, none),
         ];
-        let boundary_buf = storage("water-sim-boundary", boundary * 16, none);
+        let boundary_buf = storage(
+            "water-sim-boundary",
+            boundary * std::mem::size_of::<GpuBoundary>(),
+            none,
+        );
         let sim = storage("water-sim-state", layout.sim_words() * 4, none);
         let args = storage(
             "water-sim-args",
@@ -848,6 +854,7 @@ impl GpuWaterSim {
                 x: e.at.x,
                 z: e.at.y,
                 q: 0.0,
+                level: e.level,
             });
         }
         if !list.is_empty() {
@@ -1392,6 +1399,7 @@ struct Boundary {
     x: f32,
     z: f32,
     q: f32,
+    level: f32,
 };
 @group(0) @binding(8) var<storage, read_write> boundary: array<Boundary>;
 struct Sim {
@@ -1634,7 +1642,7 @@ fn k_sea(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let dt = sim.dt;
-    if dt <= 0.0 || P.sea.y == 0.0 {
+    if dt <= 0.0 {
         boundary[k].q = 0.0;
         return;
     }
@@ -1645,12 +1653,16 @@ fn k_sea(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let s = statics[b.cell];
     let floor = s.x;
-    let level = P.sea.x;
+    let level = b.level;
     let still = max(level - floor, 0.0);
     let head = min(dyn_state[b.cell].y, s.y);
     // Sea time at the start of this sub-step.
     let t = F.a.z + sim.simulated - dt;
-    let eta_in = incoming(vec2<f32>(b.x, b.z), t, still);
+    // Only the sea sends swell in; a lake or river outside is still.
+    var eta_in = 0.0;
+    if P.sea.y != 0.0 && abs(level - P.sea.x) < 0.01 {
+        eta_in = incoming(vec2<f32>(b.x, b.z), t, still);
+    }
     if still <= 0.05 && head <= floor + 1e-4 && level + eta_in <= floor {
         boundary[k].q = 0.0;
         return;
@@ -1799,7 +1811,7 @@ fn k_settle(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
 @compute @workgroup_size(64)
 fn k_sea_wake(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = idx(gid);
-    if k >= P.counts.z || P.sea.y == 0.0 {
+    if k >= P.counts.z {
         return;
     }
     var swell = false;

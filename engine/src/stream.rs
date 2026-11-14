@@ -17,7 +17,9 @@
 //!   a time. Models you place there are drawn with per-instance LOD, in the
 //!   same GPU batches for every tile.
 //! - **Water.** With [`WorldGenerator::water_level`], a water simulation
-//!   window follows the camera and fills seas and lakes as you go.
+//!   window follows the camera and fills seas, lakes and rivers as you go,
+//!   rivers flowing through it; further off, water above the sea is drawn
+//!   as still sheets on the far ground.
 //!
 //! GI, shadows, physics (the ground near moving bodies), navigation and the
 //! water read the streamed voxel terrain like any other.
@@ -107,12 +109,25 @@ pub trait WorldGenerator: Send + Sync + 'static {
         None
     }
 
-    /// Surface height of standing water (sea or lake) at a point, or `None`
-    /// for dry land. The water window fills open ground below it. Defaults
-    /// to the sea level everywhere.
+    /// Surface height of the water (sea, lake or river) at a point, or
+    /// `None` for dry land. The water window fills open ground below it and
+    /// lets it flow: a river whose level steps down runs over the step as a
+    /// fall, fed through the window's edge and by [`Self::water_sources`].
+    /// Beyond the window, water above the sea is drawn as still sheets at
+    /// this level to the horizon. Defaults to the sea level everywhere.
     fn water_level(&self, x: f32, z: f32) -> Option<f32> {
         let _ = (x, z);
         self.sea().map(|s| s.level)
+    }
+
+    /// Springs inside a rectangle of ground (`min` to `max`, x and z): where
+    /// water rises and how much, in cubic metres a second. They feed the
+    /// rivers of the water window around the camera; without one a river
+    /// whose head lies inside the window runs dry. Keep them few (at most 64
+    /// run at once) and the same every time for the same ground.
+    fn water_sources(&self, min: Vec2, max: Vec2) -> Vec<crate::water::WaterSource> {
+        let _ = (min, max);
+        Vec::new()
     }
 
     /// What grows on the ground at a point: how green it is (grass, or the
@@ -549,7 +564,7 @@ fn build_far(gen: &dyn WorldGenerator, settings: &StreamSettings, key: FarTileKe
     // steps between tiles of different detail.
     let sink = 0.04 * cell;
     let skirt = 2.0 + cell * 1.5;
-    FarTileMesh::from_heights_and_cover(
+    let mesh = FarTileMesh::from_heights_and_cover(
         x0,
         z0,
         cell,
@@ -558,7 +573,27 @@ fn build_far(gen: &dyn WorldGenerator, settings: &StreamSettings, key: FarTileKe
         covered.then_some(green.as_slice()),
         sink,
         skirt,
-    )
+    );
+    // Lakes and rivers above the sea (the sea itself is drawn to the
+    // horizon by the water).
+    let sea = gen.sea().map(|s| s.level);
+    let mut any = false;
+    let mut levels = Vec::with_capacity(w * w);
+    for z in 0..w {
+        for x in 0..w {
+            let (px, pz) = (x0 + (x as f32 - 1.0) * cell, z0 + (z as f32 - 1.0) * cell);
+            let level = gen
+                .water_level(px, pz)
+                .filter(|l| sea.is_none_or(|s| !crate::water::at_sea(*l, s)));
+            any |= level.is_some();
+            levels.push(level);
+        }
+    }
+    if any {
+        mesh.with_water(cell, n, &heights, &levels)
+    } else {
+        mesh
+    }
 }
 
 fn build_tile(gen: &dyn WorldGenerator, coord: IVec2, size: f32) -> EngineResult<Tile> {
@@ -1447,6 +1482,12 @@ impl WorldStream {
             if let Some(sea) = gen.sea() {
                 water.set_sea(Some(sea));
             }
+            // The window's edges open onto the water outside it: the sea,
+            // and a river or lake that carries on past the window.
+            water.set_open_edges(|x, z| gen.water_level(x, z));
+            for source in gen.water_sources(mid - half, mid + half) {
+                water.add_source(source);
+            }
             let _ = tx.send(JobOut::Water {
                 centre: wanted,
                 water: Box::new(water),
@@ -1606,6 +1647,85 @@ mod tests {
                 snow_line: 5.0,
             })
         }
+    }
+
+    /// [`TestWorld`]'s hills with a tarn: a round lake at 40 m in a bowl on
+    /// a hill, far above the sea at 0, fed by a spring.
+    struct TarnWorld;
+
+    impl TarnWorld {
+        const AT: Vec2 = Vec2::new(900.0, 300.0);
+    }
+
+    impl WorldGenerator for TarnWorld {
+        fn height(&self, x: f32, z: f32) -> f32 {
+            let d = Vec2::new(x, z).distance(Self::AT);
+            let hills = (x * 0.01).sin() * 6.0 + (z * 0.013).cos() * 4.0 + 2.0;
+            // A hill 46 m high with a bowl 10 m deep in its top.
+            let hill = 46.0 * (1.0 - d / 400.0).clamp(0.0, 1.0);
+            let bowl = 16.0 * (1.0 - d / 120.0).clamp(0.0, 1.0);
+            hills.max(hill) - bowl
+        }
+
+        fn sea(&self) -> Option<crate::water::Sea> {
+            Some(crate::water::Sea::calm(0.0))
+        }
+
+        fn water_level(&self, x: f32, z: f32) -> Option<f32> {
+            if Vec2::new(x, z).distance(Self::AT) < 110.0 {
+                Some(40.0)
+            } else {
+                Some(0.0)
+            }
+        }
+
+        fn water_sources(&self, min: Vec2, max: Vec2) -> Vec<crate::water::WaterSource> {
+            let inside = Self::AT.cmpge(min).all() && Self::AT.cmple(max).all();
+            if inside {
+                vec![crate::water::WaterSource {
+                    position: Vec3::new(Self::AT.x, 41.0, Self::AT.y),
+                    rate: 0.5,
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    #[test]
+    fn a_lake_above_the_sea_is_drawn_far_away_and_simulated_close_up() {
+        // Far away: the tile that holds the tarn carries its sheet, at the
+        // lake's level; a tile of plain coast carries none (the sea is drawn
+        // by the water itself).
+        let gen: Arc<dyn WorldGenerator> = Arc::new(TarnWorld);
+        let s = small();
+        let size = s.block_size();
+        let key = |p: Vec2| FarTileKey {
+            level: 0,
+            x: (p.x / size).floor() as i32,
+            z: (p.y / size).floor() as i32,
+        };
+        let tarn = build_far(&*gen, &s, key(TarnWorld::AT));
+        assert!(tarn.water_triangle_count() > 0, "the tarn has a sheet");
+        let sheet = tarn.water.as_ref().unwrap();
+        assert!(sheet.vertices.iter().any(|v| v[1] == 40.0 && v[3] > 1.0));
+        assert!(sheet.vertices.iter().all(|v| v[1] <= 40.0));
+        let coast = build_far(&*gen, &s, key(Vec2::new(-3000.0, 0.0)));
+        assert_eq!(coast.water_triangle_count(), 0);
+
+        // Close up: the water window fills the tarn to its level and takes
+        // the generator's spring.
+        let mut world = World::new();
+        world
+            .set_stream(Some(WorldStream::new(TarnWorld, s)))
+            .unwrap();
+        look(&mut world, TarnWorld::AT.x, TarnWorld::AT.y);
+        pump(&mut world);
+        let water = world.water().expect("a water window");
+        let at = Vec3::new(TarnWorld::AT.x, 39.0, TarnWorld::AT.y);
+        let surface = water.surface_at(at).expect("the tarn is wet");
+        assert!((surface - 40.0).abs() < 0.5, "tarn surface at {surface}");
+        assert_eq!(water.sources.len(), 1);
     }
 
     #[test]

@@ -97,12 +97,14 @@ impl Sea {
     }
 }
 
-/// One cell joined to the sea, through one face.
+/// One cell joined to water outside the region, through one face.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Boundary {
     pub cell: u32,
     /// Centre of the face on the region edge.
     pub at: Vec2,
+    /// Still level of the water outside this face.
+    pub level: f32,
 }
 
 impl Water {
@@ -119,6 +121,38 @@ impl Water {
         self.sea.as_ref()
     }
 
+    /// Open the region's edges onto the water that lies outside it:
+    /// `level(x, z)` is the still level of that water at a point on the edge
+    /// (`None` for dry land). A river that crosses the region then flows in
+    /// at its upstream edge and out at the other, and a lake that the region
+    /// only covers a part of keeps its level. Edges at the level of the sea
+    /// ([`Water::set_sea`]) carry its swell. This replaces the sea's own
+    /// choice of edges; call it again after the levels outside change.
+    pub fn set_open_edges(&mut self, level: impl Fn(f32, f32) -> Option<f32>) {
+        let r = self.region;
+        let (nx, nz) = (r.cells_x, r.cells_z);
+        let cs = r.cell_size;
+        let mut faces = Vec::new();
+        let mut add = |x: u32, z: u32, at: Vec2| {
+            if let Some(level) = level(at.x, at.y).filter(|l| l.is_finite()) {
+                faces.push(EdgeFace { x, z, at, level });
+            }
+        };
+        for z in 0..nz {
+            let zc = r.min_xz.y + (z as f32 + 0.5) * cs;
+            add(0, z, Vec2::new(r.min_xz.x, zc));
+            add(nx - 1, z, Vec2::new(r.max_xz().x, zc));
+        }
+        for x in 0..nx {
+            let xc = r.min_xz.x + (x as f32 + 0.5) * cs;
+            add(x, 0, Vec2::new(xc, r.min_xz.y));
+            add(x, nz - 1, Vec2::new(xc, r.max_xz().y));
+        }
+        self.open_edges = Some(faces);
+        self.rebuild_boundary();
+        self.wake_all();
+    }
+
     /// Seconds since the sea was set (the swell's clock).
     pub fn sea_time(&self) -> f32 {
         self.sea_clock as f32
@@ -133,62 +167,81 @@ impl Water {
     pub(crate) fn rebuild_boundary(&mut self) {
         self.boundary.clear();
         self.boundary_rev = super::sim::next_rev();
-        let Some(sea) = self.sea.as_ref() else {
-            return;
-        };
         let r = self.region;
         let (nx, nz) = (r.cells_x, r.cells_z);
-        let add = |x: u32, z: u32, at: Vec2, list: &mut Vec<Boundary>| {
-            let c = (z * nx + x) as usize;
-            for cell in self.col_start[c]..self.col_start[c + 1] {
-                let i = cell as usize;
-                // The cell holding the sea surface (the open-air one on a coast).
-                if self.floor[i] < sea.level + 2.0 && self.ceil[i] > sea.level {
-                    list.push(Boundary { cell, at });
+        // The faces that open, each with the level outside it.
+        let faces: Vec<EdgeFace> = match (&self.open_edges, &self.sea) {
+            (Some(faces), _) => faces.clone(),
+            (None, Some(sea)) => {
+                let mut faces = Vec::new();
+                let cs = r.cell_size;
+                let level = sea.level;
+                for z in 0..nz {
+                    let zc = r.min_xz.y + (z as f32 + 0.5) * cs;
+                    if sea.edges.min_x {
+                        let at = Vec2::new(r.min_xz.x, zc);
+                        faces.push(EdgeFace { x: 0, z, at, level });
+                    }
+                    if sea.edges.max_x {
+                        let (x, at) = (nx - 1, Vec2::new(r.max_xz().x, zc));
+                        faces.push(EdgeFace { x, z, at, level });
+                    }
                 }
+                for x in 0..nx {
+                    let xc = r.min_xz.x + (x as f32 + 0.5) * cs;
+                    if sea.edges.min_z {
+                        let at = Vec2::new(xc, r.min_xz.y);
+                        faces.push(EdgeFace { x, z: 0, at, level });
+                    }
+                    if sea.edges.max_z {
+                        let (z, at) = (nz - 1, Vec2::new(xc, r.max_xz().y));
+                        faces.push(EdgeFace { x, z, at, level });
+                    }
+                }
+                faces
             }
+            (None, None) => return,
         };
         let mut list = Vec::new();
-        let cs = r.cell_size;
-        for z in 0..nz {
-            let zc = r.min_xz.y + (z as f32 + 0.5) * cs;
-            if sea.edges.min_x {
-                add(0, z, Vec2::new(r.min_xz.x, zc), &mut list);
-            }
-            if sea.edges.max_x {
-                add(nx - 1, z, Vec2::new(r.max_xz().x, zc), &mut list);
-            }
-        }
-        for x in 0..nx {
-            let xc = r.min_xz.x + (x as f32 + 0.5) * cs;
-            if sea.edges.min_z {
-                add(x, 0, Vec2::new(xc, r.min_xz.y), &mut list);
-            }
-            if sea.edges.max_z {
-                add(x, nz - 1, Vec2::new(xc, r.max_xz().y), &mut list);
+        for f in &faces {
+            let c = (f.z * nx + f.x) as usize;
+            for cell in self.col_start[c]..self.col_start[c + 1] {
+                let i = cell as usize;
+                // The cell holding that surface (the open-air one on a coast).
+                if self.floor[i] < f.level + 2.0 && self.ceil[i] > f.level {
+                    list.push(Boundary {
+                        cell,
+                        at: f.at,
+                        level: f.level,
+                    });
+                }
             }
         }
-        let wet: Vec<f32> = list
-            .iter()
-            .map(|b| sea.level - self.floor[b.cell as usize])
-            .filter(|d| *d > 0.0)
-            .collect();
-        self.sea_depth = if wet.is_empty() {
-            10.0
-        } else {
-            wet.iter().sum::<f32>() / wet.len() as f32
-        };
+        if let Some(sea) = self.sea.as_ref() {
+            let wet: Vec<f32> = list
+                .iter()
+                .filter(|b| at_sea(b.level, sea.level))
+                .map(|b| sea.level - self.floor[b.cell as usize])
+                .filter(|d| *d > 0.0)
+                .collect();
+            self.sea_depth = if wet.is_empty() {
+                10.0
+            } else {
+                wet.iter().sum::<f32>() / wet.len() as f32
+            };
+        }
         self.boundary = list;
         self.boundary_q = vec![0.0; self.boundary.len()];
     }
 
-    /// Outward discharge through every sea face for this sub-step (radiation
+    /// Outward discharge through every open face for this sub-step (radiation
     /// condition with an incoming wave: q = √(g·h)·(η − 2·η_in)). Adds
     /// outflow per cell to `out`. Returns the fastest wave speed.
     pub(crate) fn sea_fluxes(&mut self, dt: f32, out: &mut [f32]) -> f32 {
-        let Some(sea) = self.sea.as_ref() else {
+        if self.boundary.is_empty() {
             return 0.0;
-        };
+        }
+        let sea = self.sea.as_ref();
         let t = self.sea_clock as f32;
         let dx = self.region.cell_size;
         let mut fastest: f32 = 0.0;
@@ -199,15 +252,19 @@ impl Water {
                 continue;
             }
             let floor = self.floor[i];
-            let still = (sea.level - floor).max(0.0);
+            let still = (b.level - floor).max(0.0);
             let head = self.head[i].min(self.ceil[i]);
-            let eta_in = sea.incoming(b.at, t, still);
-            if still <= 0.05 && head <= floor + 1e-4 && sea.level + eta_in <= floor {
+            // Only the sea sends swell in; a lake or river outside is still.
+            let eta_in = match sea {
+                Some(sea) if at_sea(b.level, sea.level) => sea.incoming(b.at, t, still),
+                _ => 0.0,
+            };
+            if still <= 0.05 && head <= floor + 1e-4 && b.level + eta_in <= floor {
                 self.boundary_q[k] = 0.0;
                 continue;
             }
             let c = (G * still.max(0.05)).sqrt();
-            let eta = head - sea.level;
+            let eta = head - b.level;
             let mut q = c * (eta - 2.0 * eta_in);
             if q > 0.0 {
                 // Cannot give more than the cell holds.
@@ -219,4 +276,18 @@ impl Water {
         }
         fastest
     }
+}
+
+/// One face on the region's edge that opens onto water at `level`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EdgeFace {
+    x: u32,
+    z: u32,
+    at: Vec2,
+    level: f32,
+}
+
+/// Whether an open face at `level` is the sea's (and carries its swell).
+pub(crate) fn at_sea(level: f32, sea: f32) -> bool {
+    (level - sea).abs() < 0.01
 }

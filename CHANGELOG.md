@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.071 (2026-11-14)
+
+- Lakes and rivers above the sea in streamed worlds: rivers flow through the water around the camera and fall from pool to pool, springs feed them, and far away they are drawn as sheets of water on the ground.
+
 ## 0.070 (2026-11-14)
 
 - Water that follows the camera is drawn in the right place: a river no longer shows as patches over a dry bed after the window moved. Worlds with costly ground heights build faster.

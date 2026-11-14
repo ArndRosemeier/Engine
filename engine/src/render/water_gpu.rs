@@ -18,8 +18,10 @@
 //!    half out shows both sides of the waterline.
 
 use super::postprocess::HDR_FORMAT;
+use crate::voxel_terrain::{FarTileKey, FarTiles};
 use crate::water::Water;
 use glam::{Mat4, Vec3};
+use std::collections::HashMap;
 
 const WATER_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const DEPTH_COPY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
@@ -62,6 +64,8 @@ pub struct WaterFrame<'a> {
     pub eye: Vec3,
     pub time: f32,
     pub wind: f32,
+    /// The far tiles shown now: their lakes and rivers are drawn too.
+    pub far: Option<&'a FarTiles>,
 }
 
 struct Targets {
@@ -90,9 +94,21 @@ struct Buffers {
     draw_capacity: usize,
 }
 
+/// One far tile's lake and river sheets on the GPU.
+struct FarSheet {
+    /// The tile's mesh these were made from (its address).
+    mesh: usize,
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    count: u32,
+}
+
 pub struct WaterGpu {
     surface_pipeline: wgpu::RenderPipeline,
     sea_pipeline: wgpu::RenderPipeline,
+    far_pipeline: wgpu::RenderPipeline,
+    /// Lakes and rivers of the far tiles shown now.
+    far: HashMap<FarTileKey, FarSheet>,
     ground_pipeline: wgpu::RenderPipeline,
     resolve_pipeline: wgpu::RenderPipeline,
     under_pipeline: wgpu::RenderPipeline,
@@ -236,7 +252,13 @@ impl WaterGpu {
                 write_mask: wgpu::ColorWrites::ALL,
             })
         };
+        let far_vertex = [wgpu::VertexBufferLayout {
+            array_stride: 16,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x4],
+        }];
         let surface_like = |label: &str, vs: &str, depth_write: bool| {
+            let far = vs == "vs_far";
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("water-surface-pipeline-layout"),
                 bind_group_layouts: &[scene_layout, &surface_layout],
@@ -248,12 +270,12 @@ impl WaterGpu {
                 vertex: wgpu::VertexState {
                     module: &surface_shader,
                     entry_point: Some(vs),
-                    buffers: &[],
+                    buffers: if far { &far_vertex } else { &[] },
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &surface_shader,
-                    entry_point: Some("fs_surface"),
+                    entry_point: Some(if far { "fs_far" } else { "fs_surface" }),
                     targets: &[color_target(HDR_FORMAT)],
                     compilation_options: Default::default(),
                 }),
@@ -276,6 +298,7 @@ impl WaterGpu {
         };
         let surface_pipeline = surface_like("water-surface", "vs_surface", true);
         let sea_pipeline = surface_like("water-sea", "vs_sea", true);
+        let far_pipeline = surface_like("water-far", "vs_far", true);
         // Wet ground only darkens what is there; it must not hide water.
         let ground_pipeline = surface_like("water-wet-ground", "vs_surface", false);
         let fullscreen = |label: &str,
@@ -359,6 +382,8 @@ impl WaterGpu {
             buffers_rev: 0,
             surface_pipeline,
             sea_pipeline,
+            far_pipeline,
+            far: HashMap::new(),
             ground_pipeline,
             resolve_pipeline,
             under_pipeline,
@@ -536,6 +561,53 @@ impl WaterGpu {
         self.synced_topology = water.topology_rev;
     }
 
+    /// Keep the far tiles' water sheets on the GPU in step with the tiles
+    /// the terrain shows.
+    fn sync_far(&mut self, device: &wgpu::Device, far: Option<&FarTiles>) {
+        use wgpu::util::DeviceExt;
+        let Some(far) = far else {
+            self.far.clear();
+            return;
+        };
+        self.far.retain(|key, sheet| {
+            far.tiles
+                .get(key)
+                .is_some_and(|m| std::sync::Arc::as_ptr(m) as usize == sheet.mesh)
+        });
+        for (key, mesh) in &far.tiles {
+            let Some(water) = mesh.water.as_ref() else {
+                continue;
+            };
+            if self.far.contains_key(key) {
+                continue;
+            }
+            let buffer = |label, contents: &[u8], usage| {
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents,
+                    usage,
+                })
+            };
+            self.far.insert(
+                *key,
+                FarSheet {
+                    mesh: std::sync::Arc::as_ptr(mesh) as usize,
+                    vertices: buffer(
+                        "water-far-vertices",
+                        bytemuck::cast_slice(&water.vertices),
+                        wgpu::BufferUsages::VERTEX,
+                    ),
+                    indices: buffer(
+                        "water-far-indices",
+                        bytemuck::cast_slice(&water.indices),
+                        wgpu::BufferUsages::INDEX,
+                    ),
+                    count: water.indices.len() as u32,
+                },
+            );
+        }
+    }
+
     /// Draw the water onto the resolved scene.
     pub fn encode(
         &mut self,
@@ -547,6 +619,7 @@ impl WaterGpu {
         frame: WaterFrame<'_>,
     ) {
         debug_assert_eq!(main_depth.sample_count() > 1, self.depth_multisampled);
+        self.sync_far(device, frame.far);
         let ext = frame.scene_texture.size();
         let size = [ext.width.max(1), ext.height.max(1)];
         self.ensure_targets(device, size, main_depth);
@@ -806,7 +879,7 @@ impl WaterGpu {
 
         // 2. The surface, then the open sea around it.
         let has_sea = water.sea().is_some();
-        if on_gpu || !self.draw.is_empty() || has_sea {
+        if on_gpu || !self.draw.is_empty() || has_sea || !self.far.is_empty() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("water-surface"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -849,6 +922,15 @@ impl WaterGpu {
             if has_sea {
                 pass.set_pipeline(&self.sea_pipeline);
                 pass.draw(0..6, 0..SEA_RINGS * perimeter as u32);
+            }
+            // Lakes and rivers beyond the simulated region.
+            if !self.far.is_empty() {
+                pass.set_pipeline(&self.far_pipeline);
+                for sheet in self.far.values() {
+                    pass.set_vertex_buffer(0, sheet.vertices.slice(..));
+                    pass.set_index_buffer(sheet.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..sheet.count, 0, 0..1);
+                }
             }
         }
 
@@ -1442,8 +1524,36 @@ fn wet_ground(in: VsOut, uv: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(color, 1.0);
 }
 
+// A lake or river beyond the simulated region: a still sheet from the far
+// tiles (position and depth per vertex).
+@vertex
+fn vs_far(@location(0) v: vec4<f32>) -> VsOut {
+    var out: VsOut;
+    out.world_p = v.xyz;
+    out.clip = u.view_proj * vec4<f32>(v.xyz, 1.0);
+    out.grad = vec2<f32>(0.0);
+    out.flow = vec2<f32>(0.0);
+    out.depth = max(v.w, 0.05);
+    out.foam = 0.0;
+    return out;
+}
+
 @fragment
 fn fs_surface(in: VsOut) -> @location(0) vec4<f32> {
+    return water_colour(in);
+}
+
+// The far sheets stop where the simulated region draws the water itself.
+@fragment
+fn fs_far(in: VsOut) -> @location(0) vec4<f32> {
+    let q = in.world_p.xz;
+    if wp.region.w > 0.0 && all(q > wp.region.xy) && all(q < wp.region_max.xy) {
+        discard;
+    }
+    return water_colour(in);
+}
+
+fn water_colour(in: VsOut) -> vec4<f32> {
     let p = in.world_p;
     let pix = in.clip.xy;
     let uv = pix * wp.screen.zw;
