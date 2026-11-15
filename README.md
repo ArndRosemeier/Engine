@@ -237,6 +237,21 @@ and `.ccd(true)` for small fast things. Then `push`, `push_at`,
 becomes colliders around moving bodies (flat floor at y = 0 without terrain;
 `set_physics_settings` changes that and gravity). See `examples/physics`.
 
+**Gravity from a field (down differs from place to place):**
+`world.set_gravity_field(Some(Arc::new(|p: &FieldProbe| -p.position.normalize_or_zero() * 9.81)))`
+and every moving dynamic body, ragdoll part and character asks the field
+for its own acceleration each physics step instead of using the one global
+gravity: planets, a spinning station, attraction stones. The probe says which
+body (`p.entity()`, or `p.body()` in a `PhysicsWorld`), what kind
+(`FieldBody::Body`, `RagdollPart`, `Character`), where its centre of mass is
+and how heavy it is, so a field can pick bodies by mass or by id. Zero is a
+fine answer (things drift); a NaN counts as zero. Build the field as a cheap
+snapshot of your sources and replace it whenever they change: a sleeping
+body wakes when the answer at its place changes. `None` goes back to
+`PhysicsSettings::gravity`. Characters still stand upright in y and follow
+the field's vertical part; water stays level and lifts against the field's
+downward part. `PhysicsWorld::set_gravity_field` is the same without a window.
+
 **Triggers, layers and shape queries (gameplay physics):**
 `world.spawn_trigger(place, Trigger::cuboid((2.0, 1.0, 2.0)))?` makes an
 invisible zone (`Trigger::ball(r)`, `Trigger::capsule(h, r)`); or

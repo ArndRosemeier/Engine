@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.074 (2026-11-15)
+
+- Gravity from a field: World::set_gravity_field lets the game give every body, ragdoll part and character its own acceleration each step, including zero, so down can differ from place to place
+
 ## 0.073 (2026-11-14)
 
 - Wildflower fields with wandering, soft edges that thin out far off

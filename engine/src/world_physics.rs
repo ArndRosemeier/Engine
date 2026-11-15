@@ -436,6 +436,33 @@ impl World {
         Ok(())
     }
 
+    /// Let the game decide which way and how hard each body falls. From
+    /// the next physics step on, every moving dynamic body, ragdoll part
+    /// and character asks `field` for its acceleration (m/s², zero allowed)
+    /// instead of using [`PhysicsSettings::gravity`](crate::physics::PhysicsSettings::gravity).
+    /// `None` goes back to that global gravity.
+    ///
+    /// Replace the field whenever its sources change (it is cheap: an `Arc`
+    /// of the game's own snapshot). A sleeping body wakes when the
+    /// acceleration at its place changes. Characters still stand upright
+    /// in y and follow the field's vertical part; water stays level in y and
+    /// lifts bodies against the field's downward part.
+    ///
+    /// ```ignore
+    /// // Everything falls towards a small planet at the origin.
+    /// world.set_gravity_field(Some(std::sync::Arc::new(|p: &FieldProbe| {
+    ///     -p.position.normalize_or_zero() * 9.81
+    /// })));
+    /// ```
+    pub fn set_gravity_field(&mut self, field: Option<crate::physics::SharedField>) {
+        self.physics.set_gravity_field(field);
+    }
+
+    /// Whether a gravity field (not the global gravity) moves bodies.
+    pub fn has_gravity_field(&self) -> bool {
+        self.physics.has_gravity_field()
+    }
+
     /// Bodies in the world, and how many of them are moving (not asleep).
     pub fn body_count(&self) -> (usize, usize) {
         (self.physics.body_count(), self.physics.awake_count())

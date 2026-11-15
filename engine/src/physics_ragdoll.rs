@@ -91,6 +91,14 @@ pub(crate) struct RagPart {
     handle: RigidBodyHandle,
     prev: (Vec3, Quat),
     cur: (Vec3, Quat),
+    /// The gravity field's acceleration at the last step this part moved.
+    pub field_accel: Vec3,
+}
+
+impl RagPart {
+    pub fn handle(&self) -> RigidBodyHandle {
+        self.handle
+    }
 }
 
 /// The bodies of one ragdoll.
@@ -100,6 +108,10 @@ pub(crate) struct RagBodies {
 }
 
 impl RagBodies {
+    pub fn parts_mut(&mut self) -> impl Iterator<Item = &mut RagPart> {
+        self.parts.iter_mut()
+    }
+
     pub fn prev_cur(&mut self) {
         for p in &mut self.parts {
             p.prev = p.cur;
@@ -165,6 +177,7 @@ impl Physics {
                 handle,
                 prev: (p.position, p.rotation),
                 cur: (p.position, p.rotation),
+                field_accel: Vec3::ZERO,
             });
         }
         for l in links {

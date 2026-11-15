@@ -334,13 +334,17 @@ impl Physics {
 
     /// One fixed step of every character, before the world steps.
     pub(super) fn step_characters(&mut self, h: f32) {
-        let g = self.settings.gravity.y;
         for id in self.character_ids() {
             let c = &self.characters[&id];
             let spec = c.spec;
             let controller = spec.controller();
             let shape = Capsule::new_y(spec.half_height(), spec.radius);
             let center = spec.center(c.cur);
+            // Characters stand upright in y: with a gravity field they
+            // follow its vertical part.
+            let g = self
+                .gravity_for(id.raw(), FieldBody::Character, center, spec.mass)
+                .y;
             let mut vertical = c.vertical;
             if let Some(speed) = c.jump {
                 vertical = speed;
