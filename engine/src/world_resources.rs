@@ -414,6 +414,71 @@ impl World {
         Ok(())
     }
 
+    /// A camera at `eye` looking at `target` with its own `up` (for a world
+    /// where down changes, see [`Camera::with_up`]). Set it every frame.
+    pub fn look_at_up(
+        &mut self,
+        eye: impl Into<Vec3>,
+        target: impl Into<Vec3>,
+        up: impl Into<Vec3>,
+    ) {
+        let lens = (self.camera.fov_y_degrees(), self.camera.near());
+        self.camera =
+            Camera::look_at(eye, target)
+                .with_up(up)
+                .with_lens(lens.0, lens.1, self.view_distance);
+    }
+
+    /// First-person camera at `eye`, looking along `forward`, with its own
+    /// `up`. `forward` may point anywhere except straight along `up`.
+    pub fn look_first_person_up(
+        &mut self,
+        eye: impl Into<Vec3>,
+        forward: impl Into<Vec3>,
+        up: impl Into<Vec3>,
+    ) {
+        let (eye, forward, up) = (eye.into(), forward.into(), up.into());
+        let up = up.try_normalize().unwrap_or(Vec3::Y);
+        let mut f = forward.try_normalize().unwrap_or(Vec3::Z);
+        if f.dot(up).abs() > 0.999 {
+            // Straight along up: tip it a little so the view stays defined.
+            f = (f + up.any_orthonormal_vector() * 0.05).normalize();
+        }
+        self.look_at_up(eye, eye + f, up);
+    }
+
+    /// [`Self::look_follow_entity`] for a world where down changes: behind
+    /// the entity, facing `forward` (any direction across `up`), `distance`
+    /// back and `height` along `up`, pulled in when something is in the way.
+    /// Use the character's smoothed up (see `CharacterState::up`).
+    pub fn look_follow_entity_up(
+        &mut self,
+        entity: EntityId,
+        up: impl Into<Vec3>,
+        forward: impl Into<Vec3>,
+        distance: f32,
+        height: f32,
+    ) -> EngineResult<()> {
+        let up = up.into().try_normalize().unwrap_or(Vec3::Y);
+        let forward = forward.into();
+        let forward = (forward - up * forward.dot(up))
+            .try_normalize()
+            .unwrap_or_else(|| up.any_orthonormal_vector());
+        let feet = self.world_transform(entity)?.w_axis.truncate();
+        let head = feet + up * 1.4;
+        let want = -forward * distance + up * (height - 1.4);
+        let length = want.length();
+        let room = if length > 1e-3 {
+            self.cast_sphere_ignoring(head, want, 0.3, length, entity)
+                .map_or(1.0, |hit| (hit.distance / length).clamp(0.0, 1.0))
+        } else {
+            1.0
+        };
+        let room = room.max(0.25 / distance.max(0.25));
+        self.look_at_up(head + want * room, head, up);
+        Ok(())
+    }
+
     /// How far the camera helpers may see, in metres.
     ///
     /// The helpers rebuild the camera every frame, so a game that reaches into

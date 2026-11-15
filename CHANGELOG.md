@@ -7,6 +7,12 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.074 (2026-11-15)
+
+- Gravity from a field: World::set_gravity_field lets the game give every body, ragdoll part and character its own acceleration each step, including zero, so down can differ from place to place
+- Characters that stand against the field: `CharacterUp::field()` walks on walls and ceilings, turns at a capped rate, drifts where the pull is weak; `push_character` adds to a character's own motion
+- Cameras with any up direction: `Camera::with_up`, `look_at_up`, `look_first_person_up`, `look_follow_entity_up`
+
 ## 0.073 (2026-11-14)
 
 - Wildflower fields with wandering, soft edges that thin out far off

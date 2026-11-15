@@ -55,8 +55,11 @@ use physics_joints::JointTracked;
 pub use physics_joints::{Joint, JointId, JointKind};
 #[path = "physics_character.rs"]
 mod physics_character;
+#[path = "physics_field.rs"]
+mod physics_field;
 use physics_character::CharacterTracked;
-pub use physics_character::{Character, CharacterState};
+pub use physics_character::{Character, CharacterState, CharacterUp};
+pub use physics_field::{FieldBody, FieldProbe, GravityField, SharedField};
 pub use physics_gameplay::{Trigger, TriggerEvent, TriggerShape, MAX_LAYER};
 pub(crate) use physics_ragdoll::{JointDesc, LinkDesc, PartDesc, PartShape};
 
@@ -448,6 +451,8 @@ struct Tracked {
     wet: bool,
     age: f32,
     temporary: Option<Temporary>,
+    /// The field's acceleration at the last step this body moved.
+    field_accel: Vec3,
 }
 
 /// Rubble whose time is up, sinking into the ground.
@@ -489,6 +494,8 @@ pub(crate) struct Physics {
     next_joint: u64,
     /// Walking characters by their entity.
     characters: HashMap<EntityId, CharacterTracked>,
+    /// Gravity from the game, per body; `None` uses `settings.gravity`.
+    field: Option<SharedField>,
 }
 
 impl std::fmt::Debug for Physics {
@@ -588,6 +595,7 @@ impl Physics {
             joints: HashMap::new(),
             next_joint: 0,
             characters: HashMap::new(),
+            field: None,
         }
     }
 
@@ -597,7 +605,9 @@ impl Physics {
 
     pub fn set_settings(&mut self, settings: PhysicsSettings) {
         self.settings = settings;
-        self.world.gravity = settings.gravity;
+        if self.field.is_none() {
+            self.world.gravity = settings.gravity;
+        }
         self.world.integration_parameters.dt = 1.0 / settings.steps_per_second;
         self.world.wake_up_all(true);
     }
@@ -765,6 +775,7 @@ impl Physics {
                 wet: false,
                 age: 0.0,
                 temporary,
+                field_accel: Vec3::ZERO,
             },
         );
         Ok(())
@@ -1035,6 +1046,7 @@ impl Physics {
             self.clock += h;
             self.update_ground(around);
             self.apply_water(around, &mut out.splashes);
+            self.apply_field();
             self.step_characters(h);
             for t in self.bodies.values_mut() {
                 t.prev = t.cur;
@@ -1167,8 +1179,16 @@ impl Physics {
 
     /// Buoyancy, drag and current for bodies in water.
     fn apply_water(&mut self, around: &Surroundings, splashes: &mut Vec<Splash>) {
-        let g = -self.settings.gravity.y;
+        let world_g = -self.settings.gravity.y;
+        let has_field = self.field.is_some();
         for t in self.bodies.values_mut() {
+            // Water is level in y: with a field, buoyancy answers its
+            // downward part (from the body's last step).
+            let g = if has_field {
+                (-t.field_accel.y).max(0.0)
+            } else {
+                world_g
+            };
             if t.kind != BodyKind::Dynamic {
                 continue;
             }
@@ -1696,6 +1716,16 @@ impl PhysicsWorld {
 
     pub fn settings(&self) -> PhysicsSettings {
         self.inner.settings()
+    }
+
+    /// Gravity per body from the game; `None` goes back to the settings'
+    /// gravity. See [`GravityField`] and `World::set_gravity_field`.
+    pub fn set_gravity_field(&mut self, field: Option<SharedField>) {
+        self.inner.set_gravity_field(field);
+    }
+
+    pub fn has_gravity_field(&self) -> bool {
+        self.inner.has_gravity_field()
     }
 
     pub fn set_settings(&mut self, settings: PhysicsSettings) -> EngineResult<()> {

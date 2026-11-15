@@ -3484,6 +3484,45 @@ mod characters_and_joints {
     }
 
     #[test]
+    fn a_character_on_a_wall_gets_a_camera_with_its_up() {
+        let mut world = World::new();
+        world
+            .set_physics_settings(crate::physics::PhysicsSettings {
+                ground: crate::physics::PhysicsGround::None,
+                ..Default::default()
+            })
+            .unwrap();
+        // A wall with its face at x = 3, and down pointing into it.
+        wall(
+            &mut world,
+            Vec3::new(4.0, 5.0, 0.0),
+            Vec3::new(2.0, 20.0, 20.0),
+        );
+        world.set_gravity_field(Some(std::sync::Arc::new(
+            |_: &crate::physics::FieldProbe| Vec3::X * 9.81,
+        )));
+        let id = world.spawn_pivot(Place::new(0.0, 5.0, 0.0));
+        world
+            .add_character(
+                id,
+                Character::default().up(crate::physics::CharacterUp::field()),
+            )
+            .unwrap();
+        run(&mut world, 180);
+        let s = world.character(id).unwrap();
+        assert!(s.grounded && (s.up - Vec3::NEG_X).length() < 0.05, "{s:?}");
+        assert!((feet(&world, id).x - 3.0).abs() < 0.1);
+        world
+            .look_follow_entity_up(id, s.up, Vec3::Y, 6.0, 3.0)
+            .unwrap();
+        let cam = world.camera();
+        assert!((cam.up() - Vec3::NEG_X).length() < 1e-4);
+        // Behind (-y) and above the player in its own frame, away from the wall.
+        assert!(cam.eye().x < 0.5 && cam.eye().y < 5.0, "{}", cam.eye());
+        assert!((cam.target() - (feet(&world, id) + s.up * 1.4)).length() < 1e-3);
+    }
+
+    #[test]
     fn a_character_lands_walks_and_keeps_its_turn() {
         let mut world = World::new();
         let p = person(&mut world, Vec3::new(0.0, 1.0, 0.0));
