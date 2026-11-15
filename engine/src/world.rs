@@ -114,11 +114,17 @@ impl EntityId {
 }
 
 impl EntityId {
-    pub(crate) fn raw(self) -> u64 {
+    /// The id as a number, for game data that keys on plain integers (a
+    /// rules crate without the engine, a network message). Turn it back
+    /// with [`Self::from_raw`].
+    pub fn raw(self) -> u64 {
         self.0
     }
 
-    pub(crate) fn from_raw(raw: u64) -> Self {
+    /// The entity a number from [`Self::raw`] names. A number that never
+    /// came from `raw` names no entity: calls with it fail with
+    /// `UnknownEntity`.
+    pub fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
 }
