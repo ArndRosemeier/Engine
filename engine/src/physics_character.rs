@@ -41,6 +41,37 @@ pub struct Character {
     /// Collision layer, as for [`Body::layer`].
     pub layer: u8,
     pub collides_with: u32,
+    /// Which way is up: always +y, or against the gravity field.
+    pub up: CharacterUp,
+}
+
+/// Which way a character stands.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum CharacterUp {
+    /// Upright in +y, whatever the gravity (the usual game).
+    #[default]
+    Y,
+    /// Feet towards the pull of the gravity field
+    /// ([`crate::world::World::set_gravity_field`]): the character walks
+    /// on walls and ceilings, falls along the field and drifts where it is
+    /// weak. It turns to a new down at most `turn_deg_per_s` degrees a second;
+    /// below `drift_below` m/s² it keeps its last up and is never grounded
+    /// (it floats, carried by its own momentum).
+    Field {
+        turn_deg_per_s: f32,
+        drift_below: f32,
+    },
+}
+
+impl CharacterUp {
+    /// Follow the field, turning up to 180 degrees a second, drifting below
+    /// 0.05 g.
+    pub fn field() -> Self {
+        CharacterUp::Field {
+            turn_deg_per_s: 180.0,
+            drift_below: 0.05 * 9.81,
+        }
+    }
 }
 
 impl Default for Character {
@@ -55,6 +86,7 @@ impl Default for Character {
             gravity_scale: 1.0,
             layer: 0,
             collides_with: u32::MAX,
+            up: CharacterUp::Y,
         }
     }
 }
@@ -85,6 +117,12 @@ impl Character {
         self.layer = layer;
         self
     }
+    /// Stand against the gravity field instead of upright in y; see
+    /// [`CharacterUp::Field`] (`CharacterUp::field()` for the usual values).
+    pub fn up(mut self, up: CharacterUp) -> Self {
+        self.up = up;
+        self
+    }
 
     pub fn validate(&self) -> EngineResult<()> {
         let bad = |what: &str| Err(EngineError::InvalidValue(format!("character {what}")));
@@ -109,14 +147,26 @@ impl Character {
         if self.layer > MAX_LAYER {
             return bad("layer is too high");
         }
+        if let CharacterUp::Field {
+            turn_deg_per_s,
+            drift_below,
+        } = self.up
+        {
+            if !(turn_deg_per_s.is_finite() && turn_deg_per_s > 0.0) {
+                return bad("up turn rate must be > 0");
+            }
+            if !(drift_below.is_finite() && drift_below >= 0.0) {
+                return bad("up drift_below must be >= 0");
+            }
+        }
         Ok(())
     }
 
     /// The capsule's centre for feet at `feet`. The capsule keeps a small
     /// gap (`SKIN`) to what it stands on, so it hangs that much lower and
     /// the feet touch the ground.
-    fn center(&self, feet: Vec3) -> Vec3 {
-        feet + Vec3::Y * (self.height * 0.5 - SKIN)
+    fn center(&self, feet: Vec3, up: Vec3) -> Vec3 {
+        feet + up * (self.height * 0.5 - SKIN)
     }
 
     fn half_height(&self) -> f32 {
@@ -149,6 +199,44 @@ pub struct CharacterState {
     pub velocity: Vec3,
     /// Where its feet are.
     pub feet: Vec3,
+    /// Which way it stands (+y unless it follows the field).
+    pub up: Vec3,
+    /// Its own motion apart from walking (falling, a jump, drifting), m/s.
+    pub fall: Vec3,
+    /// The gravity acting on it in the last step, m/s².
+    pub gravity: Vec3,
+}
+
+impl CharacterState {
+    /// The rotation that turns +y into this character's up, for drawing
+    /// it standing on a wall (multiply your yaw rotation on the right).
+    pub fn up_rotation(&self) -> Quat {
+        up_rotation(self.up)
+    }
+}
+
+/// The rotation from +y to `up`, turning the short way.
+pub(super) fn up_rotation(up: Vec3) -> Quat {
+    if up.length_squared() < 1e-6 {
+        return Quat::IDENTITY;
+    }
+    Quat::from_rotation_arc(Vec3::Y, up.normalize())
+}
+
+/// `from` turned towards `to` by at most `max_rad`.
+fn turn_towards(from: Vec3, to: Vec3, max_rad: f32) -> Vec3 {
+    let angle = from.angle_between(to);
+    if !angle.is_finite() || angle <= max_rad {
+        return to;
+    }
+    let axis = from.cross(to);
+    let axis = if axis.length_squared() > 1e-10 {
+        axis.normalize()
+    } else {
+        // Opposite: turn about any axis across `from`.
+        from.any_orthonormal_vector()
+    };
+    (Quat::from_axis_angle(axis, max_rad) * from).normalize()
 }
 
 #[derive(Debug)]
@@ -156,10 +244,12 @@ pub(super) struct CharacterTracked {
     handle: RigidBodyHandle,
     collider: ColliderHandle,
     spec: Character,
-    /// What the game asked for: horizontal speed, and a jump to start.
+    /// What the game asked for: speed along the ground, and a jump to start.
     walk: Vec3,
     jump: Option<f32>,
-    vertical: f32,
+    /// Motion apart from walking: falling, jumping, drifting.
+    fall: Vec3,
+    up: Vec3,
     state: CharacterState,
     prev: Vec3,
     cur: Vec3,
@@ -190,7 +280,7 @@ impl Physics {
             )));
         }
         self.remove_character(id);
-        let center = spec.center(feet);
+        let center = spec.center(feet, Vec3::Y);
         let handle = self.world.insert_body(
             RigidBodyBuilder::kinematic_position_based()
                 .translation(center)
@@ -211,9 +301,11 @@ impl Physics {
                 spec: *spec,
                 walk: Vec3::ZERO,
                 jump: None,
-                vertical: 0.0,
+                fall: Vec3::ZERO,
+                up: Vec3::Y,
                 state: CharacterState {
                     feet,
+                    up: Vec3::Y,
                     ..CharacterState::default()
                 },
                 prev: feet,
@@ -289,7 +381,18 @@ impl Physics {
     pub fn walk(&mut self, id: EntityId, velocity: Vec3) -> EngineResult<()> {
         crate::place::ensure_finite3(velocity, "walk velocity")?;
         let c = self.characters.get_mut(&id).ok_or_else(not_a_character)?;
-        c.walk = Vec3::new(velocity.x, 0.0, velocity.z);
+        c.walk = velocity;
+        Ok(())
+    }
+
+    /// Add to a character's own motion (a push off a wall while drifting,
+    /// a blast, a pull it should follow). Grounded characters only keep the
+    /// part that leaves the ground.
+    pub fn push_character(&mut self, id: EntityId, velocity_change: Vec3) -> EngineResult<()> {
+        crate::place::ensure_finite3(velocity_change, "character push")?;
+        let c = self.characters.get_mut(&id).ok_or_else(not_a_character)?;
+        c.fall += velocity_change;
+        c.state.grounded = c.state.grounded && c.fall.dot(c.up) <= 0.0;
         Ok(())
     }
 
@@ -324,11 +427,11 @@ impl Physics {
         c.written = feet;
         c.prev = feet;
         c.cur = feet;
-        c.vertical = 0.0;
+        c.fall = Vec3::ZERO;
         c.state.feet = feet;
-        let center = c.spec.center(feet);
+        let center = c.spec.center(feet, c.up);
         if let Some(b) = self.world.bodies.get_mut(c.handle) {
-            b.set_position(pose(center, Quat::IDENTITY), true);
+            b.set_position(pose(center, up_rotation(c.up)), true);
         }
     }
 
@@ -339,53 +442,69 @@ impl Physics {
             let spec = c.spec;
             let controller = spec.controller();
             let shape = Capsule::new_y(spec.half_height(), spec.radius);
-            let center = spec.center(c.cur);
-            // Characters stand upright in y: with a gravity field they
-            // follow its vertical part.
-            let g = self
-                .gravity_for(id.raw(), FieldBody::Character, center, spec.mass)
-                .y;
-            let mut vertical = c.vertical;
+            let gravity = self.gravity_for(
+                id.raw(),
+                FieldBody::Character,
+                spec.center(c.cur, c.up),
+                spec.mass,
+            ) * spec.gravity_scale;
+            // Which way is up now, and what pulls it along that up.
+            let (up, pull, drifting) = match spec.up {
+                CharacterUp::Y => (Vec3::Y, Vec3::Y * gravity.y, false),
+                CharacterUp::Field {
+                    turn_deg_per_s,
+                    drift_below,
+                } => {
+                    let strength = gravity.length();
+                    if strength < drift_below || strength < 1e-6 {
+                        (c.up, gravity, true)
+                    } else {
+                        let target = -gravity / strength;
+                        let up = turn_towards(c.up, target, turn_deg_per_s.to_radians() * h);
+                        (up, gravity, false)
+                    }
+                }
+            };
+            let center = spec.center(c.cur, up);
+            let rot = up_rotation(up);
+            let mut fall = c.fall;
             if let Some(speed) = c.jump {
-                vertical = speed;
+                // A jump replaces the motion along up and keeps the rest.
+                fall += up * (speed - fall.dot(up));
             }
             // Standing: no push into the ground (snapping keeps the feet on
-            // it going downhill). Otherwise gravity.
-            let standing = c.state.grounded && c.jump.is_none() && vertical <= 0.0;
-            vertical = if standing {
-                0.0
+            // it going downhill). Otherwise the pull.
+            let standing = c.state.grounded && c.jump.is_none() && fall.dot(up) <= 0.0 && !drifting;
+            fall = if standing {
+                Vec3::ZERO
             } else {
-                vertical + g * spec.gravity_scale * h
+                fall + pull * h
             };
-            let desired = c.walk * h + Vec3::Y * vertical * h;
+            let walk = c.walk - up * c.walk.dot(up);
+            let desired = walk * h + fall * h;
             let (own, jumping) = (c.collider, c.jump.is_some());
             // The flat floor is a box too big for exact shape casts: the
             // character walks on a smaller copy of it instead.
             self.place_floor(id);
-            let c = &self.characters[&id];
             let skip_floor = self.plane;
             let not_floor =
                 |h: ColliderHandle, _: &rapier3d::prelude::Collider| Some(h) != skip_floor;
             let mut hits = Vec::new();
+            let mut ctl = controller;
+            ctl.up = up;
+            if jumping || drifting {
+                // Leave the ground instead of snapping back to it.
+                ctl.snap_to_ground = None;
+            }
             let moved = {
                 let filter = QueryFilter::default()
                     .exclude_sensors()
                     .exclude_collider(own)
                     .predicate(&not_floor);
                 let queries = self.world.query_pipeline_with_filter(filter);
-                let mut ctl = controller;
-                if jumping {
-                    // Leave the ground instead of snapping back to it.
-                    ctl.snap_to_ground = None;
-                }
-                ctl.move_shape(
-                    h,
-                    &queries,
-                    &shape,
-                    &pose(center, Quat::IDENTITY),
-                    desired,
-                    |hit| hits.push(hit),
-                )
+                ctl.move_shape(h, &queries, &shape, &pose(center, rot), desired, |hit| {
+                    hits.push(hit)
+                })
             };
             // Shove the dynamic bodies it walked into.
             if !hits.is_empty() {
@@ -401,34 +520,38 @@ impl Physics {
                     &mut w.colliders,
                     filter,
                 );
-                controller.solve_character_collision_impulses(
-                    h,
-                    &mut queries,
-                    &shape,
-                    spec.mass,
-                    &hits,
-                );
+                ctl.solve_character_collision_impulses(h, &mut queries, &shape, spec.mass, &hits);
             }
-            let hit_ceiling = vertical > 0.0
-                && hits.iter().any(|hit| hit.hit.normal1.y < -0.5)
-                && moved.translation.y < desired.y * 0.5;
-            let feet = c.cur + moved.translation;
+            // Motion into whatever it hit is lost: a ceiling stops a jump,
+            // a wall stops a drift.
+            for hit in &hits {
+                let n = hit.hit.normal1;
+                let into = fall.dot(-n);
+                if into > 0.0 && n.dot(up) < 0.7 {
+                    fall += n * into;
+                }
+            }
+            let grounded = moved.grounded && !drifting;
+            if grounded && fall.dot(up) <= 0.0 {
+                fall = Vec3::ZERO;
+            }
+            let feet = self.characters[&id].cur + moved.translation;
             let c = self.characters.get_mut(&id).expect("character");
             c.jump = None;
-            c.vertical = if (moved.grounded && vertical <= 0.0) || hit_ceiling {
-                0.0
-            } else {
-                vertical
-            };
+            c.fall = fall;
+            c.up = up;
             c.prev = c.cur;
             c.cur = feet;
             c.state = CharacterState {
-                grounded: moved.grounded,
+                grounded,
                 velocity: moved.translation / h,
                 feet,
+                up,
+                fall,
+                gravity,
             };
             if let Some(b) = self.world.bodies.get_mut(c.handle) {
-                b.set_next_kinematic_position(pose(spec.center(feet), Quat::IDENTITY));
+                b.set_next_kinematic_position(pose(spec.center(feet, up), rot));
             }
         }
     }

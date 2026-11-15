@@ -169,9 +169,9 @@ pub use particles::{
 };
 pub use physics::{
     Body, BodyHit, BodyId, BodyImpact, BodyKind, BodyShape, BuildingColliders, Character,
-    CharacterState, FieldBody, FieldProbe, GravityField, Impact, Joint, JointId, JointKind,
-    PhysicsGround, PhysicsSettings, PhysicsWorld, RayHit, SharedField, Trigger, TriggerEvent,
-    TriggerShape,
+    CharacterState, CharacterUp, FieldBody, FieldProbe, GravityField, Impact, Joint, JointId,
+    JointKind, PhysicsGround, PhysicsSettings, PhysicsWorld, RayHit, SharedField, Trigger,
+    TriggerEvent, TriggerShape,
 };
 pub use place::{GlobalPlace, MeshInstance, Place};
 pub use portal::{Portal, PortalId, PortalSettings, SpaceId};

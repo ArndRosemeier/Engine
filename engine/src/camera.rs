@@ -84,6 +84,17 @@ impl Camera {
         self
     }
 
+    /// The same camera with another up direction (the default is +y), for
+    /// worlds where down changes: a character standing on a wall sees the
+    /// wall as its floor. Zero or non-finite `up` keeps the current one.
+    pub fn with_up(mut self, up: impl Into<Vec3>) -> Self {
+        let up = up.into();
+        if up.is_finite() && up.length_squared() > 1e-12 {
+            self.up = up.normalize();
+        }
+        self
+    }
+
     pub fn look_at(eye: impl Into<Vec3>, target: impl Into<Vec3>) -> Self {
         Self {
             eye: eye.into(),

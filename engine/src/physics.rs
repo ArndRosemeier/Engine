@@ -58,7 +58,7 @@ mod physics_character;
 #[path = "physics_field.rs"]
 mod physics_field;
 use physics_character::CharacterTracked;
-pub use physics_character::{Character, CharacterState};
+pub use physics_character::{Character, CharacterState, CharacterUp};
 pub use physics_field::{FieldBody, FieldProbe, GravityField, SharedField};
 pub use physics_gameplay::{Trigger, TriggerEvent, TriggerShape, MAX_LAYER};
 pub(crate) use physics_ragdoll::{JointDesc, LinkDesc, PartDesc, PartShape};

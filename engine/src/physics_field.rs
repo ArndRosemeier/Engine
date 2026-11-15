@@ -200,6 +200,7 @@ impl Physics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::physics::physics_character::CharacterUp;
 
     fn space() -> PhysicsWorld {
         PhysicsWorld::with_settings(PhysicsSettings {
@@ -334,5 +335,119 @@ mod tests {
         // Fallen 0.3 g * 1 s² / 2 = 1.47 m, not 4.9 m.
         let fallen = 10.0 - feet.y;
         assert!((fallen - 1.47).abs() < 0.2, "fell {fallen}");
+    }
+
+    fn tick_feet(p: &mut Physics, id: EntityId, feet: &mut Vec3, seconds: f32) {
+        let around = Surroundings {
+            voxels: None,
+            heights: None,
+            water: None,
+        };
+        for _ in 0..(seconds * 60.0).round() as usize {
+            let f = *feet;
+            let r = p.tick(1.0 / 60.0, &around, |_| Some(Mat4::from_translation(f)));
+            if let Some((_, f)) = r.characters.into_iter().find(|(c, _)| *c == id) {
+                *feet = f;
+            }
+        }
+    }
+
+    fn field_character(at: Vec3) -> (Physics, EntityId, Vec3) {
+        let mut p = Physics::new();
+        p.set_settings(PhysicsSettings {
+            ground: PhysicsGround::None,
+            ..PhysicsSettings::default()
+        });
+        let id = EntityId::from_raw(9);
+        p.add_character(id, &Character::default().up(CharacterUp::field()), at)
+            .unwrap();
+        (p, id, at)
+    }
+
+    #[test]
+    fn a_field_character_lands_and_walks_on_a_wall() {
+        let (mut p, id, mut feet) = field_character(Vec3::new(0.0, 5.0, 0.0));
+        // A wall whose face is the plane x = 3; down is +x.
+        p.add_static_box(
+            1,
+            0,
+            Vec3::new(4.0, 5.0, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(1.0, 10.0, 10.0),
+        );
+        p.set_gravity_field(Some(Arc::new(|_: &FieldProbe| Vec3::X * 9.81)));
+        tick_feet(&mut p, id, &mut feet, 3.0);
+        let s = p.character_state(id).unwrap();
+        assert!(s.grounded, "{s:?}");
+        assert!((s.up - Vec3::NEG_X).length() < 0.05, "up {}", s.up);
+        assert!((feet.x - 3.0).abs() < 0.1, "feet {feet}");
+        // Walk "up" the wall (+y in the world, along the ground for it).
+        p.walk(id, Vec3::new(0.0, 2.0, 0.0)).unwrap();
+        let before = feet;
+        tick_feet(&mut p, id, &mut feet, 1.0);
+        assert!(feet.y > before.y + 1.5, "{before} -> {feet}");
+        assert!((feet.x - 3.0).abs() < 0.1, "stays on the wall: {feet}");
+    }
+
+    #[test]
+    fn a_field_character_turns_at_its_rate() {
+        let (mut p, id, mut feet) = field_character(Vec3::ZERO);
+        p.set_gravity_field(Some(Arc::new(|_: &FieldProbe| Vec3::NEG_Y * 9.81)));
+        tick_feet(&mut p, id, &mut feet, 0.1);
+        // Down flips to +x: 90 degrees at 180 degrees a second takes 0.5 s.
+        p.set_gravity_field(Some(Arc::new(|_: &FieldProbe| Vec3::X * 9.81)));
+        tick_feet(&mut p, id, &mut feet, 0.25);
+        let half = p.character_state(id).unwrap().up;
+        assert!(
+            (half.angle_between(Vec3::Y).to_degrees() - 45.0).abs() < 4.0,
+            "{half}"
+        );
+        tick_feet(&mut p, id, &mut feet, 0.5);
+        let up = p.character_state(id).unwrap().up;
+        assert!((up - Vec3::NEG_X).length() < 1e-3, "{up}");
+    }
+
+    #[test]
+    fn a_field_character_drifts_where_the_pull_is_weak() {
+        let (mut p, id, mut feet) = field_character(Vec3::ZERO);
+        p.set_gravity_field(Some(Arc::new(|_: &FieldProbe| Vec3::NEG_Y * 0.1)));
+        p.push_character(id, Vec3::new(1.0, 0.0, 0.0)).unwrap();
+        tick_feet(&mut p, id, &mut feet, 2.0);
+        let s = p.character_state(id).unwrap();
+        assert!(!s.grounded);
+        assert!((feet.x - 2.0).abs() < 0.05, "{feet}");
+        assert!(
+            (s.up - Vec3::Y).length() < 1e-4,
+            "keeps its up while drifting"
+        );
+        // The weak pull still acts: 0.1 m/s² for 2 s.
+        assert!((feet.y + 0.2).abs() < 0.03, "{feet}");
+    }
+
+    #[test]
+    fn jump_height_scales_with_the_pull() {
+        let jump = |g: f32| {
+            let (mut p, id, mut feet) = field_character(Vec3::new(0.0, 0.0, 0.0));
+            p.add_static_box(
+                1,
+                0,
+                Vec3::new(0.0, -1.0, 0.0),
+                Quat::IDENTITY,
+                Vec3::new(10.0, 1.0, 10.0),
+            );
+            p.set_gravity_field(Some(Arc::new(move |_: &FieldProbe| Vec3::NEG_Y * g)));
+            tick_feet(&mut p, id, &mut feet, 0.5);
+            assert!(p.character_state(id).unwrap().grounded);
+            p.jump(id, 4.85).unwrap();
+            let mut top = feet.y;
+            for _ in 0..240 {
+                tick_feet(&mut p, id, &mut feet, 1.0 / 60.0);
+                top = top.max(feet.y);
+            }
+            top
+        };
+        // v² / 2g: 1.2 m at 1 g, 3 m at 0.4 g.
+        assert!((jump(9.81) - 1.2).abs() < 0.1);
+        assert!((jump(0.4 * 9.81) - 3.0).abs() < 0.15);
     }
 }

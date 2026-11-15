@@ -248,8 +248,8 @@ and how heavy it is, so a field can pick bodies by mass or by id. Zero is a
 fine answer (things drift); a NaN counts as zero. Build the field as a cheap
 snapshot of your sources and replace it whenever they change: a sleeping
 body wakes when the answer at its place changes. `None` goes back to
-`PhysicsSettings::gravity`. Characters still stand upright in y and follow
-the field's vertical part; water stays level and lifts against the field's
+`PhysicsSettings::gravity`. Characters stand upright in y and follow the
+field's vertical part unless they are made with `CharacterUp::field()`; water stays level and lifts against the field's
 downward part. `PhysicsWorld::set_gravity_field` is the same without a window.
 
 **Triggers, layers and shape queries (gameplay physics):**
@@ -280,6 +280,18 @@ and shoves crates aside. `world.character(player)` says whether it is
 `grounded`, its real `velocity` and `feet`. Physics only moves it: turn it
 with `set_place` as usual, and `set_place` somewhere else teleports it.
 Triggers notice characters.
+`Character::default().up(CharacterUp::field())` makes a character stand
+against the gravity field instead of upright in y (see "Gravity from a
+field" above): it walks on walls and ceilings, turns to a new down at up to
+180 degrees a second (a stumble, not a snap), falls along the field, and
+below 0.05 g drifts on its own momentum, never grounded. `walk` then counts
+the part of the velocity across its up, `jump` leaves along its up, and
+`world.push_character(id, dv)` adds to its own motion (pushing off while
+drifting). `world.character(id)` also gives its `up`, its `fall` velocity,
+the `gravity` on it and `up_rotation()` for drawing it. The camera follows
+with `world.look_follow_entity_up(player, up, forward, distance, height)`,
+`look_first_person_up(eye, forward, up)` or `look_at_up(eye, target, up)`
+(`Camera::with_up` for your own).
 
 **Joints:** `world.add_joint(a, b, Joint::hinge(Vec3::Y).at(point))?` joins two
 bodies; `world.pin(body, joint)?` joins one to a fixed point in the world.
