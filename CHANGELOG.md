@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.077 (2026-11-15)
+
+- A character resting on the ridge between two faces of a mesh collider counts as standing (it could not walk before)
+
 ## 0.076 (2026-11-15)
 
 - 3D water: a FLIP fluid box that pours, fills basins, floats bodies and follows the gravity field (World::add_fluid, examples/fluids)

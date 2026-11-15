@@ -7,10 +7,13 @@
 use super::physics_gameplay::body_groups;
 use super::*;
 use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
+use rapier3d::parry::query::ShapeCastOptions;
 use rapier3d::parry::shape::Capsule;
 
 /// The gap the character controller keeps to everything around it.
 const SKIN: f32 = 0.02;
+/// How far under the skin a resting character still finds its ground.
+const GROUND_PROBE: f32 = 0.04;
 
 /// How a character is built. `Character::default()` is a person: 1.8 m
 /// tall, 0.35 m wide, climbs 0.35 m steps and 45 degree slopes.
@@ -531,7 +534,27 @@ impl Physics {
                     fall += n * into;
                 }
             }
-            let grounded = moved.grounded && !drifting;
+            let mut on_ground = moved.grounded;
+            if !on_ground && !jumping && !drifting && fall.dot(up) <= 0.0 {
+                // Resting on an edge of a mesh (the ridge between two
+                // faces), the controller stops a skin above it without
+                // calling it ground: ask what is right under the feet.
+                let filter = QueryFilter::default()
+                    .exclude_sensors()
+                    .exclude_collider(own)
+                    .predicate(&not_floor);
+                let under = self.world.cast_shape(
+                    &pose(center + moved.translation, rot),
+                    -up,
+                    &shape,
+                    ShapeCastOptions::with_max_time_of_impact(SKIN + GROUND_PROBE),
+                    filter,
+                );
+                on_ground = under.is_some_and(|(_, hit)| {
+                    hit.normal1.dot(up) >= spec.max_slope_deg.to_radians().cos()
+                });
+            }
+            let grounded = on_ground && !drifting;
             if grounded && fall.dot(up) <= 0.0 {
                 fall = Vec3::ZERO;
             }

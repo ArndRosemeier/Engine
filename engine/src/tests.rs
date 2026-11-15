@@ -3523,6 +3523,49 @@ mod characters_and_joints {
     }
 
     #[test]
+    fn a_character_stands_on_the_ridge_of_a_mesh() {
+        // The top edge of a many-sided cylinder (a mesh collider): landing
+        // exactly on the ridge between two faces still counts as standing.
+        for (field, x) in [(false, 0.0), (true, 0.0), (false, 1.7), (true, 1.7)] {
+            let mut world = World::new();
+            world
+                .set_physics_settings(crate::physics::PhysicsSettings {
+                    ground: crate::physics::PhysicsGround::None,
+                    ..Default::default()
+                })
+                .unwrap();
+            let rock = world.spawn(
+                Mesh::cylinder(Vec3::ZERO, Vec3::Z, 50.0, 100.0, 64, rgb(90, 90, 90)).unwrap(),
+            );
+            world
+                .add_body(rock, Body::fixed().shape(BodyShape::Mesh))
+                .unwrap();
+            let y = (50.0f32 * 50.0 - x * x).sqrt();
+            let id = world.spawn_pivot(Place::new(x, y + 0.1, 0.0));
+            let mut spec = Character::default();
+            if field {
+                world.set_gravity_field(Some(std::sync::Arc::new(
+                    |p: &crate::physics::FieldProbe| {
+                        -Vec3::new(p.position.x, p.position.y, 0.0).normalize_or_zero() * 9.81
+                    },
+                )));
+                spec = spec.up(crate::physics::CharacterUp::field());
+            }
+            world.add_character(id, spec).unwrap();
+            run(&mut world, 60);
+            let s = world.character(id).unwrap();
+            assert!(s.grounded, "field {field}, x {x}: {s:?}");
+            world.walk(id, (0.0, 0.0, 2.0)).unwrap();
+            run(&mut world, 60);
+            let f = feet(&world, id);
+            assert!(
+                (f.z - 2.0).abs() < 0.2,
+                "field {field}, x {x}: walked to {f}"
+            );
+        }
+    }
+
+    #[test]
     fn a_character_lands_walks_and_keeps_its_turn() {
         let mut world = World::new();
         let p = person(&mut world, Vec3::new(0.0, 1.0, 0.0));
