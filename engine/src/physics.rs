@@ -383,6 +383,8 @@ pub(crate) struct Surroundings<'a> {
     /// A height function and an id that changes only when the terrain does.
     pub heights: Option<(usize, HeightFn<'a>)>,
     pub water: Option<&'a crate::water::Water>,
+    /// Three-dimensional water boxes.
+    pub fluids: &'a [crate::fluid::Fluid],
 }
 
 impl Surroundings<'_> {
@@ -1197,10 +1199,55 @@ impl Physics {
             };
             b.reset_forces(false);
             b.reset_torques(false);
-            if around.water.is_none() || b.is_sleeping() && !t.wet {
+            if around.water.is_none() && around.fluids.is_empty() || b.is_sleeping() && !t.wet {
                 continue;
             }
             let pos = b.translation();
+            if !around.fluids.is_empty() {
+                // 3D water: the share of probe points in water cells, pushed
+                // against whatever pulls the body (field or gravity).
+                let pull = if has_field {
+                    t.field_accel
+                } else {
+                    self.settings.gravity
+                };
+                let rot = *b.rotation();
+                let mut under = Vec3::ZERO;
+                let mut count = 0usize;
+                let mut current = Vec3::ZERO;
+                let total = t.probes.len() + 1;
+                for p in std::iter::once(pos).chain(t.probes.iter().map(|&l| pos + rot * l)) {
+                    if let Some(f) = around.fluids.iter().find(|f| f.is_water_at(p)) {
+                        under += p;
+                        count += 1;
+                        current += f.velocity_at(p);
+                    }
+                }
+                if count > 0 {
+                    let frac = count as f32 / total as f32;
+                    let centre = under / count as f32;
+                    current /= count as f32;
+                    b.add_force_at_point(-pull * WATER_KG_M3 * t.volume * frac, centre, true);
+                    let v = b.linvel();
+                    if !t.wet && v.length() > 1.5 {
+                        splashes.push(Splash {
+                            at: pos,
+                            speed: v.length(),
+                        });
+                    }
+                    t.wet = true;
+                    let mass = b.mass();
+                    b.add_force(-(v - current) * mass * 3.0 * frac, true);
+                    let w = b.angvel();
+                    let inertia = mass * t.volume.cbrt().powi(2) * 0.2;
+                    b.add_torque(-w * inertia * 2.0 * frac, true);
+                    continue;
+                }
+                if around.water.is_none() {
+                    t.wet = false;
+                    continue;
+                }
+            }
             let Some((surface, current)) = around.water_at(pos) else {
                 t.wet = false;
                 continue;
@@ -2032,6 +2079,7 @@ impl PhysicsWorld {
                 )
             }),
             water: None,
+            fluids: &[],
         };
         let transforms = &self.transforms;
         let before = self.inner.clock;
@@ -2156,6 +2204,7 @@ mod tests {
             voxels: None,
             heights: None,
             water: None,
+            fluids: &[],
         }
     }
 

@@ -369,6 +369,7 @@ and `params`; return `color` (alpha used with `.see_through()`), `normal`,
 | Save and load | README "Save and load" |
 | Models from files (glTF, GLB) | README "Load a model", `examples/model_viewer` |
 | Breakable buildings | README "Breakable buildings", `examples/buildings` |
+| Water that pours, fills basins and follows a gravity field (3D) | `examples/fluids` |
 | Speed and quality settings | README "Quality and performance" |
 | Debug switches (`ENGINE_*`) | README "Environment variables" |
 

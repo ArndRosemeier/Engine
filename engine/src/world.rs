@@ -47,6 +47,9 @@ mod world_census;
 mod world_cpu_mesh;
 #[path = "world_crowds.rs"]
 mod world_crowds;
+#[path = "world_fluids.rs"]
+mod world_fluids;
+pub use world_fluids::FluidId;
 #[path = "world_decals.rs"]
 mod world_decals;
 #[path = "world_effects.rs"]
@@ -938,6 +941,8 @@ pub struct World {
     water: Option<crate::water::Water>,
     /// Voxel terrain revision the water last read its columns from.
     water_terrain_rev: u64,
+    /// Three-dimensional water boxes (see [`crate::fluid`]).
+    fluids: world_fluids::Fluids,
     /// Rigid bodies, including pieces of shattered meshes.
     physics: crate::physics::Physics,
     /// The fixed simulation tick (see [`crate::sim`]), when on.
@@ -1120,6 +1125,7 @@ impl Default for World {
             voxel_baseline_rev: 0,
             water: None,
             water_terrain_rev: 0,
+            fluids: Default::default(),
             stream: None,
             physics: crate::physics::Physics::new(),
             sim_clock: None,

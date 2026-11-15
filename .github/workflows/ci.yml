@@ -96,6 +96,9 @@ jobs:
       - name: batch_churn (Instance batches that change, vanish and come back (a city s)
         run: python3 tools/verify.py batch_churn --frames 90 --width 640 --height 360
 
+      - name: fluids (3D water that pours, floats crates and follows a sideways pull)
+        run: python3 tools/verify.py fluids --frames 600 --width 640 --height 360
+
       - name: Keep the reports and screenshots
         if: always()
         uses: actions/upload-artifact@v4

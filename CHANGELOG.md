@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.076 (2026-11-15)
+
+- 3D water: a FLIP fluid box that pours, fills basins, floats bodies and follows the gravity field (World::add_fluid, examples/fluids)
+
 ## 0.075 (2026-11-15)
 
 - EntityId::raw and EntityId::from_raw are public, so game rules that key on plain numbers can name entities

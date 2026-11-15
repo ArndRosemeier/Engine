@@ -874,6 +874,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluids"
+version = "0.1.0"
+dependencies = [
+ "engine",
+]
+
+[[package]]
 name = "fog_volumes"
 version = "0.1.0"
 dependencies = [

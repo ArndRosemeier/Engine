@@ -498,6 +498,7 @@ impl World {
             voxels: self.voxel_terrain.as_ref(),
             heights: field.map(|f| (f as *const _ as usize, &height as crate::physics::HeightFn)),
             water: self.water.as_ref(),
+            fluids: &self.fluids.list,
         };
         let entities = &self.entities;
         let impacts_before = self.physics.pending_impacts().len();
@@ -542,5 +543,6 @@ impl World {
         for id in result.expired {
             self.despawn(id);
         }
+        self.tick_fluids(dt);
     }
 }

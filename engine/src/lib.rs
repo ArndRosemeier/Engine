@@ -53,6 +53,7 @@ pub mod custom_material;
 pub mod debris;
 pub mod decals;
 pub mod error;
+pub mod fluid;
 pub mod fly;
 pub mod fracture;
 mod frame_clock;

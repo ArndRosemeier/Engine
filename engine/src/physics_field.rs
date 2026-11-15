@@ -26,6 +26,10 @@ pub enum FieldBody {
     RagdollPart,
     /// A walking character (`World::add_character`).
     Character,
+    /// A cell of a 3D water box (`World::add_fluid`): `id` is the
+    /// [`crate::world::FluidId`] number, `mass` is 1. Asked once per frame
+    /// for every cell holding water and next to it.
+    Water,
 }
 
 /// One question to a [`GravityField`]: a body, where it is and how heavy.
@@ -324,6 +328,7 @@ mod tests {
             voxels: None,
             heights: None,
             water: None,
+            fluids: &[],
         };
         let mut feet = Vec3::new(0.0, 10.0, 0.0);
         for _ in 0..60 {
@@ -342,6 +347,7 @@ mod tests {
             voxels: None,
             heights: None,
             water: None,
+            fluids: &[],
         };
         for _ in 0..(seconds * 60.0).round() as usize {
             let f = *feet;

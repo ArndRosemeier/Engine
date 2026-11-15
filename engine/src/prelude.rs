@@ -18,6 +18,7 @@ pub use crate::custom_material::{CustomMaterial, CustomMaterialId};
 pub use crate::debris::Shatter;
 pub use crate::decals::{Decal, DecalId, DecalKind, MAX_DECALS};
 pub use crate::error::{EngineError, EngineResult};
+pub use crate::fluid::{Fluid, FluidSettings};
 pub use crate::fly::FlyCamera;
 pub use crate::grading::{ColorGrade, FogVolume, FogVolumeId, VolumeFog};
 pub use crate::hud::Anchor;
@@ -86,6 +87,7 @@ pub use crate::water::{Water, WaterRegion, WaterSample, WaterSource};
 pub use crate::water_mesh::{band_mesh, polygon_fill_mesh, rect_fill_mesh, ribbon_mesh};
 pub use crate::world::world_effects::Fire;
 pub use crate::world::AnimatedEntity;
+pub use crate::world::FluidId;
 pub use crate::world::Loaded;
 pub use crate::world::WorldScan;
 pub use crate::world::{

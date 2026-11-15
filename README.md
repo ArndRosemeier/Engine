@@ -243,14 +243,36 @@ and every moving dynamic body, ragdoll part and character asks the field
 for its own acceleration each physics step instead of using the one global
 gravity: planets, a spinning station, attraction stones. The probe says which
 body (`p.entity()`, or `p.body()` in a `PhysicsWorld`), what kind
-(`FieldBody::Body`, `RagdollPart`, `Character`), where its centre of mass is
+(`FieldBody::Body`, `RagdollPart`, `Character`, `Water`), where its centre of mass is
 and how heavy it is, so a field can pick bodies by mass or by id. Zero is a
 fine answer (things drift); a NaN counts as zero. Build the field as a cheap
 snapshot of your sources and replace it whenever they change: a sleeping
 body wakes when the answer at its place changes. `None` goes back to
 `PhysicsSettings::gravity`. Characters stand upright in y and follow the
 field's vertical part unless they are made with `CharacterUp::field()`; water stays level and lifts against the field's
-downward part. `PhysicsWorld::set_gravity_field` is the same without a window.
+downward part (3D fluid boxes follow the whole field, see below). `PhysicsWorld::set_gravity_field` is the same without a window.
+
+**Water that flows in 3D (a fluid box):** the water sheet above is a
+level height field. For water that pours, splashes, fills a basin or, in a
+gravity field, climbs a wall and hangs under a ceiling, add a `Fluid`: a box
+of cells (0.25 to 0.5 m) where particles carry the water and a grid keeps
+it from compressing (FLIP).
+`let mut pool = Fluid::new(FluidSettings::new(corner, size, 0.25))?;` then
+`pool.mark_solid(|p| ...)` for rock inside the box (its walls are always
+closed), `pool.fill_box(min, max)` or `fill_ball` for still water, and
+`world.add_fluid(pool)?`. The world steps it each frame with the gravity
+bodies feel (with a field: `FieldBody::Water` probes, one per cell holding
+water), draws its surface see-through (`FluidSettings::color`, its alpha;
+`.mesh_every(2)` rebuilds it every other frame), and lifts and slows the
+dynamic bodies in it against whatever pulls them. While it runs,
+`world.fluid_mut(id)` pours (`pour(at, radius, velocity, count)`, eight
+particles fill a cell), drains and changes rock; `fluid(id)` reads
+`volume()`, `is_water_at(p)`, `velocity_at(p)` and `particles()`. It runs on
+the CPU and is deterministic. Cost grows with the water: about 70,000
+particles (1,100 m³ at 0.5 m cells) take some 15 ms a frame on four cores,
+so keep boxes to the active zone and `world.set_fluid_awake(id, false)` the
+far ones. `Fluid::step(dt, accel)` runs one without a world. See
+`examples/fluids`.
 
 **Triggers, layers and shape queries (gameplay physics):**
 `world.spawn_trigger(place, Trigger::cuboid((2.0, 1.0, 2.0)))?` makes an
@@ -878,6 +900,7 @@ cargo run --release -p <name>
 | `audio` | Sound: a camp fire crackling from its direction, a cave and a stone hall that echo differently, a bell muffled by walls, explosions, and music in layers (click: explosion, 1-4: music intensity, M: music, K: knock, F: fire) |
 | `vfx_showcase` | Particles, ribbons and spell effects |
 | `batch_churn` | Instance batches that change, vanish and come back (a city size switch) |
+| `fluids` | 3D water that pours, fills a basin, floats crates and follows a sideways pull |
 | `procedural_caves`, `populate_world`, `gpu_field_demo`, `ui_modal` | Caves, prop scattering, GPU density fields, UI |
 
 `run_examples.py` (or `run_examples.bat` on Windows) opens a launcher with a button per example, plus ready-made variants (texture families, the Actors character, sunset, storm...). Add new variants to its `VARIANTS` list.
