@@ -92,6 +92,38 @@ fn density(sim: &Sim) -> Grid {
             }
         }
     }
+    // Where water lies against rock there is no skin to draw: it would be
+    // a second sheet under the surface, seen through the water and lit
+    // as if it faced the open. Nodes on the rock take the fullest water
+    // next to them, so the skin passes into the rock (which hides it) and
+    // only the open surface shows.
+    let solid_cell = |c: IVec3| sim.cell_index(c).is_some_and(|i| sim.solid[i]);
+    let before = soft.clone();
+    for z in 0..n.z as i32 {
+        for y in 0..n.y as i32 {
+            for x in 0..n.x as i32 {
+                let node = IVec3::new(x, y, z);
+                let on_rock = (0..8)
+                    .any(|k| solid_cell(node - IVec3::new(k & 1, (k >> 1) & 1, (k >> 2) & 1)));
+                if !on_rock {
+                    continue;
+                }
+                let mut most = before[at(node)];
+                for dz in -1..=1 {
+                    for dy in -1..=1 {
+                        for dx in -1..=1 {
+                            let c = node + IVec3::new(dx, dy, dz);
+                            if c.cmplt(IVec3::ZERO).any() || c.cmpge(n.as_ivec3()).any() {
+                                continue;
+                            }
+                            most = most.max(before[at(c)]);
+                        }
+                    }
+                }
+                soft[at(node)] = most;
+            }
+        }
+    }
     // The outermost nodes stay empty so the skin closes at the box walls.
     for z in 0..n.z as i32 {
         for y in 0..n.y as i32 {

@@ -141,6 +141,26 @@ fn the_surface_is_a_closed_mesh_around_the_water() {
 }
 
 #[test]
+#[ignore = "full"]
+fn water_on_rock_has_no_skin_against_the_rock() {
+    // Water lying on a rock floor: the only skin facing down is inside
+    // the rock, where the rock hides it.
+    let mut f = tank(12, 0.25);
+    f.mark_solid(|p| p.y < 1.0);
+    f.fill_box(Vec3::new(0.5, 1.0, 0.5), Vec3::new(2.5, 1.75, 2.5));
+    let mesh = f.surface_mesh().unwrap();
+    assert!(mesh.face_count() > 50);
+    let origin = f.origin();
+    let built = mesh.build();
+    for (p, normal) in built.positions.iter().zip(&built.normals) {
+        if normal.y < -0.5 {
+            let at = *p + origin;
+            assert!(f.is_solid_at(at), "a skin faces the floor at {at}");
+        }
+    }
+}
+
+#[test]
 fn bad_settings_are_named() {
     let e = Fluid::new(FluidSettings::new(Vec3::ZERO, Vec3::splat(100.0), 0.1)).unwrap_err();
     assert!(e.to_string().contains("cells per side"), "{e}");
