@@ -588,6 +588,7 @@ mod tests {
     use crate::crowd::{IDLE, WALK};
 
     #[test]
+    #[ignore = "full"]
     fn baked_frames_match_the_animator() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),

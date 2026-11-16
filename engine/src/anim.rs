@@ -1828,6 +1828,7 @@ pub(crate) mod tests {
     use std::path::PathBuf;
 
     #[test]
+    #[ignore = "full"]
     fn deer_asset_loads_with_clips() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         // Demo asset lives next to examples; fall back if missing during crate-only checks.
@@ -1865,6 +1866,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn semantic_action_resumes_latest_locomotion_intent() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let path = root.join("../examples/animated_animal/assets/deer.gltf");
@@ -1898,6 +1900,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn invalid_locomotion_speed_is_rejected() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let path = root.join("../examples/animated_animal/assets/deer.gltf");
@@ -1917,6 +1920,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn play_once_holds_last_frame() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let path = root.join("../examples/animated_animal/assets/deer.gltf");

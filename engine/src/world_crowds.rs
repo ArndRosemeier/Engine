@@ -372,6 +372,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn near_agents_become_characters_at_the_same_step() {
         let mut world = World::new();
         let crowd = world
@@ -423,6 +424,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn posed_agents_hold_their_pose_far_and_near() {
         let mut world = World::new();
         let crowd = world

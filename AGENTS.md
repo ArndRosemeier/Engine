@@ -3,7 +3,8 @@
 Read this before writing a game on the engine or changing the engine itself.
 It is short on purpose: the [README](README.md) has every feature with a
 recipe, and `examples/` has a runnable program for each. The code blocks
-below are compiled by `cargo test -p engine`, so they match the real API.
+below are compiled by `python tools/test.py --full` (and `cargo test -p engine`),
+so they match the real API.
 
 ## The model in one minute
 
@@ -380,8 +381,17 @@ The API docs are in the code: `cargo doc -p engine --open`, or read the
 ## Changing the engine itself
 
 - Work on a branch and open a pull request into `main`. CI must be green:
-  `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo test -p engine` on Windows and Linux, and the verify runs.
+  `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`
+  and `python tools/test.py` (the essential tests) on Windows and Linux.
+- Tests: only essential tests (they catch bugs that break games) run on every
+  build, and each has a 10 ms budget that `tools/test.py` measures; one over
+  it needs `// Over budget: <reason>` above its `#[test]`. Every other test is
+  `#[ignore = "full"]` and runs only on demand: `python tools/test.py --full`
+  (also the doc examples) and the verify runs, which CI runs when started by
+  hand ("Run workflow" on the ci workflow). A new test is full unless it
+  guards against a game-breaking bug and fits the budget. Run the full set
+  when you change what the slow tests cover (water, fluids, streaming,
+  ragdolls, crowds, animation).
 - Raise the version by exactly 0.001 per merge:
   `python tools/bump_version.py "What this brings, in plain words"`.
 - Start a new runnable example with `python tools/new_example.py <name>

@@ -473,6 +473,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn every_layer_tiles_varies_and_repeats() {
         const N: usize = 64;
         let mut seams = Vec::new();

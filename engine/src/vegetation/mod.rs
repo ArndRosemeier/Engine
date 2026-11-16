@@ -296,6 +296,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "full"]
     fn every_species_grows_three_levels() {
         for s in TreeSpecies::ALL {
             let m = tree_model(s, 1).expect("tree grows");
@@ -312,6 +313,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn a_tree_in_bloom_wears_its_colour_near_and_far() {
         let plain = tree_model(TreeSpecies::Acacia, 2).expect("acacia");
         let bloom = Bloom::new(Color::rgb(150, 90, 230), 1.0);
@@ -350,6 +352,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn growth_is_deterministic_and_variants_differ() {
         let a = tree_model(TreeSpecies::Oak, 3).expect("oak");
         let b = tree_model(TreeSpecies::Oak, 3).expect("oak");
@@ -360,6 +363,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn lod_distances_scale_with_height() {
         let tree = tree_model(TreeSpecies::Linden, 0).expect("linden");
         let shrub = shrub_model(0).expect("shrub");

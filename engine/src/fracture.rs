@@ -462,6 +462,7 @@ mod tower_tests {
     use crate::mesh::Mesh;
 
     #[test]
+    #[ignore = "full"]
     fn tall_box_pieces_are_closed() {
         let mesh = Mesh::box_at((0.0, 5.0, 0.0), (4.0, 10.0, 4.0), rgb(200, 180, 150))
             .expect("box")

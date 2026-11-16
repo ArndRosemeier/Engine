@@ -520,6 +520,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "full"]
     fn built_in_images_have_a_shape_and_clear_corners() {
         for kind in DecalKind::BUILT_IN {
             let img = builtin_image(kind);

@@ -398,6 +398,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn background_jobs_do_the_sampling_work() {
         let samples_bg = Arc::new(AtomicUsize::new(0));
         let terrain = SurfaceTerrain::new(

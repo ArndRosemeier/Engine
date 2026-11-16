@@ -744,6 +744,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn rig_is_found_and_the_first_pose_does_not_pop() {
         let Some(model) = character() else { return };
         let mut world = World::default();
@@ -774,6 +775,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn knocked_down_tumbles_settles_and_gets_up() {
         let Some(model) = character() else { return };
         let mut world = World::default();
@@ -847,6 +849,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn stay_down_waits_for_get_up() {
         let Some(model) = character() else { return };
         let mut world = World::default();
@@ -871,6 +874,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn only_so_many_tumble_at_once() {
         let Some(model) = character() else { return };
         let mut world = World::default();
@@ -901,6 +905,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn same_knock_same_fall() {
         let Some(model) = character() else { return };
         let fall = || {
@@ -921,6 +926,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn get_up_poses_stay_above_the_ground() {
         let Some(model) = character() else { return };
         let mut bind = Vec::new();

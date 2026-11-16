@@ -610,6 +610,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn gpu_mip_level_count_matches_the_cpu_chain() {
         for (w, h) in [
             (1, 1),

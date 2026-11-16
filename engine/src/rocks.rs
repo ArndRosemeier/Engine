@@ -503,6 +503,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn same_seed_is_the_same_rock_at_every_detail() {
         for shape in RockShape::ALL {
             let (a, b) = (generate(shape, 9, 1), generate(shape, 9, 3));

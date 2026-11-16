@@ -1830,6 +1830,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn generated_towers_do_not_z_fight() {
         use crate::zfight::{Options, ZFightCheck};
         let specs = [

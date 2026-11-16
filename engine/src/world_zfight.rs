@@ -547,6 +547,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn a_badly_broken_scene_gets_a_limited_number_of_posts() {
         let mut world = World::new();
         world.spawn(

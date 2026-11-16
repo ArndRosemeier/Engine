@@ -1655,6 +1655,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn rock_is_generated_down_to_a_cave_far_under_the_ground() {
         let settings = small();
         let cave_chunks = |tells: bool| {
@@ -1763,6 +1764,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn a_lake_above_the_sea_is_drawn_far_away_and_simulated_close_up() {
         // Far away: the tile that holds the tarn carries its sheet, at the
         // lake's level; a tile of plain coast carries none (the sea is drawn
@@ -1799,6 +1801,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn a_generators_ground_cover_reaches_the_terrain_and_the_far_tiles() {
         let mut world = World::new();
         world
@@ -1907,6 +1910,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn ground_loads_around_the_camera_and_unloads_behind_it() {
         let mut world = World::new();
         look(&mut world, 10.0, 10.0);
@@ -1946,6 +1950,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn far_tiles_shown_never_overlap() {
         let mut world = World::new();
         look(&mut world, 300.0, -40.0);
@@ -1983,6 +1988,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn edits_survive_unloading_and_come_back() {
         let mut world = World::new();
         look(&mut world, 0.0, 0.0);
@@ -2024,6 +2030,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn saved_games_keep_edits_of_unloaded_ground() {
         let gen = || TestWorld {
             model: None,
@@ -2063,6 +2070,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn tiles_place_models_and_take_them_away() {
         let mut world = World::new();
         let cube = Shape::box_at((0.0, 0.5, 0.0), (1.0, 1.0, 1.0), rgb(200, 100, 50)).unwrap();
@@ -2111,6 +2119,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn water_window_fills_the_sea_and_follows() {
         let mut world = World::new();
         look(&mut world, 0.0, 0.0);

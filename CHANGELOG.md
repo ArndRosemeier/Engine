@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.080 (2026-11-16)
+
+- Tests are split: the essential ones (10 ms budget each) run on every build with python tools/test.py; the slow ones, the doc examples and the example verify runs run on demand (python tools/test.py --full, or start CI by hand)
+
 ## 0.079 (2026-11-16)
 
 - Characters can change their steepest walkable slope while running (set_character_max_slope)

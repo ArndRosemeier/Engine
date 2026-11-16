@@ -587,6 +587,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn albedo_size_and_opaque() {
         for kind in [
             TerrainAlbedo::Grass,

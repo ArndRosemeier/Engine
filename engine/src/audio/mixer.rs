@@ -535,6 +535,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn output_never_clips() {
         let mut m = Mixer::new(48_000);
         for id in 0..40 {

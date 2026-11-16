@@ -688,6 +688,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn generated_foliage_is_green() {
         for kind in [
             TreeKind::Oak,

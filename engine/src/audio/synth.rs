@@ -480,6 +480,7 @@ mod tests {
     use super::Sound;
 
     #[test]
+    #[ignore = "full"]
     fn synthesised_sounds_are_audible_and_in_range() {
         for s in [
             Sound::explosion(1),
@@ -501,12 +502,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn same_seed_same_sound() {
         assert_eq!(Sound::crumble(42).0.samples, Sound::crumble(42).0.samples);
         assert_ne!(Sound::crumble(42).0.samples, Sound::crumble(43).0.samples);
     }
 
     #[test]
+    #[ignore = "full"]
     fn music_stems_share_one_length() {
         let s = super::music::stems(1, 100.0);
         assert_eq!(s.pad.len(), s.bass.len());

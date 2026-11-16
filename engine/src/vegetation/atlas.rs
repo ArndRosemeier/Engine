@@ -1440,6 +1440,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "full"]
     fn atlas_has_leaves_and_opaque_bark() {
         let a = atlas();
         assert_eq!(a.color.len(), (ATLAS_W * ATLAS_H * 4) as usize);

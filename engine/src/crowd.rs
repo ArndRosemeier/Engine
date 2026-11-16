@@ -417,6 +417,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn far_model_is_a_small_fraction_of_the_character() {
         let model = character();
         let verts = |m: &AnimatedModel| m.meshes.iter().map(|m| m.positions.len()).sum::<usize>();
@@ -450,6 +451,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn far_agents_switch_clips_with_a_fade() {
         let model = Arc::new(character());
         let profile = CrowdProfile::new("idle", "walk");

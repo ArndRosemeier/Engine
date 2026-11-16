@@ -44,6 +44,7 @@ fn wet_heads(water: &Water) -> Vec<f32> {
 }
 
 #[test]
+#[ignore = "full"]
 fn a_still_lake_stays_still() {
     let bowl = HeightMapTerrain(|x: f32, z: f32| ((x - 32.0).powi(2) + (z - 32.0).powi(2)) * 0.01);
     let region = WaterRegion::new(Vec2::ZERO, Vec2::splat(64.0), 1.0, -5.0, 60.0);
@@ -63,6 +64,7 @@ fn a_still_lake_stays_still() {
 }
 
 #[test]
+#[ignore = "full"]
 fn a_dam_break_settles_flat_and_keeps_its_volume() {
     // A flat closed tank 40 x 8 m; the left half starts 2 m deep.
     let flat = HeightMapTerrain(|_, _| 0.0);
@@ -103,6 +105,7 @@ fn a_dam_break_settles_flat_and_keeps_its_volume() {
 }
 
 #[test]
+#[ignore = "full"]
 fn water_never_crosses_a_wall_and_the_region_edge_is_closed() {
     // Two basins split by a wall higher than the water.
     let terrain = HeightMapTerrain(|x: f32, _| if (19.0..21.0).contains(&x) { 5.0 } else { 0.0 });
@@ -147,6 +150,7 @@ fn sd_box(p: Vec3, centre: Vec3, half: Vec3) -> f32 {
 }
 
 #[test]
+#[ignore = "full"]
 fn a_sealed_cave_stays_dry_until_a_tunnel_opens_it() {
     let mut volume = lake_and_cave();
     let region = WaterRegion::new(Vec2::ZERO, Vec2::new(60.0, 32.0), 1.0, -8.0, 30.0);
@@ -190,6 +194,7 @@ fn a_sealed_cave_stays_dry_until_a_tunnel_opens_it() {
 }
 
 #[test]
+#[ignore = "full"]
 fn a_flooded_u_bend_levels_both_shafts() {
     // Shafts at x 2..4 and 16..18, joined by a tunnel y 0..1. All 2 m wide.
     let terrain = FnTerrain(|p: Vec3| {
@@ -228,6 +233,7 @@ fn a_flooded_u_bend_levels_both_shafts() {
 }
 
 #[test]
+#[ignore = "full"]
 fn a_waterfall_drains_a_shelf_into_the_basin_below() {
     // A shelf at y 6 for x < 10 dropping to a basin at y 0.
     let terrain = HeightMapTerrain(|x: f32, _| if x < 10.0 { 6.0 } else { 0.0 });
@@ -263,6 +269,7 @@ fn a_waterfall_drains_a_shelf_into_the_basin_below() {
 }
 
 #[test]
+#[ignore = "full"]
 fn a_wave_runs_up_the_beach_and_pulls_back() {
     // Channel 160 m long; flat 4 m deep sea floor, beach rising from x = 100.
     let beach = HeightMapTerrain(|x: f32, _| {
@@ -319,6 +326,7 @@ fn a_wave_runs_up_the_beach_and_pulls_back() {
 }
 
 #[test]
+#[ignore = "full"]
 fn rock_added_into_a_lake_raises_it_without_losing_water() {
     let mut volume = lake_and_cave();
     let region = WaterRegion::new(Vec2::ZERO, Vec2::new(60.0, 32.0), 1.0, -8.0, 30.0);
@@ -336,6 +344,7 @@ fn rock_added_into_a_lake_raises_it_without_losing_water() {
 }
 
 #[test]
+#[ignore = "full"]
 fn abuse_never_produces_nan_or_negative_water() {
     let noise = crate::proc::Noise::new(3);
     let terrain = FnTerrain(move |p: Vec3| {
@@ -495,6 +504,7 @@ fn a_swimmer_climbs_out_onto_the_beach_and_walks() {
 }
 
 #[test]
+#[ignore = "full"]
 fn a_current_carries_a_swimmer_downstream() {
     // A long channel fed at one end and drained at the other.
     let ground = HeightMapTerrain(|x: f32, _| -3.0 - x * 0.01);
@@ -525,6 +535,7 @@ fn a_current_carries_a_swimmer_downstream() {
 }
 
 #[test]
+#[ignore = "full"]
 fn a_disturbance_makes_waves_without_changing_the_volume() {
     let (_ground, mut water) = pool();
     let v0 = water.total_volume();
@@ -559,6 +570,7 @@ fn beach_ground(x: f32) -> f32 {
 }
 
 #[test]
+#[ignore = "full"]
 fn a_calm_open_sea_stays_still() {
     let beach = HeightMapTerrain(|x: f32, _| beach_ground(x));
     let region = WaterRegion::new(Vec2::ZERO, Vec2::new(160.0, 2.0), 1.0, -8.0, 20.0);
@@ -575,6 +587,7 @@ fn a_calm_open_sea_stays_still() {
 }
 
 #[test]
+#[ignore = "full"]
 fn swell_from_the_open_sea_runs_up_the_beach_again_and_again() {
     let beach = HeightMapTerrain(|x: f32, _| beach_ground(x));
     let region = WaterRegion::new(Vec2::ZERO, Vec2::new(160.0, 2.0), 1.0, -8.0, 20.0);
@@ -620,6 +633,7 @@ fn swell_from_the_open_sea_runs_up_the_beach_again_and_again() {
 }
 
 #[test]
+#[ignore = "full"]
 fn waves_leave_through_an_open_edge_instead_of_bouncing_back() {
     let flat = HeightMapTerrain(|_, _| -4.0);
     let region = WaterRegion::new(Vec2::ZERO, Vec2::new(120.0, 2.0), 1.0, -6.0, 20.0);
@@ -692,6 +706,7 @@ fn bench_water_1024_mostly_dry() {
 }
 
 #[test]
+#[ignore = "full"]
 fn a_still_lake_sleeps_and_wakes_when_disturbed() {
     let bowl = HeightMapTerrain(|x: f32, z: f32| ((x - 64.0).powi(2) + (z - 64.0).powi(2)) * 0.002);
     let region = WaterRegion::new(Vec2::ZERO, Vec2::splat(128.0), 1.0, -5.0, 40.0);
@@ -743,6 +758,7 @@ fn a_still_lake_sleeps_and_wakes_when_disturbed() {
 }
 
 #[test]
+#[ignore = "full"]
 fn breaking_swell_leaves_foam_and_wet_sand() {
     let beach = HeightMapTerrain(|x: f32, _| beach_ground(x));
     let region = WaterRegion::new(Vec2::ZERO, Vec2::new(160.0, 2.0), 1.0, -8.0, 20.0);
@@ -780,6 +796,7 @@ fn breaking_swell_leaves_foam_and_wet_sand() {
 }
 
 #[test]
+#[ignore = "full"]
 fn sleeping_tiles_leave_no_step_in_the_sea_surface() {
     // Open sea with a slow swell over a shelf; most tiles barely move, so
     // they fall asleep while the level around them keeps changing.
@@ -851,6 +868,7 @@ fn river_level(x: f32, z: f32) -> Option<f32> {
 }
 
 #[test]
+#[ignore = "full"]
 fn a_river_runs_through_open_edges_and_keeps_its_levels() {
     // Closed edges: the upper pool spills over the sill until it stands at
     // the crest, and the lower pool rises with what it took.

@@ -1,12 +1,15 @@
 name: ci
 
 # Every pull request into main (and every push to main) must build, pass the
-# tests and be clippy-clean on Windows and Linux. See "Testing" in README.md.
+# essential tests and be clippy-clean on Windows and Linux. The full tests and
+# the verify runs are on demand: start this workflow by hand ("Run workflow").
+# See "Testing" in README.md.
 on:
   pull_request:
     branches: [main]
   push:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -48,14 +51,19 @@ jobs:
       - name: Clippy (engine and every example)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Tests
-        run: cargo test -p engine
+      - name: Essential tests (10 ms budget each)
+        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} tools/test.py
+
+      - name: Full tests and doc examples (on demand)
+        if: github.event_name == 'workflow_dispatch'
+        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} tools/test.py --full
 
   # Run examples headless on a software GPU (lavapipe) as verify runs: they
   # must reach their last frame and every world.check() must hold. See
-  # "Verify runs" in README.md.
+  # "Verify runs" in README.md. On demand: only when started by hand.
   verify:
     name: verify examples
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
       ENGINE_AUDIO: "0"

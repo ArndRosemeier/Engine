@@ -998,6 +998,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn a_blown_out_front_brings_the_tower_down_into_rubble() {
         let plan = Arc::new(BuildingPlan::tower(&TowerSpec::default()).unwrap());
         let mut world = World::new();

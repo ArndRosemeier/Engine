@@ -965,6 +965,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn too_many_voices_steal_the_quietest() {
         let mut scene = AudioScene::new();
         for _ in 0..(MAX_VOICES + 10) {

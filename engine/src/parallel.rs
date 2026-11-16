@@ -123,6 +123,7 @@ mod tests {
     use crate::error::EngineError;
 
     #[test]
+    #[ignore = "full"]
     fn a_job_beside_the_frame_borrows_and_passes_its_panic_on() {
         let mut total = 0_u64;
         let main_thread = std::thread::current().id();

@@ -700,6 +700,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn async_ring_fills_without_blocking_the_caller() {
         let mut world = World::new();
         let mut stream = ChunkStream::new(Arc::new(FlatBuilder::new()), 2)
@@ -774,6 +775,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn a_coarse_tier_leaves_a_hole_and_does_not_evict_the_fine_one() {
         // Both tiers address chunk (0, 0). Before the level was part of the
         // identity, whichever uploaded last owned the entity and the other
@@ -811,6 +813,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn walking_out_of_a_hole_fills_it_in() {
         // The hole follows the player, so ground the fine tier has left behind
         // has to come back at the coarse resolution rather than stay missing.
@@ -829,6 +832,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full"]
     fn stale_results_from_a_previous_world_are_discarded() {
         let mut world = World::new();
         let builder = Arc::new(FlatBuilder::new());

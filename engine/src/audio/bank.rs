@@ -159,6 +159,7 @@ mod tests {
     use super::{Sound, Stock};
 
     #[test]
+    #[ignore = "full"]
     fn every_stock_sound_decodes_and_is_audible() {
         for stock in [
             Stock::Explosion,

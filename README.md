@@ -972,20 +972,28 @@ One entry per pull request, in words a game developer understands. If
 another merge took your number while you were rebasing (a conflict at the
 top of `CHANGELOG.md`), keep both entries and run
 `python tools/bump_version.py --renumber` to move yours on top again. The
-`version` check on every pull request and `cargo test -p engine` fail when
+`version` check on every pull request and `python tools/test.py` fail when
 the version was not raised by exactly 0.001.
 
 ## Testing
 
 ```bash
-cargo test -p engine                        # unit tests, no GPU needed
-ENGINE_GPU_TESTS=1 cargo test -p engine     # also the GPU checks
+python tools/test.py                        # essential tests, every build
+python tools/test.py --full                 # every test and the doc examples, on demand
+ENGINE_GPU_TESTS=1 python tools/test.py --full   # also the GPU checks
 cargo clippy --workspace --all-targets
 ```
 
+Only essential tests run on every build: the ones that catch bugs that break
+games. Each has a budget of 10 ms, which `tools/test.py` measures (a test
+over it needs `// Over budget: <reason>` above its `#[test]`). The others are
+marked `#[ignore = "full"]` and run only on demand, with no budget, as do the
+doc examples and the verify runs of the examples.
+
 Warnings are errors in this workspace. The `ci` check runs formatting,
-clippy (`-D warnings`, every example included) and the tests on Windows and
-Linux for every pull request, with the Rust version pinned in
+clippy (`-D warnings`, every example included) and the essential tests on Windows and
+Linux for every pull request and push; the full tests and the verify runs run when
+the workflow is started by hand ("Run workflow"), with the Rust version pinned in
 `.github/workflows/ci.yml`; raise it on purpose and fix the new lints. Screenshots work headless (for example
 under Xvfb with a software Vulkan driver), which is how renders are checked
 without a GPU.

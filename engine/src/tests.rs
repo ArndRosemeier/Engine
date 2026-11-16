@@ -254,6 +254,7 @@ fn frame_first_flag_exists() {
 }
 
 #[test]
+#[ignore = "full"]
 fn height_terrain_has_some_water() {
     let t = crate::terrain::HeightTerrain::new(crate::terrain::TerrainRules {
         seed: 9,
@@ -278,6 +279,7 @@ fn height_terrain_has_some_water() {
 }
 
 #[test]
+#[ignore = "full"]
 fn lakes_carve_below_waterline() {
     let water_level = 5.5;
     let t = crate::terrain::HeightTerrain::new(crate::terrain::TerrainRules {
@@ -423,6 +425,7 @@ fn walk_height_matches_clipmap_triangle() {
 }
 
 #[test]
+#[ignore = "full"]
 fn terrain_stream_budgets_main_thread_work() {
     use crate::terrain::{TerrainRules, TerrainStream};
     use crate::world::World;
@@ -1438,6 +1441,7 @@ fn wind_and_season_are_validated() {
 }
 
 #[test]
+#[ignore = "full"]
 fn trees_share_one_atlas_texture() {
     use crate::vegetation::{tree_model, TreeSpecies};
     let mut world = crate::world::World::new();
@@ -1509,6 +1513,7 @@ mod physics_world {
     }
 
     #[test]
+    #[ignore = "full"]
     fn a_crate_rests_on_voxel_ground_and_falls_into_a_dug_hole() {
         let mut world = World::new();
         world.set_voxel_terrain(Some(voxel_ground(2.0)));
@@ -1535,6 +1540,7 @@ mod physics_world {
     /// tiles (x = 0) must stay on top. Tiles used to end exactly at the seam
     /// and the internal-edge fix gave no support there: the ball sank through.
     #[test]
+    #[ignore = "full"]
     fn a_ball_rolling_along_a_tile_seam_stays_on_the_ground() {
         use crate::physics::BodyShape;
         let mut volume = crate::volume::Volume::new(0.5);
@@ -1569,6 +1575,7 @@ mod physics_world {
     /// A pile of crates and balls tumbling down height terrain, built once in
     /// `World` and once in a standalone `PhysicsWorld`, stepped 10 s.
     #[test]
+    #[ignore = "full"]
     fn standalone_physics_matches_the_world() {
         use crate::physics::{BodyShape, PhysicsWorld};
         let rules = crate::proc_terrain::demo_terrain_rules();
@@ -1697,6 +1704,7 @@ mod physics_world {
     }
 
     #[test]
+    #[ignore = "full"]
     fn shattered_pieces_pile_up_instead_of_overlapping_the_floor() {
         let mut world = World::new();
         let id = crate_at(&mut world, Vec3::new(0.0, 0.5, 0.0));
@@ -2095,6 +2103,7 @@ mod hierarchy_world {
     }
 
     #[test]
+    #[ignore = "full"]
     fn things_can_be_held_in_a_hand() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -2315,6 +2324,7 @@ mod save_load {
         assert!(err.contains("save_component"), "{err}");
     }
 
+    // Over budget: 10 to 14 ms; a save that does not come back breaks every game that saves, and this is the one test of the whole round trip.
     #[test]
     fn a_world_comes_back_as_it_was_saved() {
         let mut world = fresh();
@@ -2536,6 +2546,7 @@ mod animation_blending {
     }
 
     #[test]
+    #[ignore = "full"]
     fn switching_clips_fades_instead_of_jumping() {
         let Some(model) = character() else { return };
         let mut world = World::default();
@@ -2580,6 +2591,7 @@ mod animation_blending {
     }
 
     #[test]
+    #[ignore = "full"]
     fn walk_and_run_follow_the_real_speed() {
         let Some(model) = character() else { return };
         let mut world = World::default();
@@ -2621,6 +2633,7 @@ mod animation_blending {
     }
 
     #[test]
+    #[ignore = "full"]
     fn feet_stand_on_steps_and_the_hips_drop_for_a_lower_foot() {
         let Some(model) = character() else { return };
         let mut world = World::default();
@@ -2729,6 +2742,7 @@ mod animation_blending {
     }
 
     #[test]
+    #[ignore = "full"]
     fn feet_stand_on_drawn_meshes_even_when_the_origin_is_off() {
         let Some(model) = character() else { return };
         // No physics at all: a drawn slab is the only thing under the feet,
@@ -2939,6 +2953,7 @@ mod navigation {
     }
 
     #[test]
+    #[ignore = "full"]
     fn agents_walk_to_their_goal_around_walls_and_each_other() {
         let mut world = flat();
         block(
@@ -3000,6 +3015,7 @@ mod navigation {
     }
 
     #[test]
+    #[ignore = "full"]
     fn digging_into_voxel_ground_updates_the_walkable_area() {
         let mut world = World::default();
         let mut volume = crate::volume::Volume::new(0.5);
@@ -3592,6 +3608,7 @@ mod characters_and_joints {
         assert!(world.walk(EntityId::from_raw(999), Vec3::X).is_err());
     }
 
+    // Over budget: 9 to 11 ms; walking into walls, up steps and off ledges is what every game's player does, and this walks a real character through all three.
     #[test]
     fn a_character_stops_at_walls_climbs_steps_but_not_ledges() {
         let mut world = World::new();
@@ -3632,6 +3649,7 @@ mod characters_and_joints {
     }
 
     #[test]
+    #[ignore = "full"]
     fn a_character_climbs_a_steep_ramp_only_after_its_max_slope_is_raised() {
         // Two 55 degree ramps rising along +x, one per character.
         let ramp = |world: &mut World, z: f32| {
@@ -4040,6 +4058,7 @@ mod anim_graphs {
     }
 
     #[test]
+    #[ignore = "full"]
     fn values_move_the_graph_between_states() {
         let Some((mut world, id)) = setup() else {
             return;
@@ -4058,6 +4077,7 @@ mod anim_graphs {
     }
 
     #[test]
+    #[ignore = "full"]
     fn a_trigger_plays_a_clip_once_and_goes_on() {
         let Some((mut world, id)) = setup() else {
             return;
@@ -4081,6 +4101,7 @@ mod anim_graphs {
     }
 
     #[test]
+    #[ignore = "full"]
     fn clip_events_fire_once_per_loop() {
         let Some((mut world, id)) = setup() else {
             return;
@@ -4103,6 +4124,7 @@ mod anim_graphs {
     }
 
     #[test]
+    #[ignore = "full"]
     fn match_speed_plays_faster_when_moving_faster() {
         let Some((mut world, id)) = setup() else {
             return;
@@ -4124,6 +4146,7 @@ mod anim_graphs {
     }
 
     #[test]
+    #[ignore = "full"]
     fn mistakes_are_named() {
         let Some((mut world, id)) = setup() else {
             return;
@@ -4213,6 +4236,7 @@ fn material(m: MaterialIn, base: MaterialOut) -> MaterialOut {
 "#;
 
     #[test]
+    #[ignore = "full"]
     fn the_engine_shader_compiles_with_and_without_a_material() {
         let plain = crate::render::lit_shader_source(None);
         let module = naga::front::wgsl::parse_str(&plain).expect("plain lit shader parses");
@@ -4226,6 +4250,7 @@ fn material(m: MaterialIn, base: MaterialOut) -> MaterialOut {
     }
 
     #[test]
+    #[ignore = "full"]
     fn mistakes_name_the_line_in_the_game_code() {
         let typo = "fn material(m: MaterialIn, base: MaterialOut) -> MaterialOut {\n    var o = base;\n    o.colour = vec4<f32>(1.0);\n    return o;\n}\n";
         let e = CustomMaterial::new("typo", typo)
@@ -4251,6 +4276,7 @@ fn material(m: MaterialIn, base: MaterialOut) -> MaterialOut {
     }
 
     #[test]
+    #[ignore = "full"]
     fn materials_go_on_entities_and_take_params() {
         let mut world = World::new();
         let rock = world.spawn(Mesh::box_at(Vec3::ZERO, (1.0, 1.0, 1.0), rgb(90, 90, 90)).unwrap());
@@ -4302,6 +4328,7 @@ mod texture_lifetime {
     }
 
     #[test]
+    #[ignore = "full"]
     fn streamed_meshes_do_not_pile_up_textures() {
         let mut world = World::new();
         let own = world.create_texture_rgba(1, 1, vec![255; 4]).unwrap();
@@ -4463,6 +4490,7 @@ fn plain_spawns_and_despawns_are_listed_not_render_changes() {
 }
 
 #[test]
+#[ignore = "full"]
 fn wildflowers_grow_in_fields_of_the_palette() {
     use crate::voxel_terrain::{flower_field, FLOWER_COLORS};
     let (mut thick, mut none, n) = (0, 0, 200 * 200);

@@ -24,6 +24,7 @@ fn max_along(f: &Fluid, axis: Vec3) -> f32 {
 }
 
 #[test]
+#[ignore = "full"]
 fn a_column_of_water_slumps_and_settles_without_losing_volume() {
     // 3 m tank of 0.25 m cells; a 1 x 2 x 3 m column in one corner.
     let mut f = calm_tank(12, 0.25);
@@ -50,6 +51,7 @@ fn a_column_of_water_slumps_and_settles_without_losing_volume() {
 }
 
 #[test]
+#[ignore = "full"]
 fn a_sideways_pull_piles_water_against_a_wall() {
     let mut f = calm_tank(10, 0.3);
     // Not sealed against the far walls, so air can follow it.
@@ -62,6 +64,7 @@ fn a_sideways_pull_piles_water_against_a_wall() {
 }
 
 #[test]
+#[ignore = "full"]
 fn without_a_pull_water_drifts_as_one_blob() {
     let mut f = tank(16, 0.25);
     f.fill_ball(Vec3::new(1.5, 2.0, 2.0), 0.8);
@@ -82,6 +85,7 @@ fn without_a_pull_water_drifts_as_one_blob() {
 }
 
 #[test]
+#[ignore = "full"]
 fn a_point_pull_gathers_water_into_a_ball() {
     let mut f = calm_tank(16, 0.25);
     let middle = Vec3::splat(2.0);
@@ -98,6 +102,7 @@ fn a_point_pull_gathers_water_into_a_ball() {
 }
 
 #[test]
+#[ignore = "full"]
 fn rock_holds_water_in_a_basin() {
     let mut f = tank(12, 0.25);
     // A raised floor with a pit in the middle third.
@@ -110,6 +115,7 @@ fn rock_holds_water_in_a_basin() {
 }
 
 #[test]
+#[ignore = "full"]
 fn the_same_water_gives_the_same_frames() {
     let make = || {
         let mut f = tank(10, 0.3);
@@ -143,6 +149,7 @@ fn bad_settings_are_named() {
 }
 
 #[test]
+#[ignore = "full"]
 fn the_world_steps_water_with_its_field_and_floats_wood_in_it() {
     use crate::physics::{Body, BodyShape, FieldBody, FieldProbe, PhysicsGround, PhysicsSettings};
     use crate::prelude::*;
