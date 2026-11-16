@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.079 (2026-11-16)
+
+- Characters can change their steepest walkable slope while running (set_character_max_slope)
+
 ## 0.078 (2026-11-16)
 
 - Key::Plus and Key::Minus: the + and - keys on US and German layouts and the keypad

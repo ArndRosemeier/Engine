@@ -249,6 +249,13 @@ impl World {
         self.physics.add_character(id, &character, feet)
     }
 
+    /// Change the steepest slope (degrees, 0..90) a character walks up,
+    /// while it runs. Errors for a bad angle or an entity that is not a
+    /// character.
+    pub fn set_character_max_slope(&mut self, id: EntityId, degrees: f32) -> EngineResult<()> {
+        self.physics.set_character_max_slope(id, degrees)
+    }
+
     pub fn remove_character(&mut self, id: EntityId) {
         self.physics.remove_character(id);
     }

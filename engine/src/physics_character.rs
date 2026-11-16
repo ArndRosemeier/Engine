@@ -377,6 +377,20 @@ impl Physics {
         ids
     }
 
+    /// Change the steepest slope a character walks up while it runs (a
+    /// game whose pull changes strength can let it climb more in light
+    /// pull and less in heavy).
+    pub fn set_character_max_slope(&mut self, id: EntityId, degrees: f32) -> EngineResult<()> {
+        if !(degrees.is_finite() && (0.0..90.0).contains(&degrees)) {
+            return Err(EngineError::InvalidValue(format!(
+                "max slope must be 0..90 degrees, got {degrees}"
+            )));
+        }
+        let c = self.characters.get_mut(&id).ok_or_else(not_a_character)?;
+        c.spec.max_slope_deg = degrees;
+        Ok(())
+    }
+
     pub fn character_state(&self, id: EntityId) -> Option<CharacterState> {
         self.characters.get(&id).map(|c| c.state)
     }

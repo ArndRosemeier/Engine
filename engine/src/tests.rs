@@ -3632,6 +3632,35 @@ mod characters_and_joints {
     }
 
     #[test]
+    fn a_character_climbs_a_steep_ramp_only_after_its_max_slope_is_raised() {
+        // Two 55 degree ramps rising along +x, one per character.
+        let ramp = |world: &mut World, z: f32| {
+            let size = Vec3::new(10.0, 0.2, 3.0);
+            let id = world.spawn(Mesh::box_at(Vec3::ZERO, size, rgb(150, 150, 150)).unwrap());
+            let (s, c) = 55f32.to_radians().sin_cos();
+            let place = Place::new(1.0 + 5.0 * c, 5.0 * s - 0.1, z).with_roll_deg(55.0);
+            world.set_place(id, place).unwrap();
+            world
+                .add_body(id, Body::fixed().shape(BodyShape::Box(size * 0.5)))
+                .unwrap();
+        };
+        let mut world = World::new();
+        ramp(&mut world, 0.0);
+        ramp(&mut world, 10.0);
+        let held = person(&mut world, Vec3::new(0.0, 0.0, 0.0));
+        let free = person(&mut world, Vec3::new(0.0, 0.0, 10.0));
+        assert!(world.set_character_max_slope(free, 65.0).is_ok());
+        assert!(world.set_character_max_slope(free, 95.0).is_err());
+        for id in [held, free] {
+            world.walk(id, (2.0, 0.0, 0.0)).unwrap();
+        }
+        run(&mut world, 180);
+        let (fh, ff) = (feet(&world, held), feet(&world, free));
+        assert!(fh.y < 0.6, "45 degrees stops at the ramp: {fh}");
+        assert!(ff.y > 2.0, "65 degrees walks up it: {ff}");
+    }
+
+    #[test]
     fn a_character_jumps_only_from_the_ground() {
         let mut world = World::new();
         let p = person(&mut world, Vec3::ZERO);
