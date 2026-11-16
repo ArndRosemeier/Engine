@@ -52,6 +52,12 @@ pub enum Key {
     Down,
     Left,
     Right,
+    /// The "+" key: `=`/`+` on a US layout, `+` on a German one, and the
+    /// keypad's `+`.
+    Plus,
+    /// The "-" key: `-` on a US layout, `-` on a German one, and the
+    /// keypad's `-`.
+    Minus,
 }
 
 impl Key {
@@ -101,6 +107,10 @@ impl Key {
             KeyCode::ArrowDown => Self::Down,
             KeyCode::ArrowLeft => Self::Left,
             KeyCode::ArrowRight => Self::Right,
+            // Keys are physical places: US "=" and German "+" sit at Equal
+            // and BracketRight, US "-" and German "-" at Minus and Slash.
+            KeyCode::Equal | KeyCode::BracketRight | KeyCode::NumpadAdd => Self::Plus,
+            KeyCode::Minus | KeyCode::Slash | KeyCode::NumpadSubtract => Self::Minus,
             _ => return None,
         })
     }
@@ -152,6 +162,8 @@ impl Key {
             Self::Down => "Down",
             Self::Left => "Left",
             Self::Right => "Right",
+            Self::Plus => "Plus",
+            Self::Minus => "Minus",
         }
     }
 
@@ -201,6 +213,8 @@ impl Key {
             "Down" | "down" => Self::Down,
             "Left" | "left" => Self::Left,
             "Right" | "right" => Self::Right,
+            "Plus" | "plus" | "+" => Self::Plus,
+            "Minus" | "minus" | "-" => Self::Minus,
             _ => return None,
         })
     }
@@ -432,5 +446,24 @@ mod tests {
         assert!(!i.mouse_down(MouseButton::Left));
         i.clear_keys();
         assert!(!i.pressed(Key::Digit2) && !i.down(Key::Digit2));
+    }
+
+    #[test]
+    fn plus_and_minus_on_us_german_and_keypad_layouts() {
+        for (code, key) in [
+            (KeyCode::Equal, Key::Plus),
+            (KeyCode::BracketRight, Key::Plus),
+            (KeyCode::NumpadAdd, Key::Plus),
+            (KeyCode::Minus, Key::Minus),
+            (KeyCode::Slash, Key::Minus),
+            (KeyCode::NumpadSubtract, Key::Minus),
+        ] {
+            let mut i = Input::new();
+            i.set_key(PhysicalKey::Code(code), true);
+            assert!(i.pressed(key) && i.down(key), "{code:?}");
+            i.set_key(PhysicalKey::Code(code), false);
+            assert!(!i.down(key));
+            assert_eq!(Key::from_name(key.as_str()), Some(key));
+        }
     }
 }
