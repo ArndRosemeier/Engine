@@ -455,6 +455,17 @@ impl World {
         }))
     }
 
+    /// How fast an animated entity's `clip` carries it over the ground,
+    /// m/s at scale 1 ([`AnimatedModel::ground_speed`]): set the animation
+    /// speed to the real speed divided by this and the feet do not skate.
+    pub fn animation_ground_speed(&self, id: EntityId, clip: &str) -> EngineResult<Option<f32>> {
+        Ok(self
+            .animated_entity(id)?
+            .animator
+            .model()
+            .ground_speed(clip))
+    }
+
     /// Look up one skinned/animated entity by its typed render identity.
     pub fn animated_entity(&self, id: EntityId) -> EngineResult<&AnimatedEntity> {
         self.animated.get(&id).ok_or(EngineError::UnknownEntity)

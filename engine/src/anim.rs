@@ -430,6 +430,69 @@ impl Skeleton {
 }
 
 impl AnimatedModel {
+    /// How fast `clip` carries the character over the ground, in m/s (model
+    /// units): the speed at which its planted foot moves back under the
+    /// hips. Play a walk or run at `real speed / ground_speed` and the feet
+    /// stay put on the ground instead of skating. Measured from the clip
+    /// itself, so it fits each body (short legs take shorter steps).
+    /// `None` for an unknown clip or a model without two legs.
+    pub fn ground_speed(&self, clip: &str) -> Option<f32> {
+        let ci = self.clips.iter().position(|c| c.name == clip)?;
+        let duration = self.clips[ci].duration;
+        if duration.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            return None;
+        }
+        let legs = self.skeleton.find_legs()?;
+        const N: usize = 240;
+        let dt = duration / N as f32;
+        let (mut locals, mut global) = (Vec::new(), Vec::new());
+        // Each foot's place relative to the hips (the middle of the thighs).
+        let mut feet = [Vec::with_capacity(N), Vec::with_capacity(N)];
+        for i in 0..N {
+            sample_locals(self, ci, i as f32 * dt, &mut locals);
+            globals_from_locals(&self.skeleton, &locals, &mut global);
+            let at = |j: usize| global[j].w_axis.truncate();
+            let hips = (at(legs[0].thigh) + at(legs[1].thigh)) * 0.5;
+            for (k, leg) in legs.iter().enumerate() {
+                feet[k].push(at(leg.foot) - hips);
+            }
+        }
+        // A planted foot moves steadily backwards under the hips (models
+        // face +z): its longest stretch of backward motion is the stance,
+        // and the ground it covers there over the time it takes is the
+        // speed. (Its height cannot tell: a runner lands on the toes,
+        // higher than the swinging foot reaches before it lands.)
+        let mut speeds = Vec::new();
+        for foot in &feet {
+            let back: Vec<f32> = (0..N)
+                .map(|i| -(foot[(i + 1) % N].z - foot[(i + N - 1) % N].z) / (2.0 * dt))
+                .collect();
+            let most = back.iter().copied().fold(0.0f32, f32::max);
+            if most <= 1e-3 {
+                continue;
+            }
+            let moving = |i: usize| back[i % N] > most * 0.3;
+            // The longest run of backward steps, around the loop.
+            let (mut best, mut best_start) = (0, 0);
+            for start in (0..N).filter(|&i| moving(i) && !moving(i + N - 1)) {
+                let len = (0..N).take_while(|&k| moving(start + k)).count();
+                if len > best {
+                    (best, best_start) = (len, start);
+                }
+            }
+            if best == 0 {
+                // Backward all the way round: no stance to find.
+                continue;
+            }
+            let travel = foot[best_start].z - foot[(best_start + best) % N].z;
+            speeds.push(travel / (best as f32 * dt));
+        }
+        if speeds.is_empty() {
+            return None;
+        }
+        Some(speeds.iter().sum::<f32>() / speeds.len() as f32)
+    }
+
     /// The heel and toe of a foot's sole, in the foot joint's space: the
     /// lowest skin of the foot (and the toes below it) in the bind pose, at
     /// its back and front. A foot without skin weights gets the point

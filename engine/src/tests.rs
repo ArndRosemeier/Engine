@@ -2541,6 +2541,18 @@ mod animation_blending {
         }
     }
 
+    #[test]
+    #[ignore = "full"]
+    fn ground_speed_is_measured_from_the_planted_foot() {
+        let Some(model) = character() else { return };
+        // The example's walk carries the body at a stroll, its jog faster.
+        let walk = model.ground_speed("walk").expect("a walk carries the body");
+        assert!((0.8..1.4).contains(&walk), "walk ground speed {walk}");
+        let jog = model.ground_speed("jog").expect("a jog carries the body");
+        assert!(jog > walk * 1.5, "jog {jog} against walk {walk}");
+        assert!(model.ground_speed("no such clip").is_none());
+    }
+
     fn joint(world: &World, id: EntityId, bone: &str) -> Vec3 {
         world.bone_transform(id, bone).unwrap().w_axis.truncate()
     }

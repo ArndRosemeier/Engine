@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.082 (2026-11-16)
+
+- Animated models measure how fast a clip carries the body (ground_speed), so playback can match the real speed
+
 ## 0.081 (2026-11-16)
 
 - Water lying on rock has no second skin against the rock: only its open surface is drawn, so it no longer shows pale patches through itself where it lies on a floor or hangs under rock.
