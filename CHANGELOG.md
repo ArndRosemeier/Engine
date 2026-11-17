@@ -7,6 +7,10 @@ in every window title and in the "What's new" button.
 
 Add an entry with `python tools/bump_version.py "What this merge brings"`.
 
+## 0.083 (2026-11-17)
+
+- Characters leave the ground when the pull turns away from it (a magnet overhead lifts them), instead of staying stuck standing
+
 ## 0.082 (2026-11-16)
 
 - Animated models measure how fast a clip carries the body (ground_speed), so playback can match the real speed

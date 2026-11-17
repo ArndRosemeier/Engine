@@ -490,8 +490,14 @@ impl Physics {
                 fall += up * (speed - fall.dot(up));
             }
             // Standing: no push into the ground (snapping keeps the feet on
-            // it going downhill). Otherwise the pull.
-            let standing = c.state.grounded && c.jump.is_none() && fall.dot(up) <= 0.0 && !drifting;
+            // it going downhill). Otherwise the pull. A pull away from the
+            // ground (a field that turned, a magnet overhead) lifts it off.
+            let lifting = pull.dot(up) > 0.0;
+            let standing = c.state.grounded
+                && c.jump.is_none()
+                && fall.dot(up) <= 0.0
+                && !drifting
+                && !lifting;
             fall = if standing {
                 Vec3::ZERO
             } else {
@@ -509,7 +515,7 @@ impl Physics {
             let mut hits = Vec::new();
             let mut ctl = controller;
             ctl.up = up;
-            if jumping || drifting {
+            if jumping || drifting || lifting {
                 // Leave the ground instead of snapping back to it.
                 ctl.snap_to_ground = None;
             }
