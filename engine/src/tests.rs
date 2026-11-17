@@ -3551,6 +3551,49 @@ mod characters_and_joints {
     }
 
     #[test]
+    fn a_pull_away_from_the_ground_lifts_a_standing_character() {
+        // A game's magnet overhead: the field turns to pull up, and the
+        // character standing on the floor must leave it, not stay glued.
+        let mut world = World::new();
+        world
+            .set_physics_settings(crate::physics::PhysicsSettings {
+                ground: crate::physics::PhysicsGround::None,
+                ..Default::default()
+            })
+            .unwrap();
+        wall(
+            &mut world,
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(20.0, 1.0, 20.0),
+        );
+        world.set_gravity_field(Some(std::sync::Arc::new(
+            |_: &crate::physics::FieldProbe| Vec3::NEG_Y * 9.81,
+        )));
+        let id = world.spawn_pivot(Place::new(0.0, 0.2, 0.0));
+        world
+            .add_character(
+                id,
+                Character::default().up(crate::physics::CharacterUp::Field {
+                    // Slow to turn, so standing up the other way round
+                    // cannot be what frees it.
+                    turn_deg_per_s: 5.0,
+                    drift_below: 0.3,
+                }),
+            )
+            .unwrap();
+        run(&mut world, 30);
+        assert!(world.character(id).unwrap().grounded);
+        // Up and a little sideways, as a stone above and ahead pulls.
+        world.set_gravity_field(Some(std::sync::Arc::new(
+            |_: &crate::physics::FieldProbe| Vec3::new(0.0, 0.7, 1.7),
+        )));
+        run(&mut world, 60);
+        let s = world.character(id).unwrap();
+        assert!(!s.grounded, "{s:?}");
+        assert!(feet(&world, id).y > 0.3, "{}", feet(&world, id));
+    }
+
+    #[test]
     fn a_character_stands_on_the_ridge_of_a_mesh() {
         // The top edge of a many-sided cylinder (a mesh collider): landing
         // exactly on the ridge between two faces still counts as standing.
